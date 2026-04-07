@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "pms maintainers" }]
 license = { text = "MIT" }
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0.3",
+]
 
 [project.optional-dependencies]
 # Empty for CP01 — concrete connector/embedding deps land in later checkpoints.
@@ -16,6 +18,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "mypy>=1.10",
+    "types-pyyaml>=6.0.12.20250915",
 ]
 
 [build-system]
