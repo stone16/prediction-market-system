@@ -1,0 +1,16 @@
+[package]
+name = "pms_embeddings_rs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Rust acceleration for the PMS embedding cosine-similarity batch."
+
+[lib]
+name = "pms_embeddings_rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
