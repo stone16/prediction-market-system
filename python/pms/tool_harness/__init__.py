@@ -15,6 +15,7 @@ candidates against a per-module benchmark. The harness has three pieces:
 
 from .loader import load_benchmark, load_candidate
 from .mock_candidate import MockCandidate
+from .reports import CandidateResult, ModuleReport, ReportGenerator
 from .runner import HarnessRunner
 from .schema import (
     Benchmark,
@@ -34,6 +35,7 @@ __all__ = [
     "Benchmark",
     "BenchmarkValidationError",
     "Candidate",
+    "CandidateResult",
     "FunctionalCategory",
     "FunctionalCategoryResult",
     "FunctionalResult",
@@ -41,6 +43,8 @@ __all__ = [
     "FunctionalTestResult",
     "HarnessRunner",
     "MockCandidate",
+    "ModuleReport",
+    "ReportGenerator",
     "SurvivalGateItem",
     "SurvivalItemResult",
     "SurvivalResult",

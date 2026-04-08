@@ -10,6 +10,12 @@ this module.
 Both methods catch exceptions raised by the user-provided callables and
 record them on the per-item result so a single broken test cannot crash
 the whole run.
+
+CP03 adds :meth:`HarnessRunner.evaluate_module` which runs every candidate
+through the survival gate + functional tests and ranks the survivors. It
+wraps the caller-provided per-candidate test functions into the existing
+single-candidate ``run_*`` methods via small closures so the original
+signatures remain unchanged.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from __future__ import annotations
 import time
 from typing import Awaitable, Callable
 
+from .reports import CandidateResult, ModuleReport, utc_now
 from .schema import (
     Benchmark,
     Candidate,
@@ -31,6 +38,13 @@ from .schema import (
 
 SurvivalTestFn = Callable[[SurvivalGateItem], Awaitable[bool]]
 FunctionalTestFn = Callable[[FunctionalTest], Awaitable[FunctionalTestResult]]
+
+#: Per-candidate survival test callable used by :meth:`evaluate_module`.
+ModuleSurvivalTestFn = Callable[[Candidate, SurvivalGateItem], Awaitable[bool]]
+#: Per-candidate functional test callable used by :meth:`evaluate_module`.
+ModuleFunctionalTestFn = Callable[
+    [Candidate, FunctionalTest], Awaitable[FunctionalTestResult]
+]
 
 
 class HarnessRunner:
@@ -134,3 +148,110 @@ class HarnessRunner:
                 score=0.0,
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+    async def evaluate_module(
+        self,
+        candidates: list[Candidate],
+        benchmark: Benchmark,
+        survival_test_fn: ModuleSurvivalTestFn,
+        functional_test_fn: ModuleFunctionalTestFn,
+    ) -> ModuleReport:
+        """Evaluate every candidate and rank the survivors.
+
+        For each candidate:
+
+        1. Run the survival gate via :meth:`run_survival_gate`. If any
+           item fails, emit a :class:`CandidateResult` with
+           ``verdict="eliminated"`` and ``functional=None`` — functional
+           tests are intentionally **skipped** so the report never mixes
+           "ran and scored 0" with "never ran".
+        2. If survival passes, run :meth:`run_functional_tests` and emit
+           a ``verdict="evaluated"`` result.
+
+        After every candidate has been processed, evaluated results are
+        sorted by ``overall_score`` descending (stable sort preserves
+        input order for ties) and rank 1..N is assigned in order.
+        Eliminated candidates are appended in their original order with
+        ``rank=None`` so the report still documents why they failed.
+
+        The per-candidate ``test_fn`` closures reuse the existing
+        single-candidate runner methods unchanged — we bind the current
+        candidate into a tiny lambda so ``run_survival_gate`` /
+        ``run_functional_tests`` keep their CP02 signatures.
+        """
+        evaluated_results: list[CandidateResult] = []
+        eliminated_results: list[CandidateResult] = []
+
+        for candidate in candidates:
+            async def _survival(
+                item: SurvivalGateItem, _c: Candidate = candidate
+            ) -> bool:
+                return await survival_test_fn(_c, item)
+
+            survival = await self.run_survival_gate(candidate, benchmark, _survival)
+
+            if not survival.all_passed:
+                eliminated_results.append(
+                    CandidateResult(
+                        candidate=candidate,
+                        survival=survival,
+                        functional=None,
+                        rank=None,
+                        verdict="eliminated",
+                    )
+                )
+                continue
+
+            async def _functional(
+                test: FunctionalTest, _c: Candidate = candidate
+            ) -> FunctionalTestResult:
+                return await functional_test_fn(_c, test)
+
+            functional = await self.run_functional_tests(
+                candidate, benchmark, _functional
+            )
+            evaluated_results.append(
+                CandidateResult(
+                    candidate=candidate,
+                    survival=survival,
+                    functional=functional,
+                    rank=None,  # Assigned below after sorting.
+                    verdict="evaluated",
+                )
+            )
+
+        # Stable descending sort by overall_score. mypy: functional is not None.
+        evaluated_results.sort(
+            key=lambda cr: (
+                cr.functional.overall_score if cr.functional is not None else 0.0
+            ),
+            reverse=True,
+        )
+        ranked: list[CandidateResult] = []
+        for idx, cr in enumerate(evaluated_results, start=1):
+            ranked.append(
+                CandidateResult(
+                    candidate=cr.candidate,
+                    survival=cr.survival,
+                    functional=cr.functional,
+                    rank=idx,
+                    verdict="evaluated",
+                )
+            )
+
+        all_candidates = ranked + eliminated_results
+
+        top_candidate: str | None = None
+        top_score = 0.0
+        if ranked and ranked[0].functional is not None:
+            top_candidate = ranked[0].candidate.name
+            top_score = ranked[0].functional.overall_score
+
+        return ModuleReport(
+            module=benchmark.module,
+            benchmark_version=benchmark.version,
+            evaluated_at=utc_now(),
+            candidates=all_candidates,
+            top_candidate=top_candidate,
+            top_score=top_score,
+        )
