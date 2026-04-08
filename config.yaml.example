@@ -1,0 +1,46 @@
+# config.yaml.example — sample pipeline configuration
+#
+# Each section under the top-level keys specifies a `ModuleSpec`:
+#
+#     class:  fully-qualified dotted class path
+#     kwargs: dict of keyword arguments passed to the class constructor
+#
+# Load this file at runtime with:
+#
+#     from pathlib import Path
+#     from pms.orchestrator.config import load_config
+#     config = load_config(Path("config.yaml"))
+#
+# `ModuleRegistry.instantiate(spec)` then turns each ModuleSpec into a
+# fresh instance that you can hand to `TradingPipeline(...)`.
+#
+# NOTE: this file is illustrative. The tests in `tests/test_pipeline.py`
+# construct all of their mocks inline rather than loading this file.
+
+connectors:
+  - class: pms.connectors.polymarket.PolymarketConnector
+    kwargs: {}
+  - class: pms.connectors.kalshi.KalshiConnector
+    kwargs: {}
+
+# Strategies are introduced in CP07. Until then this list stays empty.
+strategies: []
+
+# The executor, risk manager, metrics, and feedback engine are all
+# introduced in CP08/CP09. The entries below point at placeholder class
+# paths and will need to be updated when those checkpoints land.
+executor:
+  class: pms.execution.noop.NoopExecutor
+  kwargs: {}
+
+risk_manager:
+  class: pms.execution.noop.NoopRiskManager
+  kwargs: {}
+
+metrics:
+  class: pms.evaluation.noop.NoopMetricsCollector
+  kwargs: {}
+
+feedback_engine:
+  class: pms.evaluation.noop.NoopFeedbackEngine
+  kwargs: {}
