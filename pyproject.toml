@@ -13,7 +13,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Empty for CP01 — concrete connector/embedding deps land in later checkpoints.
+# Phase 3C: Anthropic SDK powers the optional LLM correlation refinement
+# layer. Install with `uv pip install 'pms[llm]'`. The default rule-based
+# CorrelationDetector does not require this; only AnthropicCorrelationClassifier
+# imports it (lazily, so the rest of pms.strategy works without it).
+llm = ["anthropic>=0.40.0"]
 
 # ---------------------------------------------------------------------------
 # CP03: CLI entry point — installed as `pms-harness` when the package is

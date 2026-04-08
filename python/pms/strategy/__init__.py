@@ -8,9 +8,21 @@ a consistent ``name`` attribute without forcing inheritance.
 
 from .arbitrage import ArbitragePairOrders, ArbitrageStrategy
 from .base import StrategyBase
+from .llm_correlation import (
+    DEFAULT_ANTHROPIC_MODEL,
+    DEFAULT_REFINE_RELATIONS,
+    AnthropicCorrelationClassifier,
+    LLMClassifierProtocol,
+    LLMCorrelationRefiner,
+)
 
 __all__ = [
+    "AnthropicCorrelationClassifier",
     "ArbitragePairOrders",
     "ArbitrageStrategy",
+    "DEFAULT_ANTHROPIC_MODEL",
+    "DEFAULT_REFINE_RELATIONS",
+    "LLMClassifierProtocol",
+    "LLMCorrelationRefiner",
     "StrategyBase",
 ]
