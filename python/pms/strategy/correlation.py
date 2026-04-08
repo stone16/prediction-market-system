@@ -235,6 +235,20 @@ def _has_contradiction(title_a: str, title_b: str) -> bool:
     flag completely unrelated markets just because they happen to include
     "more than" and "less than" somewhere.
     """
+    # NOTE: v1 limitation (review-loop f8 — kept as documented limitation,
+    # not fixed). Contradiction detection here is keyword-only: we look for
+    # "more than" / "less than" / "at least" / "at most" markers and an
+    # overlapping significant token between the two titles. We do *not*
+    # parse the numeric bounds in either title, so e.g. "ETH > 5000" and
+    # "ETH < 7000" are flagged contradictory even though both can be
+    # simultaneously true (the feasible interval [5000, 7000] is
+    # non-empty). Properly detecting numeric contradictions requires
+    # parsing each title into a half-open interval and checking the
+    # intersection — typically an LLM-assisted refinement step. CP10
+    # explicitly makes LLM refinement optional, and the rule-based
+    # classifier is still hitting >80 % precision on the hand-labeled
+    # fixture, which is the spec's acceptance bar. A post-v1 checkpoint
+    # will add an interval-aware refinement layer behind a feature flag.
     a_tokens = _significant_tokens(title_a)
     b_tokens = _significant_tokens(title_b)
     if not (a_tokens & b_tokens):

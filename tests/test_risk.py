@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Literal
 
 import pytest
 
@@ -45,13 +46,14 @@ def _order(
     market_id: str = "m-1",
     outcome_id: str = "yes",
     order_id: str = "",
+    side: Literal["buy", "sell"] = "buy",
 ) -> Order:
     return Order(
         order_id=order_id,
         platform=platform,
         market_id=market_id,
         outcome_id=outcome_id,
-        side="buy",
+        side=side,
         price=price,
         size=size,
         order_type="limit",
@@ -279,6 +281,81 @@ def test_approve_order_when_under_total_exposure_cap() -> None:
     order = _order(price=Decimal("0.50"), size=Decimal("100"))  # 50 notional
     decision = rm.check_order(order, positions=[p1])
 
+    assert decision.approved is True
+    assert decision.adjusted_size is None
+
+
+# ---------------------------------------------------------------------------
+# check_order — sell-side regression (review-loop fix A: f1)
+# ---------------------------------------------------------------------------
+
+
+def test_sell_order_reduces_exposure_not_adds() -> None:
+    """A sell order against an existing long position must NOT count as
+    new exposure. Regression for review-loop f1: prior to the fix,
+    ``check_order`` computed ``order.price * order.size`` regardless of
+    ``order.side``, so a closing sell against a position already at the cap
+    was rejected as if it were doubling the exposure.
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("500"),
+        max_total_exposure=Decimal("5000"),
+    )
+    # Existing long position sitting EXACTLY at the per-market cap.
+    # 1000 * 0.50 = 500 notional == max_position_per_market.
+    existing = _position(size=Decimal("1000"), avg_entry_price=Decimal("0.50"))
+    sell_order = _order(
+        price=Decimal("0.50"),
+        size=Decimal("100"),
+        side="sell",
+    )
+
+    decision = rm.check_order(sell_order, positions=[existing])
+
+    # Selling reduces (not adds to) exposure, so it must be approved
+    # even though the buy-side cap is already reached.
+    assert decision.approved is True
+    assert decision.adjusted_size is None
+
+
+def test_sell_order_below_cap_approved() -> None:
+    """Selling part of a long position well within the cap is approved."""
+    rm = RiskManager(
+        max_position_per_market=Decimal("500"),
+        max_total_exposure=Decimal("5000"),
+    )
+    # 600 * 0.50 = 300 notional, comfortably under the 500 cap.
+    existing = _position(size=Decimal("600"), avg_entry_price=Decimal("0.50"))
+    sell_order = _order(
+        price=Decimal("0.50"),
+        size=Decimal("100"),
+        side="sell",
+    )
+
+    decision = rm.check_order(sell_order, positions=[existing])
+
+    assert decision.approved is True
+    assert decision.adjusted_size is None
+
+
+def test_sell_order_with_no_existing_position_does_not_explode_caps() -> None:
+    """A sell with no held position must not be falsely treated as buying.
+
+    The v1 simplification reduces market exposure by ``min(order_notional,
+    current_market_exposure)`` and floors the result at zero, so a naked
+    sell on a market with no existing position has zero impact on the
+    market's exposure counter rather than pushing it negative.
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("500"),
+        max_total_exposure=Decimal("5000"),
+    )
+    sell_order = _order(
+        price=Decimal("0.50"),
+        size=Decimal("100"),
+        side="sell",
+    )
+    decision = rm.check_order(sell_order, positions=[])
     assert decision.approved is True
     assert decision.adjusted_size is None
 

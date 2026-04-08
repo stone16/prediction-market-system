@@ -23,14 +23,21 @@ Design notes
   available verbatim on :attr:`Market.raw` for anyone who needs them.
 
 * Kalshi's order book has two named sides, ``yes`` and ``no``, not
-  ``bids``/``asks``. The connector maps ``yes`` → :attr:`OrderBook.bids`
-  and ``no`` → :attr:`OrderBook.asks` as a direct pass-through so that
-  the structural shape of :class:`OrderBook` (two lists of
-  :class:`PriceLevel`) is preserved. Consumers that need the strict
-  "buying yes vs. buying no" interpretation can always read the
-  untransformed ``yes``/``no`` arrays from :attr:`OrderBook` via the
-  downstream strategy layer, or re-fetch from Kalshi directly — this
-  v1 mapping is intentionally lossless for the two-array shape.
+  ``bids``/``asks``. Both sides are *bids* on opposite legs of a binary
+  contract: a NO bid at 48¢ is *not* an offer to sell YES at 48¢ — it
+  implies a willingness to sell YES at ``1 - 0.48 = 0.52`` because
+  YES + NO settle to exactly \\$1. The connector therefore:
+
+    - maps ``yes`` → :attr:`OrderBook.bids` directly (already YES-side
+      bids, sorted high → low),
+    - mirrors ``no`` into YES-side asks via ``ask_price = 1 - no_bid``
+      (review-loop fix f5). Sizes are unchanged.
+
+  The original ``yes``/``no`` arrays remain accessible to consumers that
+  re-fetch from Kalshi directly. This makes :class:`OrderBook` behave
+  consistently with the Polymarket connector — both expose YES-leg
+  best-bid/best-ask in the same field — at the cost of dropping the
+  raw NO-side numbers from the normalized object.
 
 * ``stream_prices`` and ``get_historical_prices`` raise
   :class:`NotImplementedError` in v1 per the approved spec. WebSocket
@@ -121,6 +128,15 @@ class KalshiConnector:
         fixture suite, and the approved spec defers multi-page retrieval
         to a later checkpoint.
         """
+        # NOTE: v1 limitation (review-loop f6 — kept as documented limitation,
+        # not fixed). Only the first page of Kalshi markets is fetched.
+        # Kalshi returns a ``cursor`` field on each /markets response that
+        # the caller is supposed to feed back as a query parameter to walk
+        # the full result set, but the v1 connector ignores it. The
+        # approved spec explicitly allows "first page only" for the initial
+        # harness, and the mocked test fixture has a single-page payload,
+        # so this no-op is intentional. A post-v1 checkpoint will add the
+        # cursor loop and a configurable page-count cap.
         headers = self._sign_request_headers("GET", "/markets")
         resp = await self._http.get(
             f"{self._base_url}/markets",
@@ -153,7 +169,14 @@ class KalshiConnector:
 
         ``market_id`` here is the Kalshi market **ticker**
         (e.g. ``"PRES-2028-DEM"``), which is the primary identifier
-        Kalshi uses for markets in its REST API.
+        Kalshi uses for markets in its REST API. The Kalshi ticker
+        equals the normalized :attr:`Market.market_id` returned by
+        :meth:`get_active_markets`, so callers can pass that field
+        through directly — unlike the Polymarket connector.
+
+        See :meth:`pms.protocols.connector.ConnectorProtocol.get_orderbook`
+        for the per-platform parameter contract — review-loop fix f3
+        documents the cross-connector mismatch.
         """
         headers = self._sign_request_headers(
             "GET", f"/markets/{market_id}/orderbook"
@@ -338,6 +361,11 @@ class KalshiConnector:
         "no":  [[cents, size], ...]}}``. Either side may be ``null`` if
         empty, in which case the connector emits an empty list rather
         than raising.
+
+        YES bids are passed through directly. NO bids are mirrored into
+        YES asks via ``ask_price = 1 - no_bid_price`` (review-loop fix
+        f5) — see the class docstring for the binary-contract derivation.
+        Sizes are unchanged by the transformation.
         """
         book = raw.get("orderbook")
         if not isinstance(book, dict):
@@ -357,7 +385,7 @@ class KalshiConnector:
         no_side = book.get("no") or []
 
         bids = [self._parse_level(level) for level in yes_side]
-        asks = [self._parse_level(level) for level in no_side]
+        asks = [self._no_level_to_yes_ask(level) for level in no_side]
 
         return OrderBook(
             platform=self.platform,
@@ -365,6 +393,24 @@ class KalshiConnector:
             bids=bids,
             asks=asks,
             timestamp=datetime.now(tz=timezone.utc),
+        )
+
+    @staticmethod
+    def _no_level_to_yes_ask(level: Any) -> PriceLevel:
+        """Convert a Kalshi NO-side ``[cents, size]`` into a YES-leg ask.
+
+        Review-loop fix f5: a NO bid at ``cents`` cents implies a YES ask
+        at ``Decimal("1") - (cents / 100)``. Size is unchanged.
+        """
+        if not isinstance(level, (list, tuple)) or len(level) < 2:
+            raise ValueError(
+                f"Invalid Kalshi orderbook level (expected [cents, size]): "
+                f"{level!r}"
+            )
+        no_price = KalshiConnector._cents_to_decimal(level[0])
+        return PriceLevel(
+            price=Decimal("1") - no_price,
+            size=KalshiConnector._to_decimal(level[1]),
         )
 
     @staticmethod

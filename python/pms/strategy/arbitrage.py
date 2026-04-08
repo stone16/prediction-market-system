@@ -99,6 +99,19 @@ class ArbitrageStrategy:
         key = (update.platform, update.market_id, update.outcome_id)
         self._latest_prices[key] = update
 
+        # NOTE: v1 limitation (review-loop f2 — kept as documented limitation,
+        # not fixed). The cross-platform candidate match below uses raw
+        # ``outcome_id`` equality, which only fires for tests that inject
+        # matching IDs. In production, Polymarket emits ERC-1155 token IDs
+        # and Kalshi emits "<ticker>-YES/NO", so real price updates from the
+        # two platforms will never share an ``outcome_id`` and this path
+        # silently no-ops at runtime. The actual production cross-platform
+        # arbitrage path is the CorrelationDetector (CP10) → the
+        # ``on_correlation_found`` hook below, which classifies markets by
+        # semantic similarity and feeds normalized ``CorrelationPair``
+        # objects in. Removing this direct path is a post-v1 cleanup; we
+        # retain it for now because the unit tests pin the existing
+        # behaviour and the path is harmless in real traffic.
         candidates: list[PriceUpdate] = [
             other
             for other_key, other in self._latest_prices.items()
@@ -106,6 +119,18 @@ class ArbitrageStrategy:
             and other_key[2] == update.outcome_id
         ]
 
+        # NOTE: v1 limitation (review-loop f9 — kept as documented limitation,
+        # not fixed). Each qualifying tick emits a fresh order pair with a
+        # new ``correlation_id``, even when the same opportunity is still
+        # outstanding. Real deduplication requires tracking outstanding
+        # paired orders against executor/positions state — i.e. "did the
+        # previous pair fill, partially fill, or get cancelled?" — and that
+        # state lives in the positions ledger documented in the spec under
+        # "Out of Scope — Live positions tracking". A post-v1 checkpoint
+        # will add an opportunity tracker that emits only on threshold
+        # crossings or after the prior pair has resolved. For now the
+        # downstream executor's idempotency hooks prevent duplicate fills
+        # on identical (market, outcome, side, price) tuples.
         orders: list[Order] = []
         for other in candidates:
             spread = _compute_spread(update, other)

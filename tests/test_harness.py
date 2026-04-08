@@ -11,6 +11,7 @@ Acceptance criteria covered:
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -428,6 +429,53 @@ async def test_run_survival_gate_handles_exceptions() -> None:
         assert item.passed is False
         assert item.error is not None
         assert "kaboom" in item.error
+
+
+async def test_survival_gate_enforces_timeout() -> None:
+    """A survival item that runs longer than ``timeout_seconds`` is killed.
+
+    Regression test for review-loop fix f7: prior to the fix, the runner
+    awaited the user-provided test function directly with no timeout, so a
+    hung test could stall the whole harness. The fix wraps the call in
+    ``asyncio.wait_for(..., timeout=item.timeout_seconds)`` and records a
+    failed :class:`SurvivalItemResult` whose ``error`` mentions the timeout.
+    """
+    cand = load_candidate(CANDIDATE_PATH)
+    runner = HarnessRunner()
+
+    # Hand-build a benchmark with a 1-second survival timeout so the test
+    # finishes quickly.
+    fast_timeout_bm = Benchmark(
+        module="data_connector",
+        version=1,
+        survival_gate=[
+            SurvivalGateItem(
+                id="slow_test",
+                test="A test that intentionally takes longer than its timeout.",
+                timeout_seconds=1,
+            ),
+        ],
+        functional_tests=[],
+    )
+
+    async def slow_fn(item: SurvivalGateItem) -> bool:
+        # Sleep well past the 1-second timeout so wait_for must cancel us.
+        await asyncio.sleep(5)
+        return True
+
+    result = await runner.run_survival_gate(cand, fast_timeout_bm, slow_fn)
+
+    assert result.all_passed is False
+    assert len(result.items) == 1
+    item_result = result.items[0]
+    assert item_result.item_id == "slow_test"
+    assert item_result.passed is False
+    assert item_result.error is not None
+    assert "timeout" in item_result.error.lower()
+    # Elapsed time must be near the timeout, not the 5-second sleep.
+    # Allow generous slack for CI: anything below 3000ms confirms the
+    # wait_for cancelled the coroutine before sleep finished.
+    assert item_result.elapsed_ms < 3000.0
 
 
 # ---------------------------------------------------------------------------

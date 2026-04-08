@@ -20,6 +20,7 @@ signatures remain unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Awaitable, Callable
 
@@ -74,7 +75,18 @@ class HarnessRunner:
             passed = False
             error: str | None = None
             try:
-                passed = await test_fn(gate_item)
+                # review-loop fix f7: enforce per-item ``timeout_seconds``
+                # so a hung test can never stall the harness. Without this
+                # wrapper the runner awaited the user-provided coroutine
+                # directly and the timeout field on ``SurvivalGateItem``
+                # was effectively documentation only.
+                passed = await asyncio.wait_for(
+                    test_fn(gate_item),
+                    timeout=gate_item.timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                passed = False
+                error = f"timeout after {gate_item.timeout_seconds}s"
             except Exception as exc:  # noqa: BLE001 — runner must not crash
                 passed = False
                 error = f"{type(exc).__name__}: {exc}"

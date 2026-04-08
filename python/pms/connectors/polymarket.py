@@ -107,7 +107,13 @@ class PolymarketConnector:
         ``market_id`` here is the Polymarket CLOB ``token_id`` — Polymarket
         identifies tradable outcomes by their ERC-1155 token id rather than
         by a market-level id. Callers should pass the token id returned in
-        :attr:`Outcome.outcome_id` from :meth:`get_active_markets`.
+        :attr:`Outcome.outcome_id` from :meth:`get_active_markets`. Passing
+        the normalized :attr:`Market.market_id` (Gamma id / conditionId)
+        will fail with a 4xx from CLOB.
+
+        See :meth:`pms.protocols.connector.ConnectorProtocol.get_orderbook`
+        for the per-platform parameter contract — review-loop fix f3
+        documents the cross-connector mismatch.
         """
         resp = await self._http.get(
             f"{self._clob_base}/book",

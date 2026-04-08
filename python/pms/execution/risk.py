@@ -53,8 +53,25 @@ class RiskManager:
     def check_order(
         self, order: Order, positions: Sequence[Position]
     ) -> RiskDecision:
-        """Approve, reject, or size-adjust ``order`` given current positions."""
+        """Approve, reject, or size-adjust ``order`` given current positions.
+
+        Buy-vs-sell exposure model (review-loop fix f1)
+        ------------------------------------------------
+        v1 distinguishes the side of an order before adding it to the cap
+        check. A buy increases the per-market and total notional caps by
+        ``order.price * order.size``. A sell **reduces** them by the same
+        amount, floored at zero (sells against an empty position have no
+        net impact rather than pushing exposure negative).
+
+        This is intentionally a simplified model: it assumes "no short
+        positions", which is true for the v1 strategies (arbitrage emits
+        pairs that close out, never naked shorts). A future checkpoint with
+        a real positions ledger will replace this with cost-basis tracking
+        and signed delta accounting; the current behaviour is documented in
+        the spec under "Out of Scope — Live positions tracking".
+        """
         order_notional = order.price * order.size
+        is_sell = order.side == "sell"
 
         # Rule 1 — per-market cap, keyed on (platform, market_id).
         market_key = (order.platform, order.market_id)
@@ -66,7 +83,17 @@ class RiskManager:
             ),
             start=Decimal("0"),
         )
-        if current_market_notional + order_notional > self._max_position_per_market:
+        if is_sell:
+            # Sell reduces market notional, floored at zero. A naked sell
+            # (no held position) yields a no-op delta rather than going
+            # negative, matching the v1 "no shorts" simplification.
+            new_market_notional = max(
+                Decimal("0"), current_market_notional - order_notional
+            )
+        else:
+            new_market_notional = current_market_notional + order_notional
+
+        if new_market_notional > self._max_position_per_market:
             remaining = self._max_position_per_market - current_market_notional
             if remaining <= Decimal("0"):
                 return RiskDecision(
@@ -78,7 +105,9 @@ class RiskManager:
                     adjusted_size=None,
                 )
             # Partial room against the per-market cap: offer a reduced size
-            # that exactly fits.
+            # that exactly fits. (Sells never reach this branch because
+            # ``new_market_notional`` for a sell is always ``<=
+            # current_market_notional <= cap``.)
             adjusted_size = remaining / order.price
 
             # Re-validate the reduced order against the total exposure cap.
@@ -125,7 +154,14 @@ class RiskManager:
             (p.size * p.avg_entry_price for p in positions),
             start=Decimal("0"),
         )
-        if current_total_notional + order_notional > self._max_total_exposure:
+        if is_sell:
+            new_total_notional = max(
+                Decimal("0"), current_total_notional - order_notional
+            )
+        else:
+            new_total_notional = current_total_notional + order_notional
+
+        if new_total_notional > self._max_total_exposure:
             return RiskDecision(
                 approved=False,
                 reason=(

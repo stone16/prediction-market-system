@@ -25,6 +25,33 @@ Design notes
 * **Win rate**: v1 uses the fraction of *filled* orders as a proxy for
   win rate. A true win rate needs round-trip position P&L tracking, which
   is out of scope for CP09.
+
+P&L Accounting Model (v1 — review-loop fix f4)
+----------------------------------------------
+
+``get_pnl()`` and the per-strategy ``pnl`` field both report **signed
+cash flow**, not realized profit-and-loss against cost basis. Concretely:
+
+- A buy fill is a negative cash flow (cash leaves the account).
+- A sell fill is a positive cash flow (cash enters the account).
+- The ``realized`` field of :class:`pms.models.PnLReport` is the **sum**
+  of these signed flows over the requested window.
+
+This means a snapshot taken after a single buy will show a "realized
+loss" equal to the cost of the position, and the matching sell on a
+later snapshot will show a "realized gain" of the proceeds. **In
+isolation, neither number is the trading P&L of the round trip.** Over
+the full lifecycle of every position the cash flows do net to true
+realized P&L, but at any intermediate point the value is biased by
+half-open trades.
+
+The collector preserves the ``realized`` field name on
+:class:`PnLReport` so the shape is stable for the post-v1 ledger
+checkpoint, when ``_signed_cash_flow`` will be replaced with cost-basis
+matching against a positions ledger. That ledger is documented in the
+spec under "Out of Scope — Live positions tracking"; until it lands,
+treat ``realized`` as a cash-flow proxy and consult the underlying
+``num_trades`` and per-strategy slippage for richer insight.
 """
 
 from __future__ import annotations
@@ -90,29 +117,43 @@ class MetricsCollector:
     # ------------------------------------------------------------------
 
     def get_pnl(self, since: datetime) -> PnLReport:
-        """Compute realized + unrealized P&L over ``[since, now]``.
+        """Compute the v1 cash-flow proxy for realized + unrealized P&L.
 
         Only ``filled`` order records contribute. ``unrealized`` is
         always zero in v1 (see module docstring).
+
+        **Important** (review-loop fix f4): the ``realized`` field on the
+        returned :class:`PnLReport` is the sum of signed *cash flows*
+        (``-price*size`` for buys, ``+price*size`` for sells), not the
+        cost-basis-matched profit of closed trades. A snapshot taken
+        between a buy and its closing sell will therefore report a
+        misleading number — see "P&L Accounting Model" in the module
+        docstring for the rationale and the deferred-ledger plan.
         """
         end = datetime.now(UTC)
         relevant = [r for r in self._order_records if r.recorded_at >= since]
 
-        realized = Decimal("0")
+        # ``cash_flow`` is the variable name we *want* (review-loop fix
+        # f4); we still report it on ``PnLReport.realized`` to keep the
+        # field name stable for the post-v1 cost-basis upgrade. Renaming
+        # the field would break the model contract for callers; renaming
+        # the local variable here is documentation that this number is
+        # not yet "true realized P&L".
+        cash_flow = Decimal("0")
         num_trades = 0
         for record in relevant:
             if record.result.status != "filled":
                 continue
             num_trades += 1
-            realized += _signed_cash_flow(record.order, record.result)
+            cash_flow += _signed_cash_flow(record.order, record.result)
 
         unrealized = Decimal("0")
-        total = realized + unrealized
+        total = cash_flow + unrealized
 
         return PnLReport(
             start=since,
             end=end,
-            realized=realized,
+            realized=cash_flow,
             unrealized=unrealized,
             total=total,
             num_trades=num_trades,

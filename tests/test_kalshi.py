@@ -300,8 +300,21 @@ async def test_get_orderbook_yes_side_maps_to_bids_in_decimal_dollars() -> None:
     assert ob.bids[2].size == Decimal("500")
 
 
-async def test_get_orderbook_no_side_maps_to_asks_in_decimal_dollars() -> None:
-    """Kalshi no side -> asks. Prices converted from cents to Decimal dollars."""
+async def test_get_orderbook_no_side_maps_to_yes_asks_via_price_transformation() -> None:
+    """Kalshi NO bids transform into YES asks via ``price = 1 - no_price``.
+
+    Review-loop fix f5: Kalshi's orderbook ``no`` side is composed of bids
+    on the NO leg of a binary contract, not asks on the YES leg. A NO bid
+    at 48 cents implies a willingness to *sell* the YES leg at
+    ``1 - 0.48 = 0.52`` (because YES + NO must equal 1.0 on settlement).
+    Copying NO directly into ``asks`` (the previous v1 behaviour) put a
+    bid into the ask field, which downstream strategies would treat as a
+    crossed book or, worse, as free arbitrage.
+
+    Sizes are unchanged by the transformation; only price is mirrored
+    around 1. The original Kalshi response remains accessible via
+    :attr:`OrderBook` consumers that re-fetch from the platform.
+    """
     payload = _load_json(ORDERBOOK_FIXTURE)
     conn = _make_connector_with_orderbook(payload)
     try:
@@ -315,12 +328,13 @@ async def test_get_orderbook_no_side_maps_to_asks_in_decimal_dollars() -> None:
         assert isinstance(a.price, Decimal)
         assert isinstance(a.size, Decimal)
 
-    # First no level: [48 cents, size 80] -> (0.48, 80)
-    assert ob.asks[0].price == Decimal("0.48")
+    # NO levels in the fixture (cents): [[48, 80], [47, 200], [46, 150]].
+    # After ``ask = 1 - no_bid``: [(0.52, 80), (0.53, 200), (0.54, 150)].
+    assert ob.asks[0].price == Decimal("0.52")
     assert ob.asks[0].size == Decimal("80")
-    assert ob.asks[1].price == Decimal("0.47")
+    assert ob.asks[1].price == Decimal("0.53")
     assert ob.asks[1].size == Decimal("200")
-    assert ob.asks[2].price == Decimal("0.46")
+    assert ob.asks[2].price == Decimal("0.54")
     assert ob.asks[2].size == Decimal("150")
 
 
@@ -362,7 +376,9 @@ async def test_get_orderbook_handles_missing_side() -> None:
 
     assert ob.bids == []
     assert len(ob.asks) == 1
-    assert ob.asks[0].price == Decimal("0.48")
+    # NO bid at 48 cents → YES ask at 1 - 0.48 = 0.52 (review-loop fix f5).
+    assert ob.asks[0].price == Decimal("0.52")
+    assert ob.asks[0].size == Decimal("80")
 
 
 # ---------------------------------------------------------------------------
