@@ -36,6 +36,7 @@ CLAUDE.md, contributors expected to follow) → `retired` (resolved).
 | tool-env-assumption                  | 1           | medium   | active     | pms-phase2 | pms-phase2  | phase2-P1 |
 | stale-baseline                       | 1           | medium   | active     | pms-phase2 | pms-phase2  | phase2-P2 |
 | pytest-marker-no-auto-deselect       | 1           | low      | active     | pms-phase2 | pms-phase2  | phase2-P3 |
+| lockfile-drift-on-optional-dep       | 1           | low      | observation| pms-phase3 | pms-phase3  | phase3-P1 |
 
 Active rules are codified in `/CLAUDE.md` at the repo root (Phase 3D).
 Cross-checkpoint integration remains `proposed` because the harness-side
@@ -65,6 +66,8 @@ These are ready for the Orchestrator to auto-create GitHub issues.
    `pms-phase2`
 10. **phase2-P3** — Pytest integration markers must be env-gated
     (low, recommended) — `pms-phase2`
+11. **phase3-P1** — Stage lockfile changes with pyproject edits
+    (low, observation) — `pms-phase3`
 
 ### Monitoring (low severity, watching for recurrence)
 
@@ -86,3 +89,4 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 |-------------|------------|-----|------------|-------|---------|-------|
 | pms-v1      | 2026-04-08 | 10  | 9          | 11    | 0       | [2026-04-08-pms-v1.md](./2026-04-08-pms-v1.md) |
 | pms-phase2  | 2026-04-08 | 7   | 6          | 9     | 0       | [2026-04-08-pms-phase2.md](./2026-04-08-pms-phase2.md) |
+| pms-phase3  | 2026-04-09 | 4   | 4          | 4     | 0       | [2026-04-09-pms-phase3.md](./2026-04-09-pms-phase3.md) |
