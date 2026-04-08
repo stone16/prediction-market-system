@@ -36,6 +36,7 @@ from pms.models import (
     RiskDecision,
     RiskFeedback,
     StrategyFeedback,
+    StrategyMetrics,
 )
 from pms.protocols import (
     ConnectorProtocol,
@@ -286,14 +287,48 @@ def test_pnl_report_instantiation() -> None:
         end=datetime(2026, 4, 3, tzinfo=timezone.utc),
         realized=Decimal("100.00"),
         unrealized=Decimal("12.50"),
+        total=Decimal("112.50"),
+        num_trades=4,
     )
     assert r.realized == Decimal("100.00")
+    assert r.total == Decimal("112.50")
+    assert r.num_trades == 4
+
+
+def test_strategy_metrics_instantiation() -> None:
+    sm = StrategyMetrics(
+        strategy_name="arb",
+        num_orders=10,
+        num_fills=7,
+        win_rate=0.7,
+        avg_slippage=0.002,
+        avg_fill_latency_ms=45.0,
+        pnl=12.5,
+    )
+    assert sm.strategy_name == "arb"
+    assert sm.num_orders == 10
+    assert sm.num_fills == 7
+    assert sm.win_rate == 0.7
+    assert sm.avg_fill_latency_ms == 45.0
 
 
 def test_performance_report_instantiation() -> None:
-    sf = StrategyFeedback(pnl=1.0, win_rate=0.5, avg_slippage=0.0, suggestion="ok")
-    pr = PerformanceReport(per_strategy={"arb": sf})
+    sm = StrategyMetrics(
+        strategy_name="arb",
+        num_orders=1,
+        num_fills=1,
+        win_rate=1.0,
+        avg_slippage=0.0,
+        avg_fill_latency_ms=0.0,
+        pnl=1.0,
+    )
+    pr = PerformanceReport(
+        start=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 4, 2, tzinfo=timezone.utc),
+        per_strategy={"arb": sm},
+    )
     assert pr.per_strategy["arb"].pnl == 1.0
+    assert pr.start == datetime(2026, 4, 1, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -406,12 +441,31 @@ def test_performance_report_instantiation() -> None:
                 end=datetime(2026, 1, 2, tzinfo=timezone.utc),
                 realized=Decimal("0"),
                 unrealized=Decimal("0"),
+                total=Decimal("0"),
+                num_trades=0,
             ),
             "realized",
             Decimal("1"),
         ),
         (
-            lambda: PerformanceReport(per_strategy={}),
+            lambda: StrategyMetrics(
+                strategy_name="s",
+                num_orders=0,
+                num_fills=0,
+                win_rate=0.0,
+                avg_slippage=0.0,
+                avg_fill_latency_ms=0.0,
+                pnl=0.0,
+            ),
+            "win_rate",
+            1.0,
+        ),
+        (
+            lambda: PerformanceReport(
+                start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                end=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                per_strategy={},
+            ),
             "per_strategy",
             {},
         ),

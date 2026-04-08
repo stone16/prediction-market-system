@@ -344,10 +344,16 @@ class MockMetrics:
             end=since,
             realized=Decimal("0"),
             unrealized=Decimal("0"),
+            total=Decimal("0"),
+            num_trades=0,
         )
 
     def get_performance_metrics(self) -> PerformanceReport:
-        return PerformanceReport(per_strategy={})
+        return PerformanceReport(
+            start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            per_strategy={},
+        )
 
 
 class MockFeedbackEngine:

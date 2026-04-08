@@ -13,7 +13,7 @@ from .feedback import (
 )
 from .market import Market, OrderBook, Outcome, PriceLevel, PriceUpdate
 from .order import Order, OrderResult, OrderSide, OrderStatus, OrderType, Position
-from .reports import PerformanceReport, PnLReport
+from .reports import PerformanceReport, PnLReport, StrategyMetrics
 from .risk import RiskDecision
 
 __all__ = [
@@ -37,4 +37,5 @@ __all__ = [
     "RiskDecision",
     "RiskFeedback",
     "StrategyFeedback",
+    "StrategyMetrics",
 ]
