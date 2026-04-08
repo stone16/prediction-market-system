@@ -622,6 +622,111 @@ def test_fully_covered_sell_reduces_per_market_exposure() -> None:
     assert decision.adjusted_size is None
 
 
+def test_sell_flip_to_overcap_short_is_sized_down() -> None:
+    """Codex final consensus regression (review-loop fix f15): a sell that
+    flips a long into an over-cap short must NOT bypass the cap check via
+    the strictly_reducing shortcut.
+
+    Construction:
+    - per-market cap = 500
+    - held: 800 @ 1.0 → current market notional = 800 (above cap)
+    - sell 1400 @ 1.0
+
+    Exposure delta for the full 1400-share sell:
+      covered portion (800): -800 * 1.0 = -800
+      short portion  (600):  +600 * 1.0 = +600
+      total delta:           -200 → new market notional = 600
+
+    Pre-fix bug: ``new_market_notional (600) < current_market_notional
+    (800)`` → strictly_reducing fast-path → approved at full 1400 size,
+    leaving the post-trade short (600) STILL above the per-market cap
+    (500).
+
+    Correct behaviour: fall through to the partial-fit branch and use
+    ``_max_fillable_sell_size`` to size the order down so that
+    post-trade exposure ≤ cap.
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("500"),
+        max_total_exposure=Decimal("10000"),
+    )
+    held = _position(
+        size=Decimal("800"),
+        avg_entry_price=Decimal("1.0"),
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    sell_order = _order(
+        price=Decimal("1.0"),
+        size=Decimal("1400"),
+        side="sell",
+        market_id="m-1",
+        outcome_id="yes",
+    )
+
+    decision = rm.check_order(sell_order, positions=[held])
+
+    # The shortcut must NOT have approved this at full size with no
+    # adjustment: that would leave a 600 short above the 500 cap.
+    assert not (
+        decision.approved
+        and decision.adjusted_size is None
+        and decision.reason == "strictly_reducing"
+    ), (
+        "strictly_reducing shortcut bypassed cap check: approved full "
+        f"1400 size leaving 600 short above 500 cap (reason={decision.reason!r})"
+    )
+
+    # If approved (with size-down) the post-trade exposure must fit the cap.
+    if decision.approved:
+        adjusted = decision.adjusted_size or sell_order.size
+        # Piecewise post-trade math: covered portion clears at avg_basis,
+        # short remainder opens at order.price.
+        covered = min(adjusted, held.size)
+        short_remainder = adjusted - covered
+        avg_basis = held.avg_entry_price  # held_value / held_size = 1.0
+        reduction = covered * avg_basis
+        new_short_notional = short_remainder * sell_order.price
+        current_notional = held.size * held.avg_entry_price  # 800
+        post_notional = current_notional - reduction + new_short_notional
+        assert post_notional <= Decimal("500") + Decimal("0.0001"), (
+            f"Post-trade per-market notional {post_notional} exceeds cap "
+            f"500 after approval (adjusted_size={adjusted})"
+        )
+
+
+def test_sell_strictly_reducing_within_cap_approved() -> None:
+    """Sanity: a fully-covered sell whose post-trade notional fits the
+    cap must still take the strictly_reducing fast-path (no adjustment).
+
+    Construction:
+    - per-market cap = 500
+    - held: 600 @ 1.0 → current market notional = 600 (above cap)
+    - sell 200 @ 1.0 → fully covered, new notional = 400 (fits cap)
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("500"),
+        max_total_exposure=Decimal("10000"),
+    )
+    held = _position(
+        size=Decimal("600"),
+        avg_entry_price=Decimal("1.0"),
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    sell_order = _order(
+        price=Decimal("1.0"),
+        size=Decimal("200"),
+        side="sell",
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    decision = rm.check_order(sell_order, positions=[held])
+    assert decision.approved is True
+    assert decision.adjusted_size is None
+    assert decision.reason == "strictly_reducing"
+
+
 # ---------------------------------------------------------------------------
 # update_limits — tightening / relaxing, with guardrail clamping
 # ---------------------------------------------------------------------------

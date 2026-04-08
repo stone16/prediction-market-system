@@ -134,9 +134,14 @@ class RiskManager:
         3. ``new_market_notional = current_market_notional + market_delta``
            (where ``market_delta`` is the part of ``exposure_delta`` that
            lives on this market, i.e. the same value).
-        4. If ``new_market_notional <= current_market_notional``, the
-           order strictly reduces risk on this market — approve
-           unconditionally (no cap check).
+        4. Strictly-reducing fast-path (review-loop fix f15):
+              - A FULLY COVERED sell (``order.size <= held_size``) is
+                approved unconditionally — pure inventory reduction.
+              - Any other negative-delta order is approved without
+                further checks ONLY IF the post-trade notional fits
+                both the per-market and total-exposure caps. Otherwise
+                it falls through so a long→short flip that lands on a
+                still-over-cap short can be sized down.
         5. Otherwise, run the per-market cap check (rejecting or partial-
            fitting), then re-validate against total exposure.
         """
@@ -153,15 +158,47 @@ class RiskManager:
         new_market_notional = current_market_notional + exposure_delta
         new_total_notional = current_total_notional + exposure_delta
 
-        # Strictly-reducing orders are always approved, even if the
-        # current per-market notional is above the cap (e.g. because the
-        # cap was tightened after the position was opened).
-        if new_market_notional < current_market_notional:
-            return RiskDecision(
-                approved=True,
-                reason="strictly_reducing",
-                adjusted_size=None,
+        # Strictly-reducing fast-path. Review-loop fix f15 (Codex final
+        # consensus): the prior version only checked
+        # ``new_market_notional < current_market_notional`` and would
+        # therefore approve a sell that flips a long into an over-cap
+        # SHORT (e.g. held 800 @ 1.0, sell 1400 @ 1.0 → covered=-800,
+        # short=+600 → net delta -200, new notional 600 < current 800
+        # but still > 500 cap). The bug let any sell whose net delta is
+        # negative bypass the cap check, even when the post-trade
+        # exposure is still above the cap.
+        #
+        # Correct semantics:
+        #   1. A FULLY COVERED sell (``order.size <= held_size``) is a
+        #      pure reduction on this market — every share sold closes
+        #      existing inventory, there is no short remainder, and the
+        #      market notional decreases monotonically. Approve even if
+        #      the post-trade notional is still above the cap (the
+        #      position was over-cap before the order, and the order
+        #      makes things strictly better).
+        #   2. Any other reducing order (mixed cover+short whose net
+        #      delta is negative, or a buy that somehow nets negative)
+        #      only takes the fast path when the resulting exposure
+        #      fits BOTH caps. Otherwise it falls through to the
+        #      partial-fit branch so ``_max_fillable_sell_size`` can
+        #      size it down.
+        if exposure_delta < Decimal("0"):
+            held_size, _ = self._held_size_and_value_for_order(
+                order, positions
             )
+            fully_covered_sell = (
+                order.side == "sell" and order.size <= held_size
+            )
+            fits_caps = (
+                new_market_notional <= self._max_position_per_market
+                and new_total_notional <= self._max_total_exposure
+            )
+            if fully_covered_sell or fits_caps:
+                return RiskDecision(
+                    approved=True,
+                    reason="strictly_reducing",
+                    adjusted_size=None,
+                )
 
         # Per-market cap check (only fires when the order INCREASES
         # exposure on this market — sells with covered_only<order.size
