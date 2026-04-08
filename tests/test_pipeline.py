@@ -757,7 +757,7 @@ async def test_correlation_detector_strategy_failure_is_isolated() -> None:
 
     pipeline = TradingPipeline(
         connectors=[connector],
-        strategies=[strategy],  # type: ignore[list-item]
+        strategies=[strategy],
         executor=executor,
         risk_manager=risk,
         metrics=metrics,
