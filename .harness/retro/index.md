@@ -18,20 +18,29 @@ harness tasks. Updated by the Retro agent at the end of each task.
 
 ## Frequency Table
 
+Status legend: `observation` (1×) → `monitoring` (2×) → `proposed` (3+× or
+high severity, rule drafted) → `active` (rule promoted to project
+CLAUDE.md, contributors expected to follow) → `retired` (resolved).
+
 | Pattern                              | Occurrences | Severity | Status     | First Task | Last Task   | Proposal |
 |--------------------------------------|-------------|----------|------------|------------|-------------|----------|
-| review-rejection-hygiene             | 1           | high     | proposed   | pms-v1     | pms-v1      | Proposal 1 |
-| domain-math-piecewise                | 1           | high     | proposed   | pms-v1     | pms-v1      | Proposal 2 |
-| lifecycle-cleanup-exit-paths         | 1           | high     | proposed   | pms-v1     | pms-v1      | Proposal 3 |
-| document-instead-of-fix              | 1           | medium   | proposed   | pms-v1     | pms-v1      | Proposal 4 |
+| review-rejection-hygiene             | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 1 |
+| domain-math-piecewise                | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 2 |
+| lifecycle-cleanup-exit-paths         | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 3 |
+| document-instead-of-fix              | 1           | medium   | active     | pms-v1     | pms-v1      | Proposal 4 |
 | cross-checkpoint-integration         | 1           | medium   | proposed   | pms-v1     | pms-v1      | Proposal 5 |
 | magnitude-overrun-tests              | 1           | low      | monitoring | pms-v1     | pms-v1      | Proposal 6 |
-| rule-conflict-precedence             | 1           | low      | proposed   | pms-v1     | pms-v1      | Proposal 7 |
-| runtime-behaviour-vs-design-intent   | 1           | high     | proposed   | pms-v1     | pms-v1      | Principle |
+| rule-conflict-precedence             | 1           | low      | active     | pms-v1     | pms-v1      | Proposal 7 |
+| runtime-behaviour-vs-design-intent   | 1           | high     | active     | pms-v1     | pms-v1      | Principle |
 | project-ide-tooling-drift            | 1           | low      | monitoring | pms-v1     | pms-v1      | Skill defect |
-| tool-env-assumption                  | 1           | medium   | proposed   | pms-phase2 | pms-phase2  | phase2-P1 |
-| stale-baseline                       | 1           | medium   | proposed   | pms-phase2 | pms-phase2  | phase2-P2 |
-| pytest-marker-no-auto-deselect       | 1           | low      | proposed   | pms-phase2 | pms-phase2  | phase2-P3 |
+| tool-env-assumption                  | 1           | medium   | active     | pms-phase2 | pms-phase2  | phase2-P1 |
+| stale-baseline                       | 1           | medium   | active     | pms-phase2 | pms-phase2  | phase2-P2 |
+| pytest-marker-no-auto-deselect       | 1           | low      | active     | pms-phase2 | pms-phase2  | phase2-P3 |
+
+Active rules are codified in `/CLAUDE.md` at the repo root (Phase 3D).
+Cross-checkpoint integration remains `proposed` because the harness-side
+fix (an evaluator integration trace step) belongs in the orchestrator
+template, not in project CLAUDE.md.
 
 ## Pending Proposals
 
