@@ -326,6 +326,7 @@ ConnectorFeedback(data_staleness_ms: float, api_error_rate: float, suggestion: s
 
 - **Rust implementations**: v1 is pure Python. Rust Cargo.toml scaffolded but empty.
 - **Live trading**: No real money execution. Connectors use recorded fixtures.
+- **Live positions tracking**: v1 does not maintain a positions ledger at the pipeline level. `OrderExecutor.get_positions()` returns an empty list unless a positions source is manually registered via `register_positions_source()`. `RiskManager` correctly enforces exposure caps when positions are provided (verified by unit tests), but the pipeline does not yet wire executor results back into a positions store. A post-v1 checkpoint will add either (a) an in-memory positions ledger derived from OrderResults, (b) a `PositionsStore` Protocol wired via config, or (c) live connector `get_positions()` implementations. This gap is consistent with v1's "no live trading" scope: recorded-fixture tests supply synthetic positions directly.
 - **WebSocket streaming**: `stream_prices()` and `get_historical_prices()` deferred (raise `NotImplementedError`).
 - **Synergy testing**: `SynergyRunner` for cross-module candidate evaluation deferred to future spec.
 - **Web UI / Dashboard**: No frontend. CLI and Python API only.

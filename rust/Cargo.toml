@@ -1,0 +1,5 @@
+# Rust workspace stub — reserved for future performance-critical paths.
+# v1 is pure Python; no Rust crates are implemented yet.
+[workspace]
+resolver = "2"
+members = []

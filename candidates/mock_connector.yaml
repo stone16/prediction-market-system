@@ -1,0 +1,13 @@
+# Mock candidate used by the harness's own self-tests.
+# It is intentionally fake — it points at example.com and is wired to
+# pms.tool_harness.MockCandidate at runtime.
+name: mock_connector
+repo: https://example.com/mock
+language: python
+install: "echo mock install"
+platforms: [polymarket, kalshi]
+module: data_connector
+notes: "Mock candidate for harness self-tests"
+config:
+  mock_markets: 150
+  mock_latency_ms: 200
