@@ -3,7 +3,10 @@
 # pms.tool_harness.MockCandidate at runtime.
 name: mock_connector
 repo: https://example.com/mock
-language: python
+# Special "mock" language tells the CLI to route this candidate to the
+# in-process MockCandidate instead of spawning real subprocesses. Real
+# tool candidates use python/typescript/rust/java.
+language: mock
 install: "echo mock install"
 platforms: [polymarket, kalshi]
 module: data_connector

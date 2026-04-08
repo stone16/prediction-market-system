@@ -1,0 +1,80 @@
+# Benchmark for the analytics_dashboard module.
+#
+# Survival gate: candidate must install, expose at least one dashboard
+# endpoint locally, and serve a non-empty response on the canonical
+# health-check route.
+module: analytics_dashboard
+version: 1
+
+survival_gate:
+  - id: install
+    test: "Candidate installs cleanly via the documented install command."
+    timeout_seconds: 600
+  - id: connect
+    test: "Candidate exposes at least one dashboard endpoint locally."
+    timeout_seconds: 60
+  - id: fetch_one
+    test: "Candidate serves a non-empty response on a canonical health-check route."
+    timeout_seconds: 30
+
+functional_tests:
+  data_coverage:
+    weight: 0.25
+    tests:
+      - id: panel_breadth
+        test: "Distinct dashboard panels / widgets shipped out of the box."
+        metric: count
+        baseline: 4
+        lower_is_better: false
+      - id: venue_breadth
+        test: "Number of venues whose data the dashboard surfaces."
+        metric: count
+        baseline: 1
+        lower_is_better: false
+      - id: realtime_capable
+        test: "Dashboard updates without manual page refresh."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+
+  performance:
+    weight: 0.25
+    tests:
+      - id: page_load_p95
+        test: "p95 first-contentful-paint of the main dashboard route (ms)."
+        metric: ms
+        baseline: 2500
+        lower_is_better: true
+      - id: query_latency_p95
+        test: "p95 backend query latency under typical load (ms)."
+        metric: ms
+        baseline: 1500
+        lower_is_better: true
+
+  integrability:
+    weight: 0.25
+    tests:
+      - id: ingests_pms_metrics
+        test: "Dashboard ingests pms.evaluation.MetricsCollector output."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: dockerized
+        test: "Repository ships a working Docker / docker-compose entry point."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+
+  code_quality:
+    weight: 0.25
+    tests:
+      - id: has_tests
+        test: "Repository ships an automated test suite for the dashboard."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: recently_maintained
+        test: "Days since the last commit on the default branch."
+        metric: days
+        baseline: 90
+        lower_is_better: true

@@ -1,0 +1,79 @@
+# Benchmark for the embedding_engine module.
+#
+# Survival gate: candidate must install, load its default model, and
+# encode at least one input string into a numeric embedding vector.
+module: embedding_engine
+version: 1
+
+survival_gate:
+  - id: install
+    test: "Candidate installs cleanly via the documented install command."
+    timeout_seconds: 600
+  - id: connect
+    test: "Candidate loads its default model into memory."
+    timeout_seconds: 120
+  - id: fetch_one
+    test: "Candidate encodes one input string into a numeric vector."
+    timeout_seconds: 60
+
+functional_tests:
+  data_coverage:
+    weight: 0.25
+    tests:
+      - id: model_breadth
+        test: "Distinct named models the engine can load."
+        metric: count
+        baseline: 1
+        lower_is_better: false
+      - id: multilingual_supported
+        test: "Supports embedding non-English market titles."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: dim_consistency
+        test: "Output vector dimensionality is constant across inputs."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+
+  performance:
+    weight: 0.25
+    tests:
+      - id: encode_latency
+        test: "Median wall-time to encode one short string (CPU only)."
+        metric: ms
+        baseline: 50
+        lower_is_better: true
+      - id: batch_throughput
+        test: "Strings encoded per second in a 1k-string batch."
+        metric: count
+        baseline: 200
+        lower_is_better: false
+
+  integrability:
+    weight: 0.25
+    tests:
+      - id: numpy_output
+        test: "Engine output is a numpy ndarray (dtype float32)."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: pickle_safe
+        test: "Loaded model can be pickled / unpickled across processes."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+
+  code_quality:
+    weight: 0.25
+    tests:
+      - id: has_tests
+        test: "Repository ships an automated test suite for the encoding path."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: recently_maintained
+        test: "Days since the last commit on the default branch."
+        metric: days
+        baseline: 90
+        lower_is_better: true

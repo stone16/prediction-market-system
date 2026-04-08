@@ -1,0 +1,16 @@
+# py-clob-client as order_executor — best documented Python execution
+# path for Polymarket limit and market orders.
+name: py-clob-client
+repo: https://github.com/Polymarket/py-clob-client
+language: python
+install: "pip install py-clob-client==0.34.6"
+platforms: [polymarket]
+module: order_executor
+notes: "Best-documented Python execution path for Polymarket limit and market orders."
+config:
+  package_name: py-clob-client
+  package_version: "0.34.6"
+  stars: 1043
+  last_updated: "2026-02-22"
+  verdict: deeper-review
+  auth_required: true

@@ -54,6 +54,54 @@ def test_data_connector_yaml_exists() -> None:
     assert BENCHMARK_PATH.exists(), f"missing benchmark: {BENCHMARK_PATH}"
 
 
+# P2-04: every catalog module ships a benchmark YAML and parses cleanly.
+ALL_MODULE_BENCHMARKS: tuple[str, ...] = (
+    "data_connector",
+    "realtime_feed",
+    "data_normalizer",
+    "embedding_engine",
+    "correlation_detector",
+    "arbitrage_calculator",
+    "order_executor",
+    "risk_manager",
+    "backtesting_engine",
+    "analytics_dashboard",
+)
+
+
+@pytest.mark.parametrize("module", ALL_MODULE_BENCHMARKS)
+def test_all_module_benchmarks_load(module: str) -> None:
+    """Each of the 10 catalog modules has a benchmark YAML that parses
+    to a valid :class:`Benchmark` dataclass.
+
+    Loader rejects:
+    - missing fields
+    - functional category weights that don't sum to 1.0 (within 1e-6)
+    - non-mapping survival_gate items
+    - bool values where int is expected (timeout_seconds)
+
+    Any of those raise :class:`BenchmarkValidationError`, which pytest
+    surfaces as a test failure with the field path.
+    """
+    bm_path = REPO_ROOT / "benchmarks" / f"{module}.yaml"
+    assert bm_path.exists(), f"missing benchmark file: {bm_path}"
+    bm = load_benchmark(bm_path)
+    assert isinstance(bm, Benchmark)
+    assert bm.module == module
+    # Spec contract: 3 survival items + 4 functional categories with
+    # weights summing to 1.0.
+    assert len(bm.survival_gate) == 3, (
+        f"{module}: expected 3 survival items, got {len(bm.survival_gate)}"
+    )
+    assert len(bm.functional_tests) == 4, (
+        f"{module}: expected 4 functional categories, got {len(bm.functional_tests)}"
+    )
+    weight_sum = sum(c.weight for c in bm.functional_tests)
+    assert abs(weight_sum - 1.0) < 1e-6, (
+        f"{module}: functional weights sum to {weight_sum}, expected 1.0"
+    )
+
+
 def test_mock_connector_yaml_exists() -> None:
     assert CANDIDATE_PATH.exists(), f"missing candidate: {CANDIDATE_PATH}"
 
@@ -94,7 +142,10 @@ def test_load_candidate_happy_path() -> None:
     assert isinstance(cand, Candidate)
     assert cand.name == "mock_connector"
     assert cand.module == "data_connector"
-    assert cand.language == "python"
+    # P2-02: mock_connector now uses the special "mock" language so the
+    # CLI routes it to the in-process MockCandidate instead of spawning a
+    # real subprocess venv. Real candidates use python/typescript/rust.
+    assert cand.language == "mock"
     assert "polymarket" in cand.platforms
     assert "kalshi" in cand.platforms
     assert isinstance(cand.config, dict)

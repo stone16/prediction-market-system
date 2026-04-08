@@ -512,6 +512,147 @@ async def test_cli_evaluate_no_candidates_returns_nonzero(
     assert rc != 0
 
 
+# ---------------------------------------------------------------------------
+# P2-05: evaluate-all CLI + cross-module eval_results.yaml aggregation.
+# ---------------------------------------------------------------------------
+
+
+async def test_evaluate_all_produces_aggregate_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``evaluate-all`` walks every benchmark and emits a single
+    ``eval_results.yaml`` summary alongside the per-module reports.
+
+    The test sets up an isolated workspace with **two** module
+    benchmarks (``data_connector`` and ``order_executor``) so the
+    aggregate covers more than one row, plus a single mock candidate
+    for ``data_connector`` to exercise the survivors path. The
+    ``order_executor`` module has no candidate so it must surface as a
+    gap in the aggregate.
+    """
+    import yaml as _yaml
+
+    bm_dir = tmp_path / "benchmarks"
+    cand_dir = tmp_path / "candidates"
+    out_dir = tmp_path / "reports" / "phase2-run-test"
+    bm_dir.mkdir()
+    cand_dir.mkdir()
+
+    # Real benchmark fixtures: copy the data_connector + order_executor
+    # benchmarks from the repo so the test exercises the actual schema.
+    (bm_dir / "data_connector.yaml").write_text(
+        BENCHMARK_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    order_executor_src = REPO_ROOT / "benchmarks" / "order_executor.yaml"
+    (bm_dir / "order_executor.yaml").write_text(
+        order_executor_src.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    # Single mock candidate covering data_connector. order_executor has
+    # no candidate, so it must surface as a gap in eval_results.yaml.
+    (cand_dir / "mock_connector.yaml").write_text(
+        CANDIDATE_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    from pms.tool_harness.cli import run_cli
+
+    rc = await run_cli(
+        [
+            "evaluate-all",
+            "--benchmarks-dir",
+            str(bm_dir),
+            "--candidates-dir",
+            str(cand_dir),
+            "--output-dir",
+            str(out_dir),
+        ]
+    )
+    assert rc == 0
+
+    # Per-module reports were written for the module that had candidates.
+    assert (out_dir / "data_connector-scores.json").exists()
+    assert (out_dir / "data_connector-report.md").exists()
+    # The module with no candidates is skipped (no scores/report files).
+    assert not (out_dir / "order_executor-scores.json").exists()
+
+    # eval_results.yaml exists and parses to the expected shape.
+    eval_path = out_dir / "eval_results.yaml"
+    assert eval_path.exists()
+    payload = _yaml.safe_load(eval_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    assert "generated_at" in payload
+    assert "modules" in payload
+    assert "gaps" in payload
+    assert "summary" in payload
+
+    # Only data_connector ran (order_executor was skipped due to no
+    # candidates), so the aggregate has one module entry.
+    assert len(payload["modules"]) == 1
+    dc = payload["modules"][0]
+    assert dc["module"] == "data_connector"
+    assert dc["evaluated_count"] == 1
+    assert dc["survived_count"] == 1
+    assert dc["top_candidate"] == "mock_connector"
+    assert dc["top_score"] > 0.0
+    assert dc["request_more_candidates"] is False
+
+    # Gaps list is empty for this run (mock survived).
+    assert payload["gaps"] == []
+    assert payload["summary"]["total_modules"] == 1
+    assert payload["summary"]["modules_with_winner"] == 1
+    assert payload["summary"]["modules_with_gap"] == 0
+
+
+async def test_evaluate_all_flags_modules_with_no_survivors(
+    tmp_path: Path,
+) -> None:
+    """A module whose only candidate fails the survival gate must show up
+    in ``gaps`` and have ``request_more_candidates: true``."""
+    import yaml as _yaml
+
+    from pms.tool_harness.aggregate import (
+        build_eval_results,
+        eval_results_to_dict,
+    )
+
+    # Build a synthetic ModuleReport where the only candidate is eliminated.
+    bm = _make_benchmark()
+    cand = _make_candidate("failing_tool")
+    runner = HarnessRunner()
+
+    async def survival(c: Candidate, item: SurvivalGateItem) -> bool:
+        return False
+
+    async def functional(
+        c: Candidate, test: FunctionalTest
+    ) -> FunctionalTestResult:  # pragma: no cover — never called
+        raise AssertionError("functional should not run when survival fails")
+
+    report = await runner.evaluate_module(
+        candidates=[cand],
+        benchmark=bm,
+        survival_test_fn=survival,
+        functional_test_fn=functional,
+    )
+
+    from datetime import datetime, timezone
+
+    eval_results = build_eval_results(
+        [report], generated_at=datetime(2026, 4, 8, tzinfo=timezone.utc)
+    )
+    payload = eval_results_to_dict(eval_results)
+
+    assert payload["gaps"] == ["data_connector"]
+    modules = payload["modules"]
+    assert isinstance(modules, list)
+    only_module = modules[0]
+    assert isinstance(only_module, dict)
+    assert only_module["request_more_candidates"] is True
+    hints = only_module["search_hints"]
+    assert isinstance(hints, list) and hints
+    assert "survive" in str(hints[0]).lower()
+
+
 def test_cli_main_is_sync_wrapper_over_run_cli() -> None:
     """``main()`` must be a thin sync wrapper around ``run_cli``.
 

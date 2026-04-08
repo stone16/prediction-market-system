@@ -1,0 +1,18 @@
+# real-time-data-client — official Polymarket RTDS WebSocket client.
+# Catalog first-choice for realtime_feed.
+name: real-time-data-client
+repo: https://github.com/Polymarket/real-time-data-client
+language: typescript
+install: "npm install @polymarket/real-time-data-client@1.4.0"
+platforms: [polymarket]
+module: realtime_feed
+notes: "Official RTDS client for trades, comments, crypto/equity prices. 91.33% line / 67.86% branch coverage measured via mock-socket harness. Polymarket-only."
+config:
+  package_name: "@polymarket/real-time-data-client"
+  package_version: "1.4.0"
+  stars: 196
+  last_updated: "2026-03-03"
+  verdict: deeper-review
+  endpoint: "wss://ws-live-data.polymarket.com"
+  measured_line_coverage_pct: 91.33
+  measured_branch_coverage_pct: 67.86

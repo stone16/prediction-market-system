@@ -1,0 +1,23 @@
+# nautilus_trader — institutional-grade Rust+Python event-driven engine.
+# Catalog first-choice for backtesting_engine.
+name: nautilus_trader
+repo: https://github.com/nautechsystems/nautilus_trader
+# Catalog tags this as "rust" but the published artifact is a Python
+# wheel (pip install nautilus_trader==1.225.0). The subprocess runner
+# routes by install command, so the language field needs to match the
+# install path: python.
+language: python
+install: "pip install nautilus_trader==1.225.0"
+platforms: [polymarket]
+module: backtesting_engine
+notes: "Most mature deterministic simulation engine with active Polymarket adapter support. Requires rustc 1.94.1 for editable build. Repo-level pytest bootstrap is broken (TOPIX100 tick scheme double-registration)."
+config:
+  package_name: nautilus_trader
+  package_version: "1.225.0"
+  stars: 21717
+  last_updated: "2026-04-07"
+  verdict: deeper-review
+  rust_msrv: "1.94.1"
+  measured_adapter_line_coverage_pct: 100.0
+  measured_adapter_branch_coverage_pct: 100.0
+  known_blocker: "tests/conftest.py double-registers TOPIX100 tick scheme"

@@ -1,0 +1,15 @@
+# prediction-market-analysis — Jon-Becker's offline data + analysis
+# framework. Catalog backup for correlation_detector.
+name: prediction-market-analysis
+repo: https://github.com/Jon-Becker/prediction-market-analysis
+language: python
+install: "uv sync"
+platforms: [polymarket, kalshi]
+module: correlation_detector
+notes: "Best offline substrate for relationship discovery across Polymarket and Kalshi market histories. Dataset-oriented rather than low-latency SDK."
+config:
+  stars: 2766
+  last_updated: "2026-04-04"
+  verdict: deeper-review
+  uses_kalshi_python_min: "2.1.4"
+  uses_polymarket_py_min: "0.1.0"

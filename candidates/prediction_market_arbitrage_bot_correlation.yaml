@@ -1,0 +1,15 @@
+# prediction-market-arbitrage-bot — TypeScript cross-venue arbitrage bot
+# from realfishsam. Catalog first-choice for correlation_detector AND
+# arbitrage_calculator (one YAML per module).
+name: prediction-market-arbitrage-bot
+repo: https://github.com/realfishsam/prediction-market-arbitrage-bot
+language: typescript
+install: "npm install"
+platforms: [polymarket, kalshi]
+module: correlation_detector
+notes: "Best benchmarkable reference for mapping equivalent Kalshi and Polymarket questions into actionable pairs. Strategy-specific bot, no published package."
+config:
+  stars: 131
+  last_updated: "2026-01-16"
+  verdict: deeper-review
+  uses_pmxt: true

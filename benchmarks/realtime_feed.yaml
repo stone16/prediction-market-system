@@ -1,0 +1,84 @@
+# Benchmark for the realtime_feed module.
+#
+# Survival gate: candidate must install, open the venue's WebSocket /
+# streaming endpoint, and receive at least one frame end-to-end. Tools
+# that fail to handshake or hang past the timeout are eliminated before
+# functional scoring.
+#
+# Functional categories use the same equally-weighted 0.25 split as the
+# data_connector benchmark so cross-module comparisons stay legible.
+module: realtime_feed
+version: 1
+
+survival_gate:
+  - id: install
+    test: "Candidate installs cleanly via the documented install command."
+    timeout_seconds: 300
+  - id: connect
+    test: "Candidate opens a WebSocket / streaming connection to at least one supported platform."
+    timeout_seconds: 30
+  - id: fetch_one
+    test: "Candidate receives at least one streaming frame end-to-end."
+    timeout_seconds: 60
+
+functional_tests:
+  data_coverage:
+    weight: 0.25
+    tests:
+      - id: topic_breadth
+        test: "Number of distinct streaming topics the client can subscribe to."
+        metric: count
+        baseline: 3
+        lower_is_better: false
+      - id: platform_breadth
+        test: "Number of platforms the streaming client supports."
+        metric: count
+        baseline: 1
+        lower_is_better: false
+      - id: frame_field_completeness
+        test: "Fraction of streamed frames with all required fields populated."
+        metric: percentage
+        baseline: 0.95
+        lower_is_better: false
+
+  performance:
+    weight: 0.25
+    tests:
+      - id: connection_latency
+        test: "Median time from connect() to first frame received."
+        metric: ms
+        baseline: 1500
+        lower_is_better: true
+      - id: frame_throughput
+        test: "Frames received per second on a busy public topic over 60s."
+        metric: count
+        baseline: 5
+        lower_is_better: false
+
+  integrability:
+    weight: 0.25
+    tests:
+      - id: returns_pms_price_update
+        test: "Adapter output maps cleanly onto pms.models.PriceUpdate."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: clean_disconnect
+        test: "Client disconnects cleanly without leaking sockets."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+
+  code_quality:
+    weight: 0.25
+    tests:
+      - id: has_tests
+        test: "Repository ships an automated test suite for the streaming path."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: recently_maintained
+        test: "Days since the last commit on the default branch."
+        metric: days
+        baseline: 90
+        lower_is_better: true

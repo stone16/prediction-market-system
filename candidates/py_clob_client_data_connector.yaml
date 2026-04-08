@@ -1,0 +1,16 @@
+# py-clob-client — official Python CLOB SDK from Polymarket.
+# Catalog backup for data_connector (and order_executor in a separate YAML).
+name: py-clob-client
+repo: https://github.com/Polymarket/py-clob-client
+language: python
+install: "pip install py-clob-client==0.34.6"
+platforms: [polymarket]
+module: data_connector
+notes: "Canonical Python CLOB connector with strongest documentation coverage. Polymarket-only; auth and signing setup is non-trivial."
+config:
+  package_name: py-clob-client
+  package_version: "0.34.6"
+  stars: 1043
+  last_updated: "2026-02-22"
+  verdict: deeper-review
+  api_docs: "https://docs.polymarket.com/api-reference/introduction"

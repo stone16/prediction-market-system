@@ -1,0 +1,80 @@
+# Benchmark for the correlation_detector module.
+#
+# Survival gate: candidate must install, accept a small market corpus,
+# and surface at least one detected correlation pair on a hand-labeled
+# fixture.
+module: correlation_detector
+version: 1
+
+survival_gate:
+  - id: install
+    test: "Candidate installs cleanly via the documented install command."
+    timeout_seconds: 300
+  - id: connect
+    test: "Candidate accepts a small market corpus (>=10 markets)."
+    timeout_seconds: 30
+  - id: fetch_one
+    test: "Candidate surfaces at least one correlation pair on a labeled fixture."
+    timeout_seconds: 60
+
+functional_tests:
+  data_coverage:
+    weight: 0.25
+    tests:
+      - id: correlation_kinds
+        test: "Distinct correlation kinds detected (equivalent, subset, opposing, etc.)."
+        metric: count
+        baseline: 2
+        lower_is_better: false
+      - id: cross_venue_supported
+        test: "Detector handles markets from different venues in one corpus."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: precision_at_5
+        test: "Precision over the top-5 pairs on the labeled fixture."
+        metric: percentage
+        baseline: 0.6
+        lower_is_better: false
+
+  performance:
+    weight: 0.25
+    tests:
+      - id: pair_scoring_latency
+        test: "Median wall-time to score one candidate pair."
+        metric: ms
+        baseline: 25
+        lower_is_better: true
+      - id: corpus_throughput
+        test: "Pairs scored per second on a 10k-market corpus."
+        metric: count
+        baseline: 200
+        lower_is_better: false
+
+  integrability:
+    weight: 0.25
+    tests:
+      - id: returns_pms_correlation_pair
+        test: "Detector output maps cleanly onto pms.models.CorrelationPair."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: pluggable_scorer
+        test: "Scoring function is overridable without forking the package."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+
+  code_quality:
+    weight: 0.25
+    tests:
+      - id: has_tests
+        test: "Repository ships an automated test suite for the correlation path."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: recently_maintained
+        test: "Days since the last commit on the default branch."
+        metric: days
+        baseline: 90
+        lower_is_better: true

@@ -1,0 +1,16 @@
+# pmxt as data_normalizer — same package, different module slot.
+# Catalog first-choice for data_normalizer because pmxt exposes explicit
+# normalized market/orderbook/trade models across venues.
+name: pmxt
+repo: https://github.com/pmxt-dev/pmxt
+language: typescript
+install: "npm install pmxtjs@2.25.2"
+platforms: [polymarket, kalshi, limitless]
+module: data_normalizer
+notes: "Explicit normalized market, orderbook, and trade models across venues."
+config:
+  package_name: pmxtjs
+  package_version: "2.25.2"
+  stars: 1407
+  last_updated: "2026-04-07"
+  verdict: deeper-review

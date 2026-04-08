@@ -3,19 +3,11 @@
 Usage::
 
     uv run pms-harness evaluate --module data_connector
+    uv run pms-harness evaluate-all --output-dir reports/phase2-run
 
-The ``evaluate`` subcommand:
-
-1. Loads ``<benchmarks-dir>/<module>.yaml`` (defaults to ``benchmarks/``).
-2. Scans ``<candidates-dir>/*.yaml`` for every candidate whose ``module``
-   field matches the requested module.
-3. Runs :meth:`pms.tool_harness.HarnessRunner.evaluate_module` against
-   each candidate. CP03 only ships an in-process :class:`MockCandidate`;
-   later checkpoints will replace the wrapped test functions with
-   real subprocess-based runners without touching this module.
-4. Writes ``<output-dir>/<module>-scores.json`` and
-   ``<output-dir>/<module>-report.md``.
-5. Prints a one-line summary to stdout.
+The ``evaluate`` subcommand runs one module benchmark; ``evaluate-all``
+walks every benchmark in ``benchmarks/`` and emits a cross-module
+``eval_results.yaml`` summary that auto-research consumes as feedback.
 
 The CLI uses :mod:`argparse` rather than Typer/Click so the harness
 stays on stdlib-only runtime dependencies (:mod:`pyyaml` is the single
@@ -29,17 +21,23 @@ import asyncio
 import sys
 from pathlib import Path
 
+from .aggregate import (
+    build_eval_results,
+    write_eval_results_yaml,
+)
 from .loader import load_benchmark, load_candidate
 from .mock_candidate import MockCandidate
-from .reports import ReportGenerator
+from .reports import ModuleReport, ReportGenerator, utc_now
 from .runner import HarnessRunner
 from .schema import (
+    Benchmark,
     BenchmarkValidationError,
     Candidate,
     FunctionalTest,
     FunctionalTestResult,
     SurvivalGateItem,
 )
+from .subprocess_runner import DEFAULT_PROBES_DIR, SubprocessRunnerFactory
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -76,6 +74,52 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Where to write report.md and scores.json (default: reports/).",
     )
+    eval_parser.add_argument(
+        "--probes-dir",
+        default=DEFAULT_PROBES_DIR,
+        type=Path,
+        help=(
+            "Directory containing probe scripts for real candidates "
+            "(default: candidates/probes/)."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # P2-05: ``evaluate-all`` walks every benchmark and writes one
+    # cross-module ``eval_results.yaml`` plus per-module reports.
+    # ------------------------------------------------------------------
+    all_parser = subparsers.add_parser(
+        "evaluate-all",
+        help="Run every benchmark in the benchmarks dir and produce a "
+        "cross-module eval_results.yaml summary.",
+    )
+    all_parser.add_argument(
+        "--benchmarks-dir",
+        default=Path("benchmarks"),
+        type=Path,
+        help="Directory containing benchmark YAMLs (default: benchmarks/).",
+    )
+    all_parser.add_argument(
+        "--candidates-dir",
+        default=Path("candidates"),
+        type=Path,
+        help="Directory containing candidate YAMLs (default: candidates/).",
+    )
+    all_parser.add_argument(
+        "--output-dir",
+        required=True,
+        type=Path,
+        help="Where to write per-module reports + eval_results.yaml.",
+    )
+    all_parser.add_argument(
+        "--probes-dir",
+        default=DEFAULT_PROBES_DIR,
+        type=Path,
+        help=(
+            "Directory containing probe scripts for real candidates "
+            "(default: candidates/probes/)."
+        ),
+    )
     return parser
 
 
@@ -96,6 +140,60 @@ def _discover_candidates(candidates_dir: Path, module: str) -> list[Candidate]:
         if candidate.module == module:
             found.append(candidate)
     return found
+
+
+async def _evaluate_one_module(
+    benchmark: Benchmark,
+    candidates: list[Candidate],
+    probes_dir: Path,
+) -> ModuleReport:
+    """Run survival + functional gates for one module and return its report.
+
+    The temp venvs/workdirs created by the subprocess runner are
+    released via ``cleanup_all`` in the ``finally`` block so a crashed
+    module run can't leak disk into ``/tmp``.
+    """
+    runner = HarnessRunner()
+    # P2-02: real candidates run inside isolated subprocess venvs via the
+    # SubprocessRunnerFactory; the in-process MockCandidate is reserved
+    # for the special ``language: mock`` candidate used by self-tests.
+    # Functional tests for real tools are still placeholder until P2-04;
+    # the dispatch keeps them out of the runner's exception path so
+    # survival results surface in the report.
+    mocks: dict[str, MockCandidate] = {
+        c.name: MockCandidate(name=c.name) for c in candidates if c.language == "mock"
+    }
+    subprocess_factory = SubprocessRunnerFactory(probes_dir=probes_dir)
+
+    async def survival_fn(
+        candidate: Candidate, item: SurvivalGateItem
+    ) -> bool:
+        if candidate.language == "mock":
+            return await mocks[candidate.name].survival_check(item)
+        return await subprocess_factory.survival_check(candidate, item)
+
+    async def functional_fn(
+        candidate: Candidate, test: FunctionalTest
+    ) -> FunctionalTestResult:
+        if candidate.language == "mock":
+            return await mocks[candidate.name].functional_check(test)
+        return FunctionalTestResult(
+            test_id=test.id,
+            metric=test.metric,
+            value=0.0,
+            score=0.0,
+            error="functional probing not implemented for real candidates yet (P2-04)",
+        )
+
+    try:
+        return await runner.evaluate_module(
+            candidates=candidates,
+            benchmark=benchmark,
+            survival_test_fn=survival_fn,
+            functional_test_fn=functional_fn,
+        )
+    finally:
+        subprocess_factory.cleanup_all()
 
 
 async def _cmd_evaluate(args: argparse.Namespace) -> int:
@@ -125,28 +223,8 @@ async def _cmd_evaluate(args: argparse.Namespace) -> int:
         )
         return 3
 
-    runner = HarnessRunner()
-    # CP03 wires every candidate to the in-process MockCandidate; later
-    # checkpoints will swap this for a subprocess-based runner.
-    mocks: dict[str, MockCandidate] = {
-        c.name: MockCandidate(name=c.name) for c in candidates
-    }
-
-    async def survival_fn(
-        candidate: Candidate, item: SurvivalGateItem
-    ) -> bool:
-        return await mocks[candidate.name].survival_check(item)
-
-    async def functional_fn(
-        candidate: Candidate, test: FunctionalTest
-    ) -> FunctionalTestResult:
-        return await mocks[candidate.name].functional_check(test)
-
-    report = await runner.evaluate_module(
-        candidates=candidates,
-        benchmark=benchmark,
-        survival_test_fn=survival_fn,
-        functional_test_fn=functional_fn,
+    report = await _evaluate_one_module(
+        benchmark, candidates, Path(args.probes_dir)
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +251,94 @@ async def _cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_evaluate_all(args: argparse.Namespace) -> int:
+    """``evaluate-all`` — run every benchmark and emit a cross-module summary.
+
+    Discovers benchmarks via ``benchmarks_dir.glob("*.yaml")`` (sorted by
+    name for deterministic output), evaluates each in sequence, and
+    writes one ``eval_results.yaml`` plus the same per-module
+    ``<module>-scores.json`` and ``<module>-report.md`` files the
+    single-module ``evaluate`` command produces.
+
+    A non-zero exit code is returned only when no benchmarks could be
+    found; individual module failures are recorded in their reports
+    (and surface as gaps in ``eval_results.yaml``) but do not abort the
+    overall run.
+    """
+    benchmarks_dir = Path(args.benchmarks_dir)
+    candidates_dir = Path(args.candidates_dir)
+    output_dir = Path(args.output_dir)
+    probes_dir = Path(args.probes_dir)
+
+    if not benchmarks_dir.exists():
+        print(
+            f"error: benchmarks dir not found: {benchmarks_dir}", file=sys.stderr
+        )
+        return 2
+
+    benchmark_paths = sorted(benchmarks_dir.glob("*.yaml"))
+    if not benchmark_paths:
+        print(
+            f"error: no benchmark YAMLs in {benchmarks_dir}", file=sys.stderr
+        )
+        return 3
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generator = ReportGenerator()
+    reports: list[ModuleReport] = []
+
+    for bm_path in benchmark_paths:
+        try:
+            benchmark = load_benchmark(bm_path)
+        except BenchmarkValidationError as exc:
+            print(
+                f"warning: skipping invalid benchmark {bm_path}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+
+        module = benchmark.module
+        candidates = _discover_candidates(candidates_dir, module)
+        if not candidates:
+            print(
+                f"warning: no candidates for module '{module}' — skipping",
+                file=sys.stderr,
+            )
+            continue
+
+        report = await _evaluate_one_module(benchmark, candidates, probes_dir)
+        generator.write_scores_json(
+            report, output_dir / f"{module}-scores.json"
+        )
+        generator.write_report_md(
+            report, output_dir / f"{module}-report.md"
+        )
+        reports.append(report)
+        if report.top_candidate is not None:
+            print(
+                f"[{module}] {len(candidates)} candidate(s) → "
+                f"top: {report.top_candidate} ({report.top_score:.2f})"
+            )
+        else:
+            print(
+                f"[{module}] {len(candidates)} candidate(s) → "
+                f"no survivors (gap)"
+            )
+
+    if not reports:
+        print("error: no modules evaluated", file=sys.stderr)
+        return 4
+
+    eval_results = build_eval_results(reports, generated_at=utc_now())
+    eval_results_path = output_dir / "eval_results.yaml"
+    write_eval_results_yaml(eval_results, eval_results_path)
+    print(
+        f"Wrote eval_results.yaml ({len(eval_results.modules)} modules, "
+        f"{len(eval_results.gaps)} gap(s)): {eval_results_path}"
+    )
+    return 0
+
+
 async def run_cli(argv: list[str]) -> int:
     """Async CLI entry point — parses ``argv`` and dispatches to a subcommand.
 
@@ -187,6 +353,8 @@ async def run_cli(argv: list[str]) -> int:
 
     if args.command == "evaluate":
         return await _cmd_evaluate(args)
+    if args.command == "evaluate-all":
+        return await _cmd_evaluate_all(args)
 
     parser.print_help(sys.stderr)
     return 1

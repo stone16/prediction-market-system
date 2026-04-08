@@ -1,0 +1,80 @@
+# Benchmark for the arbitrage_calculator module.
+#
+# Survival gate: candidate must install, accept at least one cross-
+# venue market pair, and produce a structured opportunity verdict
+# (positive or negative) without crashing on edge inputs.
+module: arbitrage_calculator
+version: 1
+
+survival_gate:
+  - id: install
+    test: "Candidate installs cleanly via the documented install command."
+    timeout_seconds: 300
+  - id: connect
+    test: "Candidate accepts a synthetic cross-venue market pair as input."
+    timeout_seconds: 10
+  - id: fetch_one
+    test: "Candidate produces a structured arbitrage opportunity verdict for one pair."
+    timeout_seconds: 30
+
+functional_tests:
+  data_coverage:
+    weight: 0.25
+    tests:
+      - id: opportunity_kinds
+        test: "Distinct opportunity shapes detected (cross-venue, subset, basket, etc.)."
+        metric: count
+        baseline: 2
+        lower_is_better: false
+      - id: handles_two_venues
+        test: "Calculator supports at least Polymarket and Kalshi simultaneously."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: numerical_correctness
+        test: "Sample test fixtures match a hand-calculated edge within 0.5%."
+        metric: percentage
+        baseline: 0.995
+        lower_is_better: false
+
+  performance:
+    weight: 0.25
+    tests:
+      - id: pair_eval_latency
+        test: "Median wall-time to evaluate one cross-venue market pair."
+        metric: ms
+        baseline: 50
+        lower_is_better: true
+      - id: bulk_throughput
+        test: "Pairs evaluated per second on a 1k-pair fixture."
+        metric: count
+        baseline: 100
+        lower_is_better: false
+
+  integrability:
+    weight: 0.25
+    tests:
+      - id: returns_pms_arbitrage_opportunity
+        test: "Calculator output maps cleanly onto pms.models.ArbitrageOpportunity."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: pure_function
+        test: "Calculator is side-effect-free (no global state, no I/O)."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+
+  code_quality:
+    weight: 0.25
+    tests:
+      - id: has_tests
+        test: "Repository ships an automated test suite for the arbitrage math."
+        metric: boolean
+        baseline: 1
+        lower_is_better: false
+      - id: recently_maintained
+        test: "Days since the last commit on the default branch."
+        metric: days
+        baseline: 90
+        lower_is_better: true
