@@ -914,6 +914,129 @@ async def test_pipeline_clear_opportunity_failure_is_isolated() -> None:
     assert sum("clear_opportunity" in e for e in report.errors) == 2
 
 
+async def test_pipeline_clears_opportunity_even_when_executor_raises() -> None:
+    """Codex round-4 regression (fix f14): the pipeline must call
+    ``clear_opportunity`` for an attributed order even when the executor
+    raises during ``submit_order``. Without this cleanup the strategy
+    keeps the opportunity key in its outstanding-opportunity set forever,
+    silently suppressing every subsequent re-emission of the same logical
+    opportunity. The repro is a two-cycle test driving the real
+    ``ArbitrageStrategy`` against an executor that always raises:
+
+    1. Cycle 1 proposes orders, the executor raises, errors get recorded.
+    2. Cycle 2 sees the same markets and MUST re-emit the same paired
+       order — proving the cleanup hook fired despite the exception.
+    """
+    from pms.strategy import ArbitrageStrategy
+
+    pm_market = Market(
+        platform="polymarket",
+        market_id="m-pm",
+        title="Sample PM",
+        description="Sample",
+        outcomes=[
+            Outcome(outcome_id="shared-outcome", title="Yes", price=Decimal("0.52")),
+            Outcome(outcome_id="no-pm", title="No", price=Decimal("0.48")),
+        ],
+        volume=Decimal("1000"),
+        end_date=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        category="test",
+        url="https://example.com/pm",
+        status="open",
+        raw={},
+    )
+    kalshi_market = Market(
+        platform="kalshi",
+        market_id="m-kalshi",
+        title="Sample Kalshi",
+        description="Sample",
+        outcomes=[
+            Outcome(outcome_id="shared-outcome", title="Yes", price=Decimal("0.58")),
+            Outcome(outcome_id="no-kalshi", title="No", price=Decimal("0.42")),
+        ],
+        volume=Decimal("1000"),
+        end_date=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        category="test",
+        url="https://example.com/kalshi",
+        status="open",
+        raw={},
+    )
+
+    class RaisingExecutor:
+        """An executor whose ``submit_order`` always raises.
+
+        Mimics a transient infra failure (e.g. broker rejected, network
+        flap). Returns no positions so the risk stage approves
+        everything.
+        """
+
+        def __init__(self) -> None:
+            self.submit_order_calls = 0
+
+        async def submit_order(self, order: Order) -> OrderResult:
+            self.submit_order_calls += 1
+            raise RuntimeError("simulated submission failure")
+
+        async def cancel_order(self, order_id: str) -> bool:
+            return False
+
+        async def get_positions(self) -> list[Position]:
+            return []
+
+    connector = MockConnector(markets=[pm_market, kalshi_market])
+    strategy = ArbitrageStrategy(
+        min_spread=Decimal("0.02"),
+        max_position_size=Decimal("10"),
+        platforms=("polymarket", "kalshi"),
+    )
+    executor = RaisingExecutor()
+    risk = ApproveAllRisk()
+    metrics = MockMetrics()
+    feedback_engine = MockFeedbackEngine()
+
+    pipeline = TradingPipeline(
+        connectors=[connector],
+        strategies=[strategy],
+        executor=executor,
+        risk_manager=risk,
+        metrics=metrics,
+        feedback_engine=feedback_engine,
+    )
+
+    # Cycle 1: orders proposed, executor raises on every submission.
+    report_1 = await pipeline.run_cycle()
+
+    # Sanity: pipeline reached the executor and tried to submit orders.
+    assert report_1.orders_proposed >= 2, (
+        "Strategy did not emit any paired arbitrage order on cycle 1"
+    )
+    assert executor.submit_order_calls >= 2
+    # Every submission failed, so nothing was actually submitted.
+    assert report_1.orders_submitted == 0
+    # And every failure was recorded as an error string referencing the
+    # executor.
+    assert sum("Executor failed" in e for e in report_1.errors) >= 2
+
+    # CRITICAL invariant: even though the executor raised, the
+    # opportunity tracker MUST be empty after cycle 1. Otherwise the
+    # strategy will silently suppress the same opportunity on cycle 2.
+    assert strategy.outstanding_opportunity_keys() == set(), (
+        "clear_opportunity was not called for orders whose executor "
+        "raised — the opportunity key is leaking across cycles."
+    )
+
+    # Cycle 2: same markets, same opportunity. Re-emission MUST work
+    # because the strategy released its tracker on cycle 1's failures.
+    cycle1_paired_count = len(strategy.get_paired_orders())
+    report_2 = await pipeline.run_cycle()
+    assert report_2.orders_proposed >= 2, (
+        "Pipeline did not re-emit opportunity after cycle 1's executor "
+        "failures; clear_opportunity was probably skipped on the except "
+        "branch."
+    )
+    assert len(strategy.get_paired_orders()) == cycle1_paired_count + 1
+
+
 async def test_run_cycle_stamps_strategy_attribution_on_metrics() -> None:
     """The pipeline must tag every recorded order with the emitting strategy.
 

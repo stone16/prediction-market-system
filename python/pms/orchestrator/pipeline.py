@@ -479,6 +479,18 @@ class TradingPipeline:
         it; strategies that do not implement it keep their old behaviour.
         Exceptions from ``clear_opportunity`` are recorded in ``errors``
         so a buggy strategy cannot abort the cycle.
+
+        Review-loop fix f14 (round 4 — exception path cleanup)
+        ------------------------------------------------------
+
+        ``clear_opportunity`` MUST also fire when ``submit_order`` raises.
+        Previously the except branch ``continue``d before the cleanup
+        block, so a flaky executor would leak the opportunity key
+        forever — every subsequent cycle would silently suppress the same
+        logical opportunity because the strategy still believed it was
+        in flight. The submission loop now wraps the per-order work in a
+        ``try/finally`` so cleanup runs on both the success and failure
+        paths.
         """
         submitted = 0
         filled = 0
@@ -493,58 +505,76 @@ class TradingPipeline:
 
         for order in approved_orders:
             try:
-                result = await self._executor.submit_order(order)
-            except Exception as exc:  # noqa: BLE001 — pipeline contract
-                message = (
-                    f"Executor failed on order {order.order_id}: {exc}"
-                )
-                logger.exception(message)
-                errors.append(message)
-                continue
-
-            submitted += 1
-            if result.status == "filled":
-                filled += 1
-
-            strategy_name = order_to_strategy.get(order.order_id, "unknown")
-            stamped_result = OrderResult(
-                order_id=result.order_id,
-                status=result.status,
-                filled_size=result.filled_size,
-                filled_price=result.filled_price,
-                message=result.message,
-                raw={**result.raw, "strategy": strategy_name},
-            )
-
-            try:
-                await self._metrics.record_order(order, stamped_result)
-            except Exception as exc:  # noqa: BLE001 — pipeline contract
-                message = (
-                    f"Metrics.record_order failed for {order.order_id}: "
-                    f"{exc}"
-                )
-                logger.exception(message)
-                errors.append(message)
-
-            # Release the producing strategy's opportunity tracker for
-            # this order. The lifecycle is terminal at this point —
-            # every terminal status (filled, partial, rejected, error)
-            # releases the opportunity so a later cycle can retry if
-            # appropriate. Strategies that do not implement the optional
-            # method are skipped silently.
-            producing_strategy = strategies_by_name.get(strategy_name)
-            if producing_strategy is not None and hasattr(
-                producing_strategy, "clear_opportunity"
-            ):
                 try:
-                    producing_strategy.clear_opportunity(order.order_id)
+                    result = await self._executor.submit_order(order)
                 except Exception as exc:  # noqa: BLE001 — pipeline contract
                     message = (
-                        f"Strategy {strategy_name} clear_opportunity "
-                        f"failed for {order.order_id}: {exc}"
+                        f"Executor failed on order {order.order_id}: {exc}"
                     )
                     logger.exception(message)
                     errors.append(message)
+                    # Skip the success-path bookkeeping but DO NOT skip
+                    # the ``finally`` cleanup below — the opportunity
+                    # lifecycle is terminal regardless of submit outcome.
+                    continue
+
+                submitted += 1
+                if result.status == "filled":
+                    filled += 1
+
+                strategy_name = order_to_strategy.get(
+                    order.order_id, "unknown"
+                )
+                stamped_result = OrderResult(
+                    order_id=result.order_id,
+                    status=result.status,
+                    filled_size=result.filled_size,
+                    filled_price=result.filled_price,
+                    message=result.message,
+                    raw={**result.raw, "strategy": strategy_name},
+                )
+
+                try:
+                    await self._metrics.record_order(order, stamped_result)
+                except Exception as exc:  # noqa: BLE001 — pipeline contract
+                    message = (
+                        f"Metrics.record_order failed for {order.order_id}: "
+                        f"{exc}"
+                    )
+                    logger.exception(message)
+                    errors.append(message)
+            finally:
+                # Release the producing strategy's opportunity tracker
+                # for this order. The lifecycle is terminal at this
+                # point — every terminal status (filled, partial,
+                # rejected, error, AND executor exception) releases the
+                # opportunity so a later cycle can retry if appropriate.
+                # Strategies that do not implement the optional method
+                # are skipped silently. The lookup uses the attribution
+                # map directly (rather than the in-loop ``strategy_name``
+                # variable) so the cleanup still runs even when control
+                # left the try block via the executor-failure ``continue``
+                # before ``strategy_name`` was assigned.
+                attributed_name = order_to_strategy.get(order.order_id)
+                if attributed_name is not None:
+                    producing_strategy = strategies_by_name.get(
+                        attributed_name
+                    )
+                    if producing_strategy is not None and hasattr(
+                        producing_strategy, "clear_opportunity"
+                    ):
+                        try:
+                            producing_strategy.clear_opportunity(
+                                order.order_id
+                            )
+                        except Exception as exc:  # noqa: BLE001 — pipeline contract
+                            message = (
+                                f"Strategy {attributed_name} "
+                                f"clear_opportunity failed for "
+                                f"{order.order_id}: {exc}"
+                            )
+                            logger.exception(message)
+                            errors.append(message)
 
         return submitted, filled, errors
 
