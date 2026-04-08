@@ -290,6 +290,69 @@ async def test_subset_no_action_for_independent_relation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_superset_relation_normalized_to_subset() -> None:
+    """A ``superset`` pair is equivalent to its swapped ``subset``.
+
+    CP10's detector picks ``relation_type`` based on the lexicographic order
+    of market IDs, so the same logical subset/superset violation may arrive
+    either way. The strategy must normalize so it emits the SAME orders
+    regardless of which side the detector tagged as the subset.
+
+    Construction:
+
+    * ``market_a`` (on kalshi) is the SUPERSET, priced at 0.50.
+    * ``market_b`` (on polymarket) is the SUBSET, priced at 0.70.
+    * ``relation_type="superset"`` — meaning "A is a superset of B".
+
+    After normalization, we expect:
+
+    * Buy A (superset, cheap) @ 0.50 on kalshi
+    * Sell B (subset, expensive) @ 0.70 on polymarket
+    """
+    strategy = ArbitrageStrategy(
+        min_spread=Decimal("0.02"),
+        max_position_size=Decimal("100"),
+    )
+
+    # Note: market_a is tagged as the SUPERSET here.
+    market_a = _market(
+        "kalshi", "superset-market", yes_price=Decimal("0.50")
+    )
+    market_b = _market(
+        "polymarket", "subset-market", yes_price=Decimal("0.70")
+    )
+
+    pair = CorrelationPair(
+        market_a=market_a,
+        market_b=market_b,
+        similarity_score=0.9,
+        relation_type="superset",
+        relation_detail="A is a superset of B",
+        arbitrage_opportunity=Decimal("0.20"),
+    )
+
+    orders = await strategy.on_correlation_found(pair)
+    assert orders is not None
+    assert len(orders) == 2
+
+    by_side = {(o.platform, o.market_id, o.side, o.price) for o in orders}
+    # Buy the cheap superset A @ 0.50 on kalshi
+    assert (
+        "kalshi",
+        "superset-market",
+        "buy",
+        Decimal("0.50"),
+    ) in by_side
+    # Sell the expensive subset B @ 0.70 on polymarket
+    assert (
+        "polymarket",
+        "subset-market",
+        "sell",
+        Decimal("0.70"),
+    ) in by_side
+
+
+@pytest.mark.asyncio
 async def test_subset_paired_correlation_id() -> None:
     """Subset arbitrage also records a paired order entry with a shared id."""
     strategy = ArbitrageStrategy(min_spread=Decimal("0.02"))

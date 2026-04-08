@@ -43,6 +43,7 @@ from decimal import Decimal
 from pms.models import (
     Market,
     Order,
+    OrderResult,
     Position,
     PriceUpdate,
 )
@@ -133,9 +134,11 @@ class TradingPipeline:
         price_updates = self._synthesize_price_updates(markets)
 
         # 3. STRATEGY
-        proposed_orders, strategy_errors = await self._run_strategies(
-            self._strategies, price_updates
-        )
+        (
+            proposed_orders,
+            order_to_strategy,
+            strategy_errors,
+        ) = await self._run_strategies(self._strategies, price_updates)
         errors.extend(strategy_errors)
 
         if not proposed_orders:
@@ -182,7 +185,7 @@ class TradingPipeline:
 
         # 5. EXECUTE
         submitted_count, filled_count, execute_errors = await self._execute(
-            approved_orders
+            approved_orders, order_to_strategy
         )
         errors.extend(execute_errors)
 
@@ -277,9 +280,19 @@ class TradingPipeline:
         self,
         strategies: Sequence[StrategyProtocol],
         price_updates: list[PriceUpdate],
-    ) -> tuple[list[Order], list[str]]:
-        """Feed every price update to every strategy; collect proposed orders."""
+    ) -> tuple[list[Order], dict[str, str], list[str]]:
+        """Feed every price update to every strategy; collect proposed orders.
+
+        Also returns a ``order_id -> strategy.name`` map so the execute
+        stage can stamp strategy attribution onto the ``OrderResult.raw``
+        dict before recording the result on the metrics collector. This
+        is the only place where the pipeline has first-hand knowledge of
+        which strategy emitted which order — ``Order`` itself has no
+        strategy field (and adding one would spill into every connector's
+        order payload).
+        """
         proposed: list[Order] = []
+        order_to_strategy: dict[str, str] = {}
         errors: list[str] = []
 
         for update in price_updates:
@@ -297,8 +310,10 @@ class TradingPipeline:
 
                 if result:
                     proposed.extend(result)
+                    for order in result:
+                        order_to_strategy[order.order_id] = strategy.name
 
-        return proposed, errors
+        return proposed, order_to_strategy, errors
 
     async def _load_positions(self) -> tuple[list[Position], str | None]:
         """Fetch current positions from the executor for risk evaluation."""
@@ -346,9 +361,26 @@ class TradingPipeline:
         return approved, errors
 
     async def _execute(
-        self, approved_orders: list[Order]
+        self,
+        approved_orders: list[Order],
+        order_to_strategy: dict[str, str],
     ) -> tuple[int, int, list[str]]:
-        """Submit approved orders to the executor and record metrics."""
+        """Submit approved orders to the executor and record metrics.
+
+        Before recording an order on the metrics collector, the result's
+        ``raw`` payload is augmented with a ``"strategy"`` key pointing
+        to the emitting strategy's ``name``. This is what allows
+        :meth:`MetricsCollector.get_performance_metrics` to bucket
+        orders per strategy — without it, every order falls into the
+        ``"unknown"`` bucket and the feedback loop silently breaks
+        (``ArbitrageStrategy.on_feedback`` reads
+        ``strategy_adjustments["arbitrage"]``, which never exists).
+
+        If the risk manager rewrote the order via
+        :class:`dataclasses.replace`, the ``order_id`` is preserved, so
+        the attribution lookup still succeeds. Orders with no known
+        origin fall through to ``"unknown"`` for backward compatibility.
+        """
         submitted = 0
         filled = 0
         errors: list[str] = []
@@ -368,8 +400,18 @@ class TradingPipeline:
             if result.status == "filled":
                 filled += 1
 
+            strategy_name = order_to_strategy.get(order.order_id, "unknown")
+            stamped_result = OrderResult(
+                order_id=result.order_id,
+                status=result.status,
+                filled_size=result.filled_size,
+                filled_price=result.filled_price,
+                message=result.message,
+                raw={**result.raw, "strategy": strategy_name},
+            )
+
             try:
-                await self._metrics.record_order(order, result)
+                await self._metrics.record_order(order, stamped_result)
             except Exception as exc:  # noqa: BLE001 — pipeline contract
                 message = (
                     f"Metrics.record_order failed for {order.order_id}: "

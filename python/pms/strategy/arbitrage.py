@@ -133,7 +133,27 @@ class ArbitrageStrategy:
         Market A is treated as the subset, B as the superset. If A's
         YES-leg price is materially higher than B's YES-leg price (by more
         than ``min_spread``), we buy B and sell A to capture the edge.
+
+        CP10's correlation detector assigns ``relation_type`` based on the
+        lexicographic order of the two market IDs, so the same logical
+        subset/superset pair may arrive with ``relation_type="superset"``
+        (meaning "A is a superset of B") depending on which ID sorted
+        first. We normalize by swapping ``market_a`` / ``market_b`` so the
+        rest of this method can assume the canonical "A is the subset"
+        orientation. Without this normalization, the strategy would
+        silently miss half of its opportunities in a way driven purely by
+        market ID ordering.
         """
+        if pair.relation_type == "superset":
+            pair = CorrelationPair(
+                market_a=pair.market_b,
+                market_b=pair.market_a,
+                similarity_score=pair.similarity_score,
+                relation_type="subset",
+                relation_detail=pair.relation_detail,
+                arbitrage_opportunity=pair.arbitrage_opportunity,
+            )
+
         if pair.relation_type != "subset":
             return None
 

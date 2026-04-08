@@ -57,6 +57,7 @@ from pms.models import (
     RiskFeedback,
     StrategyFeedback,
 )
+from pms.evaluation.metrics import MetricsCollector
 from pms.orchestrator.config import ModuleSpec, PipelineConfig, load_config
 from pms.orchestrator.pipeline import CycleReport, TradingPipeline
 from pms.orchestrator.registry import ModuleRegistry
@@ -557,6 +558,52 @@ async def test_run_cycle_risk_size_adjustment_is_applied() -> None:
     # Both submitted orders have the adjusted size
     for submitted in executor.submitted_orders:
         assert submitted.size == Decimal("3")
+
+
+async def test_run_cycle_stamps_strategy_attribution_on_metrics() -> None:
+    """The pipeline must tag every recorded order with the emitting strategy.
+
+    Without attribution, ``MetricsCollector._compute_strategy_metrics``
+    buckets every order under ``"unknown"`` (because ``result.raw`` does
+    not carry a ``"strategy"`` key), which silently severs the feedback
+    loop — ``FeedbackEngine`` emits ``strategy_adjustments["unknown"]``
+    but ``ArbitrageStrategy.on_feedback`` reads ``.get("arbitrage")``.
+
+    This test drives the fix: pipeline stamps ``result.raw["strategy"]``
+    with the name of the strategy that emitted the order before
+    recording the order on the metrics collector. We use the REAL
+    ``MetricsCollector`` (not the in-test ``MockMetrics``) because the
+    bug is in the metrics strategy-attribution path and we want the
+    integration to fail loudly if the pipeline regresses.
+    """
+
+    connector = MockConnector(markets=[_sample_market()])
+    strategy = MockStrategy(orders_to_emit=[_sample_order("o-attr")])
+    executor = SpyExecutor()
+    risk = ApproveAllRisk()
+    metrics = MetricsCollector()
+    feedback_engine = MockFeedbackEngine()
+
+    pipeline = TradingPipeline(
+        connectors=[connector],
+        strategies=[strategy],
+        executor=executor,
+        risk_manager=risk,
+        metrics=metrics,
+        feedback_engine=feedback_engine,
+    )
+
+    report = await pipeline.run_cycle()
+
+    # Sanity: cycle ran and at least one order was recorded.
+    assert report.orders_submitted >= 1
+
+    performance = metrics.get_performance_metrics()
+    # Every recorded order must live under the strategy's ``name`` bucket,
+    # not the ``"unknown"`` fallback.
+    assert "mock" in performance.per_strategy
+    assert "unknown" not in performance.per_strategy
+    assert performance.per_strategy["mock"].num_orders == report.orders_submitted
 
 
 # ---------------------------------------------------------------------------
