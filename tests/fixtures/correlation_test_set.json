@@ -1,0 +1,145 @@
+{
+  "description": "Hand-labeled correlation test set for CP10. Ten related pairs (subset/superset/contradictory/overlapping) and ten unrelated pairs. Titles kept simple so the deterministic bag-of-words fake encoder used by unit tests produces the right similarity structure.",
+  "pairs": [
+    {
+      "id": "pair_01",
+      "market_a": {"market_id": "p01a", "title": "Team Alpha beats Team Beta by 20 points"},
+      "market_b": {"market_id": "p01b", "title": "Team Alpha beats Team Beta"},
+      "expected_related": true,
+      "expected_relation": "subset_or_superset"
+    },
+    {
+      "id": "pair_02",
+      "market_a": {"market_id": "p02a", "title": "Lakers beat Warriors by more than 10 points"},
+      "market_b": {"market_id": "p02b", "title": "Lakers beat Warriors"},
+      "expected_related": true,
+      "expected_relation": "subset_or_superset"
+    },
+    {
+      "id": "pair_03",
+      "market_a": {"market_id": "p03a", "title": "Bitcoin reaches 100000 dollars by December"},
+      "market_b": {"market_id": "p03b", "title": "Bitcoin reaches 100000 dollars"},
+      "expected_related": true,
+      "expected_relation": "subset_or_superset"
+    },
+    {
+      "id": "pair_04",
+      "market_a": {"market_id": "p04a", "title": "Ethereum price more than 5000 dollars"},
+      "market_b": {"market_id": "p04b", "title": "Ethereum price less than 5000 dollars"},
+      "expected_related": true,
+      "expected_relation": "contradictory"
+    },
+    {
+      "id": "pair_05",
+      "market_a": {"market_id": "p05a", "title": "Inflation more than 5 percent this year"},
+      "market_b": {"market_id": "p05b", "title": "Inflation less than 5 percent this year"},
+      "expected_related": true,
+      "expected_relation": "contradictory"
+    },
+    {
+      "id": "pair_06",
+      "market_a": {"market_id": "p06a", "title": "Democrats win presidential election by at least 5 percent"},
+      "market_b": {"market_id": "p06b", "title": "Democrats win presidential election"},
+      "expected_related": true,
+      "expected_relation": "subset_or_superset"
+    },
+    {
+      "id": "pair_07",
+      "market_a": {"market_id": "p07a", "title": "Fed raises interest rates"},
+      "market_b": {"market_id": "p07b", "title": "Fed raises interest rates by at least 25 basis points"},
+      "expected_related": true,
+      "expected_relation": "subset_or_superset"
+    },
+    {
+      "id": "pair_08",
+      "market_a": {"market_id": "p08a", "title": "Apple stock price more than 200 dollars"},
+      "market_b": {"market_id": "p08b", "title": "Apple stock price less than 200 dollars"},
+      "expected_related": true,
+      "expected_relation": "contradictory"
+    },
+    {
+      "id": "pair_09",
+      "market_a": {"market_id": "p09a", "title": "Tesla delivers more than 2 million vehicles"},
+      "market_b": {"market_id": "p09b", "title": "Tesla delivers vehicles this year"},
+      "expected_related": true,
+      "expected_relation": "subset_or_superset"
+    },
+    {
+      "id": "pair_10",
+      "market_a": {"market_id": "p10a", "title": "Manchester United wins champions league"},
+      "market_b": {"market_id": "p10b", "title": "Manchester United wins champions league by at least 2 goals"},
+      "expected_related": true,
+      "expected_relation": "subset_or_superset"
+    },
+    {
+      "id": "pair_11",
+      "market_a": {"market_id": "p11a", "title": "Bitcoin hits 100000 dollars"},
+      "market_b": {"market_id": "p11b", "title": "Democrats win presidential election"},
+      "expected_related": false,
+      "expected_relation": "independent"
+    },
+    {
+      "id": "pair_12",
+      "market_a": {"market_id": "p12a", "title": "Super Bowl winner Chiefs"},
+      "market_b": {"market_id": "p12b", "title": "Fed rate decision September"},
+      "expected_related": false,
+      "expected_relation": "independent"
+    },
+    {
+      "id": "pair_13",
+      "market_a": {"market_id": "p13a", "title": "Apple stock above 200 dollars"},
+      "market_b": {"market_id": "p13b", "title": "Climate agreement signed in Paris"},
+      "expected_related": false,
+      "expected_relation": "independent"
+    },
+    {
+      "id": "pair_14",
+      "market_a": {"market_id": "p14a", "title": "Tesla delivers 2 million vehicles"},
+      "market_b": {"market_id": "p14b", "title": "Ukraine war ceasefire agreement"},
+      "expected_related": false,
+      "expected_relation": "independent"
+    },
+    {
+      "id": "pair_15",
+      "market_a": {"market_id": "p15a", "title": "Ethereum price above 5000"},
+      "market_b": {"market_id": "p15b", "title": "World cup winner Brazil"},
+      "expected_related": false,
+      "expected_relation": "independent"
+    },
+    {
+      "id": "pair_16",
+      "market_a": {"market_id": "p16a", "title": "Manchester United wins trophy"},
+      "market_b": {"market_id": "p16b", "title": "OpenAI releases new model"},
+      "expected_related": false,
+      "expected_relation": "independent"
+    },
+    {
+      "id": "pair_17",
+      "market_a": {"market_id": "p17a", "title": "Lakers playoff champion"},
+      "market_b": {"market_id": "p17b", "title": "Oil price above 100 dollars"},
+      "expected_related": false,
+      "expected_relation": "independent"
+    },
+    {
+      "id": "pair_18",
+      "market_a": {"market_id": "p18a", "title": "Inflation above 5 percent"},
+      "market_b": {"market_id": "p18b", "title": "Eurovision winner Sweden"},
+      "expected_related": false,
+      "expected_relation": "independent"
+    },
+    {
+      "id": "pair_19",
+      "market_a": {"market_id": "p19a", "title": "Fed rate hike 25 basis points"},
+      "market_b": {"market_id": "p19b", "title": "Premier league winner Arsenal"},
+      "expected_related": false,
+      "expected_relation": "independent"
+    },
+    {
+      "id": "pair_20",
+      "market_a": {"market_id": "p20a", "title": "Dogecoin price doubles"},
+      "market_b": {"market_id": "p20b", "title": "Space X starship reaches orbit"},
+      "expected_related": false,
+      "expected_relation": "independent"
+    }
+  ]
+}
