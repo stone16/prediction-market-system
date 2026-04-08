@@ -6,12 +6,14 @@ This package houses the concrete implementations of
 here so callers can ``from pms.execution import RiskManager, OrderExecutor``.
 """
 
+from .executor import OrderExecutor
 from .guardrails import GUARDRAILS, GuardrailBounds, apply_guardrail
 from .risk import RiskManager
 
 __all__ = [
     "GUARDRAILS",
     "GuardrailBounds",
+    "OrderExecutor",
     "RiskManager",
     "apply_guardrail",
 ]
