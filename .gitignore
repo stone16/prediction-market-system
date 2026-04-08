@@ -22,3 +22,6 @@ reports/
 # Rust
 target/
 .review-loop/
+
+# OpenViking memory (per-user, not committed)
+.openviking/

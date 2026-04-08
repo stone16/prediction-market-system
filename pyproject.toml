@@ -42,11 +42,12 @@ packages = ["python/pms"]
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["python"]
+pythonpath = ["python", "."]
 asyncio_mode = "auto"
 filterwarnings = ["error"]
 markers = [
     "slow: marks tests as slow / integration (deselect with '-m \"not slow\"')",
+    "integration: real-network/real-subprocess integration tests (deselect with '-m \"not integration\"')",
 ]
 
 # ---------------------------------------------------------------------------
