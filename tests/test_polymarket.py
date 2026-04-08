@@ -1,11 +1,11 @@
-"""Tests for the Polymarket connector (CP04).
+"""Tests for the Polymarket connector (CP04 + Phase 3A).
 
 Covers the acceptance criteria:
 - PolymarketConnector implements all ConnectorProtocol methods
 - get_active_markets returns Market objects with all fields populated
 - get_orderbook returns OrderBook with bid/ask PriceLevel lists
-- stream_prices raises NotImplementedError (v1 limitation)
-- get_historical_prices raises NotImplementedError
+- stream_prices polls get_orderbook and yields PriceUpdate objects (Phase 3A)
+- get_historical_prices fetches /prices-history and returns PriceUpdates (Phase 3A)
 - raw field preserves the original Gamma API response dict
 - Tests use recorded fixtures in tests/fixtures/polymarket/ — no live HTTP
 
@@ -25,7 +25,7 @@ import httpx
 import pytest
 
 from pms.connectors.polymarket import PolymarketConnector
-from pms.models import Market, OrderBook, PriceLevel
+from pms.models import Market, OrderBook, PriceLevel, PriceUpdate
 from pms.protocols import ConnectorProtocol
 
 # ---------------------------------------------------------------------------
@@ -326,28 +326,246 @@ async def test_get_orderbook_sends_token_id_query_param() -> None:
 
 
 # ---------------------------------------------------------------------------
-# stream_prices / get_historical_prices — v1 deferred
+# Phase 3A: stream_prices polling fallback over get_orderbook
 # ---------------------------------------------------------------------------
 
 
-def test_stream_prices_raises_not_implemented() -> None:
-    conn = PolymarketConnector()
-    with pytest.raises(NotImplementedError) as exc_info:
-        # Calling stream_prices must raise immediately — it's a sync method
-        # per ConnectorProtocol signature.
-        conn.stream_prices(["token-1"])
-    message = str(exc_info.value)
-    assert "v1" in message.lower()
-    assert "stream_prices" in message
+def _make_book_payload(
+    bid_price: str, bid_size: str, ask_price: str, ask_size: str
+) -> dict[str, Any]:
+    return {
+        "bids": [{"price": bid_price, "size": bid_size}],
+        "asks": [{"price": ask_price, "size": ask_size}],
+        "timestamp": "1759900000000",
+    }
 
 
-async def test_get_historical_prices_raises_not_implemented() -> None:
-    conn = PolymarketConnector()
-    with pytest.raises(NotImplementedError) as exc_info:
-        await conn.get_historical_prices(
-            "token-1", datetime(2026, 1, 1, tzinfo=timezone.utc)
+async def test_stream_prices_yields_price_updates_from_book_polls() -> None:
+    """Polling stream calls get_orderbook for each market each iteration."""
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/book"
+        token = request.url.params.get("token_id") or ""
+        requests.append(token)
+        return httpx.Response(
+            200, json=_make_book_payload("0.40", "10", "0.60", "5")
         )
-    assert "get_historical_prices" in str(exc_info.value)
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    conn = PolymarketConnector(http_client=client)
+
+    # Bound the iterator with max_iterations so the test terminates.
+    iterator = conn.stream_prices(
+        ["token-a", "token-b"],
+        poll_interval_seconds=0.0,
+        max_iterations=2,
+    )
+    updates: list[PriceUpdate] = []
+    async for update in iterator:
+        updates.append(update)
+
+    await conn.close()
+
+    # Two markets * two iterations = four updates.
+    assert len(updates) == 4
+    # Each update preserves bid/ask and computes a mid-price.
+    for u in updates:
+        assert u.platform == "polymarket"
+        assert u.bid == Decimal("0.40")
+        assert u.ask == Decimal("0.60")
+        assert u.last == Decimal("0.50")  # mid of 0.40/0.60
+    # Both markets were polled in both iterations.
+    assert requests == ["token-a", "token-b", "token-a", "token-b"]
+
+
+async def test_stream_prices_skips_failing_markets_but_continues() -> None:
+    """One bad book must not silence the rest of the stream."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        token = request.url.params.get("token_id") or ""
+        if token == "broken":
+            return httpx.Response(500, json={"error": "boom"})
+        return httpx.Response(
+            200, json=_make_book_payload("0.45", "10", "0.55", "5")
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    conn = PolymarketConnector(http_client=client)
+
+    iterator = conn.stream_prices(
+        ["broken", "token-good"],
+        poll_interval_seconds=0.0,
+        max_iterations=1,
+    )
+    updates: list[PriceUpdate] = []
+    async for update in iterator:
+        updates.append(update)
+
+    await conn.close()
+
+    # Only the working market produces an update.
+    assert len(updates) == 1
+    assert updates[0].market_id == "token-good"
+
+
+async def test_stream_prices_handles_empty_book_sides() -> None:
+    """A book with only bids (or only asks) yields a PriceUpdate where
+    ``last`` falls back to whichever side has data."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "bids": [{"price": "0.30", "size": "5"}],
+                "asks": [],  # empty ask side
+                "timestamp": "1759900000000",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    conn = PolymarketConnector(http_client=client)
+
+    iterator = conn.stream_prices(
+        ["token-1"], poll_interval_seconds=0.0, max_iterations=1
+    )
+    updates = [u async for u in iterator]
+    await conn.close()
+
+    assert len(updates) == 1
+    update = updates[0]
+    assert update.bid == Decimal("0.30")
+    assert update.ask == Decimal("0")
+    # When only one side has data, ``last`` falls back to it.
+    assert update.last == Decimal("0.30")
+
+
+# ---------------------------------------------------------------------------
+# Phase 3A: get_historical_prices over /prices-history
+# ---------------------------------------------------------------------------
+
+
+async def test_get_historical_prices_returns_price_update_series() -> None:
+    """The /prices-history response must be parsed into a list of PriceUpdates."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/prices-history"
+        assert request.url.params.get("market") == "token-x"
+        # startTs is converted from datetime → unix seconds.
+        assert request.url.params.get("startTs") == "1735689600"  # 2025-01-01 UTC
+        return httpx.Response(
+            200,
+            json={
+                "history": [
+                    {"t": 1735689600, "p": 0.42},
+                    {"t": 1735693200, "p": 0.45},
+                    {"t": 1735696800, "p": 0.50},
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    conn = PolymarketConnector(http_client=client)
+
+    updates = await conn.get_historical_prices(
+        "token-x", datetime(2025, 1, 1, tzinfo=timezone.utc)
+    )
+    await conn.close()
+
+    assert len(updates) == 3
+    assert all(u.platform == "polymarket" for u in updates)
+    assert all(u.market_id == "token-x" for u in updates)
+    # Single-price endpoint → bid == ask == last.
+    assert updates[0].bid == updates[0].ask == updates[0].last == Decimal("0.42")
+    assert updates[1].last == Decimal("0.45")
+    assert updates[2].last == Decimal("0.50")
+    # Timestamps come back as UTC datetimes.
+    assert updates[0].timestamp.tzinfo == timezone.utc
+
+
+async def test_get_historical_prices_normalizes_naive_datetime_to_utc() -> None:
+    """A naive ``since`` is interpreted as UTC, not local time."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # 2025-01-01 00:00:00 UTC is unix 1735689600 — naive input must
+        # produce the same value, not the local-time conversion.
+        assert request.url.params.get("startTs") == "1735689600"
+        return httpx.Response(200, json={"history": []})
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    conn = PolymarketConnector(http_client=client)
+
+    await conn.get_historical_prices(
+        "token-x", datetime(2025, 1, 1)  # naive — no tzinfo
+    )
+    await conn.close()
+
+
+async def test_get_historical_prices_skips_malformed_ticks() -> None:
+    """Ticks missing ``t`` or ``p``, or with non-numeric values, are skipped."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "history": [
+                    {"t": 1735689600, "p": 0.42},
+                    {"t": None, "p": 0.45},  # missing t
+                    {"t": 1735693200},  # missing p
+                    "garbage",  # non-dict tick
+                    {"t": "not-a-number", "p": 0.50},  # bad t
+                    {"t": 1735696800, "p": 0.50},
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    conn = PolymarketConnector(http_client=client)
+
+    updates = await conn.get_historical_prices(
+        "token-x", datetime(2025, 1, 1, tzinfo=timezone.utc)
+    )
+    await conn.close()
+
+    assert len(updates) == 2
+    assert [u.last for u in updates] == [Decimal("0.42"), Decimal("0.50")]
+
+
+async def test_get_historical_prices_returns_empty_for_empty_history() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"history": []})
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    conn = PolymarketConnector(http_client=client)
+
+    updates = await conn.get_historical_prices(
+        "token-x", datetime(2025, 1, 1, tzinfo=timezone.utc)
+    )
+    await conn.close()
+
+    assert updates == []
+
+
+async def test_get_historical_prices_raises_on_non_dict_root() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=["this", "is", "wrong"])
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    conn = PolymarketConnector(http_client=client)
+
+    with pytest.raises(ValueError, match="non-dict payload"):
+        await conn.get_historical_prices(
+            "token-x", datetime(2025, 1, 1, tzinfo=timezone.utc)
+        )
+    await conn.close()
 
 
 # ---------------------------------------------------------------------------

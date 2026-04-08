@@ -16,9 +16,13 @@ Design notes
   a plain :class:`httpx.AsyncClient` also lets tests inject
   :class:`httpx.MockTransport` for deterministic, offline fixtures.
 
-* ``stream_prices`` and ``get_historical_prices`` raise
-  :class:`NotImplementedError` in v1. WebSocket streaming and historical
-  price APIs are deferred to a later checkpoint per the approved spec.
+* Phase 3A wires real implementations for ``stream_prices`` (polling
+  fallback over the public CLOB ``/book`` endpoint, with a bounded
+  ``max_iterations`` for tests) and ``get_historical_prices`` (CLOB
+  ``/prices-history`` endpoint). True WebSocket streaming via
+  ``wss://ws-subscriptions-clob.polymarket.com`` is still deferred —
+  it would add a websockets dependency and reconnect/heartbeat
+  plumbing this connector intentionally does not carry today.
 
 * The full Gamma API response dict for each market is preserved verbatim
   on :attr:`pms.models.Market.raw` so downstream code can recover any
@@ -27,15 +31,19 @@ Design notes
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, cast
 
 import httpx
 
 from pms.models import Market, OrderBook, Outcome, PriceLevel, PriceUpdate
+
+logger = logging.getLogger(__name__)
 
 
 class PolymarketConnector:
@@ -129,31 +137,183 @@ class PolymarketConnector:
         return self._normalize_orderbook(market_id, cast(dict[str, Any], data))
 
     # ------------------------------------------------------------------
-    # ConnectorProtocol — streaming / history (deferred to future CP)
+    # ConnectorProtocol — streaming / history (Phase 3A)
     # ------------------------------------------------------------------
 
     def stream_prices(
-        self, market_ids: list[str]
+        self,
+        market_ids: list[str],
+        *,
+        poll_interval_seconds: float = 5.0,
+        max_iterations: int | None = None,
     ) -> AsyncIterator[PriceUpdate]:
-        """Deferred in v1 — raises :class:`NotImplementedError`.
+        """Yield top-of-book :class:`PriceUpdate`\\s for ``market_ids``.
 
-        Implementation via Polymarket's websocket gateway is tracked as a
-        follow-up checkpoint.
+        Phase 3A ships a **polling-based** stream that calls
+        :meth:`get_orderbook` for each market every
+        ``poll_interval_seconds`` and yields one ``PriceUpdate`` per
+        market per iteration. Real WebSocket streaming via
+        ``wss://ws-subscriptions-clob.polymarket.com`` is still
+        deferred — it would add a ``websockets`` dependency and
+        reconnect/heartbeat plumbing the polling fallback does not
+        need.
+
+        Parameters
+        ----------
+        market_ids:
+            CLOB token ids (one per outcome leg). Same identifier
+            scheme as :meth:`get_orderbook` — see the protocol's
+            ``market_id`` contract for the per-platform mapping.
+        poll_interval_seconds:
+            Wait between iterations across the full market list.
+            Default 5s mirrors the CLOB rate-limit guidance for
+            unauthenticated polling clients.
+        max_iterations:
+            If set, stops after this many polling rounds. ``None``
+            (the default) streams forever; tests pass an integer to
+            keep the iterator bounded.
+
+        The protocol declares this as a regular ``def``; ``async def``
+        with ``yield`` is structurally compatible (Python returns the
+        async generator on call without an extra ``await``).
+
+        Per-market fetch failures are logged and skipped — a single
+        broken book never silences the rest of the stream.
         """
-        raise NotImplementedError(
-            "PolymarketConnector.stream_prices is not implemented in v1. "
-            "WebSocket streaming is deferred to a future checkpoint."
+        return self._stream_prices_impl(
+            market_ids,
+            poll_interval_seconds=poll_interval_seconds,
+            max_iterations=max_iterations,
+        )
+
+    async def _stream_prices_impl(
+        self,
+        market_ids: list[str],
+        *,
+        poll_interval_seconds: float,
+        max_iterations: int | None,
+    ) -> AsyncIterator[PriceUpdate]:
+        iteration = 0
+        while max_iterations is None or iteration < max_iterations:
+            for market_id in market_ids:
+                try:
+                    book = await self.get_orderbook(market_id)
+                except Exception as exc:  # noqa: BLE001 — defensive
+                    logger.warning(
+                        "stream_prices: get_orderbook(%s) failed: %s",
+                        market_id,
+                        exc,
+                    )
+                    continue
+                yield self._book_to_price_update(market_id, book)
+            iteration += 1
+            if max_iterations is not None and iteration >= max_iterations:
+                return
+            # Sleep between rounds; tests pass a tiny interval so this
+            # is effectively a no-op under their bounded max_iterations.
+            await asyncio.sleep(poll_interval_seconds)
+
+    @staticmethod
+    def _book_to_price_update(
+        market_id: str, book: OrderBook
+    ) -> PriceUpdate:
+        """Compress an OrderBook snapshot into a single PriceUpdate.
+
+        ``last`` is the mid-price when both sides are populated, else
+        whichever side has data — keeps downstream consumers from
+        having to special-case empty books.
+        """
+        top_bid = book.bids[0].price if book.bids else Decimal("0")
+        top_ask = book.asks[0].price if book.asks else Decimal("0")
+        if top_bid > 0 and top_ask > 0:
+            mid = (top_bid + top_ask) / Decimal("2")
+        else:
+            mid = top_bid if top_bid > 0 else top_ask
+        return PriceUpdate(
+            platform="polymarket",
+            market_id=market_id,
+            outcome_id=market_id,  # CLOB token id == outcome id
+            bid=top_bid,
+            ask=top_ask,
+            last=mid,
+            timestamp=book.timestamp,
         )
 
     async def get_historical_prices(
         self, market_id: str, since: datetime
     ) -> list[PriceUpdate]:
-        """Deferred in v1 — raises :class:`NotImplementedError`."""
-        raise NotImplementedError(
-            "PolymarketConnector.get_historical_prices is not implemented "
-            "in v1. Historical price retrieval is deferred to a future "
-            "checkpoint."
+        """Fetch historical price ticks via the CLOB ``/prices-history`` endpoint.
+
+        Parameters
+        ----------
+        market_id:
+            CLOB token id (same identifier scheme as
+            :meth:`get_orderbook`).
+        since:
+            Start timestamp. Naive datetimes are interpreted as UTC.
+            The endpoint accepts a unix-seconds ``startTs`` query param.
+
+        Returns a list of :class:`PriceUpdate` ordered by timestamp
+        ascending. The CLOB endpoint only exposes a single price per
+        tick (not bid/ask), so the returned ``PriceUpdate.bid``,
+        ``ask`` and ``last`` all carry the same value — downstream
+        consumers should treat this as a "last trade" series rather
+        than a top-of-book series.
+        """
+        # Normalize to a UTC timestamp; naive datetimes get UTC.
+        since_utc = (
+            since
+            if since.tzinfo is not None
+            else since.replace(tzinfo=timezone.utc)
         )
+        start_ts = int(since_utc.timestamp())
+
+        resp = await self._http.get(
+            f"{self._clob_base}/prices-history",
+            params={
+                "market": market_id,
+                "startTs": start_ts,
+                "fidelity": 1,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError(
+                "Polymarket CLOB /prices-history endpoint returned a "
+                f"non-dict payload: {type(data).__name__}"
+            )
+
+        history_raw = data.get("history", []) or []
+        if not isinstance(history_raw, list):
+            return []
+
+        updates: list[PriceUpdate] = []
+        for tick in history_raw:
+            if not isinstance(tick, dict):
+                continue
+            ts_val = tick.get("t")
+            price_val = tick.get("p")
+            if ts_val is None or price_val is None:
+                continue
+            try:
+                # ``t`` is unix seconds (int); be defensive about strings.
+                ts = datetime.fromtimestamp(int(ts_val), tz=timezone.utc)
+                price = self._to_decimal(price_val)
+            except (TypeError, ValueError, ArithmeticError):
+                continue
+            updates.append(
+                PriceUpdate(
+                    platform=self.platform,
+                    market_id=market_id,
+                    outcome_id=market_id,
+                    bid=price,
+                    ask=price,
+                    last=price,
+                    timestamp=ts,
+                )
+            )
+        return updates
 
     # ------------------------------------------------------------------
     # Normalization helpers
