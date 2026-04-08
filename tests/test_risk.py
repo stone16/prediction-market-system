@@ -196,6 +196,52 @@ def test_adjust_order_size_when_partially_fits_per_market_cap() -> None:
     assert decision.adjusted_size == Decimal("200")
 
 
+def test_partial_fit_also_respects_total_exposure_cap() -> None:
+    """CP08 iter-2 fix: partial-fit path must re-validate against total exposure.
+
+    Regression test for a bug where ``check_order`` would shrink an order to
+    fit ``max_position_per_market`` but forget to re-check the reduced order
+    against ``max_total_exposure``. The reduced order could therefore push
+    the portfolio over the total-exposure cap.
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("500"),
+        max_total_exposure=Decimal("1000"),
+    )
+    # Existing notional in the target market "M1": 400
+    p_same_market = _position(
+        size=Decimal("400"),
+        avg_entry_price=Decimal("1.0"),
+        market_id="M1",
+        outcome_id="O1",
+    )
+    # Existing notional in a different market: 580 → total exposure = 980
+    p_other_market = _position(
+        size=Decimal("580"),
+        avg_entry_price=Decimal("1.0"),
+        market_id="M2",
+        outcome_id="O1",
+    )
+    # New order on market M1: notional 200. Per-market room is 100 (500-400),
+    # so the naive fix would shrink to 100. But total room is only 20
+    # (1000-980), so the order must be shrunk further or rejected.
+    new_order = _order(
+        price=Decimal("1.0"),
+        size=Decimal("200"),
+        market_id="M1",
+        outcome_id="O2",
+    )
+    decision = rm.check_order(new_order, positions=[p_same_market, p_other_market])
+
+    if decision.approved:
+        adjusted = decision.adjusted_size or new_order.size
+        total_after = Decimal("980") + adjusted * new_order.price
+        assert total_after <= Decimal("1000"), (
+            f"Total exposure {total_after} exceeds cap 1000 after partial-fit "
+            "adjustment"
+        )
+
+
 def test_reject_order_on_total_exposure_cap() -> None:
     """Multiple positions push the portfolio to the total exposure cap."""
     rm = RiskManager(

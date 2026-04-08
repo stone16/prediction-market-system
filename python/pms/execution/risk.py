@@ -77,8 +77,43 @@ class RiskManager:
                     ),
                     adjusted_size=None,
                 )
-            # Partial room: offer a reduced size that exactly fits.
+            # Partial room against the per-market cap: offer a reduced size
+            # that exactly fits.
             adjusted_size = remaining / order.price
+
+            # Re-validate the reduced order against the total exposure cap.
+            # Otherwise a per-market shrink could still push total notional
+            # over ``max_total_exposure`` (CP08 iter-2 fix).
+            adjusted_notional = adjusted_size * order.price
+            current_total_notional = sum(
+                (p.size * p.avg_entry_price for p in positions),
+                start=Decimal("0"),
+            )
+            if (
+                current_total_notional + adjusted_notional
+                > self._max_total_exposure
+            ):
+                exposure_room = (
+                    self._max_total_exposure - current_total_notional
+                )
+                if exposure_room <= Decimal("0"):
+                    return RiskDecision(
+                        approved=False,
+                        reason=(
+                            f"Total exposure cap {self._max_total_exposure} "
+                            "reached"
+                        ),
+                        adjusted_size=None,
+                    )
+                adjusted_size = exposure_room / order.price
+                return RiskDecision(
+                    approved=True,
+                    reason=(
+                        "Size reduced to fit both per-market and total caps"
+                    ),
+                    adjusted_size=adjusted_size,
+                )
+
             return RiskDecision(
                 approved=True,
                 reason="Size reduced to fit per-market cap",
