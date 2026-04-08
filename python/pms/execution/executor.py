@@ -23,6 +23,30 @@ Features implemented here per the CP08 acceptance criteria:
   tolerance)
 * ``cancel_order`` placeholder that returns ``False`` in v1 — real cancel
   semantics are out of scope for this checkpoint
+
+Phase 3B (positions ledger)
+---------------------------
+
+The executor also maintains an **in-memory positions ledger** derived
+from every successful ``OrderResult`` it produces. This closes the
+pms-v1 E2E gap where ``RiskManager`` could only see positions reported
+by external connectors — long-only tracking, keyed by
+``(platform, market_id, outcome_id)``:
+
+* ``buy`` fills add to the position and weight-average the entry price
+* ``sell`` fills reduce the position; selling more than is held clamps
+  at zero (no short tracking — buying the opposite outcome is the
+  intended way to express a short in this model)
+* ``rejected`` / ``error`` results never touch the ledger
+* ``get_positions`` returns the merged view (external sources are
+  authoritative when they cover the same key; the ledger fills the
+  gap for platforms with no registered source)
+* ``internal_positions`` exposes just the ledger view for tests and
+  for callers that need to distinguish synthetic from live positions
+
+The ledger lives in process memory only — reload the executor and
+you start with an empty book. Durable persistence is reserved for the
+``StorageProtocol`` future work documented in the spec.
 """
 
 from __future__ import annotations
@@ -80,6 +104,10 @@ class OrderExecutor:
         self._sleep: SleepFn = sleep_fn
         self._positions_sources: dict[str, PositionsSourceFn] = {}
         self._submitted_ids: set[str] = set()
+        # Phase 3B: in-memory positions ledger keyed by
+        # (platform, market_id, outcome_id). Mutated only by
+        # ``_update_ledger`` after a successful ``submit_fn`` call.
+        self._ledger: dict[tuple[str, str, str], Position] = {}
 
     # ------------------------------------------------------------------
     # Registration helpers
@@ -140,6 +168,7 @@ class OrderExecutor:
                         order.order_id,
                     )
                     self._submitted_ids.add(order.order_id)
+                    self._update_ledger(order, status)
                     return status
 
             try:
@@ -164,6 +193,7 @@ class OrderExecutor:
                 break
 
             self._submitted_ids.add(order.order_id)
+            self._update_ledger(order, result)
             return result
 
         return self._error_result(
@@ -176,12 +206,18 @@ class OrderExecutor:
         return False
 
     async def get_positions(self) -> list[Position]:
-        """Aggregate positions across every registered source.
+        """Aggregate positions across every registered source + the ledger.
 
-        Individual source failures are logged and skipped so a single broken
-        connector never blanks out the whole portfolio view.
+        External (live API) sources are authoritative when they cover the
+        same ``(platform, market_id, outcome_id)`` key — they reflect the
+        venue's ground truth, while the ledger is a synthetic
+        reconstruction from local fill history. Internal ledger entries
+        only fill the gap for keys the external sources do not report.
+
+        Individual source failures are logged and skipped so a single
+        broken connector never blanks out the whole portfolio view.
         """
-        all_positions: list[Position] = []
+        merged: dict[tuple[str, str, str], Position] = {}
         for platform, fn in self._positions_sources.items():
             try:
                 positions = await fn()
@@ -190,8 +226,93 @@ class OrderExecutor:
                     "Failed to fetch positions from %s: %s", platform, exc
                 )
                 continue
-            all_positions.extend(positions)
-        return all_positions
+            for pos in positions:
+                merged[(pos.platform, pos.market_id, pos.outcome_id)] = pos
+
+        # Internal ledger fills any gap not covered by an external source.
+        for key, pos in self._ledger.items():
+            merged.setdefault(key, pos)
+
+        return list(merged.values())
+
+    # ------------------------------------------------------------------
+    # Phase 3B: in-memory positions ledger
+    # ------------------------------------------------------------------
+    def internal_positions(self) -> list[Position]:
+        """Return the executor's synthetic positions ledger as a list.
+
+        Snapshot only — mutating the returned list does **not** alter
+        the executor's internal state. Use this when callers need to
+        distinguish positions the executor inferred from its own fill
+        stream from positions reported by an external source.
+        """
+        return list(self._ledger.values())
+
+    def clear_internal_positions(self) -> None:
+        """Reset the in-memory ledger.
+
+        Test helper / operational reset. Real production callers should
+        rarely need this; it's primarily here so a mid-session reset is
+        possible without re-instantiating the executor (which would
+        also drop ``_submitted_ids`` and the registered submit handlers).
+        """
+        self._ledger.clear()
+
+    def _update_ledger(self, order: Order, result: OrderResult) -> None:
+        """Apply ``result`` to the in-memory positions ledger.
+
+        Skips if the result is not a fill (``filled`` / ``partial``) or
+        if ``filled_size`` is zero. ``buy`` adds and re-averages;
+        ``sell`` reduces and clamps at zero (long-only — see module
+        docstring for the rationale).
+        """
+        if result.status not in ("filled", "partial"):
+            return
+        if result.filled_size <= 0:
+            return
+
+        key = (order.platform, order.market_id, order.outcome_id)
+        existing = self._ledger.get(key)
+
+        if order.side == "buy":
+            if existing is None:
+                self._ledger[key] = Position(
+                    platform=order.platform,
+                    market_id=order.market_id,
+                    outcome_id=order.outcome_id,
+                    size=result.filled_size,
+                    avg_entry_price=result.filled_price,
+                    unrealized_pnl=Decimal("0"),
+                )
+                return
+            new_size = existing.size + result.filled_size
+            # Weighted average — Decimal arithmetic, not float, so the
+            # cost basis is exact across many partial fills.
+            new_avg = (
+                existing.size * existing.avg_entry_price
+                + result.filled_size * result.filled_price
+            ) / new_size
+            self._ledger[key] = replace(
+                existing, size=new_size, avg_entry_price=new_avg
+            )
+            return
+
+        # order.side == "sell"
+        if existing is None or existing.size <= 0:
+            # Long-only: nothing to sell. Silently no-op rather than
+            # raise so a stray sell from a strategy never crashes the
+            # executor — the risk manager is the layer that should
+            # reject naked shorts.
+            return
+        new_size = existing.size - result.filled_size
+        if new_size <= 0:
+            # Position fully closed — drop it from the ledger entirely
+            # so callers don't see a zero-size ghost row.
+            del self._ledger[key]
+            return
+        # Sells do not change cost basis (avg_entry_price stays put);
+        # only realised P&L would, and the ledger does not track that.
+        self._ledger[key] = replace(existing, size=new_size)
 
     # ------------------------------------------------------------------
     # Observability

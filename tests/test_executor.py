@@ -416,3 +416,320 @@ async def test_cancel_order_returns_false_v1_placeholder() -> None:
     """v1 has no live cancel capability."""
     executor = OrderExecutor(sleep_fn=_NoopSleep())
     assert await executor.cancel_order("some-id") is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 3B: in-memory positions ledger derived from successful fills
+# ---------------------------------------------------------------------------
+
+
+def _sell_order(
+    platform: str = "polymarket",
+    market_id: str = "m-1",
+    size: Decimal = Decimal("4"),
+) -> Order:
+    return Order(
+        order_id="",
+        platform=platform,
+        market_id=market_id,
+        outcome_id="yes",
+        side="sell",
+        price=Decimal("0.55"),
+        size=size,
+        order_type="limit",
+    )
+
+
+async def _make_executor_with_echo(
+    submit_status: str = "filled",
+    filled_size: Decimal = Decimal("10"),
+    filled_price: Decimal = Decimal("0.50"),
+) -> OrderExecutor:
+    """Build an OrderExecutor whose submit_fn returns a fixed-result echo.
+
+    The submit_fn ignores the order's own price/size and substitutes the
+    test-specified ``filled_size`` / ``filled_price``, so each test can
+    drive the ledger directly without manually constructing the
+    OrderResult chain.
+    """
+    async def submit(order: Order) -> OrderResult:
+        return OrderResult(
+            order_id=order.order_id,
+            status=submit_status,  # type: ignore[arg-type]
+            filled_size=filled_size,
+            filled_price=filled_price,
+            message="ok",
+            raw={},
+        )
+
+    return OrderExecutor(
+        submit_fns={"polymarket": submit, "kalshi": submit},
+        sleep_fn=_NoopSleep(),
+    )
+
+
+async def test_ledger_starts_empty() -> None:
+    executor = OrderExecutor(sleep_fn=_NoopSleep())
+    assert executor.internal_positions() == []
+
+
+async def test_buy_creates_new_position() -> None:
+    executor = await _make_executor_with_echo(
+        filled_size=Decimal("10"), filled_price=Decimal("0.50")
+    )
+    await executor.submit_order(_order(size=Decimal("10")))
+    positions = executor.internal_positions()
+    assert len(positions) == 1
+    pos = positions[0]
+    assert pos.platform == "polymarket"
+    assert pos.market_id == "m-1"
+    assert pos.outcome_id == "yes"
+    assert pos.size == Decimal("10")
+    assert pos.avg_entry_price == Decimal("0.50")
+
+
+async def test_buy_then_buy_weight_averages_entry_price() -> None:
+    """Two buys at different prices must produce a Decimal weighted avg.
+
+    10 @ 0.50 + 20 @ 0.80 → size 30, avg = (10*0.50 + 20*0.80) / 30 = 0.70.
+    The math is exact under Decimal — no float drift in the assertion.
+    """
+    executor = await _make_executor_with_echo(
+        filled_size=Decimal("10"), filled_price=Decimal("0.50")
+    )
+    await executor.submit_order(_order())
+    # Swap submit_fn for the second order so we can vary the fill price.
+
+    async def second_submit(order: Order) -> OrderResult:
+        return OrderResult(
+            order_id=order.order_id,
+            status="filled",
+            filled_size=Decimal("20"),
+            filled_price=Decimal("0.80"),
+            message="ok",
+            raw={},
+        )
+
+    executor._submit_fns["polymarket"] = second_submit
+    await executor.submit_order(_order())
+
+    positions = executor.internal_positions()
+    assert len(positions) == 1
+    pos = positions[0]
+    assert pos.size == Decimal("30")
+    assert pos.avg_entry_price == Decimal("0.70")
+
+
+async def test_partial_fill_uses_filled_size_not_requested() -> None:
+    """A partial fill must update the ledger with the filled portion only."""
+    executor = await _make_executor_with_echo(
+        submit_status="partial",
+        filled_size=Decimal("3"),
+        filled_price=Decimal("0.50"),
+    )
+    await executor.submit_order(_order(size=Decimal("10")))  # asked 10, got 3
+    positions = executor.internal_positions()
+    assert len(positions) == 1
+    assert positions[0].size == Decimal("3")
+
+
+async def test_sell_reduces_existing_position() -> None:
+    executor = await _make_executor_with_echo(
+        filled_size=Decimal("10"), filled_price=Decimal("0.50")
+    )
+    await executor.submit_order(_order(size=Decimal("10")))
+
+    async def sell_submit(order: Order) -> OrderResult:
+        return OrderResult(
+            order_id=order.order_id,
+            status="filled",
+            filled_size=Decimal("4"),
+            filled_price=Decimal("0.55"),
+            message="ok",
+            raw={},
+        )
+
+    executor._submit_fns["polymarket"] = sell_submit
+    await executor.submit_order(_sell_order(size=Decimal("4")))
+
+    positions = executor.internal_positions()
+    assert len(positions) == 1
+    # Sell does not change avg_entry_price — only size shrinks.
+    assert positions[0].size == Decimal("6")
+    assert positions[0].avg_entry_price == Decimal("0.50")
+
+
+async def test_sell_full_size_drops_position_from_ledger() -> None:
+    executor = await _make_executor_with_echo(
+        filled_size=Decimal("10"), filled_price=Decimal("0.50")
+    )
+    await executor.submit_order(_order(size=Decimal("10")))
+
+    async def sell_submit(order: Order) -> OrderResult:
+        return OrderResult(
+            order_id=order.order_id,
+            status="filled",
+            filled_size=Decimal("10"),
+            filled_price=Decimal("0.55"),
+            message="ok",
+            raw={},
+        )
+
+    executor._submit_fns["polymarket"] = sell_submit
+    await executor.submit_order(_sell_order(size=Decimal("10")))
+
+    assert executor.internal_positions() == []
+
+
+async def test_sell_more_than_held_clamps_at_zero() -> None:
+    """Long-only ledger: oversells close out the position rather than
+    flipping into a synthetic short. Buying the opposite outcome is the
+    intended way to express a short in this model."""
+    executor = await _make_executor_with_echo(
+        filled_size=Decimal("3"), filled_price=Decimal("0.50")
+    )
+    await executor.submit_order(_order(size=Decimal("3")))
+
+    async def sell_submit(order: Order) -> OrderResult:
+        return OrderResult(
+            order_id=order.order_id,
+            status="filled",
+            filled_size=Decimal("10"),
+            filled_price=Decimal("0.55"),
+            message="ok",
+            raw={},
+        )
+
+    executor._submit_fns["polymarket"] = sell_submit
+    await executor.submit_order(_sell_order(size=Decimal("10")))
+    assert executor.internal_positions() == []
+
+
+async def test_sell_with_no_position_is_noop() -> None:
+    executor = await _make_executor_with_echo(
+        submit_status="filled",
+        filled_size=Decimal("4"),
+        filled_price=Decimal("0.55"),
+    )
+    await executor.submit_order(_sell_order(size=Decimal("4")))
+    assert executor.internal_positions() == []
+
+
+async def test_rejected_orders_do_not_touch_the_ledger() -> None:
+    executor = await _make_executor_with_echo(
+        submit_status="rejected",
+        filled_size=Decimal("0"),
+        filled_price=Decimal("0"),
+    )
+    await executor.submit_order(_order())
+    assert executor.internal_positions() == []
+
+
+async def test_error_orders_do_not_touch_the_ledger() -> None:
+    """An unknown-platform submit returns status='error' — must skip the ledger."""
+    executor = OrderExecutor(submit_fns={}, sleep_fn=_NoopSleep())
+    result = await executor.submit_order(_order(platform="nowhere"))
+    assert result.status == "error"
+    assert executor.internal_positions() == []
+
+
+async def test_zero_filled_size_is_skipped() -> None:
+    executor = await _make_executor_with_echo(
+        submit_status="filled",
+        filled_size=Decimal("0"),
+        filled_price=Decimal("0.50"),
+    )
+    await executor.submit_order(_order())
+    assert executor.internal_positions() == []
+
+
+async def test_separate_keys_kept_independent() -> None:
+    """Different (platform, market, outcome) keys must not collide."""
+    executor = await _make_executor_with_echo(
+        filled_size=Decimal("5"), filled_price=Decimal("0.50")
+    )
+    await executor.submit_order(_order(market_id="m-1"))
+    await executor.submit_order(_order(market_id="m-2"))
+    await executor.submit_order(_order(platform="kalshi", market_id="m-1"))
+    positions = executor.internal_positions()
+    assert len(positions) == 3
+    keys = {(p.platform, p.market_id, p.outcome_id) for p in positions}
+    assert keys == {
+        ("polymarket", "m-1", "yes"),
+        ("polymarket", "m-2", "yes"),
+        ("kalshi", "m-1", "yes"),
+    }
+
+
+async def test_get_positions_uses_ledger_when_no_external_source() -> None:
+    """With no external source, the ledger is the only contributor."""
+    executor = await _make_executor_with_echo(
+        filled_size=Decimal("10"), filled_price=Decimal("0.50")
+    )
+    await executor.submit_order(_order())
+    positions = await executor.get_positions()
+    assert len(positions) == 1
+    assert positions[0].size == Decimal("10")
+
+
+async def test_external_source_wins_over_ledger_for_same_key() -> None:
+    """External (live API) sources are authoritative when keys overlap."""
+    executor = await _make_executor_with_echo(
+        filled_size=Decimal("10"), filled_price=Decimal("0.50")
+    )
+    await executor.submit_order(_order(market_id="m-1"))
+
+    async def external() -> list[Position]:
+        return [
+            Position(
+                platform="polymarket",
+                market_id="m-1",
+                outcome_id="yes",
+                size=Decimal("999"),  # the live API knows the truth
+                avg_entry_price=Decimal("0.42"),
+                unrealized_pnl=Decimal("0"),
+            )
+        ]
+
+    executor.register_positions_source("polymarket", external)
+    positions = await executor.get_positions()
+    assert len(positions) == 1
+    assert positions[0].size == Decimal("999")  # external wins
+    assert positions[0].avg_entry_price == Decimal("0.42")
+
+
+async def test_ledger_fills_gap_external_source_doesnt_cover() -> None:
+    """When external sources don't cover a key, the ledger fills the gap."""
+    executor = await _make_executor_with_echo(
+        filled_size=Decimal("10"), filled_price=Decimal("0.50")
+    )
+    await executor.submit_order(_order(market_id="m-1"))
+    await executor.submit_order(_order(market_id="m-2"))
+
+    async def external() -> list[Position]:
+        return [
+            Position(
+                platform="polymarket",
+                market_id="m-1",
+                outcome_id="yes",
+                size=Decimal("999"),
+                avg_entry_price=Decimal("0.42"),
+                unrealized_pnl=Decimal("0"),
+            )
+        ]
+
+    executor.register_positions_source("polymarket", external)
+    positions = await executor.get_positions()
+    by_market = {p.market_id: p for p in positions}
+    assert by_market["m-1"].size == Decimal("999")  # external
+    assert by_market["m-2"].size == Decimal("10")  # ledger fallback
+
+
+async def test_clear_internal_positions_resets_the_ledger() -> None:
+    executor = await _make_executor_with_echo(
+        filled_size=Decimal("10"), filled_price=Decimal("0.50")
+    )
+    await executor.submit_order(_order())
+    assert executor.internal_positions()
+    executor.clear_internal_positions()
+    assert executor.internal_positions() == []
