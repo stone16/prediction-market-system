@@ -555,6 +555,72 @@ async def test_arbitrage_does_not_re_emit_same_correlation_pair() -> None:
 
 
 @pytest.mark.asyncio
+async def test_arbitrage_can_re_emit_cross_platform_after_clear_opportunity() -> None:
+    """Review-loop fix f13: once a paired order is resolved the strategy
+    must be able to re-emit the same opportunity. ``clear_opportunity`` is
+    the public API callers (pipeline post-execute cleanup) use to release
+    tracking state, and must accept an ``order_id`` from the emitted
+    paired orders so the pipeline does not need to track correlation_ids.
+    """
+    strategy = ArbitrageStrategy(
+        min_spread=Decimal("0.02"),
+        max_position_size=Decimal("100"),
+    )
+
+    pm = _price_update("polymarket", bid=Decimal("0.50"), ask=Decimal("0.52"))
+    kalshi = _price_update("kalshi", bid=Decimal("0.58"), ask=Decimal("0.60"))
+
+    await strategy.on_price_update(pm)
+    first = await strategy.on_price_update(kalshi)
+    assert first is not None and len(first) == 2
+
+    # Release the opportunity by passing the order_id of one of the paired
+    # orders. After release, a fresh tick on the same opportunity must
+    # emit a new paired order.
+    strategy.clear_opportunity(first[0].order_id)
+    # Calling clear_opportunity with the OTHER order's id is a no-op
+    # (the opportunity is already released) — must not raise.
+    strategy.clear_opportunity(first[1].order_id)
+
+    second = await strategy.on_price_update(kalshi)
+    assert second is not None and len(second) == 2
+    # A brand-new paired ledger entry was created.
+    assert len(strategy.get_paired_orders()) == 2
+    # The two emissions carry distinct correlation_ids.
+    paired = strategy.get_paired_orders()
+    assert paired[0].correlation_id != paired[1].correlation_id
+
+
+@pytest.mark.asyncio
+async def test_arbitrage_can_re_emit_correlation_pair_after_clear_opportunity() -> None:
+    """Subset-based arbitrage must also support re-emission via
+    ``clear_opportunity`` after the paired orders resolve.
+    """
+    strategy = ArbitrageStrategy(min_spread=Decimal("0.02"))
+
+    market_a = _market("polymarket", "subset-market", yes_price=Decimal("0.70"))
+    market_b = _market("kalshi", "superset-market", yes_price=Decimal("0.50"))
+
+    pair = CorrelationPair(
+        market_a=market_a,
+        market_b=market_b,
+        similarity_score=0.9,
+        relation_type="subset",
+        relation_detail="A is a subset of B",
+        arbitrage_opportunity=Decimal("0.20"),
+    )
+
+    first = await strategy.on_correlation_found(pair)
+    assert first is not None and len(first) == 2
+
+    strategy.clear_opportunity(first[0].order_id)
+
+    second = await strategy.on_correlation_found(pair)
+    assert second is not None and len(second) == 2
+    assert len(strategy.get_paired_orders()) == 2
+
+
+@pytest.mark.asyncio
 async def test_arbitrage_different_opportunities_are_tracked_separately() -> None:
     """Two distinct cross-platform opportunities must each emit one
     paired order — deduplication is per-opportunity, not global."""

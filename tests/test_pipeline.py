@@ -771,6 +771,149 @@ async def test_correlation_detector_strategy_failure_is_isolated() -> None:
     assert report.orders_submitted == 0
 
 
+async def test_pipeline_clears_opportunity_after_order_lifecycle() -> None:
+    """Review-loop fix f13: the pipeline must notify strategies that an
+    order's lifecycle is complete by calling ``clear_opportunity(order_id)``
+    after recording the order on the metrics collector. Without this hook,
+    ``ArbitrageStrategy`` suppresses the same logical opportunity forever
+    across cycles — a two-cycle test driving the real strategy exposes
+    the regression.
+    """
+    from pms.strategy import ArbitrageStrategy
+
+    pm_market = Market(
+        platform="polymarket",
+        market_id="m-pm",
+        title="Sample PM",
+        description="Sample",
+        outcomes=[
+            Outcome(outcome_id="shared-outcome", title="Yes", price=Decimal("0.52")),
+            Outcome(outcome_id="no-pm", title="No", price=Decimal("0.48")),
+        ],
+        volume=Decimal("1000"),
+        end_date=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        category="test",
+        url="https://example.com/pm",
+        status="open",
+        raw={},
+    )
+    kalshi_market = Market(
+        platform="kalshi",
+        market_id="m-kalshi",
+        title="Sample Kalshi",
+        description="Sample",
+        outcomes=[
+            Outcome(outcome_id="shared-outcome", title="Yes", price=Decimal("0.58")),
+            Outcome(outcome_id="no-kalshi", title="No", price=Decimal("0.42")),
+        ],
+        volume=Decimal("1000"),
+        end_date=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        category="test",
+        url="https://example.com/kalshi",
+        status="open",
+        raw={},
+    )
+
+    connector = MockConnector(markets=[pm_market, kalshi_market])
+    # Real ArbitrageStrategy so the outstanding-opportunity tracker is
+    # exercised exactly as in production. The test-only outcome_id
+    # equality path is intentional here — it is the easiest way to
+    # drive a repeatable cross-platform opportunity without wiring a
+    # correlation detector.
+    strategy = ArbitrageStrategy(
+        min_spread=Decimal("0.02"),
+        max_position_size=Decimal("10"),
+        platforms=("polymarket", "kalshi"),
+    )
+    executor = SpyExecutor()
+    risk = ApproveAllRisk()
+    metrics = MockMetrics()
+    feedback_engine = MockFeedbackEngine()
+
+    pipeline = TradingPipeline(
+        connectors=[connector],
+        strategies=[strategy],
+        executor=executor,
+        risk_manager=risk,
+        metrics=metrics,
+        feedback_engine=feedback_engine,
+    )
+
+    # Cycle 1: strategy emits a paired order on the second price update
+    # (once both legs are cached).
+    report_1 = await pipeline.run_cycle()
+    assert report_1.orders_submitted >= 2
+    cycle1_paired_count = len(strategy.get_paired_orders())
+    assert cycle1_paired_count == 1, (
+        f"Expected 1 paired order after cycle 1, got {cycle1_paired_count}"
+    )
+
+    # Cycle 2: same connector returns the same markets, so the same
+    # opportunity surfaces again. With the clear_opportunity hook
+    # wired, the strategy must emit a NEW paired order for the same
+    # logical opportunity because cycle 1's orders have fully resolved.
+    report_2 = await pipeline.run_cycle()
+    assert report_2.orders_submitted >= 2, (
+        "Pipeline did not re-emit opportunity after cycle 1 completed; "
+        "clear_opportunity hook is probably not wired."
+    )
+    assert len(strategy.get_paired_orders()) == cycle1_paired_count + 1
+
+
+async def test_pipeline_clear_opportunity_failure_is_isolated() -> None:
+    """A strategy that raises from ``clear_opportunity`` must be caught
+    and recorded in ``CycleReport.errors`` — not propagated.
+    """
+
+    class _RaisingClearStrategy:
+        name = "raises-clear"
+
+        def __init__(self) -> None:
+            self.clear_opportunity_calls = 0
+
+        async def on_price_update(
+            self, update: PriceUpdate
+        ) -> list[Order] | None:
+            return [_sample_order(f"o-{update.outcome_id}")]
+
+        async def on_correlation_found(
+            self, pair: CorrelationPair
+        ) -> list[Order] | None:
+            return None
+
+        async def on_feedback(self, feedback: EvaluationFeedback) -> None:
+            return None
+
+        def clear_opportunity(self, identifier: str) -> None:
+            self.clear_opportunity_calls += 1
+            raise RuntimeError("kaboom in clear_opportunity")
+
+    connector = MockConnector(markets=[_sample_market()])
+    strategy = _RaisingClearStrategy()
+    executor = SpyExecutor()
+    risk = ApproveAllRisk()
+    metrics = MockMetrics()
+    feedback_engine = MockFeedbackEngine()
+
+    pipeline = TradingPipeline(
+        connectors=[connector],
+        strategies=[strategy],
+        executor=executor,
+        risk_manager=risk,
+        metrics=metrics,
+        feedback_engine=feedback_engine,
+    )
+
+    report = await pipeline.run_cycle()
+
+    # The cycle still completed and the orders still submitted.
+    assert report.orders_submitted == 2
+    # clear_opportunity was called once per submitted order.
+    assert strategy.clear_opportunity_calls == 2
+    # Both failures recorded.
+    assert sum("clear_opportunity" in e for e in report.errors) == 2
+
+
 async def test_run_cycle_stamps_strategy_attribution_on_metrics() -> None:
     """The pipeline must tag every recorded order with the emitting strategy.
 

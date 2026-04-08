@@ -93,7 +93,16 @@ class ArbitrageStrategy:
         # post-fill cleanup) to release a tracked opportunity once the
         # paired orders have resolved.
         self._outstanding_opportunities: set[str] = set()
+        # ``correlation_id`` → opportunity_key kept for backwards
+        # compatibility with direct-correlation-id callers (pre-f13).
         self._correlation_id_to_key: dict[str, str] = {}
+        # Review-loop fix f13: pipeline-facing order_id → opportunity_key
+        # map. Populated at emit time so ``clear_opportunity(order_id)``
+        # can release tracking state once the paired orders resolve in
+        # the execute phase. Without this, ``_outstanding_opportunities``
+        # accumulates forever and every future cycle sees the same
+        # opportunity as "still pending".
+        self._order_id_to_key: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # StrategyProtocol hooks
@@ -154,6 +163,8 @@ class ArbitrageStrategy:
             pair = self._make_cross_platform_pair(cheap, expensive)
             self._outstanding_opportunities.add(opportunity_key)
             self._correlation_id_to_key[pair.correlation_id] = opportunity_key
+            for emitted in pair.orders:
+                self._order_id_to_key[emitted.order_id] = opportunity_key
             self._paired_orders.append(pair)
             orders.extend(pair.orders)
 
@@ -237,6 +248,8 @@ class ArbitrageStrategy:
         )
         self._outstanding_opportunities.add(opportunity_key)
         self._correlation_id_to_key[correlation_id] = opportunity_key
+        for emitted in arb_pair.orders:
+            self._order_id_to_key[emitted.order_id] = opportunity_key
         self._paired_orders.append(arb_pair)
         return list(arb_pair.orders)
 
@@ -302,21 +315,64 @@ class ArbitrageStrategy:
         """
         return set(self._outstanding_opportunities)
 
-    def clear_opportunity(self, correlation_id: str) -> None:
-        """Release the opportunity associated with ``correlation_id``.
+    def clear_opportunity(self, identifier: str) -> None:
+        """Release the opportunity associated with ``identifier``.
 
-        Callers should invoke this once the paired order with the given
-        ``correlation_id`` has resolved (filled, cancelled, expired).
-        After clearing, the strategy is free to emit a fresh pair if
-        the underlying spread still meets ``min_spread``.
+        ``identifier`` may be either:
 
-        Unknown ``correlation_id`` values are silently ignored so the
-        method is safe to call from cleanup handlers without extra
-        bookkeeping on the caller side.
+        1. An **order_id** from a previously-emitted paired order
+           (the pipeline-facing case — review-loop fix f13). The
+           pipeline calls this from ``_execute`` after every submitted
+           order is recorded on the metrics collector so the strategy
+           can re-emit the same logical opportunity on the next cycle
+           once the in-flight orders resolve.
+        2. A **correlation_id** from :class:`ArbitragePairOrders`.
+           Retained for backwards compatibility and direct callers
+           (tests, ad-hoc tooling) that still track paired-orders by
+           correlation_id.
+
+        Whichever identifier is supplied, the matching opportunity_key
+        is discarded from the outstanding-opportunity set, and every
+        order_id pointing at that key is also pruned so the strategy
+        does not accumulate stale bookkeeping across cycles.
+
+        Unknown identifiers are silently ignored so the method is
+        safe to call from cleanup handlers without extra bookkeeping
+        on the caller side.
         """
-        opportunity_key = self._correlation_id_to_key.pop(correlation_id, None)
-        if opportunity_key is not None:
-            self._outstanding_opportunities.discard(opportunity_key)
+        opportunity_key: str | None = None
+
+        # Prefer the order_id map (the pipeline path). ``pop`` so a
+        # follow-up call with the sibling order_id is a harmless no-op.
+        opportunity_key = self._order_id_to_key.pop(identifier, None)
+
+        # Fallback: legacy correlation_id path.
+        if opportunity_key is None:
+            opportunity_key = self._correlation_id_to_key.pop(
+                identifier, None
+            )
+
+        if opportunity_key is None:
+            return
+
+        self._outstanding_opportunities.discard(opportunity_key)
+        # Prune any sibling order_ids still pointing at the released key
+        # so the map does not grow unbounded over many cycles.
+        stale = [
+            oid
+            for oid, key in self._order_id_to_key.items()
+            if key == opportunity_key
+        ]
+        for oid in stale:
+            self._order_id_to_key.pop(oid, None)
+        # Also prune the correlation_id reverse-map for the same key.
+        stale_corr = [
+            cid
+            for cid, key in self._correlation_id_to_key.items()
+            if key == opportunity_key
+        ]
+        for cid in stale_corr:
+            self._correlation_id_to_key.pop(cid, None)
 
     # ------------------------------------------------------------------
     # Internals

@@ -462,10 +462,34 @@ class TradingPipeline:
         :class:`dataclasses.replace`, the ``order_id`` is preserved, so
         the attribution lookup still succeeds. Orders with no known
         origin fall through to ``"unknown"`` for backward compatibility.
+
+        Review-loop fix f13 (opportunity lifecycle cleanup)
+        ---------------------------------------------------
+
+        After ``metrics.record_order`` succeeds (or fails — the lifecycle
+        is terminal either way), the pipeline notifies the producing
+        strategy via ``clear_opportunity(order_id)`` if the strategy
+        exposes that method. This is the seam that lets
+        ``ArbitrageStrategy`` release its outstanding-opportunity tracker
+        so the same logical opportunity can be re-emitted on a later
+        cycle. Without this hook, once an opportunity is emitted it is
+        suppressed forever (the outstanding-opportunity set never
+        shrinks). ``clear_opportunity`` is intentionally duck-typed with
+        ``hasattr`` because ``StrategyProtocol`` does not (yet) require
+        it; strategies that do not implement it keep their old behaviour.
+        Exceptions from ``clear_opportunity`` are recorded in ``errors``
+        so a buggy strategy cannot abort the cycle.
         """
         submitted = 0
         filled = 0
         errors: list[str] = []
+
+        # O(1) strategy lookup by name so every order that makes it
+        # through the execute phase can find its producing strategy
+        # instance without re-scanning ``self._strategies``.
+        strategies_by_name: dict[str, StrategyProtocol] = {
+            strategy.name: strategy for strategy in self._strategies
+        }
 
         for order in approved_orders:
             try:
@@ -501,6 +525,26 @@ class TradingPipeline:
                 )
                 logger.exception(message)
                 errors.append(message)
+
+            # Release the producing strategy's opportunity tracker for
+            # this order. The lifecycle is terminal at this point —
+            # every terminal status (filled, partial, rejected, error)
+            # releases the opportunity so a later cycle can retry if
+            # appropriate. Strategies that do not implement the optional
+            # method are skipped silently.
+            producing_strategy = strategies_by_name.get(strategy_name)
+            if producing_strategy is not None and hasattr(
+                producing_strategy, "clear_opportunity"
+            ):
+                try:
+                    producing_strategy.clear_opportunity(order.order_id)
+                except Exception as exc:  # noqa: BLE001 — pipeline contract
+                    message = (
+                        f"Strategy {strategy_name} clear_opportunity "
+                        f"failed for {order.order_id}: {exc}"
+                    )
+                    logger.exception(message)
+                    errors.append(message)
 
         return submitted, filled, errors
 

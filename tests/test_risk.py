@@ -462,6 +462,141 @@ def test_partial_sell_of_over_limit_position_strictly_reducing_is_approved() -> 
     assert decision.adjusted_size is None
 
 
+def test_sell_partial_fit_piecewise_calculation() -> None:
+    """Review-loop fix f12: a sell that crosses from covered to short
+    must be sized using piecewise math, not ``remaining / price``.
+
+    Construction (Codex repro):
+    - per-market cap = 40
+    - held: 100 @ 0.20 → current market notional = 20
+    - sell 150 @ 0.90
+
+    Exposure delta for a full 150-share sell:
+      covered portion (100): -100 * 0.20 = -20
+      short portion (50):    +50  * 0.90 = +45
+      total delta:           +25 → new notional 45 > cap 40
+
+    Correct piecewise max-fillable sell:
+      after clearing 100 covered shares, exposure is 0 (20 - 20).
+      remaining market room = 40 - 0 = 40
+      short portion at 0.90: 40 / 0.90 ≈ 44.444...
+      max s = 100 (covered) + 44.444... = 144.444...
+
+    The buggy pre-fix path returned ``remaining_before_sell / price``
+    = 20 / 0.90 ≈ 22.22, which is off by ~6.5x. Any post-trade exposure
+    strictly under 40 + epsilon is considered valid.
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("40"),
+        max_total_exposure=Decimal("5000"),
+    )
+    held = _position(
+        size=Decimal("100"),
+        avg_entry_price=Decimal("0.20"),
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    sell_order = _order(
+        price=Decimal("0.90"),
+        size=Decimal("150"),
+        side="sell",
+        market_id="m-1",
+        outcome_id="yes",
+    )
+
+    decision = rm.check_order(sell_order, positions=[held])
+
+    assert decision.approved is True
+    assert decision.adjusted_size is not None
+    # Correct answer: 100 (covered) + 40/0.90 ≈ 144.444...
+    expected = Decimal("100") + Decimal("40") / Decimal("0.90")
+    # Allow a small tolerance for Decimal precision on the division.
+    diff = abs(decision.adjusted_size - expected)
+    assert diff < Decimal("0.0001"), (
+        f"Expected adjusted_size ~ {expected}, got {decision.adjusted_size}"
+    )
+    # And the buggy linear answer must NOT be returned.
+    assert decision.adjusted_size > Decimal("30"), (
+        f"adjusted_size {decision.adjusted_size} looks like the buggy "
+        "linear path (remaining/price ≈ 22.22)"
+    )
+
+    # Post-trade exposure must actually fit under the cap.
+    covered = min(sell_order.size, held.size)
+    short_remainder = decision.adjusted_size - covered
+    # held has avg_basis 0.20 → reduction = covered * 0.20
+    reduction = covered * Decimal("0.20")
+    new_short = short_remainder * sell_order.price
+    delta = -reduction + new_short
+    current_notional = held.size * held.avg_entry_price  # 20
+    post_trade = current_notional + delta
+    assert post_trade <= Decimal("40") + Decimal("0.0001"), (
+        f"Post-trade exposure {post_trade} exceeds cap 40 after "
+        "partial-fit sizing"
+    )
+
+
+def test_sell_fully_covered_no_partial_fit_needed() -> None:
+    """A fully-covered sell must be approved at full size without
+    invoking the partial-fit branch.
+
+    Construction:
+    - per-market cap = 50
+    - held: 100 @ 0.50 → current market notional = 50 (at cap)
+    - sell 80 @ 0.50 → covered portion 80 * 0.50 = -40 delta
+      → new notional = 50 - 40 = 10, strictly below cap.
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("50"),
+        max_total_exposure=Decimal("5000"),
+    )
+    held = _position(
+        size=Decimal("100"),
+        avg_entry_price=Decimal("0.50"),
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    sell_order = _order(
+        price=Decimal("0.50"),
+        size=Decimal("80"),
+        side="sell",
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    decision = rm.check_order(sell_order, positions=[held])
+
+    assert decision.approved is True
+    assert decision.adjusted_size is None  # no adjustment needed
+
+
+def test_sell_with_no_held_position_uses_linear_math() -> None:
+    """Naked short with no held inventory must use the linear
+    ``remaining / price`` calculation — there is no covered portion to
+    add on top.
+
+    Construction:
+    - per-market cap = 40
+    - no held positions
+    - sell 100 @ 0.50 → naked short would add 50 exposure > 40
+    - max fillable = 40 / 0.50 = 80 shares
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("40"),
+        max_total_exposure=Decimal("5000"),
+    )
+    sell_order = _order(
+        price=Decimal("0.50"),
+        size=Decimal("100"),
+        side="sell",
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    decision = rm.check_order(sell_order, positions=[])
+
+    assert decision.approved is True
+    assert decision.adjusted_size == Decimal("80")
+
+
 def test_fully_covered_sell_reduces_per_market_exposure() -> None:
     """A sell that is fully covered by inventory must reduce per-market
     notional by the proportional cost basis, not by the order price."""
