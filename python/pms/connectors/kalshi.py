@@ -72,6 +72,13 @@ class KalshiConnector:
 
     BASE_URL: str = "https://api.elections.kalshi.com/trade-api/v2"
 
+    #: Hard cap on the number of pages :meth:`get_active_markets` will
+    #: walk through Kalshi's cursor pagination. Acts as a safety brake
+    #: against a server-side bug returning a non-terminating cursor.
+    #: 20 pages × 100 markets/page = 2000 markets, comfortably above
+    #: Kalshi's current open-market count.
+    MAX_PAGES: int = 20
+
     def __init__(
         self,
         http_client: httpx.AsyncClient | None = None,
@@ -123,42 +130,50 @@ class KalshiConnector:
         """Return all currently open Kalshi markets.
 
         Uses ``status=open`` so the connector only returns tradable
-        markets. Pagination (Kalshi ``cursor``) is intentionally not
-        followed in v1 — the first page is sufficient for the mocked
-        fixture suite, and the approved spec defers multi-page retrieval
-        to a later checkpoint.
+        markets. Walks Kalshi's ``cursor`` field across pages until
+        either an empty/missing cursor terminates the walk or the
+        :attr:`MAX_PAGES` safety cap is reached (review-loop fix f6
+        round 2).
         """
-        # NOTE: v1 limitation (review-loop f6 — kept as documented limitation,
-        # not fixed). Only the first page of Kalshi markets is fetched.
-        # Kalshi returns a ``cursor`` field on each /markets response that
-        # the caller is supposed to feed back as a query parameter to walk
-        # the full result set, but the v1 connector ignores it. The
-        # approved spec explicitly allows "first page only" for the initial
-        # harness, and the mocked test fixture has a single-page payload,
-        # so this no-op is intentional. A post-v1 checkpoint will add the
-        # cursor loop and a configurable page-count cap.
-        headers = self._sign_request_headers("GET", "/markets")
-        resp = await self._http.get(
-            f"{self._base_url}/markets",
-            params={"status": "open", "limit": 100},
-            headers=headers or None,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if not isinstance(data, dict):
-            raise ValueError(
-                "Kalshi /markets endpoint returned a non-dict payload: "
-                f"{type(data).__name__}"
+        all_markets: list[Market] = []
+        cursor: str | None = None
+        for _ in range(self.MAX_PAGES):
+            params: dict[str, Any] = {"status": "open", "limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+
+            headers = self._sign_request_headers("GET", "/markets")
+            resp = await self._http.get(
+                f"{self._base_url}/markets",
+                params=params,
+                headers=headers or None,
             )
-        markets_raw = data.get("markets", [])
-        if not isinstance(markets_raw, list):
-            raise ValueError(
-                "Kalshi /markets 'markets' field is not a list: "
-                f"{type(markets_raw).__name__}"
-            )
-        return [
-            self._normalize_market(cast(dict[str, Any], m)) for m in markets_raw
-        ]
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError(
+                    "Kalshi /markets endpoint returned a non-dict payload: "
+                    f"{type(data).__name__}"
+                )
+
+            markets_raw = data.get("markets", [])
+            if not isinstance(markets_raw, list):
+                raise ValueError(
+                    "Kalshi /markets 'markets' field is not a list: "
+                    f"{type(markets_raw).__name__}"
+                )
+
+            for raw in markets_raw:
+                all_markets.append(
+                    self._normalize_market(cast(dict[str, Any], raw))
+                )
+
+            next_cursor = data.get("cursor")
+            if not isinstance(next_cursor, str) or not next_cursor:
+                break
+            cursor = next_cursor
+
+        return all_markets
 
     # ------------------------------------------------------------------
     # ConnectorProtocol — order book

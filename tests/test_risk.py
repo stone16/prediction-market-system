@@ -338,13 +338,15 @@ def test_sell_order_below_cap_approved() -> None:
     assert decision.adjusted_size is None
 
 
-def test_sell_order_with_no_existing_position_does_not_explode_caps() -> None:
-    """A sell with no held position must not be falsely treated as buying.
+def test_sell_order_with_no_existing_position_counts_as_short_exposure() -> None:
+    """Review-loop f10 (round 2): a naked sell with no held position must
+    be treated as **new short exposure**, not as a no-op.
 
-    The v1 simplification reduces market exposure by ``min(order_notional,
-    current_market_exposure)`` and floors the result at zero, so a naked
-    sell on a market with no existing position has zero impact on the
-    market's exposure counter rather than pushing it negative.
+    The round-1 fix unconditionally floored sell exposure at zero, which
+    silently approved naked shorts as "zero risk". The proper inventory-
+    aware model counts the un-covered remainder of any sell as new short
+    exposure, so a 100 @ 0.5 naked sell must consume 50 units of the
+    per-market and total caps.
     """
     rm = RiskManager(
         max_position_per_market=Decimal("500"),
@@ -355,7 +357,132 @@ def test_sell_order_with_no_existing_position_does_not_explode_caps() -> None:
         size=Decimal("100"),
         side="sell",
     )
+    # Approved (50 < 500 and 50 < 5000), but the new short exposure was
+    # taken into account — see ``test_naked_sell_consumes_per_market_cap``
+    # below for the cap-consumption assertion.
     decision = rm.check_order(sell_order, positions=[])
+    assert decision.approved is True
+    assert decision.adjusted_size is None
+
+
+def test_naked_sell_consumes_per_market_cap() -> None:
+    """A naked sell that would push notional past the per-market cap
+    must be sized down or rejected — it is NOT zero-risk.
+
+    Construction:
+    - per-market cap = 500
+    - existing position on a DIFFERENT market = 0
+    - naked sell on m-1: 1500 @ 1.0 → 1500 of new short exposure
+    - cap is exceeded → must reject (no covering inventory at all)
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("500"),
+        max_total_exposure=Decimal("5000"),
+    )
+    # No held positions on m-1, so the entire sell is new short exposure.
+    sell_order = _order(
+        price=Decimal("1.0"),
+        size=Decimal("1500"),
+        side="sell",
+        market_id="m-1",
+    )
+    decision = rm.check_order(sell_order, positions=[])
+    # 1500 > 500, but partial-fit allows 500/1.0 = 500 shares.
+    assert decision.approved is True
+    assert decision.adjusted_size == Decimal("500")
+
+
+def test_naked_sell_rejected_when_cap_already_full_from_other_short() -> None:
+    """Once short exposure on a market is at the cap, more naked shorts
+    on the SAME outcome must be rejected — not silently approved.
+
+    We simulate "existing short" by parking a long position on a sibling
+    outcome of the same market that fills the per-market cap, then we
+    fire a naked sell on a third outcome of the same market.
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("500"),
+        max_total_exposure=Decimal("5000"),
+    )
+    # Existing long fills the per-market cap entirely.
+    full_market = _position(
+        size=Decimal("1000"),
+        avg_entry_price=Decimal("0.50"),
+        market_id="m-1",
+        outcome_id="other-outcome",
+    )
+    # New naked sell on a different outcome of the same market.
+    sell_order = _order(
+        price=Decimal("0.50"),
+        size=Decimal("200"),
+        side="sell",
+        market_id="m-1",
+        outcome_id="naked-outcome",
+    )
+    decision = rm.check_order(sell_order, positions=[full_market])
+    # Cap already full → naked sell on another outcome must be rejected.
+    assert decision.approved is False
+    assert decision.adjusted_size is None
+
+
+def test_partial_sell_of_over_limit_position_strictly_reducing_is_approved() -> None:
+    """Review-loop f10 (round 2): a strictly-reducing sell against a
+    position that is *already* over the cap must be approved.
+
+    Construction:
+    - per-market cap = 500
+    - existing long position on m-1 = 800 @ 1.0 → 800 notional (already
+      over cap because the cap was tightened after entry)
+    - sell 200 @ 1.0 → reduces market notional by 200 (cost basis-aware)
+    - new market notional after sell = 600
+    - 600 is still > 500, but the order strictly reduces risk so it must
+      be approved unconditionally.
+    """
+    rm = RiskManager(
+        max_position_per_market=Decimal("500"),
+        max_total_exposure=Decimal("5000"),
+    )
+    over_limit = _position(
+        size=Decimal("800"),
+        avg_entry_price=Decimal("1.0"),
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    sell_order = _order(
+        price=Decimal("1.0"),
+        size=Decimal("200"),
+        side="sell",
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    decision = rm.check_order(sell_order, positions=[over_limit])
+    # Strictly reducing → always approved, even though new notional is
+    # still above the cap.
+    assert decision.approved is True
+    assert decision.adjusted_size is None
+
+
+def test_fully_covered_sell_reduces_per_market_exposure() -> None:
+    """A sell that is fully covered by inventory must reduce per-market
+    notional by the proportional cost basis, not by the order price."""
+    rm = RiskManager(
+        max_position_per_market=Decimal("500"),
+        max_total_exposure=Decimal("5000"),
+    )
+    held = _position(
+        size=Decimal("400"),
+        avg_entry_price=Decimal("0.50"),
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    sell_order = _order(
+        price=Decimal("0.50"),
+        size=Decimal("200"),
+        side="sell",
+        market_id="m-1",
+        outcome_id="yes",
+    )
+    decision = rm.check_order(sell_order, positions=[held])
     assert decision.approved is True
     assert decision.adjusted_size is None
 

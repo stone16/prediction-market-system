@@ -84,6 +84,16 @@ class ArbitrageStrategy:
         self._latest_prices: dict[tuple[str, str, str], PriceUpdate] = {}
         # Paired-orders ledger for observability / downstream atomic execution.
         self._paired_orders: list[ArbitragePairOrders] = []
+        # Outstanding-opportunity tracker (review-loop fix f9 round 2).
+        # Each opportunity has a stable canonical key derived from the
+        # (platform, market_id, outcome_id) of both legs (or both
+        # markets, for correlation pairs). The strategy refuses to emit
+        # a fresh order pair while an opportunity key is in this set.
+        # ``clear_opportunity`` is the public API for callers (executor,
+        # post-fill cleanup) to release a tracked opportunity once the
+        # paired orders have resolved.
+        self._outstanding_opportunities: set[str] = set()
+        self._correlation_id_to_key: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # StrategyProtocol hooks
@@ -99,19 +109,16 @@ class ArbitrageStrategy:
         key = (update.platform, update.market_id, update.outcome_id)
         self._latest_prices[key] = update
 
-        # NOTE: v1 limitation (review-loop f2 — kept as documented limitation,
-        # not fixed). The cross-platform candidate match below uses raw
-        # ``outcome_id`` equality, which only fires for tests that inject
-        # matching IDs. In production, Polymarket emits ERC-1155 token IDs
-        # and Kalshi emits "<ticker>-YES/NO", so real price updates from the
-        # two platforms will never share an ``outcome_id`` and this path
-        # silently no-ops at runtime. The actual production cross-platform
-        # arbitrage path is the CorrelationDetector (CP10) → the
-        # ``on_correlation_found`` hook below, which classifies markets by
-        # semantic similarity and feeds normalized ``CorrelationPair``
-        # objects in. Removing this direct path is a post-v1 cleanup; we
-        # retain it for now because the unit tests pin the existing
-        # behaviour and the path is harmless in real traffic.
+        # Cross-platform ``outcome_id`` equality is the **test-only** path:
+        # Polymarket emits ERC-1155 token IDs and Kalshi emits
+        # "<ticker>-YES/NO", so real updates from the two platforms never
+        # share an ``outcome_id`` and this path is a no-op in production.
+        # The production cross-platform arbitrage path is the CP10
+        # ``CorrelationDetector`` → :meth:`on_correlation_found` hook,
+        # which is now wired into ``TradingPipeline`` (review-loop fix f2
+        # round 2). Removing the direct path is a post-v1 cleanup; the
+        # unit tests still pin the existing behaviour and the path is
+        # harmless because it is unreachable on real data.
         candidates: list[PriceUpdate] = [
             other
             for other_key, other in self._latest_prices.items()
@@ -119,18 +126,12 @@ class ArbitrageStrategy:
             and other_key[2] == update.outcome_id
         ]
 
-        # NOTE: v1 limitation (review-loop f9 — kept as documented limitation,
-        # not fixed). Each qualifying tick emits a fresh order pair with a
-        # new ``correlation_id``, even when the same opportunity is still
-        # outstanding. Real deduplication requires tracking outstanding
-        # paired orders against executor/positions state — i.e. "did the
-        # previous pair fill, partially fill, or get cancelled?" — and that
-        # state lives in the positions ledger documented in the spec under
-        # "Out of Scope — Live positions tracking". A post-v1 checkpoint
-        # will add an opportunity tracker that emits only on threshold
-        # crossings or after the prior pair has resolved. For now the
-        # downstream executor's idempotency hooks prevent duplicate fills
-        # on identical (market, outcome, side, price) tuples.
+        # Review-loop fix f9 (round 2): de-duplicate by canonical
+        # opportunity key. The same logical opportunity (e.g. PM YES vs
+        # Kalshi YES on the same outcome) must only emit one paired
+        # order pair while it remains outstanding. Callers release the
+        # opportunity via :meth:`clear_opportunity` when the paired
+        # orders have resolved (filled/cancelled).
         orders: list[Order] = []
         for other in candidates:
             spread = _compute_spread(update, other)
@@ -144,7 +145,15 @@ class ArbitrageStrategy:
             else:
                 cheap, expensive = other, update
 
+            opportunity_key = self._cross_platform_opportunity_key(
+                cheap, expensive
+            )
+            if opportunity_key in self._outstanding_opportunities:
+                continue
+
             pair = self._make_cross_platform_pair(cheap, expensive)
+            self._outstanding_opportunities.add(opportunity_key)
+            self._correlation_id_to_key[pair.correlation_id] = opportunity_key
             self._paired_orders.append(pair)
             orders.extend(pair.orders)
 
@@ -192,6 +201,14 @@ class ArbitrageStrategy:
         if a_yes <= b_yes + self._min_spread:
             return None
 
+        # Review-loop fix f9 round 2: de-duplicate identical correlation
+        # pairs. ``CorrelationDetector`` can re-emit the same pair on
+        # every cycle, so without tracking we would flood the executor
+        # with stale order pairs.
+        opportunity_key = self._correlation_opportunity_key(pair)
+        if opportunity_key in self._outstanding_opportunities:
+            return None
+
         correlation_id = str(uuid.uuid4())
         buy_b = Order(
             order_id=f"{correlation_id}-buy-b",
@@ -218,6 +235,8 @@ class ArbitrageStrategy:
             correlation_id=correlation_id,
             orders=(buy_b, sell_a),
         )
+        self._outstanding_opportunities.add(opportunity_key)
+        self._correlation_id_to_key[correlation_id] = opportunity_key
         self._paired_orders.append(arb_pair)
         return list(arb_pair.orders)
 
@@ -226,8 +245,11 @@ class ArbitrageStrategy:
 
         Rules (applied in priority order — the first matching rule wins):
 
-        1. If ``win_rate < 0.4`` and ``pnl < 0``: multiply ``min_spread`` by
-           1.5 (become more selective to cut losing trades).
+        1. If ``win_rate < 0.4`` and ``cash_flow < 0``: multiply
+           ``min_spread`` by 1.5 (become more selective to cut losing
+           trades). ``cash_flow`` is the v1 signed-cash-flow proxy from
+           the metrics collector — see :class:`pms.models.PnLReport` for
+           why it's not labelled "pnl" in v1 (review-loop fix f11).
         2. Else if observed ``avg_slippage`` exceeds ``min_spread / 2``:
            raise ``min_spread`` by the observed slippage (restore edge
            after costs).
@@ -241,7 +263,7 @@ class ArbitrageStrategy:
 
         new_spread: Decimal = self._min_spread
 
-        if my_feedback.win_rate < 0.4 and my_feedback.pnl < 0:
+        if my_feedback.win_rate < 0.4 and my_feedback.cash_flow < 0:
             new_spread = self._min_spread * Decimal("1.5")
         else:
             # ``avg_slippage`` is a float on the wire; convert via ``str``
@@ -271,9 +293,62 @@ class ArbitrageStrategy:
         """Return the current adaptive ``min_spread`` threshold."""
         return self._min_spread
 
+    def outstanding_opportunity_keys(self) -> set[str]:
+        """Return a snapshot of currently tracked opportunity keys.
+
+        Useful for tests and observability tooling. The strategy refuses
+        to re-emit a paired order while its opportunity key is in this
+        set (review-loop fix f9 round 2).
+        """
+        return set(self._outstanding_opportunities)
+
+    def clear_opportunity(self, correlation_id: str) -> None:
+        """Release the opportunity associated with ``correlation_id``.
+
+        Callers should invoke this once the paired order with the given
+        ``correlation_id`` has resolved (filled, cancelled, expired).
+        After clearing, the strategy is free to emit a fresh pair if
+        the underlying spread still meets ``min_spread``.
+
+        Unknown ``correlation_id`` values are silently ignored so the
+        method is safe to call from cleanup handlers without extra
+        bookkeeping on the caller side.
+        """
+        opportunity_key = self._correlation_id_to_key.pop(correlation_id, None)
+        if opportunity_key is not None:
+            self._outstanding_opportunities.discard(opportunity_key)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cross_platform_opportunity_key(
+        cheap: PriceUpdate, expensive: PriceUpdate
+    ) -> str:
+        """Build a canonical key for a cross-platform opportunity.
+
+        The key is independent of which leg is currently the cheap side
+        — sorting by ``(platform, market_id, outcome_id)`` ensures the
+        same key surfaces if the spread later flips.
+        """
+        a = (cheap.platform, cheap.market_id, cheap.outcome_id)
+        b = (expensive.platform, expensive.market_id, expensive.outcome_id)
+        ordered = sorted([a, b])
+        return f"cross::{ordered[0]}::{ordered[1]}"
+
+    @staticmethod
+    def _correlation_opportunity_key(pair: CorrelationPair) -> str:
+        """Build a canonical key for a correlation-based opportunity.
+
+        Sorted by ``(platform, market_id)`` of both legs so the key is
+        the same regardless of which side the detector tagged as
+        ``market_a``.
+        """
+        a = (pair.market_a.platform, pair.market_a.market_id)
+        b = (pair.market_b.platform, pair.market_b.market_id)
+        ordered = sorted([a, b])
+        return f"correlation::{ordered[0]}::{ordered[1]}"
 
     def _make_cross_platform_pair(
         self, cheap: PriceUpdate, expensive: PriceUpdate

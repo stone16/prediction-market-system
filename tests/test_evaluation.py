@@ -123,8 +123,9 @@ async def test_get_pnl_empty_collector_returns_zero() -> None:
     report = collector.get_pnl(since)
 
     assert isinstance(report, PnLReport)
-    assert report.realized == Decimal("0")
-    assert report.unrealized == Decimal("0")
+    assert report.cash_flow == Decimal("0")
+    assert report.realized_pnl == Decimal("0")
+    assert report.unrealized_pnl == Decimal("0")
     assert report.total == Decimal("0")
     assert report.num_trades == 0
     assert report.start == since
@@ -150,8 +151,10 @@ async def test_get_pnl_sums_filled_orders() -> None:
 
     assert report.num_trades == 2
     # -5.00 + 6.00 = 1.00
-    assert report.realized == Decimal("1.00")
-    assert report.unrealized == Decimal("0")
+    assert report.cash_flow == Decimal("1.00")
+    # v1: realized_pnl + unrealized_pnl are always zero (no cost basis).
+    assert report.realized_pnl == Decimal("0")
+    assert report.unrealized_pnl == Decimal("0")
     assert report.total == Decimal("1.00")
 
 
@@ -171,7 +174,7 @@ async def test_get_pnl_ignores_non_filled_orders() -> None:
     report = collector.get_pnl(since)
 
     assert report.num_trades == 0
-    assert report.realized == Decimal("0")
+    assert report.cash_flow == Decimal("0")
 
 
 async def test_get_pnl_time_window_filters_older_entries() -> None:
@@ -203,7 +206,7 @@ async def test_get_pnl_time_window_filters_older_entries() -> None:
 
     # Only the second order should be counted.
     assert report.num_trades == 1
-    assert report.realized == Decimal("6.00")
+    assert report.cash_flow == Decimal("6.00")
 
 
 async def test_record_price_snapshot_stores_updates() -> None:
@@ -305,10 +308,10 @@ async def test_get_performance_metrics_slippage_calculation() -> None:
     assert arb.avg_slippage == pytest.approx(0.10, rel=1e-6)
 
 
-async def test_get_performance_metrics_pnl_per_strategy() -> None:
+async def test_get_performance_metrics_cash_flow_per_strategy() -> None:
     collector = MetricsCollector()
 
-    # arb: buy 10 @ 0.50 then sell 10 @ 0.60 → pnl = 1.00
+    # arb: buy 10 @ 0.50 then sell 10 @ 0.60 → cash_flow = 1.00
     await collector.record_order(
         _order(order_id="o-1", side="buy", price="0.50", size="10"),
         _result(order_id="o-1", filled_price="0.50", filled_size="10", strategy="arb"),
@@ -319,7 +322,10 @@ async def test_get_performance_metrics_pnl_per_strategy() -> None:
     )
 
     report = collector.get_performance_metrics()
-    assert report.per_strategy["arb"].pnl == pytest.approx(1.0, rel=1e-6)
+    arb = report.per_strategy["arb"]
+    assert arb.cash_flow == pytest.approx(1.0, rel=1e-6)
+    # v1: realized_pnl is permanently zero until cost basis tracking lands.
+    assert arb.realized_pnl == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +345,8 @@ def _metrics(
     name: str = "arb",
     win_rate: float = 0.5,
     avg_slippage: float = 0.01,
-    pnl: float = 0.0,
+    cash_flow: float = 0.0,
+    realized_pnl: float = 0.0,
     num_orders: int = 10,
     num_fills: int = 5,
 ) -> StrategyMetrics:
@@ -350,7 +357,8 @@ def _metrics(
         win_rate=win_rate,
         avg_slippage=avg_slippage,
         avg_fill_latency_ms=0.0,
-        pnl=pnl,
+        cash_flow=cash_flow,
+        realized_pnl=realized_pnl,
     )
 
 
@@ -411,7 +419,7 @@ def test_generate_feedback_bounds_are_enforced_on_single_strategy() -> None:
             "bad": _metrics(
                 win_rate=2.5,
                 avg_slippage=-0.5,
-                pnl=5_000_000.0,
+                cash_flow=5_000_000.0,
             )
         }
     )
@@ -422,9 +430,9 @@ def test_generate_feedback_bounds_are_enforced_on_single_strategy() -> None:
     assert 0.0 <= bad.win_rate <= 1.0
     assert 0.0 <= bad.avg_slippage <= 1.0
     assert (
-        FEEDBACK_GUARDRAILS["strategy_pnl_min"]
-        <= bad.pnl
-        <= FEEDBACK_GUARDRAILS["strategy_pnl_max"]
+        FEEDBACK_GUARDRAILS["strategy_cash_flow_min"]
+        <= bad.cash_flow
+        <= FEEDBACK_GUARDRAILS["strategy_cash_flow_max"]
     )
 
 
@@ -440,7 +448,7 @@ def test_generate_feedback_fuzz_guardrails() -> None:
             name=f"strat-{i}",
             win_rate=rng.uniform(-5.0, 5.0),
             avg_slippage=rng.uniform(-2.0, 2.0),
-            pnl=rng.uniform(-5_000_000.0, 5_000_000.0),
+            cash_flow=rng.uniform(-5_000_000.0, 5_000_000.0),
         )
         report = _perf_report({metrics.strategy_name: metrics})
         fb = engine.generate_feedback(report)
@@ -453,10 +461,10 @@ def test_generate_feedback_fuzz_guardrails() -> None:
             f"iteration {i}: avg_slippage {sf.avg_slippage} out of bounds"
         )
         assert (
-            FEEDBACK_GUARDRAILS["strategy_pnl_min"]
-            <= sf.pnl
-            <= FEEDBACK_GUARDRAILS["strategy_pnl_max"]
-        ), f"iteration {i}: pnl {sf.pnl} out of bounds"
+            FEEDBACK_GUARDRAILS["strategy_cash_flow_min"]
+            <= sf.cash_flow
+            <= FEEDBACK_GUARDRAILS["strategy_cash_flow_max"]
+        ), f"iteration {i}: cash_flow {sf.cash_flow} out of bounds"
 
         # RiskFeedback exposure must also be within bounds.
         assert (
@@ -468,8 +476,8 @@ def test_generate_feedback_fuzz_guardrails() -> None:
 
 def test_feedback_guardrails_module_constant_has_required_keys() -> None:
     required = {
-        "strategy_pnl_min",
-        "strategy_pnl_max",
+        "strategy_cash_flow_min",
+        "strategy_cash_flow_max",
         "strategy_win_rate_min",
         "strategy_win_rate_max",
         "strategy_slippage_min",

@@ -237,9 +237,12 @@ def test_risk_decision_instantiation() -> None:
 
 def test_strategy_feedback_instantiation() -> None:
     sf = StrategyFeedback(
-        pnl=12.5, win_rate=0.62, avg_slippage=0.003, suggestion="raise_min_spread"
+        cash_flow=12.5,
+        win_rate=0.62,
+        avg_slippage=0.003,
+        suggestion="raise_min_spread",
     )
-    assert sf.pnl == 12.5
+    assert sf.cash_flow == 12.5
     assert sf.win_rate == 0.62
 
 
@@ -264,7 +267,9 @@ def test_connector_feedback_instantiation() -> None:
 
 
 def test_evaluation_feedback_instantiation() -> None:
-    sf = StrategyFeedback(pnl=1.0, win_rate=0.5, avg_slippage=0.001, suggestion="ok")
+    sf = StrategyFeedback(
+        cash_flow=1.0, win_rate=0.5, avg_slippage=0.001, suggestion="ok"
+    )
     rf = RiskFeedback(
         max_drawdown_hit=False, current_exposure=Decimal("1"), suggestion="ok"
     )
@@ -277,7 +282,7 @@ def test_evaluation_feedback_instantiation() -> None:
         connector_adjustments={"polymarket": cf},
     )
     assert fb.period == timedelta(hours=1)
-    assert fb.strategy_adjustments["arb"].pnl == 1.0
+    assert fb.strategy_adjustments["arb"].cash_flow == 1.0
     assert fb.connector_adjustments["polymarket"].api_error_rate == 0.0
 
 
@@ -285,13 +290,16 @@ def test_pnl_report_instantiation() -> None:
     r = PnLReport(
         start=datetime(2026, 4, 1, tzinfo=timezone.utc),
         end=datetime(2026, 4, 3, tzinfo=timezone.utc),
-        realized=Decimal("100.00"),
-        unrealized=Decimal("12.50"),
-        total=Decimal("112.50"),
+        cash_flow=Decimal("100.00"),
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        total=Decimal("100.00"),
         num_trades=4,
     )
-    assert r.realized == Decimal("100.00")
-    assert r.total == Decimal("112.50")
+    assert r.cash_flow == Decimal("100.00")
+    assert r.realized_pnl == Decimal("0")
+    assert r.unrealized_pnl == Decimal("0")
+    assert r.total == Decimal("100.00")
     assert r.num_trades == 4
 
 
@@ -303,13 +311,16 @@ def test_strategy_metrics_instantiation() -> None:
         win_rate=0.7,
         avg_slippage=0.002,
         avg_fill_latency_ms=45.0,
-        pnl=12.5,
+        cash_flow=12.5,
+        realized_pnl=0.0,
     )
     assert sm.strategy_name == "arb"
     assert sm.num_orders == 10
     assert sm.num_fills == 7
     assert sm.win_rate == 0.7
     assert sm.avg_fill_latency_ms == 45.0
+    assert sm.cash_flow == 12.5
+    assert sm.realized_pnl == 0.0
 
 
 def test_performance_report_instantiation() -> None:
@@ -320,14 +331,15 @@ def test_performance_report_instantiation() -> None:
         win_rate=1.0,
         avg_slippage=0.0,
         avg_fill_latency_ms=0.0,
-        pnl=1.0,
+        cash_flow=1.0,
+        realized_pnl=0.0,
     )
     pr = PerformanceReport(
         start=datetime(2026, 4, 1, tzinfo=timezone.utc),
         end=datetime(2026, 4, 2, tzinfo=timezone.utc),
         per_strategy={"arb": sm},
     )
-    assert pr.per_strategy["arb"].pnl == 1.0
+    assert pr.per_strategy["arb"].cash_flow == 1.0
     assert pr.start == datetime(2026, 4, 1, tzinfo=timezone.utc)
 
 
@@ -414,9 +426,9 @@ def test_performance_report_instantiation() -> None:
         ),
         (
             lambda: StrategyFeedback(
-                pnl=0.0, win_rate=0.0, avg_slippage=0.0, suggestion=""
+                cash_flow=0.0, win_rate=0.0, avg_slippage=0.0, suggestion=""
             ),
-            "pnl",
+            "cash_flow",
             1.0,
         ),
         (
@@ -439,12 +451,13 @@ def test_performance_report_instantiation() -> None:
             lambda: PnLReport(
                 start=datetime(2026, 1, 1, tzinfo=timezone.utc),
                 end=datetime(2026, 1, 2, tzinfo=timezone.utc),
-                realized=Decimal("0"),
-                unrealized=Decimal("0"),
+                cash_flow=Decimal("0"),
+                realized_pnl=Decimal("0"),
+                unrealized_pnl=Decimal("0"),
                 total=Decimal("0"),
                 num_trades=0,
             ),
-            "realized",
+            "cash_flow",
             Decimal("1"),
         ),
         (
@@ -455,7 +468,8 @@ def test_performance_report_instantiation() -> None:
                 win_rate=0.0,
                 avg_slippage=0.0,
                 avg_fill_latency_ms=0.0,
-                pnl=0.0,
+                cash_flow=0.0,
+                realized_pnl=0.0,
             ),
             "win_rate",
             1.0,
@@ -478,7 +492,7 @@ def test_model_is_frozen(make, attr, value) -> None:  # type: ignore[no-untyped-
 
 
 def test_evaluation_feedback_is_frozen() -> None:
-    sf = StrategyFeedback(pnl=0.0, win_rate=0.0, avg_slippage=0.0, suggestion="")
+    sf = StrategyFeedback(cash_flow=0.0, win_rate=0.0, avg_slippage=0.0, suggestion="")
     rf = RiskFeedback(
         max_drawdown_hit=False, current_exposure=Decimal("0"), suggestion=""
     )

@@ -49,6 +49,7 @@ from pms.models import (
 )
 from pms.protocols import (
     ConnectorProtocol,
+    CorrelationDetectorProtocol,
     ExecutorProtocol,
     FeedbackEngineProtocol,
     MetricsCollectorProtocol,
@@ -96,6 +97,7 @@ class TradingPipeline:
         risk_manager: RiskManagerProtocol,
         metrics: MetricsCollectorProtocol,
         feedback_engine: FeedbackEngineProtocol,
+        correlation_detector: CorrelationDetectorProtocol | None = None,
     ) -> None:
         self._connectors: list[ConnectorProtocol] = list(connectors)
         self._strategies: list[StrategyProtocol] = list(strategies)
@@ -103,6 +105,14 @@ class TradingPipeline:
         self._risk_manager = risk_manager
         self._metrics = metrics
         self._feedback_engine = feedback_engine
+        # Optional CP10 correlation detector. When set, the pipeline runs
+        # detection after sense and dispatches each ``CorrelationPair``
+        # to every strategy via ``on_correlation_found`` (review-loop fix
+        # f2 round 2). When None, behaviour is identical to the
+        # detector-less pipeline.
+        self._correlation_detector: CorrelationDetectorProtocol | None = (
+            correlation_detector
+        )
 
     # ------------------------------------------------------------------
     # Cycle entry point
@@ -133,6 +143,19 @@ class TradingPipeline:
         # 2. Synthesize price updates from fetched markets
         price_updates = self._synthesize_price_updates(markets)
 
+        # 2.5. CORRELATION DETECTION (optional, review-loop fix f2 r2)
+        # When a CorrelationDetector is wired, run it on the fetched
+        # markets and dispatch each pair to every strategy. The orders
+        # returned from ``on_correlation_found`` are merged into the
+        # proposed-orders pool below. Detector failures and strategy
+        # failures are isolated like the rest of the pipeline.
+        (
+            correlation_orders,
+            correlation_strategy_map,
+            correlation_errors,
+        ) = await self._run_correlation_detection(markets)
+        errors.extend(correlation_errors)
+
         # 3. STRATEGY
         (
             proposed_orders,
@@ -140,6 +163,12 @@ class TradingPipeline:
             strategy_errors,
         ) = await self._run_strategies(self._strategies, price_updates)
         errors.extend(strategy_errors)
+
+        # Merge correlation-derived orders into the price-update pool.
+        # Correlation orders are appended (not pre-pended) so the existing
+        # per-update emission order is preserved for the legacy tests.
+        proposed_orders.extend(correlation_orders)
+        order_to_strategy.update(correlation_strategy_map)
 
         if not proposed_orders:
             logger.info(
@@ -275,6 +304,59 @@ class TradingPipeline:
                     )
                 )
         return updates
+
+    async def _run_correlation_detection(
+        self, markets: list[Market]
+    ) -> tuple[list[Order], dict[str, str], list[str]]:
+        """Detect correlations and dispatch them to every strategy.
+
+        Review-loop fix f2 round 2: the CP10 ``CorrelationDetector`` was
+        previously unwired, leaving ``ArbitrageStrategy.on_correlation_found``
+        unreachable in production (the only path that fired in tests was
+        the cross-platform ``outcome_id`` equality check, which never
+        matches Polymarket vs. Kalshi IDs). Wiring the detector here is
+        the production seam.
+
+        Returns the union of orders emitted by every strategy, a
+        ``order_id -> strategy.name`` map for attribution, and any
+        captured error messages.
+        """
+        if self._correlation_detector is None:
+            return [], {}, []
+
+        errors: list[str] = []
+
+        try:
+            pairs = await self._correlation_detector.detect(markets)
+        except Exception as exc:  # noqa: BLE001 — pipeline contract
+            message = f"CorrelationDetector failed: {exc}"
+            logger.exception(message)
+            return [], {}, [message]
+
+        produced: list[Order] = []
+        attribution: dict[str, str] = {}
+
+        for pair in pairs:
+            for strategy in self._strategies:
+                try:
+                    orders = await strategy.on_correlation_found(pair)
+                except Exception as exc:  # noqa: BLE001 — pipeline contract
+                    message = (
+                        f"Strategy {strategy.name} on_correlation_found "
+                        f"failed: {exc}"
+                    )
+                    logger.exception(message)
+                    errors.append(message)
+                    continue
+
+                if not orders:
+                    continue
+
+                for order in orders:
+                    produced.append(order)
+                    attribution[order.order_id] = strategy.name
+
+        return produced, attribution, errors
 
     async def _run_strategies(
         self,

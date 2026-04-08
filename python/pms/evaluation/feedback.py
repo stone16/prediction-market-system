@@ -47,9 +47,14 @@ from pms.models import (
 #: Hard bounds enforced on every value in an :class:`EvaluationFeedback`
 #: packet. Keys use an explicit ``<component>_<field>_<min|max>`` scheme so
 #: lookups are self-documenting.
+#:
+#: Review-loop fix f11 (round 2): the ``strategy_pnl_*`` keys are renamed
+#: to ``strategy_cash_flow_*`` to match the new
+#: :attr:`StrategyFeedback.cash_flow` field — the prior ``pnl`` label was
+#: misleading because v1 does not yet match cost basis.
 FEEDBACK_GUARDRAILS: Final[dict[str, Any]] = {
-    "strategy_pnl_min": -1_000_000.0,
-    "strategy_pnl_max": 1_000_000.0,
+    "strategy_cash_flow_min": -1_000_000.0,
+    "strategy_cash_flow_max": 1_000_000.0,
     "strategy_win_rate_min": 0.0,
     "strategy_win_rate_max": 1.0,
     "strategy_slippage_min": 0.0,
@@ -84,10 +89,10 @@ class FeedbackEngine:
 
         for name, sm in metrics.per_strategy.items():
             strategy_adjustments[name] = StrategyFeedback(
-                pnl=_clamp_float(
-                    sm.pnl,
-                    FEEDBACK_GUARDRAILS["strategy_pnl_min"],
-                    FEEDBACK_GUARDRAILS["strategy_pnl_max"],
+                cash_flow=_clamp_float(
+                    sm.cash_flow,
+                    FEEDBACK_GUARDRAILS["strategy_cash_flow_min"],
+                    FEEDBACK_GUARDRAILS["strategy_cash_flow_max"],
                 ),
                 win_rate=_clamp_float(
                     sm.win_rate,

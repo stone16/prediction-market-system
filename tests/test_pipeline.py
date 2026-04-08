@@ -43,6 +43,7 @@ import pytest
 
 from pms.models import (
     ConnectorFeedback,
+    CorrelationPair,
     EvaluationFeedback,
     Market,
     Order,
@@ -119,7 +120,10 @@ def _sample_feedback() -> EvaluationFeedback:
         period=timedelta(minutes=5),
         strategy_adjustments={
             "mock": StrategyFeedback(
-                pnl=0.0, win_rate=0.0, avg_slippage=0.0, suggestion="hold"
+                cash_flow=0.0,
+                win_rate=0.0,
+                avg_slippage=0.0,
+                suggestion="hold",
             )
         },
         risk_adjustments=RiskFeedback(
@@ -343,8 +347,9 @@ class MockMetrics:
         return PnLReport(
             start=since,
             end=since,
-            realized=Decimal("0"),
-            unrealized=Decimal("0"),
+            cash_flow=Decimal("0"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
             total=Decimal("0"),
             num_trades=0,
         )
@@ -558,6 +563,212 @@ async def test_run_cycle_risk_size_adjustment_is_applied() -> None:
     # Both submitted orders have the adjusted size
     for submitted in executor.submitted_orders:
         assert submitted.size == Decimal("3")
+
+
+class _MockCorrelationDetector:
+    """Returns a preset list of CorrelationPair from ``detect``."""
+
+    def __init__(
+        self,
+        pairs: list[CorrelationPair] | None = None,
+        raise_on_detect: bool = False,
+    ) -> None:
+        self._pairs = pairs or []
+        self._raise = raise_on_detect
+        self.detect_calls = 0
+
+    async def detect(self, markets: list[Market]) -> list[CorrelationPair]:
+        self.detect_calls += 1
+        if self._raise:
+            raise RuntimeError("simulated detector failure")
+        return list(self._pairs)
+
+
+class _CorrelationOrderStrategy:
+    """Returns a fixed order from ``on_correlation_found`` (and nothing else)."""
+
+    name = "corr-mock"
+
+    def __init__(self, order: Order) -> None:
+        self._order = order
+        self.on_correlation_found_calls = 0
+        self.on_price_update_calls = 0
+
+    async def on_price_update(
+        self, update: PriceUpdate
+    ) -> list[Order] | None:
+        self.on_price_update_calls += 1
+        return None
+
+    async def on_correlation_found(
+        self, pair: CorrelationPair
+    ) -> list[Order] | None:
+        self.on_correlation_found_calls += 1
+        return [self._order]
+
+    async def on_feedback(self, feedback: EvaluationFeedback) -> None:
+        return None
+
+
+def _correlation_pair_for_markets() -> CorrelationPair:
+    a = _sample_market(platform="polymarket", market_id="m-pm")
+    b = _sample_market(platform="kalshi", market_id="m-kalshi")
+    return CorrelationPair(
+        market_a=a,
+        market_b=b,
+        similarity_score=0.9,
+        relation_type="overlapping",
+        relation_detail="",
+        arbitrage_opportunity=None,
+    )
+
+
+async def test_pipeline_invokes_correlation_detector_when_configured() -> None:
+    """Review-loop fix f2 (round 2): the pipeline must run the
+    CorrelationDetector after sense and dispatch each pair to every
+    strategy via ``on_correlation_found``. Resulting orders must reach
+    the executor and be attributed to the emitting strategy.
+    """
+    connector = MockConnector(markets=[_sample_market()])
+    corr_pair = _correlation_pair_for_markets()
+    detector = _MockCorrelationDetector(pairs=[corr_pair])
+    corr_order = Order(
+        order_id="corr-o-1",
+        platform="kalshi",
+        market_id="m-kalshi",
+        outcome_id="yes",
+        side="buy",
+        price=Decimal("0.40"),
+        size=Decimal("5"),
+        order_type="limit",
+    )
+    strategy = _CorrelationOrderStrategy(order=corr_order)
+    executor = SpyExecutor()
+    risk = ApproveAllRisk()
+    metrics = MetricsCollector()
+    feedback_engine = MockFeedbackEngine()
+
+    pipeline = TradingPipeline(
+        connectors=[connector],
+        strategies=[strategy],
+        executor=executor,
+        risk_manager=risk,
+        metrics=metrics,
+        feedback_engine=feedback_engine,
+        correlation_detector=detector,
+    )
+
+    report = await pipeline.run_cycle()
+
+    assert detector.detect_calls == 1
+    assert strategy.on_correlation_found_calls == 1
+    # Order from on_correlation_found made it through risk + execute.
+    assert any(
+        o.order_id == "corr-o-1" for o in executor.submitted_orders
+    )
+    assert report.orders_proposed >= 1
+    assert report.orders_submitted >= 1
+    # Strategy attribution must reach the metrics collector.
+    perf = metrics.get_performance_metrics()
+    assert "corr-mock" in perf.per_strategy
+    assert "unknown" not in perf.per_strategy
+
+
+async def test_pipeline_without_correlation_detector_still_works() -> None:
+    """Existing pipelines (no detector configured) must keep working unchanged."""
+    connector = MockConnector(markets=[_sample_market()])
+    strategy = MockStrategy(orders_to_emit=[_sample_order("o-no-detector")])
+    executor = SpyExecutor()
+    risk = ApproveAllRisk()
+    metrics = MockMetrics()
+    feedback_engine = MockFeedbackEngine()
+
+    pipeline = TradingPipeline(
+        connectors=[connector],
+        strategies=[strategy],
+        executor=executor,
+        risk_manager=risk,
+        metrics=metrics,
+        feedback_engine=feedback_engine,
+        # correlation_detector intentionally omitted
+    )
+
+    report = await pipeline.run_cycle()
+
+    assert report.orders_submitted == 2  # 2 outcomes -> 2 orders
+    assert report.errors == ()
+
+
+async def test_correlation_detector_failure_does_not_crash_cycle() -> None:
+    """A detector that raises must be caught and recorded, not propagated."""
+    connector = MockConnector(markets=[_sample_market()])
+    detector = _MockCorrelationDetector(raise_on_detect=True)
+    strategy = MockStrategy()  # emits nothing
+    executor = SpyExecutor()
+    risk = ApproveAllRisk()
+    metrics = MockMetrics()
+    feedback_engine = MockFeedbackEngine()
+
+    pipeline = TradingPipeline(
+        connectors=[connector],
+        strategies=[strategy],
+        executor=executor,
+        risk_manager=risk,
+        metrics=metrics,
+        feedback_engine=feedback_engine,
+        correlation_detector=detector,
+    )
+
+    report = await pipeline.run_cycle()
+
+    assert isinstance(report, CycleReport)
+    assert detector.detect_calls == 1
+    assert any("CorrelationDetector" in e for e in report.errors)
+
+
+async def test_correlation_detector_strategy_failure_is_isolated() -> None:
+    """A strategy that raises in ``on_correlation_found`` must not crash
+    the cycle — it should be recorded in ``errors`` and the cycle should
+    continue (no orders, but no crash)."""
+
+    class _RaisingCorrStrategy:
+        name = "raises"
+
+        async def on_price_update(
+            self, update: PriceUpdate
+        ) -> list[Order] | None:
+            return None
+
+        async def on_correlation_found(
+            self, pair: CorrelationPair
+        ) -> list[Order] | None:
+            raise RuntimeError("kaboom")
+
+        async def on_feedback(self, feedback: EvaluationFeedback) -> None:
+            return None
+
+    connector = MockConnector(markets=[_sample_market()])
+    detector = _MockCorrelationDetector(pairs=[_correlation_pair_for_markets()])
+    strategy = _RaisingCorrStrategy()
+    executor = SpyExecutor()
+    risk = ApproveAllRisk()
+    metrics = MockMetrics()
+    feedback_engine = MockFeedbackEngine()
+
+    pipeline = TradingPipeline(
+        connectors=[connector],
+        strategies=[strategy],  # type: ignore[list-item]
+        executor=executor,
+        risk_manager=risk,
+        metrics=metrics,
+        feedback_engine=feedback_engine,
+        correlation_detector=detector,
+    )
+
+    report = await pipeline.run_cycle()
+    assert any("on_correlation_found" in e for e in report.errors)
+    # No orders submitted because the strategy raised before producing any.
+    assert report.orders_submitted == 0
 
 
 async def test_run_cycle_stamps_strategy_attribution_on_metrics() -> None:

@@ -228,6 +228,130 @@ async def test_get_active_markets_end_date_is_timezone_aware() -> None:
         assert m.end_date.utcoffset() is not None
 
 
+async def test_get_active_markets_follows_pagination_cursor() -> None:
+    """Review-loop fix f6 (round 2): the connector must follow Kalshi's
+    ``cursor`` field across pages until exhaustion.
+
+    The mock transport responds with a 2-page payload:
+
+    - Page 1: 2 markets, ``cursor="page-2"``
+    - Page 2: 1 market, ``cursor=""`` (terminator)
+
+    The connector must hit the API twice, propagate the cursor, and
+    return all 3 markets concatenated.
+    """
+    page_1 = {
+        "markets": [
+            {
+                "ticker": "M-1",
+                "title": "Market 1",
+                "yes_bid": 50,
+                "no_bid": 50,
+                "status": "active",
+                "close_time": "2030-01-01T00:00:00Z",
+                "event_ticker": "EV1",
+            },
+            {
+                "ticker": "M-2",
+                "title": "Market 2",
+                "yes_bid": 30,
+                "no_bid": 70,
+                "status": "active",
+                "close_time": "2030-01-01T00:00:00Z",
+                "event_ticker": "EV1",
+            },
+        ],
+        "cursor": "page-2",
+    }
+    page_2 = {
+        "markets": [
+            {
+                "ticker": "M-3",
+                "title": "Market 3",
+                "yes_bid": 25,
+                "no_bid": 75,
+                "status": "active",
+                "close_time": "2030-01-01T00:00:00Z",
+                "event_ticker": "EV1",
+            }
+        ],
+        "cursor": "",
+    }
+
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        cursor = request.url.params.get("cursor")
+        if cursor in (None, ""):
+            return httpx.Response(200, json=page_1)
+        if cursor == "page-2":
+            return httpx.Response(200, json=page_2)
+        raise AssertionError(f"unexpected cursor {cursor!r}")
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(
+        transport=transport,
+        base_url="https://api.elections.kalshi.com/trade-api/v2",
+    )
+    conn = KalshiConnector(http_client=client)
+    try:
+        markets = await conn.get_active_markets()
+    finally:
+        await conn.close()
+
+    assert len(captured) == 2
+    # The second request must include the cursor query param.
+    assert captured[1].url.params.get("cursor") == "page-2"
+    assert len(markets) == 3
+    tickers = [m.market_id for m in markets]
+    assert tickers == ["M-1", "M-2", "M-3"]
+
+
+async def test_get_active_markets_respects_max_pages_cap() -> None:
+    """An infinite-cursor mock must not loop forever — the connector
+    must cap the number of pages it follows.
+    """
+    payload_template = {
+        "markets": [
+            {
+                "ticker": "PAGE-MKT",
+                "title": "Recurring market",
+                "yes_bid": 50,
+                "no_bid": 50,
+                "status": "active",
+                "close_time": "2030-01-01T00:00:00Z",
+                "event_ticker": "EV1",
+            }
+        ],
+        # Pretend the cursor never terminates: it always points at the
+        # next page.
+        "cursor": "always-more",
+    }
+
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=payload_template)
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(
+        transport=transport,
+        base_url="https://api.elections.kalshi.com/trade-api/v2",
+    )
+    conn = KalshiConnector(http_client=client)
+    try:
+        markets = await conn.get_active_markets()
+    finally:
+        await conn.close()
+
+    # The connector must stop somewhere — exact value tested via the
+    # public ``MAX_PAGES`` constant on the connector.
+    assert len(captured) == KalshiConnector.MAX_PAGES
+    assert len(markets) == KalshiConnector.MAX_PAGES
+
+
 async def test_get_active_markets_sends_status_open_query_param() -> None:
     """The connector must request only open/active markets from Kalshi."""
     payload = _load_json(MARKETS_FIXTURE)

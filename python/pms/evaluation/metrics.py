@@ -18,40 +18,41 @@ Design notes
   pipeline. ``avg_fill_latency_ms`` is therefore always ``0.0`` for v1;
   the field exists so the shape is stable for a future CP where the
   pipeline timestamps submit/fill.
-* **Unrealized P&L**: v1 has no mark-to-market loop (would require
-  position bookkeeping + live mid-prices). ``unrealized`` is always
-  ``Decimal("0")``. ``total = realized + unrealized`` is preserved so
-  consumers never have to re-derive it.
+* **Realized + unrealized P&L**: v1 has no mark-to-market loop and no
+  cost-basis ledger, so :attr:`PnLReport.realized_pnl` and
+  :attr:`PnLReport.unrealized_pnl` are always ``Decimal("0")``.
+  ``total = cash_flow + realized_pnl + unrealized_pnl`` is preserved so
+  consumers never have to re-derive it (and reduces to ``cash_flow`` in
+  v1).
 * **Win rate**: v1 uses the fraction of *filled* orders as a proxy for
   win rate. A true win rate needs round-trip position P&L tracking, which
   is out of scope for CP09.
 
-P&L Accounting Model (v1 — review-loop fix f4)
-----------------------------------------------
+P&L Accounting Model (v1 — review-loop fix f11, round 2)
+--------------------------------------------------------
 
-``get_pnl()`` and the per-strategy ``pnl`` field both report **signed
-cash flow**, not realized profit-and-loss against cost basis. Concretely:
+``get_pnl()`` populates :attr:`PnLReport.cash_flow` with **signed cash
+flow**, not realized profit-and-loss against cost basis. Concretely:
 
 - A buy fill is a negative cash flow (cash leaves the account).
 - A sell fill is a positive cash flow (cash enters the account).
-- The ``realized`` field of :class:`pms.models.PnLReport` is the **sum**
-  of these signed flows over the requested window.
+- ``cash_flow`` is the **sum** of these signed flows over the requested
+  window.
 
-This means a snapshot taken after a single buy will show a "realized
-loss" equal to the cost of the position, and the matching sell on a
-later snapshot will show a "realized gain" of the proceeds. **In
+This means a snapshot taken after a single buy will show a "negative
+cash flow" equal to the cost of the position, and the matching sell on
+a later snapshot will show a "positive cash flow" of the proceeds. **In
 isolation, neither number is the trading P&L of the round trip.** Over
 the full lifecycle of every position the cash flows do net to true
 realized P&L, but at any intermediate point the value is biased by
 half-open trades.
 
-The collector preserves the ``realized`` field name on
-:class:`PnLReport` so the shape is stable for the post-v1 ledger
-checkpoint, when ``_signed_cash_flow`` will be replaced with cost-basis
-matching against a positions ledger. That ledger is documented in the
-spec under "Out of Scope — Live positions tracking"; until it lands,
-treat ``realized`` as a cash-flow proxy and consult the underlying
-``num_trades`` and per-strategy slippage for richer insight.
+Round 1 of the review loop only added a docstring warning to the
+``realized`` field. Round 2 fixes the actual data: the field is renamed
+to ``cash_flow`` so its name no longer lies. The new ``realized_pnl``
+field stays at ``0`` until a future checkpoint adds cost-basis matching
+against a positions ledger (documented in the spec under "Out of Scope
+— Live positions tracking").
 """
 
 from __future__ import annotations
@@ -119,26 +120,21 @@ class MetricsCollector:
     def get_pnl(self, since: datetime) -> PnLReport:
         """Compute the v1 cash-flow proxy for realized + unrealized P&L.
 
-        Only ``filled`` order records contribute. ``unrealized`` is
-        always zero in v1 (see module docstring).
+        Only ``filled`` order records contribute.
+        :attr:`PnLReport.realized_pnl` and
+        :attr:`PnLReport.unrealized_pnl` are always zero in v1 (see
+        module docstring); :attr:`PnLReport.cash_flow` carries the
+        signed-cash-flow proxy.
 
-        **Important** (review-loop fix f4): the ``realized`` field on the
-        returned :class:`PnLReport` is the sum of signed *cash flows*
-        (``-price*size`` for buys, ``+price*size`` for sells), not the
-        cost-basis-matched profit of closed trades. A snapshot taken
-        between a buy and its closing sell will therefore report a
-        misleading number — see "P&L Accounting Model" in the module
-        docstring for the rationale and the deferred-ledger plan.
+        Review-loop fix f11 (round 2): the field on the returned
+        :class:`PnLReport` is now named ``cash_flow`` instead of
+        ``realized``, so the field name no longer lies about its
+        semantics. ``realized_pnl`` stays at ``Decimal("0")`` until
+        cost-basis tracking lands in a post-v1 checkpoint.
         """
         end = datetime.now(UTC)
         relevant = [r for r in self._order_records if r.recorded_at >= since]
 
-        # ``cash_flow`` is the variable name we *want* (review-loop fix
-        # f4); we still report it on ``PnLReport.realized`` to keep the
-        # field name stable for the post-v1 cost-basis upgrade. Renaming
-        # the field would break the model contract for callers; renaming
-        # the local variable here is documentation that this number is
-        # not yet "true realized P&L".
         cash_flow = Decimal("0")
         num_trades = 0
         for record in relevant:
@@ -147,14 +143,16 @@ class MetricsCollector:
             num_trades += 1
             cash_flow += _signed_cash_flow(record.order, record.result)
 
-        unrealized = Decimal("0")
-        total = cash_flow + unrealized
+        realized_pnl = Decimal("0")
+        unrealized_pnl = Decimal("0")
+        total = cash_flow + realized_pnl + unrealized_pnl
 
         return PnLReport(
             start=since,
             end=end,
-            realized=cash_flow,
-            unrealized=unrealized,
+            cash_flow=cash_flow,
+            realized_pnl=realized_pnl,
+            unrealized_pnl=unrealized_pnl,
             total=total,
             num_trades=num_trades,
         )
@@ -212,11 +210,11 @@ def _compute_strategy_metrics(
     # Average slippage = |filled_price - order.price| / order.price for
     # every filled record (ignoring zero-price divide).
     slippage_samples: list[float] = []
-    pnl_total = Decimal("0")
+    cash_flow_total = Decimal("0")
     for record in records:
         if record.result.status != "filled":
             continue
-        pnl_total += _signed_cash_flow(record.order, record.result)
+        cash_flow_total += _signed_cash_flow(record.order, record.result)
         if record.order.price > 0:
             diff = abs(record.result.filled_price - record.order.price)
             slippage_samples.append(float(diff / record.order.price))
@@ -234,5 +232,7 @@ def _compute_strategy_metrics(
         win_rate=win_rate,
         avg_slippage=avg_slippage,
         avg_fill_latency_ms=0.0,
-        pnl=float(pnl_total),
+        cash_flow=float(cash_flow_total),
+        # v1 has no cost-basis ledger — see module docstring.
+        realized_pnl=0.0,
     )

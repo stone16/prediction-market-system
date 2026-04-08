@@ -9,9 +9,16 @@ from decimal import Decimal
 
 @dataclass(frozen=True)
 class StrategyFeedback:
-    """Per-strategy performance summary and tuning suggestion."""
+    """Per-strategy performance summary and tuning suggestion.
 
-    pnl: float
+    ``cash_flow`` is the signed-cash-flow proxy from
+    :class:`pms.models.StrategyMetrics` (review-loop fix f11). The field
+    was previously named ``pnl``, which was misleading because v1 has
+    no cost-basis tracking. The new name matches the upstream
+    ``StrategyMetrics.cash_flow`` field.
+    """
+
+    cash_flow: float
     win_rate: float
     avg_slippage: float
     suggestion: str

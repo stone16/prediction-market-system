@@ -13,6 +13,28 @@ It enforces two independent caps on every candidate order:
 feedback engine: drawdown hits tighten limits, ``"relax"`` suggestions
 loosen them. Every mutation flows through :func:`apply_guardrail` so the
 floor/ceiling bounds defined in :data:`GUARDRAILS` are never crossed.
+
+Sell-side exposure model (review-loop fix f10, round 2)
+-------------------------------------------------------
+
+The first attempt at fixing f1 unconditionally subtracted the sell
+notional from current exposure and floored at zero. That was wrong in
+two ways:
+
+1. A naked sell with no held inventory was approved as zero-risk even
+   though it opens a fresh short position.
+2. A partial sell of an over-limit long was rejected as if it were
+   adding new exposure, even though it strictly reduces risk.
+
+The correct, inventory-aware model splits a sell into a covered portion
+(closes part of the held long, reduces exposure by the proportional cost
+basis) and a remainder (opens a new short, adds exposure at order
+price). On top of that, any order whose post-trade per-market notional
+is *strictly less than* the current notional is always approved — risk
+reductions never need a cap check.
+
+Buys keep the original behaviour: ``order.size * order.price`` is added
+to per-market and total notionals.
 """
 
 from __future__ import annotations
@@ -55,44 +77,55 @@ class RiskManager:
     ) -> RiskDecision:
         """Approve, reject, or size-adjust ``order`` given current positions.
 
-        Buy-vs-sell exposure model (review-loop fix f1)
-        ------------------------------------------------
-        v1 distinguishes the side of an order before adding it to the cap
-        check. A buy increases the per-market and total notional caps by
-        ``order.price * order.size``. A sell **reduces** them by the same
-        amount, floored at zero (sells against an empty position have no
-        net impact rather than pushing exposure negative).
+        See the module docstring for the inventory-aware sell model
+        (review-loop fix f10, round 2). The pseudo-code below summarises
+        the algorithm:
 
-        This is intentionally a simplified model: it assumes "no short
-        positions", which is true for the v1 strategies (arbitrage emits
-        pairs that close out, never naked shorts). A future checkpoint with
-        a real positions ledger will replace this with cost-basis tracking
-        and signed delta accounting; the current behaviour is documented in
-        the spec under "Out of Scope — Live positions tracking".
+        1. Compute per-market notional and the matching held size/value
+           on the *exact* outcome the order targets (a sell only closes
+           inventory it actually owns).
+        2. Compute ``exposure_delta`` for the order:
+              buy:  +order.size * order.price
+              sell: covered = min(held_size, order.size)
+                    avg_basis = held_value / held_size  (if any)
+                    -covered * avg_basis
+                    + (order.size - covered) * order.price
+        3. ``new_market_notional = current_market_notional + market_delta``
+           (where ``market_delta`` is the part of ``exposure_delta`` that
+           lives on this market, i.e. the same value).
+        4. If ``new_market_notional <= current_market_notional``, the
+           order strictly reduces risk on this market — approve
+           unconditionally (no cap check).
+        5. Otherwise, run the per-market cap check (rejecting or partial-
+           fitting), then re-validate against total exposure.
         """
-        order_notional = order.price * order.size
-        is_sell = order.side == "sell"
-
-        # Rule 1 — per-market cap, keyed on (platform, market_id).
         market_key = (order.platform, order.market_id)
-        current_market_notional = sum(
-            (
-                p.size * p.avg_entry_price
-                for p in positions
-                if (p.platform, p.market_id) == market_key
-            ),
+        current_market_notional = self._sum_notional_for_key(
+            positions, market_key
+        )
+        current_total_notional = sum(
+            (p.size * p.avg_entry_price for p in positions),
             start=Decimal("0"),
         )
-        if is_sell:
-            # Sell reduces market notional, floored at zero. A naked sell
-            # (no held position) yields a no-op delta rather than going
-            # negative, matching the v1 "no shorts" simplification.
-            new_market_notional = max(
-                Decimal("0"), current_market_notional - order_notional
-            )
-        else:
-            new_market_notional = current_market_notional + order_notional
 
+        exposure_delta = self._compute_exposure_delta(order, positions)
+        new_market_notional = current_market_notional + exposure_delta
+        new_total_notional = current_total_notional + exposure_delta
+
+        # Strictly-reducing orders are always approved, even if the
+        # current per-market notional is above the cap (e.g. because the
+        # cap was tightened after the position was opened).
+        if new_market_notional < current_market_notional:
+            return RiskDecision(
+                approved=True,
+                reason="strictly_reducing",
+                adjusted_size=None,
+            )
+
+        # Per-market cap check (only fires when the order INCREASES
+        # exposure on this market — sells with covered_only<order.size
+        # can also land here when the short remainder pushes new notional
+        # above current).
         if new_market_notional > self._max_position_per_market:
             remaining = self._max_position_per_market - current_market_notional
             if remaining <= Decimal("0"):
@@ -104,20 +137,14 @@ class RiskManager:
                     ),
                     adjusted_size=None,
                 )
-            # Partial room against the per-market cap: offer a reduced size
-            # that exactly fits. (Sells never reach this branch because
-            # ``new_market_notional`` for a sell is always ``<=
-            # current_market_notional <= cap``.)
+            # Partial room: shrink the order to exactly fit. We compute
+            # the shrink against ``order.price`` because the unconverted
+            # portion of an over-cap order is the new (buy or short)
+            # exposure being added at order price, which is the same
+            # whether the order is a buy or a sell.
             adjusted_size = remaining / order.price
-
-            # Re-validate the reduced order against the total exposure cap.
-            # Otherwise a per-market shrink could still push total notional
-            # over ``max_total_exposure`` (CP08 iter-2 fix).
             adjusted_notional = adjusted_size * order.price
-            current_total_notional = sum(
-                (p.size * p.avg_entry_price for p in positions),
-                start=Decimal("0"),
-            )
+
             if (
                 current_total_notional + adjusted_notional
                 > self._max_total_exposure
@@ -149,18 +176,7 @@ class RiskManager:
                 adjusted_size=adjusted_size,
             )
 
-        # Rule 2 — total exposure cap, summed across every position.
-        current_total_notional = sum(
-            (p.size * p.avg_entry_price for p in positions),
-            start=Decimal("0"),
-        )
-        if is_sell:
-            new_total_notional = max(
-                Decimal("0"), current_total_notional - order_notional
-            )
-        else:
-            new_total_notional = current_total_notional + order_notional
-
+        # Per-market cap is fine — re-check total exposure.
         if new_total_notional > self._max_total_exposure:
             return RiskDecision(
                 approved=False,
@@ -175,6 +191,65 @@ class RiskManager:
             reason="within_limits",
             adjusted_size=None,
         )
+
+    # ------------------------------------------------------------------
+    # Inventory-aware exposure helpers (review-loop fix f10 round 2)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sum_notional_for_key(
+        positions: Sequence[Position], market_key: tuple[str, str]
+    ) -> Decimal:
+        return sum(
+            (
+                p.size * p.avg_entry_price
+                for p in positions
+                if (p.platform, p.market_id) == market_key
+            ),
+            start=Decimal("0"),
+        )
+
+    @staticmethod
+    def _compute_exposure_delta(
+        order: Order, positions: Sequence[Position]
+    ) -> Decimal:
+        """Return the change in exposure notional if ``order`` fills.
+
+        Buys add ``order.size * order.price``. Sells split into a
+        covered portion (closes part of the long on the targeted
+        outcome at proportional cost basis) and a short remainder
+        (opens new short exposure at order price).
+        """
+        if order.side == "buy":
+            return order.price * order.size
+
+        # Sell: walk only positions on the EXACT outcome being sold.
+        held_size = Decimal("0")
+        held_value = Decimal("0")
+        for p in positions:
+            if (
+                p.platform == order.platform
+                and p.market_id == order.market_id
+                and p.outcome_id == order.outcome_id
+            ):
+                held_size += p.size
+                held_value += p.size * p.avg_entry_price
+
+        if held_size <= Decimal("0"):
+            # Naked short: every share is fresh exposure at order price.
+            return order.price * order.size
+
+        if held_size >= order.size:
+            # Fully covered: reduce exposure by the proportional cost basis.
+            avg_basis = held_value / held_size
+            return -(order.size * avg_basis)
+
+        # Partially covered: close the held portion, open a short for the
+        # remainder.
+        avg_basis = held_value / held_size
+        reduction = -(held_size * avg_basis)
+        new_short = (order.size - held_size) * order.price
+        return reduction + new_short
 
     # ------------------------------------------------------------------
     # Feedback-driven limit updates

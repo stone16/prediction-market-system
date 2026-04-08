@@ -113,7 +113,7 @@ def _empty_risk_feedback() -> RiskFeedback:
 def _feedback_with_strategy(
     name: str,
     *,
-    pnl: float = 0.0,
+    cash_flow: float = 0.0,
     win_rate: float = 1.0,
     avg_slippage: float = 0.0,
     suggestion: str = "",
@@ -123,7 +123,7 @@ def _feedback_with_strategy(
         period=timedelta(minutes=5),
         strategy_adjustments={
             name: StrategyFeedback(
-                pnl=pnl,
+                cash_flow=cash_flow,
                 win_rate=win_rate,
                 avg_slippage=avg_slippage,
                 suggestion=suggestion,
@@ -387,11 +387,11 @@ async def test_subset_paired_correlation_id() -> None:
 
 @pytest.mark.asyncio
 async def test_feedback_raises_spread_on_poor_performance() -> None:
-    """win_rate < 0.4 AND pnl < 0 => min_spread *= 1.5."""
+    """win_rate < 0.4 AND cash_flow < 0 => min_spread *= 1.5."""
     strategy = ArbitrageStrategy(min_spread=Decimal("0.02"))
     feedback = _feedback_with_strategy(
         strategy.name,
-        pnl=-100.0,
+        cash_flow=-100.0,
         win_rate=0.2,
         avg_slippage=0.0,
     )
@@ -407,7 +407,7 @@ async def test_feedback_raises_spread_on_high_slippage() -> None:
     strategy = ArbitrageStrategy(min_spread=Decimal("0.02"))
     feedback = _feedback_with_strategy(
         strategy.name,
-        pnl=50.0,
+        cash_flow=50.0,
         win_rate=0.8,
         avg_slippage=0.02,
     )
@@ -423,7 +423,7 @@ async def test_feedback_respects_ceiling_guardrail() -> None:
     strategy = ArbitrageStrategy(min_spread=Decimal("0.15"))
     feedback = _feedback_with_strategy(
         strategy.name,
-        pnl=-500.0,
+        cash_flow=-500.0,
         win_rate=0.1,
         avg_slippage=0.0,
     )
@@ -440,7 +440,7 @@ async def test_feedback_no_op_for_irrelevant_strategy_name() -> None:
     strategy = ArbitrageStrategy(min_spread=Decimal("0.02"))
     feedback = _feedback_with_strategy(
         "other_strategy",
-        pnl=-100.0,
+        cash_flow=-100.0,
         win_rate=0.1,
         avg_slippage=0.5,
     )
@@ -490,3 +490,117 @@ def test_protocol_compat() -> None:
     """ArbitrageStrategy satisfies StrategyProtocol at runtime."""
     strategy = ArbitrageStrategy()
     assert isinstance(strategy, StrategyProtocol)
+
+
+# ---------------------------------------------------------------------------
+# 5. Opportunity deduplication (review-loop f9 round 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_arbitrage_does_not_re_emit_same_cross_platform_opportunity() -> None:
+    """Review-loop fix f9 (round 2): a cross-platform opportunity must
+    only emit one paired order while it remains outstanding.
+
+    Construction: feed the same PM/Kalshi pair into the strategy twice
+    in a row. The first call must emit the order pair; the second call
+    must return ``None`` (or an empty list) because the opportunity is
+    still tracked.
+    """
+    strategy = ArbitrageStrategy(
+        min_spread=Decimal("0.02"),
+        max_position_size=Decimal("100"),
+    )
+
+    pm = _price_update("polymarket", bid=Decimal("0.50"), ask=Decimal("0.52"))
+    kalshi = _price_update("kalshi", bid=Decimal("0.58"), ask=Decimal("0.60"))
+
+    # Seed both caches with one tick each.
+    await strategy.on_price_update(pm)
+    first = await strategy.on_price_update(kalshi)
+    assert first is not None
+    assert len(first) == 2
+
+    # Same opportunity, fresh tick — must NOT re-emit.
+    second = await strategy.on_price_update(kalshi)
+    assert second is None or len(second) == 0
+    # Paired-orders ledger only contains the first emission.
+    assert len(strategy.get_paired_orders()) == 1
+
+
+@pytest.mark.asyncio
+async def test_arbitrage_does_not_re_emit_same_correlation_pair() -> None:
+    """Calling ``on_correlation_found`` twice with the same pair must
+    only emit orders once."""
+    strategy = ArbitrageStrategy(min_spread=Decimal("0.02"))
+
+    market_a = _market("polymarket", "subset-market", yes_price=Decimal("0.70"))
+    market_b = _market("kalshi", "superset-market", yes_price=Decimal("0.50"))
+
+    pair = CorrelationPair(
+        market_a=market_a,
+        market_b=market_b,
+        similarity_score=0.9,
+        relation_type="subset",
+        relation_detail="A is a subset of B",
+        arbitrage_opportunity=Decimal("0.20"),
+    )
+
+    first = await strategy.on_correlation_found(pair)
+    assert first is not None and len(first) == 2
+
+    second = await strategy.on_correlation_found(pair)
+    assert second is None or len(second) == 0
+    assert len(strategy.get_paired_orders()) == 1
+
+
+@pytest.mark.asyncio
+async def test_arbitrage_different_opportunities_are_tracked_separately() -> None:
+    """Two distinct cross-platform opportunities must each emit one
+    paired order — deduplication is per-opportunity, not global."""
+    strategy = ArbitrageStrategy(
+        min_spread=Decimal("0.02"),
+        max_position_size=Decimal("100"),
+    )
+
+    pm_a = _price_update(
+        "polymarket",
+        bid=Decimal("0.50"),
+        ask=Decimal("0.52"),
+        market_id="m-a",
+        outcome_id="yes-a",
+    )
+    kalshi_a = _price_update(
+        "kalshi",
+        bid=Decimal("0.58"),
+        ask=Decimal("0.60"),
+        market_id="m-a",
+        outcome_id="yes-a",
+    )
+    pm_b = _price_update(
+        "polymarket",
+        bid=Decimal("0.30"),
+        ask=Decimal("0.32"),
+        market_id="m-b",
+        outcome_id="yes-b",
+    )
+    kalshi_b = _price_update(
+        "kalshi",
+        bid=Decimal("0.40"),
+        ask=Decimal("0.42"),
+        market_id="m-b",
+        outcome_id="yes-b",
+    )
+
+    await strategy.on_price_update(pm_a)
+    first = await strategy.on_price_update(kalshi_a)
+    assert first is not None
+    assert len(first) == 2
+
+    await strategy.on_price_update(pm_b)
+    second = await strategy.on_price_update(kalshi_b)
+    assert second is not None
+    assert len(second) == 2
+
+    # Both opportunities tracked, neither de-duplicated.
+    assert len(strategy.get_paired_orders()) == 2
