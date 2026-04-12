@@ -2,8 +2,21 @@
 
 **Purpose**: Let any agent (Claude Code, Codex, etc.) on any machine pick up where the previous session left off and continue building the prediction market system step-by-step.
 
-**Last updated**: 2026-04-08
-**Current phase**: **v1 complete, ready for Phase 2 (real tool evaluation)**
+**Last updated**: 2026-04-12
+**Current phase**: **Research complete — architecture text bank committed; ready to extend models**
+
+## Architecture Text Bank (read before any implementation work)
+
+Two authoritative research documents live in [`docs/research/`](research/):
+
+| Document | Contents | Score |
+|----------|----------|-------|
+| [`schema-spec.md`](research/schema-spec.md) | 8 entities with full field provenance, Polymarket + Kalshi venue mappings, directory structure, 5 adapter contracts, 6 anti-patterns | 1.0 / 1.0 |
+| [`tool-catalog.md`](research/tool-catalog.md) | 4-layer cybernetic tool catalog (Sensor / Controller / Actuator / Evaluation), scored tool entries, minimum viable stack, integration architecture | 0.98 / 1.0 |
+
+**Rule**: before adding a model field or choosing a concrete implementation, check `docs/research/` first.
+
+---
 
 ---
 
