@@ -1,0 +1,131 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { FeedbackPanel } from './FeedbackPanel';
+import { LayerCard } from './LayerCard';
+import { apiGet } from '@/lib/api';
+import type { Feedback, MetricsResponse, StatusResponse } from '@/lib/types';
+
+type DashboardData = {
+  status: StatusResponse | null;
+  metrics: MetricsResponse | null;
+  feedback: Feedback[];
+  disconnected: boolean;
+};
+
+const initialData: DashboardData = {
+  status: null,
+  metrics: null,
+  feedback: [],
+  disconnected: false
+};
+
+export function DashboardClient() {
+  const [data, setData] = useState<DashboardData>(initialData);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const [status, metrics, feedback] = await Promise.all([
+          apiGet<StatusResponse>('/status'),
+          apiGet<MetricsResponse>('/metrics'),
+          apiGet<Feedback[]>('/feedback?resolved=false')
+        ]);
+        if (!cancelled) setData({ status, metrics, feedback, disconnected: false });
+      } catch {
+        if (!cancelled) {
+          setData((current) => ({ ...current, disconnected: true }));
+        }
+      }
+    }
+    void load();
+    const timer = window.setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const status = data.status;
+  const metrics = data.metrics;
+  const sensorStatus = status?.sensors[0]?.status ?? 'unknown';
+
+  return (
+    <>
+      <section className="hero">
+        <div>
+          <p className="eyebrow">Cybernetic trading loop</p>
+          <h1>Cybernetic Console</h1>
+          <p className="lede">
+            Live state for sensor intake, controller decisions, actuator fills, and evaluator feedback.
+          </p>
+        </div>
+        <div className="status-strip" aria-label="run summary">
+          <div>
+            <span>Mode</span>
+            {status?.mode ?? 'loading'}
+          </div>
+          <div>
+            <span>Started</span>
+            {status?.runner_started_at ?? 'not started'}
+          </div>
+          <div>
+            <span>Brier</span>
+            {metrics?.brier_overall?.toFixed(3) ?? 'n/a'}
+          </div>
+        </div>
+      </section>
+
+      <section className="grid-four" aria-label="layer status">
+        <LayerCard
+          disconnected={data.disconnected}
+          label="last signal heartbeat"
+          metric={status?.sensors[0]?.last_signal_at ? 'fresh' : 'none'}
+          name="Sensor"
+          status={sensorStatus}
+        />
+        <LayerCard
+          disconnected={data.disconnected}
+          label="decisions total"
+          metric={String(status?.controller.decisions_total ?? 0)}
+          name="Controller"
+          status="ready"
+        />
+        <LayerCard
+          disconnected={data.disconnected}
+          label="fills total"
+          metric={String(status?.actuator.fills_total ?? 0)}
+          name="Actuator"
+          status={status?.actuator.mode ?? 'unknown'}
+        />
+        <LayerCard
+          disconnected={data.disconnected}
+          label="eval records"
+          metric={String(status?.evaluator.eval_records_total ?? 0)}
+          name="Evaluator"
+          status="scoring"
+        />
+      </section>
+
+      <section className="section-grid">
+        <div className="card summary-card">
+          <h2>Loop Health</h2>
+          <p className="lede">
+            Pending feedback stays visible until a human resolves it. The panel updates in place after each
+            action.
+          </p>
+        </div>
+        <FeedbackPanel
+          items={data.feedback}
+          onResolved={(feedbackId) =>
+            setData((current) => ({
+              ...current,
+              feedback: current.feedback.filter((item) => item.feedback_id !== feedbackId)
+            }))
+          }
+        />
+      </section>
+    </>
+  );
+}

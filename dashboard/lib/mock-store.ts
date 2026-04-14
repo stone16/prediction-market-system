@@ -1,0 +1,92 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import type { Decision, Feedback, MetricsResponse, Signal, StatusResponse } from './types';
+
+const rootDir = path.resolve(process.cwd(), '..');
+const dataDir = path.join(rootDir, '.data');
+const feedbackPath = path.join(dataDir, 'feedback.jsonl');
+
+export function mockStatus(): StatusResponse {
+  return {
+    mode: 'backtest',
+    runner_started_at: '2026-04-14T00:00:00+00:00',
+    sensors: [{ name: 'HistoricalSensor', status: 'idle', last_signal_at: '2026-04-07T22:39:00+00:00' }],
+    controller: { decisions_total: mockDecisions().length },
+    actuator: { fills_total: 18, mode: 'backtest' },
+    evaluator: { eval_records_total: 18, brier_overall: 0.18 }
+  };
+}
+
+export function mockSignals(): Signal[] {
+  return Array.from({ length: 60 }, (_, index) => ({
+    market_id: `pm-synthetic-${String(index).padStart(3, '0')}`,
+    title: `Synthetic market ${String(index).padStart(3, '0')}`,
+    yes_price: 0.3 + (index % 30) / 100,
+    fetched_at: new Date(Date.UTC(2026, 3, 1, index % 24, 0, 0)).toISOString()
+  }));
+}
+
+export function mockDecisions(): Decision[] {
+  return Array.from({ length: 18 }, (_, index) => ({
+    decision_id: `decision-${index}`,
+    market_id: `pm-synthetic-${String(index).padStart(3, '0')}`,
+    forecaster: index % 2 === 0 ? 'StatisticalForecaster' : 'RulesForecaster',
+    prob_estimate: 0.56 + (index % 4) / 100,
+    expected_edge: 0.08 + (index % 3) / 100,
+    kelly_size: 12 + index,
+    resolved_outcome: index % 3 === 0 ? 1 : 0,
+    price: 0.42 + (index % 5) / 100,
+    side: 'BUY'
+  }));
+}
+
+export function mockMetrics(): MetricsResponse {
+  const decisions = mockDecisions();
+  return {
+    brier_overall: 0.18,
+    brier_by_category: { StatisticalForecaster: 0.16, RulesForecaster: 0.21 },
+    pnl: 42.75,
+    slippage_bps: 18.4,
+    fill_rate: 0.92,
+    win_rate: 0.61,
+    brier_series: decisions.map((decision, index) => ({
+      recorded_at: `2026-04-${String(1 + index).padStart(2, '0')}T00:00:00+00:00`,
+      brier_score: 0.08 + (index % 6) / 100
+    })),
+    calibration_curve: decisions.map((decision) => ({
+      prob_estimate: decision.prob_estimate,
+      resolved_outcome: decision.resolved_outcome ?? 0
+    })),
+    pnl_series: decisions.map((decision, index) => ({
+      recorded_at: `2026-04-${String(1 + index).padStart(2, '0')}T00:00:00+00:00`,
+      pnl: -8 + index * 3.1
+    }))
+  };
+}
+
+export function readFeedback(): Feedback[] {
+  if (!fs.existsSync(feedbackPath)) return [];
+  return fs
+    .readFileSync(feedbackPath, 'utf-8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Feedback);
+}
+
+export function writeFeedback(items: Feedback[]) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(feedbackPath, `${items.map((item) => JSON.stringify(item)).join('\n')}\n`);
+}
+
+export function resolveFeedback(feedbackId: string): Feedback | null {
+  const items = readFeedback();
+  const index = items.findIndex((item) => item.feedback_id === feedbackId);
+  if (index === -1) return null;
+  items[index] = {
+    ...items[index],
+    resolved: true,
+    resolved_at: new Date().toISOString()
+  };
+  writeFeedback(items);
+  return items[index];
+}
