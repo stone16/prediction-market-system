@@ -175,7 +175,7 @@ def test_actuator_feedback_appends_controller_feedback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_executor_releases_dedup_token_on_success_and_exception() -> None:
+async def test_executor_releases_dedup_token_on_success_and_liquidity_rejection() -> None:
     store = FeedbackStore()
     tokens = executor.DedupTokenStore()
     ok_executor = executor.ActuatorExecutor(
@@ -206,8 +206,9 @@ async def test_executor_releases_dedup_token_on_success_and_exception() -> None:
         dedup_tokens=tokens,
     )
 
-    with pytest.raises(InsufficientLiquidityError):
-        await failing_executor.execute(_decision(decision_id="d-fail"), _portfolio())
+    rejected = await failing_executor.execute(_decision(decision_id="d-fail"), _portfolio())
 
+    assert rejected.status == OrderStatus.INVALID.value
+    assert rejected.raw_status == "insufficient_liquidity"
     assert tokens.contains("d-fail") is False
     assert store.all()[-1].category == "insufficient_liquidity"

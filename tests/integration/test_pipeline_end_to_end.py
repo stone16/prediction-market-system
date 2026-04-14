@@ -5,6 +5,7 @@ import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,6 +30,17 @@ class HoldingSensor:
             yield _signal()
 
 
+class OneShotSensor:
+    def __init__(self, signal: MarketSignal) -> None:
+        self.signal = signal
+
+    def __aiter__(self) -> AsyncIterator[MarketSignal]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[MarketSignal]:
+        yield self.signal
+
+
 def _settings(mode: RunMode) -> PMSSettings:
     return PMSSettings(
         mode=mode,
@@ -39,20 +51,26 @@ def _settings(mode: RunMode) -> PMSSettings:
     )
 
 
-def _signal() -> MarketSignal:
+def _signal(
+    *,
+    market_id: str = "runner-hold",
+    orderbook: dict[str, Any] | None = None,
+    external_signal: dict[str, Any] | None = None,
+) -> MarketSignal:
     return MarketSignal(
-        market_id="runner-hold",
+        market_id=market_id,
         token_id="yes-token",
         venue="polymarket",
         title="Will the runner keep tasks alive?",
         yes_price=0.4,
         volume_24h=1000.0,
         resolves_at=datetime(2026, 4, 20, tzinfo=UTC),
-        orderbook={
+        orderbook=orderbook or {
             "bids": [{"price": 0.39, "size": 100.0}],
             "asks": [{"price": 0.41, "size": 100.0}],
         },
-        external_signal={"metaculus_prob": 0.7, "resolved_outcome": 1.0},
+        external_signal=external_signal
+        or {"metaculus_prob": 0.7, "resolved_outcome": 1.0},
         fetched_at=datetime(2026, 4, 14, tzinfo=UTC),
         market_status=MarketStatus.OPEN.value,
     )
@@ -117,8 +135,43 @@ async def test_backtest_end_to_end_fixture_produces_decisions_and_eval_records(
 
     assert len(runner.state.signals) == 100
     assert len(runner.state.decisions) >= 10
+    assert {fill.resolved_outcome for fill in runner.state.fills} <= {0.0, 1.0}
     assert len(records) >= 5
     assert all(0.0 <= record.brier_score <= 1.0 for record in records)
+    locked_size = sum(fill.fill_size for fill in runner.state.fills)
+    assert runner.portfolio.locked_usdc == pytest.approx(locked_size)
+    assert runner.portfolio.free_usdc == pytest.approx(1000.0 - locked_size)
+    assert sum(
+        position.locked_usdc for position in runner.portfolio.open_positions
+    ) == pytest.approx(locked_size)
+
+
+@pytest.mark.asyncio
+async def test_paper_runner_records_liquidity_rejections_in_order_state(
+    tmp_path: Path,
+) -> None:
+    runner = Runner(
+        config=_settings(RunMode.PAPER),
+        sensors=[
+            OneShotSensor(
+                _signal(
+                    market_id="paper-empty-book",
+                    orderbook={"bids": [], "asks": []},
+                    external_signal={"fair_value": 0.7, "resolved_outcome": 1.0},
+                )
+            )
+        ],
+        eval_store=EvalStore(path=tmp_path / "eval_records.jsonl"),
+        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+    )
+
+    await runner.start()
+    await asyncio.wait_for(runner.wait_until_idle(), timeout=5.0)
+    await asyncio.wait_for(runner.stop(), timeout=5.0)
+
+    assert len(runner.state.orders) == 1
+    assert runner.state.orders[0].raw_status == "insufficient_liquidity"
+    assert runner.state.fills == []
 
 
 @pytest.mark.integration

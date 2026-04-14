@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
 
 from pms.core.models import FillRecord, TradeDecision
 from pms.evaluation.adapters.scoring import Scorer
 from pms.storage.eval_store import EvalStore
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,6 +44,12 @@ class EvalSpool:
         while True:
             fill, decision = await self._queue.get()
             try:
+                if fill.resolved_outcome is None:
+                    logger.info(
+                        "skipping unresolved fill in evaluator spool: %s",
+                        fill.trade_id,
+                    )
+                    continue
                 self.store.append(self.scorer.score(fill, decision))
             finally:
                 self._queue.task_done()

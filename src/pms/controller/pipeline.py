@@ -5,6 +5,7 @@ import logging
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import TypeVar
 
 from pms.config import PMSSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
@@ -19,6 +20,7 @@ from pms.core.models import MarketSignal, Portfolio, TradeDecision
 logger = logging.getLogger(__name__)
 
 ForecastResult = tuple[float, float, str]
+T = TypeVar("T")
 
 
 @dataclass
@@ -48,29 +50,27 @@ class ControllerPipeline:
         signal: MarketSignal,
         portfolio: Portfolio | None = None,
     ) -> TradeDecision | None:
-        assert self.router is not None
-        if not self.router.gate(signal):
+        router = _required(self.router, "router")
+        if not router.gate(signal):
             return None
 
-        assert self.forecasters is not None
+        forecasters = _required(self.forecasters, "forecasters")
         tasks = [
             self._predict_forecaster(forecaster, signal)
-            for forecaster in self.forecasters
+            for forecaster in forecasters
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         probabilities: list[float] = []
-        for forecaster, result in zip(self.forecasters, results, strict=True):
+        calibrator = _required(self.calibrator, "calibrator")
+        for forecaster, result in zip(forecasters, results, strict=True):
             if isinstance(result, BaseException):
                 logger.warning("forecaster failed: %s", result)
                 continue
             if result is None:
                 continue
             model_id = _model_id(result, forecaster)
-            assert self.calibrator is not None
-            probabilities.append(
-                self.calibrator.calibrate(float(result[0]), model_id=model_id)
-            )
+            probabilities.append(calibrator.calibrate(float(result[0]), model_id=model_id))
 
         if not probabilities:
             return None
@@ -78,8 +78,8 @@ class ControllerPipeline:
         prob_estimate = sum(probabilities) / len(probabilities)
         expected_edge = prob_estimate - signal.yes_price
         active_portfolio = portfolio or _default_portfolio()
-        assert self.sizer is not None
-        size = self.sizer.size(
+        sizer = _required(self.sizer, "sizer")
+        size = sizer.size(
             prob=prob_estimate,
             market_price=signal.yes_price,
             portfolio=active_portfolio,
@@ -95,7 +95,7 @@ class ControllerPipeline:
             size=size,
             order_type="limit",
             max_slippage_bps=self.settings.controller.max_slippage_bps,
-            stop_conditions=self.router.stop_conditions(signal),
+            stop_conditions=router.stop_conditions(signal),
             prob_estimate=prob_estimate,
             expected_edge=expected_edge,
             time_in_force=self.settings.controller.time_in_force,
@@ -130,3 +130,10 @@ def _default_portfolio() -> Portfolio:
         locked_usdc=0.0,
         open_positions=[],
     )
+
+
+def _required(value: T | None, name: str) -> T:
+    if value is None:
+        msg = f"ControllerPipeline {name} is not initialized"
+        raise RuntimeError(msg)
+    return value

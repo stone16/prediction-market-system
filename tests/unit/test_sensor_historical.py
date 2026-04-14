@@ -32,6 +32,9 @@ async def test_historical_sensor_reads_jsonl_fixture_in_timestamp_order() -> Non
     assert signals[0].market_id == "pm-synthetic-000"
     assert signals[-1].market_id == "pm-synthetic-099"
     assert signals[0].market_status == MarketStatus.OPEN.value
+    assert {
+        signal.external_signal.get("resolved_outcome") for signal in signals
+    } == {0.0, 1.0}
 
 
 @pytest.mark.asyncio

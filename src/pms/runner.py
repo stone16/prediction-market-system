@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pms.actuator.adapters.backtest import BacktestActuator
 from pms.actuator.adapters.paper import PaperActuator
@@ -23,6 +23,7 @@ from pms.core.models import (
     MarketSignal,
     OrderState,
     Portfolio,
+    Position,
     TradeDecision,
 )
 from pms.evaluation.adapters.scoring import Scorer
@@ -37,6 +38,8 @@ from pms.storage.feedback_store import FeedbackStore
 logger = logging.getLogger(__name__)
 
 DEFAULT_BACKTEST_FIXTURE = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
+RUNNER_STATE_LIMIT = 1000
+T = TypeVar("T")
 
 
 @runtime_checkable
@@ -195,7 +198,10 @@ class Runner:
         return PolymarketActuator(self.config)
 
     async def _controller_loop(self) -> None:
-        assert self.controller is not None
+        controller = self.controller
+        if controller is None:
+            msg = "Runner controller is not initialized"
+            raise RuntimeError(msg)
         while True:
             if self._should_stop_controller():
                 return
@@ -205,10 +211,10 @@ class Runner:
                 continue
 
             try:
-                self.state.signals.append(signal)
-                decision = await self.controller.decide(signal, portfolio=self.portfolio)
+                _append_bounded(self.state.signals, signal)
+                decision = await controller.decide(signal, portfolio=self.portfolio)
                 if decision is not None:
-                    self.state.decisions.append(decision)
+                    _append_bounded(self.state.decisions, decision)
                     await self._decision_queue.put((decision, signal))
             finally:
                 self.sensor_stream.queue.task_done()
@@ -228,10 +234,11 @@ class Runner:
                     decision,
                     self.portfolio,
                 )
-                self.state.orders.append(order_state)
+                _append_bounded(self.state.orders, order_state)
                 fill = _fill_from_order(order_state, decision, signal)
                 if fill is not None:
-                    self.state.fills.append(fill)
+                    _append_bounded(self.state.fills, fill)
+                    self.portfolio = _portfolio_with_fill(self.portfolio, fill)
                     self._evaluator_spool.enqueue(fill, decision)
             except Exception as error:
                 logger.warning("actuator execution failed: %s", error)
@@ -259,6 +266,13 @@ class Runner:
             if isinstance(sensor, AsyncCloseable):
                 await sensor.aclose()
         self._active_sensors = ()
+
+
+def _append_bounded(items: list[T], item: T) -> None:
+    items.append(item)
+    overflow = len(items) - RUNNER_STATE_LIMIT
+    if overflow > 0:
+        del items[:overflow]
 
 
 def _fill_from_order(
@@ -289,8 +303,59 @@ def _fill_from_order(
     )
 
 
-def _resolved_outcome(signal: MarketSignal) -> float:
+def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
+    positions = list(portfolio.open_positions)
+    fill_size = fill.fill_size
+    for index, position in enumerate(positions):
+        if _same_position(position, fill):
+            new_shares = position.shares_held + fill_size
+            if new_shares <= 0.0:
+                avg_entry_price = fill.fill_price
+            else:
+                avg_entry_price = (
+                    position.avg_entry_price * position.shares_held
+                    + fill.fill_price * fill_size
+                ) / new_shares
+            positions[index] = replace(
+                position,
+                shares_held=new_shares,
+                avg_entry_price=avg_entry_price,
+                locked_usdc=position.locked_usdc + fill_size,
+            )
+            break
+    else:
+        positions.append(
+            Position(
+                market_id=fill.market_id,
+                token_id=fill.token_id,
+                venue=fill.venue,
+                side=fill.side,
+                shares_held=fill_size,
+                avg_entry_price=fill.fill_price,
+                unrealized_pnl=0.0,
+                locked_usdc=fill_size,
+            )
+        )
+
+    return replace(
+        portfolio,
+        free_usdc=portfolio.free_usdc - fill_size,
+        locked_usdc=portfolio.locked_usdc + fill_size,
+        open_positions=positions,
+    )
+
+
+def _same_position(position: Position, fill: FillRecord) -> bool:
+    return (
+        position.market_id == fill.market_id
+        and position.token_id == fill.token_id
+        and position.venue == fill.venue
+        and position.side == fill.side
+    )
+
+
+def _resolved_outcome(signal: MarketSignal) -> float | None:
     raw_outcome = signal.external_signal.get("resolved_outcome")
     if raw_outcome is not None:
         return min(max(float(raw_outcome), 0.0), 1.0)
-    return 1.0 if signal.yes_price >= 0.5 else 0.0
+    return None

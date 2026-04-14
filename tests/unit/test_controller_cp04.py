@@ -8,6 +8,7 @@ from pms.config import RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
+from pms.controller.pipeline import ControllerPipeline
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import MarketStatus
 from pms.core.models import EvalRecord, MarketSignal, Portfolio
@@ -103,6 +104,20 @@ def test_statistical_forecaster_uses_metaculus_prior() -> None:
     assert "Metaculus" in result[2]
 
 
+def test_statistical_forecaster_rejects_non_positive_prior_strength() -> None:
+    with pytest.raises(ValueError, match="prior_strength"):
+        StatisticalForecaster(prior_strength=0.0)
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_reports_uninitialized_dependencies() -> None:
+    pipeline = ControllerPipeline()
+    pipeline.router = None
+
+    with pytest.raises(RuntimeError, match="router"):
+        await pipeline.decide(_signal(), portfolio=_portfolio())
+
+
 def test_netcal_calibrator_identity_boundary_at_99_samples() -> None:
     calibrator = NetcalCalibrator()
     calibrator.add_samples("model-a", _records(99))
@@ -134,3 +149,11 @@ def test_kelly_sizer_caps_at_max_position_per_market() -> None:
     sizer = KellySizer(risk=RiskSettings(max_position_per_market=10.0))
 
     assert sizer.size(prob=0.8, market_price=0.5, portfolio=_portfolio()) == 10.0
+
+
+def test_kelly_sizer_reports_uninitialized_risk() -> None:
+    sizer = KellySizer()
+    object.__setattr__(sizer, "risk", None)
+
+    with pytest.raises(RuntimeError, match="risk"):
+        sizer.size(prob=0.8, market_price=0.5, portfolio=_portfolio())

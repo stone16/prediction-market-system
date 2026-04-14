@@ -62,6 +62,31 @@ async def test_polymarket_rest_sensor_polls_gamma_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_polymarket_rest_sensor_skips_malformed_market_rows() -> None:
+    payload = [
+        {**_gamma_market_payload()[0], "conditionId": "bad-price", "outcomePrices": None},
+        _gamma_market_payload()[0],
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = PolymarketRestSensor(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=0.01,
+    )
+
+    signals = await sensor.poll_once()
+    await sensor.aclose()
+
+    assert [signal.market_id for signal in signals] == ["pm-live-1"]
+
+
+@pytest.mark.asyncio
 async def test_polymarket_rest_sensor_backoff_on_http_429(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

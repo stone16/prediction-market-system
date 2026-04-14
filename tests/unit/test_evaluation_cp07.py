@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,9 +18,11 @@ from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 
 
-def _decision(*, prob: float = 0.7, price: float = 0.4) -> TradeDecision:
+def _decision(
+    *, decision_id: str = "d-cp07", prob: float = 0.7, price: float = 0.4
+) -> TradeDecision:
     return TradeDecision(
-        decision_id="d-cp07",
+        decision_id=decision_id,
         market_id="m-cp07",
         token_id="t-yes",
         venue="polymarket",
@@ -38,7 +41,7 @@ def _decision(*, prob: float = 0.7, price: float = 0.4) -> TradeDecision:
 def _fill(
     *,
     decision_id: str = "d-cp07",
-    resolved_outcome: float = 1.0,
+    resolved_outcome: float | None = 1.0,
     fill_price: float = 0.42,
     status: str = OrderStatus.MATCHED.value,
 ) -> FillRecord:
@@ -132,6 +135,29 @@ async def test_eval_spool_enqueue_is_non_blocking_and_scores_in_background(
     assert elapsed_ms < 100
     assert len(store.all()) == 100
     assert (tmp_path / "eval_records.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_skips_unresolved_fills_and_keeps_running(
+    tmp_path: Path,
+) -> None:
+    store = EvalStore(path=tmp_path / "eval_records.jsonl")
+    spool = EvalSpool(store=store, scorer=Scorer())
+    await spool.start()
+
+    spool.enqueue(
+        _fill(decision_id="d-unresolved", resolved_outcome=None),
+        _decision(decision_id="d-unresolved"),
+    )
+    spool.enqueue(
+        _fill(decision_id="d-resolved", resolved_outcome=1.0),
+        _decision(decision_id="d-resolved"),
+    )
+
+    await asyncio.wait_for(spool.join(), timeout=1.0)
+    await spool.stop()
+
+    assert [record.decision_id for record in store.all()] == ["d-resolved"]
 
 
 def test_metrics_snapshot_empty_and_aggregated_records() -> None:

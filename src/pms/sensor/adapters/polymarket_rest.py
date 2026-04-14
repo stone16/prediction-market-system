@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,6 +13,9 @@ import httpx
 from pms.config import PMSSettings
 from pms.core.enums import MarketStatus
 from pms.core.models import MarketSignal
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -46,14 +50,25 @@ class PolymarketRestSensor:
                 backoff = min(backoff * 2.0, self.max_backoff_s)
 
     async def poll_once(self) -> list[MarketSignal]:
-        assert self.client is not None
-        response = await self.client.get("/markets")
+        client = self.client
+        if client is None:
+            msg = "PolymarketRestSensor client is not initialized"
+            raise RuntimeError(msg)
+        response = await client.get("/markets")
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list):
             msg = "Expected Gamma API /markets response to be a list"
             raise ValueError(msg)
-        return [_gamma_market_to_signal(row) for row in payload if isinstance(row, dict)]
+        signals: list[MarketSignal] = []
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            try:
+                signals.append(_gamma_market_to_signal(row))
+            except (KeyError, TypeError, ValueError) as error:
+                logger.warning("skipping malformed Gamma market row: %s", error)
+        return signals
 
     async def aclose(self) -> None:
         if self.client is not None:
@@ -95,9 +110,15 @@ def _parse_token_ids(value: object) -> tuple[str | None, str | None]:
 
 
 def _first_price(value: object) -> float:
+    if value is None or value == "":
+        msg = "outcomePrices is missing"
+        raise ValueError(msg)
     loaded = json.loads(value) if isinstance(value, str) else value
     if isinstance(loaded, list) and loaded:
         return float(loaded[0])
+    if isinstance(loaded, list):
+        msg = "outcomePrices is empty"
+        raise ValueError(msg)
     return float(cast(str | int | float, value))
 
 

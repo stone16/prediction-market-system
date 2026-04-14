@@ -44,11 +44,14 @@ class LLMForecaster:
             self.config = LLMSettings()
 
     def predict(self, signal: MarketSignal) -> LLMForecastResult | None:
-        assert self.config is not None
-        if not self.config.enabled:
+        config = self.config
+        if config is None:
+            msg = "LLMForecaster config is not initialized"
+            raise RuntimeError(msg)
+        if not config.enabled:
             return None
 
-        api_key = self.config.api_key or os.environ.get("ANTHROPIC_API_KEY")
+        api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             return None
 
@@ -57,7 +60,7 @@ class LLMForecaster:
             return None
 
         response = client.messages.create(
-            model=self.config.model,
+            model=config.model,
             max_tokens=512,
             temperature=0,
             system=(
@@ -71,7 +74,7 @@ class LLMForecaster:
             prob_estimate=_clamp(_as_float(payload["prob_estimate"])),
             confidence=_clamp(_as_float(payload["confidence"])),
             rationale=str(payload["rationale"]),
-            model_id=self.config.model,
+            model_id=config.model,
         )
 
     async def forecast(self, signal: MarketSignal) -> float:

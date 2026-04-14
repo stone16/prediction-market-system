@@ -32,6 +32,8 @@ class KellySizer:
             return 0.0
         scaled_fraction = kelly_fraction * self.fraction
         raw_size = Decimal(str(portfolio.free_usdc)) * scaled_fraction
-        assert self.risk is not None
+        if self.risk is None:
+            msg = "KellySizer risk is not initialized"
+            raise RuntimeError(msg)
         capped = min(raw_size, Decimal(str(self.risk.max_position_per_market)))
         return float(capped)

@@ -66,7 +66,7 @@ class ActuatorExecutor:
             except InsufficientLiquidityError:
                 state = _rejected_order_state(decision, "insufficient_liquidity")
                 self.feedback.generate(state, reason="insufficient_liquidity")
-                raise
+                return state
             except Exception:
                 state = _rejected_order_state(decision, "venue_rejection")
                 self.feedback.generate(state, reason="venue_rejection")

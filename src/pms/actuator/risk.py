@@ -36,6 +36,9 @@ class RiskManager:
         ):
             return RiskDecision(False, "drawdown_circuit_breaker")
 
+        if decision.size > portfolio.free_usdc:
+            return RiskDecision(False, "insufficient_free_usdc")
+
         return RiskDecision(True, "approved")
 
 

@@ -27,12 +27,14 @@ class SensorStream:
     async def stop(self, *, timeout: float = 5.0) -> None:
         for task in self._tasks:
             task.cancel()
-        if self._tasks:
-            await asyncio.wait_for(
-                asyncio.gather(*self._tasks, return_exceptions=True),
-                timeout=timeout,
-            )
-        self._tasks = ()
+        try:
+            if self._tasks:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._tasks, return_exceptions=True),
+                    timeout=timeout,
+                )
+        finally:
+            self._tasks = ()
 
     async def _consume(self, sensor: ISensor) -> None:
         async for signal in sensor:

@@ -11,6 +11,11 @@ ForecastResult = tuple[float, float, str]
 class StatisticalForecaster:
     prior_strength: float = 2.0
 
+    def __post_init__(self) -> None:
+        if self.prior_strength <= 0.0:
+            msg = "prior_strength must be positive"
+            raise ValueError(msg)
+
     def predict(self, signal: MarketSignal) -> ForecastResult:
         metaculus = signal.external_signal.get("metaculus_prob")
         if metaculus is None:
