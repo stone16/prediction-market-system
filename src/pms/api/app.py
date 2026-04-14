@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+import os
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -19,23 +22,46 @@ T = TypeVar("T")
 LIVE_DISABLED_DETAIL = (
     "Live trading is disabled. Set live_trading_enabled=true in config."
 )
+RUNNER_ALREADY_RUNNING_DETAIL = "Runner is already running."
+logger = logging.getLogger(__name__)
 
 
 class ConfigUpdate(BaseModel):
     mode: RunMode
 
 
-def create_app(runner: Runner | None = None) -> FastAPI:
+def create_app(
+    runner: Runner | None = None,
+    *,
+    auto_start: bool | None = None,
+) -> FastAPI:
     active_runner = runner or Runner()
-    app = FastAPI(title="PMS API")
+    if auto_start is None:
+        auto_start = os.environ.get("PMS_AUTO_START", "").lower() in {"1", "true", "yes"}
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        started_here = False
+        if auto_start and not _is_runner_running(active_runner):
+            logger.info("PMS_AUTO_START enabled — starting runner in %s mode", active_runner.state.mode.value)
+            await active_runner.start()
+            started_here = True
+        try:
+            yield
+        finally:
+            if started_here:
+                await active_runner.stop()
+
+    app = FastAPI(title="PMS API", lifespan=lifespan)
     app.state.runner = active_runner
 
     @app.get("/status")
     async def status() -> dict[str, Any]:
-        metrics = _metrics(active_runner)
+        metrics_snapshot = _metrics(active_runner)
         return {
             "mode": active_runner.state.mode.value,
             "runner_started_at": _jsonable(active_runner.state.runner_started_at),
+            "running": _is_runner_running(active_runner),
             "sensors": _sensor_statuses(active_runner),
             "controller": {"decisions_total": len(active_runner.state.decisions)},
             "actuator": {
@@ -44,7 +70,7 @@ def create_app(runner: Runner | None = None) -> FastAPI:
             },
             "evaluator": {
                 "eval_records_total": len(active_runner.eval_store.all()),
-                "brier_overall": metrics.brier_overall,
+                "brier_overall": metrics_snapshot.brier_overall,
             },
         }
 
@@ -67,7 +93,38 @@ def create_app(runner: Runner | None = None) -> FastAPI:
 
     @app.get("/metrics")
     async def metrics() -> dict[str, Any]:
-        return cast(dict[str, Any], _jsonable(_metrics(active_runner)))
+        snapshot = _metrics(active_runner)
+        records = sorted(
+            active_runner.eval_store.all(),
+            key=lambda record: record.recorded_at,
+        )
+        payload = cast(dict[str, Any], _jsonable(snapshot))
+        payload["brier_series"] = [
+            {
+                "recorded_at": record.recorded_at.isoformat(),
+                "brier_score": record.brier_score,
+            }
+            for record in records
+        ]
+        payload["calibration_curve"] = [
+            {
+                "prob_estimate": record.prob_estimate,
+                "resolved_outcome": record.resolved_outcome,
+            }
+            for record in records
+        ]
+        cumulative_pnl = 0.0
+        pnl_series: list[dict[str, Any]] = []
+        for record in records:
+            cumulative_pnl += record.pnl
+            pnl_series.append(
+                {
+                    "recorded_at": record.recorded_at.isoformat(),
+                    "pnl": cumulative_pnl,
+                }
+            )
+        payload["pnl_series"] = pnl_series
+        return payload
 
     @app.get("/feedback")
     async def feedback(resolved: bool | None = None) -> list[dict[str, Any]]:
@@ -90,6 +147,22 @@ def create_app(runner: Runner | None = None) -> FastAPI:
         active_runner.switch_mode(update.mode)
         return {"mode": active_runner.state.mode.value}
 
+    @app.post("/run/start")
+    async def run_start() -> dict[str, Any]:
+        if _is_runner_running(active_runner):
+            raise HTTPException(status_code=409, detail=RUNNER_ALREADY_RUNNING_DETAIL)
+        await active_runner.start()
+        return {
+            "status": "started",
+            "mode": active_runner.state.mode.value,
+            "runner_started_at": _jsonable(active_runner.state.runner_started_at),
+        }
+
+    @app.post("/run/stop")
+    async def run_stop() -> dict[str, Any]:
+        await active_runner.stop()
+        return {"status": "stopped"}
+
     return app
 
 
@@ -102,6 +175,10 @@ def _latest(items: Sequence[T], limit: int) -> list[T]:
 
 def _metrics(runner: Runner) -> MetricsSnapshot:
     return MetricsCollector(runner.eval_store.all()).snapshot()
+
+
+def _is_runner_running(runner: Runner) -> bool:
+    return any(not task.done() for task in runner.tasks)
 
 
 def _sensor_statuses(runner: Runner) -> list[dict[str, Any]]:

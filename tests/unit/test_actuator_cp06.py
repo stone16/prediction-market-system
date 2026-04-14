@@ -163,7 +163,7 @@ async def test_polymarket_actuator_raises_when_live_trading_disabled() -> None:
 
 
 def test_actuator_feedback_appends_controller_feedback() -> None:
-    store = FeedbackStore()
+    store = FeedbackStore(path=None)
     generator = ActuatorFeedback(store)
 
     feedback = generator.generate(_order_state(), reason="insufficient_liquidity")
@@ -176,7 +176,7 @@ def test_actuator_feedback_appends_controller_feedback() -> None:
 
 @pytest.mark.asyncio
 async def test_executor_releases_dedup_token_on_success_and_liquidity_rejection() -> None:
-    store = FeedbackStore()
+    store = FeedbackStore(path=None)
     tokens = executor.DedupTokenStore()
     ok_executor = executor.ActuatorExecutor(
         adapter=PaperActuator(

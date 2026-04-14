@@ -13,8 +13,12 @@ dependencies = [
     "pydantic>=2.12.0",
     "pydantic-settings>=2.11.0",
     "pyyaml>=6.0.3",
+    "uvicorn>=0.30",
     "websockets>=16.0",
 ]
+
+[project.scripts]
+pms-api = "pms.api.__main__:main"
 
 [project.optional-dependencies]
 # CP05: Anthropic SDK powers the optional LLM forecaster. Install with

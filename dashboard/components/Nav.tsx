@@ -9,8 +9,9 @@ export function Nav() {
       </Link>
       <div className="nav-links">
         <Link href="/">Overview</Link>
-        <Link href="/metrics">Metrics</Link>
+        <Link href="/signals">Signals</Link>
         <Link href="/decisions">Decisions</Link>
+        <Link href="/metrics">Metrics</Link>
         <Link href="/backtest">Backtest</Link>
       </div>
     </nav>

@@ -1,46 +1,44 @@
-# config.yaml.example — sample pipeline configuration
+# config.yaml.example — PMSSettings override file
 #
-# Each section under the top-level keys specifies a `ModuleSpec`:
+# PMSSettings uses pydantic-settings with an env prefix of `PMS_` and a
+# nested delimiter of `__`. You can either export env vars
+# (e.g. PMS_MODE=paper, PMS_RISK__MAX_TOTAL_EXPOSURE=5000) or load a YAML
+# file via:
 #
-#     class:  fully-qualified dotted class path
-#     kwargs: dict of keyword arguments passed to the class constructor
+#     from pms.config import PMSSettings
+#     settings = PMSSettings.load("config.yaml")
 #
-# Load this file at runtime with:
-#
-#     from pathlib import Path
-#     from pms.orchestrator.config import load_config
-#     config = load_config(Path("config.yaml"))
-#
-# `ModuleRegistry.instantiate(spec)` then turns each ModuleSpec into a
-# fresh instance that you can hand to `TradingPipeline(...)`.
-#
-# NOTE: this file is illustrative. The tests in `tests/test_pipeline.py`
-# construct all of their mocks inline rather than loading this file.
+# Below are the supported top-level keys with their defaults.
 
-connectors:
-  - class: pms.connectors.polymarket.PolymarketConnector
-    kwargs: {}
-  - class: pms.connectors.kalshi.KalshiConnector
-    kwargs: {}
+mode: backtest                 # backtest | paper | live
+live_trading_enabled: false    # must be true to switch into live mode
 
-# Strategies are introduced in CP07. Until then this list stays empty.
-strategies: []
+risk:
+  max_position_usdc: 100.0
+  max_position_per_market: 100.0
+  max_total_exposure: 1000.0
+  max_brier_score: 0.30
+  slippage_threshold_bps: 50.0
+  min_win_rate: 0.50
+  min_order_usdc: 1.0
 
-# The executor, risk manager, metrics, and feedback engine are all
-# introduced in CP08/CP09. The entries below point at placeholder class
-# paths and will need to be updated when those checkpoints land.
-executor:
-  class: pms.execution.noop.NoopExecutor
-  kwargs: {}
+sensor:
+  poll_interval_s: 5.0
 
-risk_manager:
-  class: pms.execution.noop.NoopRiskManager
-  kwargs: {}
+controller:
+  min_volume: 0.0
+  max_slippage_bps: 100
+  time_in_force: GTC
 
-metrics:
-  class: pms.evaluation.noop.NoopMetricsCollector
-  kwargs: {}
+polymarket:
+  host: https://clob.polymarket.com
+  websocket_url: wss://ws-subscriptions-clob.polymarket.com/ws/
+  chain_id: 137
+  # private_key, api_key, api_secret, api_passphrase, funder_address,
+  # and signature_type are required for live trading; leave unset for
+  # paper/backtest modes.
 
-feedback_engine:
-  class: pms.evaluation.noop.NoopFeedbackEngine
-  kwargs: {}
+llm:
+  enabled: false
+  provider: null               # e.g. "anthropic" (requires `pms[llm]`)
+  model: claude-3-5-sonnet-latest

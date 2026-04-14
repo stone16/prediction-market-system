@@ -14,6 +14,19 @@ class FeedbackStore:
     path: Path | None = field(default_factory=lambda: Path(".data/feedback.jsonl"))
     _items: list[Feedback] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if self.path is None or not self.path.exists():
+            return
+        with self.path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    self._items.append(_feedback_from_json(json.loads(line)))
+                except (ValueError, KeyError):
+                    continue
+
     def append(self, feedback: Feedback) -> None:
         self._items.append(feedback)
         self._append_to_disk(feedback)
@@ -63,3 +76,32 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
     return value
+
+
+def _feedback_from_json(payload: dict[str, Any]) -> Feedback:
+    created_at = _parse_datetime(payload["created_at"])
+    resolved_at_raw = payload.get("resolved_at")
+    resolved_at = _parse_datetime(resolved_at_raw) if resolved_at_raw else None
+    metadata_raw = payload.get("metadata")
+    metadata: dict[str, Any] = metadata_raw if isinstance(metadata_raw, dict) else {}
+    return Feedback(
+        feedback_id=str(payload["feedback_id"]),
+        target=str(payload["target"]),
+        source=str(payload["source"]),
+        message=str(payload["message"]),
+        severity=str(payload["severity"]),
+        created_at=created_at,
+        resolved=bool(payload.get("resolved", False)),
+        resolved_at=resolved_at,
+        category=payload.get("category"),
+        metadata=metadata,
+    )
+
+
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    msg = f"Unable to parse datetime from {value!r}"
+    raise ValueError(msg)

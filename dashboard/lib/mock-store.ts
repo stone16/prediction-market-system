@@ -10,6 +10,7 @@ export function mockStatus(): StatusResponse {
   return {
     mode: 'backtest',
     runner_started_at: '2026-04-14T00:00:00+00:00',
+    running: false,
     sensors: [{ name: 'HistoricalSensor', status: 'idle', last_signal_at: '2026-04-07T22:39:00+00:00' }],
     controller: { decisions_total: mockDecisions().length },
     actuator: { fills_total: 18, mode: 'backtest' },
@@ -49,7 +50,7 @@ export function mockMetrics(): MetricsResponse {
     slippage_bps: 18.4,
     fill_rate: 0.92,
     win_rate: 0.61,
-    brier_series: decisions.map((decision, index) => ({
+    brier_series: decisions.map((_decision, index) => ({
       recorded_at: `2026-04-${String(1 + index).padStart(2, '0')}T00:00:00+00:00`,
       brier_score: 0.08 + (index % 6) / 100
     })),
@@ -57,7 +58,7 @@ export function mockMetrics(): MetricsResponse {
       prob_estimate: decision.prob_estimate,
       resolved_outcome: decision.resolved_outcome ?? 0
     })),
-    pnl_series: decisions.map((decision, index) => ({
+    pnl_series: decisions.map((_decision, index) => ({
       recorded_at: `2026-04-${String(1 + index).padStart(2, '0')}T00:00:00+00:00`,
       pnl: -8 + index * 3.1
     }))

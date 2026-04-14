@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FeedbackPanel } from './FeedbackPanel';
 import { LayerCard } from './LayerCard';
+import { RunControls } from './RunControls';
 import { apiGet } from '@/lib/api';
 import type { Feedback, MetricsResponse, StatusResponse } from '@/lib/types';
 
@@ -22,30 +23,32 @@ const initialData: DashboardData = {
 
 export function DashboardClient() {
   const [data, setData] = useState<DashboardData>(initialData);
+  const cancelledRef = useRef(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const [status, metrics, feedback] = await Promise.all([
-          apiGet<StatusResponse>('/status'),
-          apiGet<MetricsResponse>('/metrics'),
-          apiGet<Feedback[]>('/feedback?resolved=false')
-        ]);
-        if (!cancelled) setData({ status, metrics, feedback, disconnected: false });
-      } catch {
-        if (!cancelled) {
-          setData((current) => ({ ...current, disconnected: true }));
-        }
+  const load = useCallback(async () => {
+    try {
+      const [status, metrics, feedback] = await Promise.all([
+        apiGet<StatusResponse>('/status'),
+        apiGet<MetricsResponse>('/metrics'),
+        apiGet<Feedback[]>('/feedback?resolved=false')
+      ]);
+      if (!cancelledRef.current) setData({ status, metrics, feedback, disconnected: false });
+    } catch {
+      if (!cancelledRef.current) {
+        setData((current) => ({ ...current, disconnected: true }));
       }
     }
+  }, []);
+
+  useEffect(() => {
+    cancelledRef.current = false;
     void load();
-    const timer = window.setInterval(load, 5000);
+    const timer = window.setInterval(() => void load(), 5000);
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [load]);
 
   const status = data.status;
   const metrics = data.metrics;
@@ -76,6 +79,12 @@ export function DashboardClient() {
           </div>
         </div>
       </section>
+
+      <RunControls
+        running={status?.running ?? false}
+        mode={status?.mode ?? null}
+        onChange={() => void load()}
+      />
 
       <section className="grid-four" aria-label="layer status">
         <LayerCard

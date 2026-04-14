@@ -252,3 +252,15 @@ def test_eval_store_append_writes_jsonl(tmp_path: Path) -> None:
 
     assert len(store.all()) == 1
     assert "d-cp07" in (tmp_path / "eval_records.jsonl").read_text(encoding="utf-8")
+
+
+def test_feedback_store_reloads_from_disk(tmp_path: Path) -> None:
+    path = tmp_path / "feedback.jsonl"
+    first = FeedbackStore(path=path)
+    first.append(_feedback("fb-reload"))
+    first.resolve("fb-reload")
+
+    reloaded = FeedbackStore(path=path)
+
+    assert [item.feedback_id for item in reloaded.all()] == ["fb-reload"]
+    assert reloaded.all()[0].resolved is True
