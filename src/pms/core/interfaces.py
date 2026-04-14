@@ -34,6 +34,8 @@ class IEvaluator(Protocol):
 
 
 class IForecaster(Protocol):
+    def predict(self, signal: MarketSignal) -> tuple[float, float, str] | None: ...
+
     async def forecast(self, signal: MarketSignal) -> float: ...
 
 
@@ -42,5 +44,4 @@ class ICalibrator(Protocol):
 
 
 class ISizer(Protocol):
-    def size(self, signal: MarketSignal, probability: float, portfolio: Portfolio) -> float: ...
-
+    def size(self, *, prob: float, market_price: float, portfolio: Portfolio) -> float: ...
