@@ -16,10 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Phase 3C: Anthropic SDK powers the optional LLM correlation refinement
-# layer. Install with `uv pip install 'pms[llm]'`. The default rule-based
-# CorrelationDetector does not require this; only AnthropicCorrelationClassifier
-# imports it (lazily, so the rest of pms.strategy works without it).
+# CP05: Anthropic SDK powers the optional LLM forecaster. Install with
+# `uv pip install 'pms[llm]'`. LLMForecaster imports it lazily, so the default
+# rule-based/statistical controller path does not require it.
 llm = ["anthropic>=0.40.0"]
 
 [dependency-groups]

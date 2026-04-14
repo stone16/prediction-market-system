@@ -23,9 +23,16 @@ class PolymarketSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
+    enabled: bool = False
     provider: str | None = None
     api_key: str | None = None
-    model: str | None = None
+    model: str = "claude-3-5-sonnet-latest"
+
+
+class ControllerSettings(BaseModel):
+    min_volume: float = 0.0
+    max_slippage_bps: int = 100
+    time_in_force: str = "GTC"
 
 
 class RiskSettings(BaseModel):
@@ -53,6 +60,7 @@ class PMSSettings(BaseSettings):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     sensor: SensorSettings = Field(default_factory=SensorSettings)
+    controller: ControllerSettings = Field(default_factory=ControllerSettings)
 
     @classmethod
     def load(cls, config_path: str | Path | None = "config.yaml") -> Self:
