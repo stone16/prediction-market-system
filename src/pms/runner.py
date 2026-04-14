@@ -105,6 +105,10 @@ class Runner:
         return self._evaluator_spool._task
 
     @property
+    def active_sensors(self) -> tuple[ISensor, ...]:
+        return self._active_sensors
+
+    @property
     def tasks(self) -> tuple[asyncio.Task[None], ...]:
         tasks: list[asyncio.Task[None]] = []
         tasks.extend(self.sensor_stream.tasks)
