@@ -69,11 +69,13 @@ async def test_runner_start_stop_and_switch_mode_preserves_tasks(
         feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
     )
 
-    assert runner.state.runner_started_at is None
+    initial_started_at = runner.state.runner_started_at
+    assert initial_started_at is None
 
     await runner.start()
 
-    assert runner.state.runner_started_at is not None
+    started_at = runner.state.runner_started_at
+    assert started_at is not None
     assert runner.sensor_stream.tasks
     assert runner.controller_task is not None
     assert runner.actuator_task is not None
