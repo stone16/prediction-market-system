@@ -117,14 +117,14 @@ class Portfolio:
 class VenueCredentials:
     venue: Venue
     host: str
-    private_key: str | None = None
-    api_key: str | None = None
-    api_secret: str | None = None
-    api_passphrase: str | None = None
+    private_key: str | None = field(default=None, repr=False)
+    api_key: str | None = field(default=None, repr=False)
+    api_secret: str | None = field(default=None, repr=False)
+    api_passphrase: str | None = field(default=None, repr=False)
     signature_type: int | None = None
     funder_address: str | None = None
-    api_key_id: str | None = None
-    private_key_pem: str | None = None
+    api_key_id: str | None = field(default=None, repr=False)
+    private_key_pem: str | None = field(default=None, repr=False)
     chain_id: int | None = None
 
 
@@ -151,4 +151,3 @@ class Feedback:
     resolved: bool = False
     resolved_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-

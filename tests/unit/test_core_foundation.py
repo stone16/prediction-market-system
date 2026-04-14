@@ -131,6 +131,28 @@ def test_live_trading_disabled_error_is_runtime_error() -> None:
     assert issubclass(models.LiveTradingDisabledError, RuntimeError)
 
 
+def test_venue_credentials_repr_redacts_secret_fields() -> None:
+    credentials = models.VenueCredentials(
+        venue="polymarket",
+        host="https://clob.polymarket.com",
+        private_key="private-key",
+        api_key="api-key",
+        api_secret="api-secret",
+        api_passphrase="passphrase",
+        api_key_id="api-key-id",
+        private_key_pem="private-key-pem",
+    )
+
+    rendered = repr(credentials)
+
+    assert "private-key" not in rendered
+    assert "api-key" not in rendered
+    assert "api-secret" not in rendered
+    assert "passphrase" not in rendered
+    assert "api-key-id" not in rendered
+    assert "private-key-pem" not in rendered
+
+
 def test_core_enums_use_stable_wire_values() -> None:
     assert [mode.value for mode in RunMode] == ["backtest", "paper", "live"]
     assert [side.value for side in Side] == ["BUY", "SELL"]
