@@ -150,4 +150,5 @@ class Feedback:
     created_at: datetime
     resolved: bool = False
     resolved_at: datetime | None = None
+    category: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

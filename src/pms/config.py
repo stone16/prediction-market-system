@@ -38,6 +38,7 @@ class ControllerSettings(BaseModel):
 class RiskSettings(BaseModel):
     max_position_usdc: float = 100.0
     max_position_per_market: float = 100.0
+    max_total_exposure: float = 1000.0
     min_order_usdc: float = 1.0
     max_drawdown_pct: float | None = None
     max_open_positions: int | None = None
