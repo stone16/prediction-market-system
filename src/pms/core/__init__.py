@@ -1,0 +1,2 @@
+"""Core cybernetic architecture contracts."""
+
