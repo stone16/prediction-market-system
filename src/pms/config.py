@@ -35,6 +35,10 @@ class RiskSettings(BaseModel):
     max_open_positions: int | None = None
 
 
+class SensorSettings(BaseModel):
+    poll_interval_s: float = 5.0
+
+
 class PMSSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="PMS_",
@@ -47,6 +51,7 @@ class PMSSettings(BaseSettings):
     polymarket: PolymarketSettings = Field(default_factory=PolymarketSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
+    sensor: SensorSettings = Field(default_factory=SensorSettings)
 
     @classmethod
     def load(cls, config_path: str | Path | None = "config.yaml") -> Self:

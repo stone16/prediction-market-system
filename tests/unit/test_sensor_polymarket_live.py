@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator
 from datetime import UTC
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
-import websockets
 from websockets.asyncio.server import serve
 
 from pms.config import PMSSettings, SensorSettings
@@ -89,7 +88,7 @@ async def test_polymarket_rest_sensor_backoff_on_http_429(
         initial_backoff_s=0.25,
     )
 
-    iterator = sensor.__aiter__()
+    iterator = cast(AsyncGenerator[MarketSignal, None], sensor.__aiter__())
     signal = await anext(iterator)
     await iterator.aclose()
     await sensor.aclose()
@@ -124,7 +123,7 @@ async def test_polymarket_stream_sensor_emits_price_updates() -> None:
             ws_url=f"ws://127.0.0.1:{port}", market_ids=["pm-ws-1"]
         )
 
-        iterator = sensor.__aiter__()
+        iterator = cast(AsyncGenerator[MarketSignal, None], sensor.__aiter__())
         signal = await asyncio.wait_for(anext(iterator), timeout=2.0)
         await iterator.aclose()
 
@@ -171,7 +170,7 @@ async def test_stream_keepalive_resets_watchdog_without_fallback() -> None:
             market_ids=["pm-ws-1"],
             on_message=watchdog.notify_message,
         )
-        iterator = sensor.__aiter__()
+        iterator = cast(AsyncGenerator[MarketSignal, None], sensor.__aiter__())
         signal = await asyncio.wait_for(anext(iterator), timeout=2.0)
         await iterator.aclose()
         await asyncio.wait_for(watchdog.stop(), timeout=5.0)
@@ -220,4 +219,4 @@ async def test_polymarket_rest_sensor_real_gamma_poll_returns_signal() -> None:
     assert len(signals) >= 1
     assert all(isinstance(signal, MarketSignal) for signal in signals)
     assert all(signal.fetched_at.tzinfo is not None for signal in signals)
-    assert all(signal.fetched_at.tzinfo is not UTC for signal in signals) is False
+    assert all(signal.fetched_at.utcoffset() == UTC.utcoffset(None) for signal in signals)
