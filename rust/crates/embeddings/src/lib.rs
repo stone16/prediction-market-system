@@ -14,12 +14,18 @@
 //! see `rust/README.md` for the design and the Python fallback that
 //! remains canonical until this is filled in.
 
+#[cfg(feature = "extension-module")]
 use pyo3::prelude::*;
 
 /// Returns the crate's package version.
+pub fn crate_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+#[cfg(feature = "extension-module")]
 #[pyfunction]
 fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    crate_version()
 }
 
 /// Hot-path placeholder: compute pairwise cosine similarity for a
@@ -29,6 +35,7 @@ fn version() -> &'static str {
 /// Currently `unimplemented!()` — the Python fallback in
 /// `pms.embeddings.engine.EmbeddingEngine.find_similar_pairs` stays
 /// the source of truth until this is filled in.
+#[cfg(feature = "extension-module")]
 #[pyfunction]
 #[allow(unused_variables)]
 fn find_similar_pairs(
@@ -40,9 +47,20 @@ fn find_similar_pairs(
     ))
 }
 
+#[cfg(feature = "extension-module")]
 #[pymodule]
 fn pms_embeddings_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(find_similar_pairs, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crate_version;
+
+    #[test]
+    fn crate_version_matches_package_version() {
+        assert_eq!(crate_version(), env!("CARGO_PKG_VERSION"));
+    }
 }

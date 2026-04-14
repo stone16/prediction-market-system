@@ -12,5 +12,8 @@ description = "Rust acceleration for the PMS executor inner retry loop."
 name = "pms_executor_rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+extension-module = ["dep:pyo3", "pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.22", optional = true }

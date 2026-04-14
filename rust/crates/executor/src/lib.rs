@@ -12,12 +12,18 @@
 //! it. Real ledger / backoff implementations are deliberately left
 //! `unimplemented!()` — see `rust/README.md` for the design.
 
+#[cfg(feature = "extension-module")]
 use pyo3::prelude::*;
 
 /// Returns the crate's package version.
+pub fn crate_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+#[cfg(feature = "extension-module")]
 #[pyfunction]
 fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    crate_version()
 }
 
 /// Hot-path placeholder: compute the next exponential backoff delay
@@ -27,6 +33,7 @@ fn version() -> &'static str {
 /// Currently `unimplemented!()` — the Python fallback in
 /// `pms.execution.executor.OrderExecutor.submit_order` stays the
 /// source of truth until this is filled in.
+#[cfg(feature = "extension-module")]
 #[pyfunction]
 #[allow(unused_variables)]
 fn compute_backoff(attempt: usize, initial: f64, multiplier: f64) -> PyResult<f64> {
@@ -35,9 +42,20 @@ fn compute_backoff(attempt: usize, initial: f64, multiplier: f64) -> PyResult<f6
     ))
 }
 
+#[cfg(feature = "extension-module")]
 #[pymodule]
 fn pms_executor_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(compute_backoff, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crate_version;
+
+    #[test]
+    fn crate_version_matches_package_version() {
+        assert_eq!(crate_version(), env!("CARGO_PKG_VERSION"));
+    }
 }

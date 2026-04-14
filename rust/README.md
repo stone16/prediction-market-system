@@ -22,6 +22,12 @@ body so the path forward is concrete. Filling in the actual
 implementations is reserved for a future task — the Python fallback
 remains the canonical reference until then.
 
+The PyO3 `extension-module` feature is opt-in. Normal `cargo test`
+builds keep that feature off so the Rust workspace can be tested
+without relying on platform-specific `libpython` loader paths. Each
+crate-local `pyproject.toml` enables `extension-module` for maturin
+builds, which produce importable Python extension wheels.
+
 ## Build
 
 The Rust crates are not built by `uv sync`. Building them requires
@@ -35,13 +41,28 @@ rustup default stable
 # 2. Install maturin (the PyO3 build frontend).
 uv pip install maturin
 
-# 3. Build each crate in turn. ``maturin develop`` builds the
+# 3. Run the Rust workspace smoke tests. These do not build Python
+#    extension modules; they verify the ordinary Cargo path.
+cd rust
+cargo test --workspace
+
+# 4. Build each crate in turn. ``maturin develop`` builds the
 #    extension and installs it into the active venv so the
 #    ``import pms_*_rs`` line in the accel layer succeeds.
-cd rust
 maturin develop --release -m crates/embeddings/Cargo.toml
 maturin develop --release -m crates/datafeed/Cargo.toml
 maturin develop --release -m crates/executor/Cargo.toml
+```
+
+If your shell has both `VIRTUAL_ENV` and `CONDA_PREFIX` set, maturin
+will ask you to unset one. In that case, target the project venv
+explicitly:
+
+```bash
+cd rust
+env -u CONDA_PREFIX ../.venv/bin/maturin develop --release -m crates/embeddings/Cargo.toml
+env -u CONDA_PREFIX ../.venv/bin/maturin develop --release -m crates/datafeed/Cargo.toml
+env -u CONDA_PREFIX ../.venv/bin/maturin develop --release -m crates/executor/Cargo.toml
 ```
 
 After a successful `maturin develop` round, restart the Python
