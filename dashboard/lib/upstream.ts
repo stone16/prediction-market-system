@@ -5,16 +5,17 @@ export async function upstreamResponse(pathname: string, init?: RequestInit) {
   if (!baseUrl) return null;
   const url = new URL(pathname, baseUrl);
   let response: Response;
+  let body: string;
   try {
     response = await fetch(url, {
       cache: 'no-store',
       ...init
     });
+    body = await response.text();
   } catch (error) {
     console.warn(`PMS upstream unavailable at ${url.toString()}`, error);
     return null;
   }
-  const body = await response.text();
   return new NextResponse(body, {
     status: response.status,
     headers: {

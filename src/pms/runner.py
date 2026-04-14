@@ -284,6 +284,8 @@ def _fill_from_order(
         return None
     if order_state.filled_size <= 0.0:
         return None
+    if order_state.fill_price <= 0.0:
+        return None
 
     return FillRecord(
         trade_id=order_state.order_id,
@@ -306,16 +308,14 @@ def _fill_from_order(
 def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
     positions = list(portfolio.open_positions)
     fill_size = fill.fill_size
+    contracts = _filled_contracts(fill)
     for index, position in enumerate(positions):
         if _same_position(position, fill):
-            new_shares = position.shares_held + fill_size
-            if new_shares <= 0.0:
-                avg_entry_price = fill.fill_price
-            else:
-                avg_entry_price = (
-                    position.avg_entry_price * position.shares_held
-                    + fill.fill_price * fill_size
-                ) / new_shares
+            new_shares = position.shares_held + contracts
+            avg_entry_price = (
+                position.avg_entry_price * position.shares_held
+                + fill.fill_price * contracts
+            ) / new_shares
             positions[index] = replace(
                 position,
                 shares_held=new_shares,
@@ -330,7 +330,7 @@ def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
                 token_id=fill.token_id,
                 venue=fill.venue,
                 side=fill.side,
-                shares_held=fill_size,
+                shares_held=contracts,
                 avg_entry_price=fill.fill_price,
                 unrealized_pnl=0.0,
                 locked_usdc=fill_size,
@@ -343,6 +343,12 @@ def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
         locked_usdc=portfolio.locked_usdc + fill_size,
         open_positions=positions,
     )
+
+
+def _filled_contracts(fill: FillRecord) -> float:
+    if fill.filled_contracts is not None:
+        return fill.filled_contracts
+    return fill.fill_size / fill.fill_price
 
 
 def _same_position(position: Position, fill: FillRecord) -> bool:

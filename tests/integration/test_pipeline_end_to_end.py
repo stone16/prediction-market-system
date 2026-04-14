@@ -144,6 +144,10 @@ async def test_backtest_end_to_end_fixture_produces_decisions_and_eval_records(
     assert sum(
         position.locked_usdc for position in runner.portfolio.open_positions
     ) == pytest.approx(locked_size)
+    assert sum(
+        position.shares_held * position.avg_entry_price
+        for position in runner.portfolio.open_positions
+    ) == pytest.approx(locked_size)
 
 
 @pytest.mark.asyncio
