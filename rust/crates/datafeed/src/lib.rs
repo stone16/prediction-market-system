@@ -14,6 +14,7 @@
 //! are intentionally left as `unimplemented!()` until a future task
 //! explicitly takes them on — see `rust/README.md` for the design.
 
+#[cfg(feature = "extension-module")]
 use pyo3::prelude::*;
 
 /// Returns the crate's package version.
@@ -21,9 +22,14 @@ use pyo3::prelude::*;
 /// This is the smoke function the Python accel layer uses to confirm
 /// the compiled extension is loadable. Tests assert it returns a
 /// non-empty string; the value itself is the Cargo package version.
+pub fn crate_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+#[cfg(feature = "extension-module")]
 #[pyfunction]
 fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    crate_version()
 }
 
 /// Hot-path placeholder: parse a raw Polymarket Gamma `/markets`
@@ -32,6 +38,7 @@ fn version() -> &'static str {
 /// Currently `unimplemented!()` — the Python fallback in
 /// `pms.connectors.polymarket.PolymarketConnector._normalize_market`
 /// stays the source of truth until this is filled in.
+#[cfg(feature = "extension-module")]
 #[pyfunction]
 #[allow(unused_variables)]
 fn parse_polymarket_markets(_payload: &str) -> PyResult<Vec<String>> {
@@ -40,9 +47,20 @@ fn parse_polymarket_markets(_payload: &str) -> PyResult<Vec<String>> {
     ))
 }
 
+#[cfg(feature = "extension-module")]
 #[pymodule]
 fn pms_datafeed_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(parse_polymarket_markets, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crate_version;
+
+    #[test]
+    fn crate_version_matches_package_version() {
+        assert_eq!(crate_version(), env!("CARGO_PKG_VERSION"));
+    }
 }
