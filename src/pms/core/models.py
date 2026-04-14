@@ -89,6 +89,7 @@ class FillRecord:
     fees: float | None = None
     liquidity_side: str | None = None
     transaction_ref: str | None = None
+    resolved_outcome: float | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,11 @@ class EvalRecord:
     fill_status: str
     recorded_at: datetime
     citations: list[str]
+    category: str | None = None
+    model_id: str | None = None
+    pnl: float = 0.0
+    slippage_bps: float = 0.0
+    filled: bool = True
 
 
 @dataclass(frozen=True)
