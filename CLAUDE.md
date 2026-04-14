@@ -15,17 +15,16 @@ Always run from a clean shell at the repo root:
 ```bash
 uv sync                                  # install deps from uv.lock
 uv run pytest -q                         # full test suite
-uv run mypy python/ tests/ scripts/ --strict   # strict type check on every committed module
+uv run mypy src/ tests/ --strict         # strict type check on every committed module
 ```
 
-The pytest baseline must be **≥323 passing, 2 skipped** as of 2026-04-09.
-Skipped = 1 baseline + 1 integration test gated on `PMS_RUN_INTEGRATION=1`.
+The pytest baseline must be **≥62 passing, 2 skipped** as of 2026-04-14 (pms-v2).
+Skipped = 2 integration tests gated on `PMS_RUN_INTEGRATION=1`.
 mypy strict must be clean on **every** source file. Both gates are
 load-bearing — never commit without running both.
 
-`pytest -m integration` requires `PMS_RUN_INTEGRATION=1` and runs the real
-py-clob-client end-to-end against the public Polymarket CLOB endpoint
-(no credentials needed).
+`pytest -m integration` requires `PMS_RUN_INTEGRATION=1` and runs the
+paper-mode runner against the live Polymarket REST API (no credentials needed).
 
 ## Active rules (promoted from retros)
 
