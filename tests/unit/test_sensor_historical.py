@@ -8,7 +8,6 @@ import pytest
 
 from pms.core.enums import MarketStatus
 from pms.core.models import MarketSignal
-from pms.sensor.adapters import historical
 from pms.sensor.adapters.historical import HistoricalSensor
 from pms.sensor.stream import SensorStream
 
@@ -73,7 +72,7 @@ async def test_historical_sensor_replay_speed_scales_sleep(
     async def fake_sleep(seconds: float) -> None:
         sleep_durations.append(seconds)
 
-    monkeypatch.setattr(historical.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     signals = await _collect(HistoricalSensor(jsonl_path, replay_speed=2.0))
 
