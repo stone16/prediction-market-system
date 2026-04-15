@@ -6,12 +6,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pms.config import data_dir
 from pms.core.models import Feedback
 
 
 @dataclass
 class FeedbackStore:
-    path: Path | None = field(default_factory=lambda: Path(".data/feedback.jsonl"))
+    path: Path | None = field(default_factory=lambda: data_dir() / "feedback.jsonl")
     _items: list[Feedback] = field(default_factory=list)
 
     def __post_init__(self) -> None:

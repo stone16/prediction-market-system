@@ -18,7 +18,7 @@ uv run pytest -q                         # full test suite
 uv run mypy src/ tests/ --strict         # strict type check on every committed module
 ```
 
-The pytest baseline must be **≥62 passing, 2 skipped** as of 2026-04-14 (pms-v2).
+The pytest baseline must be **≥70 passing, 2 skipped** as of 2026-04-15 (pms-v2).
 Skipped = 2 integration tests gated on `PMS_RUN_INTEGRATION=1`.
 mypy strict must be clean on **every** source file. Both gates are
 load-bearing — never commit without running both.
@@ -178,50 +178,60 @@ skipif keeps the default invocation fast and offline.
 
 ### Frozen dataclasses for all data models
 
-Every type under `pms.models.*` is `@dataclass(frozen=True)`. Mutation
-goes through `dataclasses.replace`. New models added to `pms.models`
-must follow the same convention — the runtime invariants in `risk.py`,
-`executor.py`, and the strategy modules all assume immutability.
+Every entity under `pms.core.models` is `@dataclass(frozen=True)`. Mutation
+goes through `dataclasses.replace`. New models must follow the same
+convention — the runtime invariants in `actuator/risk.py`,
+`actuator/executor.py`, and every module under `controller/` assume
+immutability.
 
-### Decimal for all financial math
+### `float` at entity boundary, `Decimal` for calculation internals
 
-Never use `float` for prices, sizes, P&L, exposure, or any monetary
-quantity. Use `Decimal(str(value))` when converting from JSON to avoid
-binary float precision loss. The existing tests for `risk.py`,
-`executor.py`, and `strategy/arbitrage.py` exercise the Decimal path
-explicitly; new tests should match.
+The v2 schema-spec pins entity financial fields to Python `float`
+(matching the source venue payloads and the OSS reference
+implementations). See the module docstring on `src/pms/core/models.py`
+for the rationale.
+
+Rules:
+- `MarketSignal`, `TradeDecision`, `OrderState`, `FillRecord`,
+  `Portfolio`, `EvalRecord` store prices, sizes, and money as `float`.
+- Adapters and pure-math calculators (e.g. `controller/sizers/kelly.py`,
+  Kalshi cent-fixed-point reconciliation) MUST convert to `Decimal` via
+  `Decimal(str(value))` before arithmetic, then convert back to `float`
+  when writing into an entity. The `str(...)` step avoids binary float
+  precision loss.
+- Do not invert this rule to "Decimal everywhere" — that pattern was
+  pms-v1 and was reversed deliberately when v2 locked the schema-spec.
 
 ### Protocol-first module boundaries
 
-Every module slot in `python/pms/protocols/` defines a Protocol. Concrete
-implementations live under `python/pms/{connectors,strategy,execution,...}/`.
-The pipeline orchestrator (`python/pms/orchestrator/pipeline.py`) only
-ever holds references to the Protocol type, never to the concrete class.
-This is what makes module swapping work without touching the pipeline.
+Protocol interfaces live in `src/pms/core/interfaces.py`. Concrete
+implementations live under `src/pms/{sensor,controller,actuator,evaluation}/`
+(with further `adapters/` subpackages per layer). The orchestrator
+(`src/pms/runner.py`) and the controller pipeline
+(`src/pms/controller/pipeline.py`) only ever reference the Protocol
+types (`ISensor`, `IController`, `IActuator`, `IEvaluator`,
+`IForecaster`, `ICalibrator`, `ISizer`), never concrete classes. This
+is what makes module swapping work without touching the orchestrator.
 
-### Test discovery requires `pythonpath = ["python", "."]`
+### Test discovery requires `pythonpath = ["src", "."]`
 
-(Locked in by `fix(tests)` commit `27c7f89`.)
+The package lives under `src/pms/` (hatchling target in
+`pyproject.toml`). `[tool.pytest.ini_options]` MUST keep both `src`
+and `.` on `pythonpath` so `from pms.*` imports resolve against the
+in-tree source and so `tests/` fixtures can be imported as modules.
+Removing either entry breaks pytest collection on a fresh clone.
 
-`tests/test_pipeline.py` imports `from tests._registry_target import ...`
-which only resolves when the project root is on `sys.path`. The
-`pyproject.toml` `[tool.pytest.ini_options]` section MUST keep `.` on
-`pythonpath` — removing it breaks pytest collection on a fresh clone.
+Strict mypy resolves via `mypy_path = "src"` in the same `pyproject.toml`
+— keep those two paths in sync.
 
-### Subprocess runner install command parser is whitelist-only
+### Data directory is a single entry point
 
-(Locked in by `feat(phase2)` commit `b18d850`.)
-
-`python/pms/tool_harness/subprocess_runner.py` accepts only:
-- `pip install <pkg>` (rewritten to `uv pip install --python <venv>`)
-- `uv pip install <pkg>` (rewritten to `uv pip install --python <venv>`)
-- `npm install <pkg>`
-- `cargo add <pkg>`
-
-Any other shape (`uv sync`, `make install`, multi-step pipes, shell
-redirects) raises `UnsupportedCandidateError`. Do not loosen this
-parser to accept more shapes — adding shell-execution to the runner
-re-introduces the failure mode the whitelist was designed to prevent.
+Persistent JSONL state (`feedback.jsonl`, `eval_records.jsonl`) goes
+through `pms.config.data_dir()`. Default is `.data/` (gitignored);
+override for dev or tests with the `PMS_DATA_DIR` env var. Tests in
+`tests/` always pass an explicit `tmp_path` to `FeedbackStore` and
+`EvalStore`, so nothing in the test suite touches the shared `.data/`
+even without the env var set.
 
 ### No `Co-Authored-By` lines in commit messages
 
@@ -242,41 +252,55 @@ at every commit; it is settled.
 
 ```
 prediction-market-system/
-├── python/pms/                    # main package
-│   ├── models/                    # frozen dataclasses
-│   ├── protocols/                 # 9 Protocol interfaces
-│   ├── connectors/                # polymarket.py, kalshi.py
-│   ├── tool_harness/              # benchmark/candidate runner + subprocess
-│   ├── orchestrator/              # pipeline + module registry
-│   ├── strategy/                  # arbitrage, correlation, base
-│   ├── execution/                 # risk, executor, guardrails
-│   ├── evaluation/                # metrics, feedback
-│   └── embeddings/                # engine, sentence_transformer fallback
-├── rust/                          # Cargo workspace (scaffolded only)
-├── benchmarks/                    # 10 module benchmark YAMLs
-├── candidates/                    # 18 real-tool candidate YAMLs + probes/
-├── scripts/                       # one-off CLI helpers (export to auto-research)
-├── tests/                         # 323 tests, fixtures/ directory
-├── docs/                          # continuation guide + workflow docs
-├── .harness/pms-v1/spec.md        # original spec
-└── .harness/retro/                # task retros + index.md
+├── src/pms/                       # main package (hatchling wheel target)
+│   ├── core/                      # frozen dataclasses, enums, Protocol interfaces
+│   ├── sensor/                    # stream + watchdog + adapters/{historical,polymarket_rest,polymarket_stream}
+│   ├── controller/                # pipeline + router + forecasters/ + calibrators/ + sizers/
+│   ├── actuator/                  # risk + executor + feedback + adapters/{backtest,paper,polymarket}
+│   ├── evaluation/                # metrics + eval spool + feedback + adapters/scoring
+│   ├── storage/                   # EvalStore + FeedbackStore (JSONL persistence)
+│   ├── api/                       # FastAPI app + `pms-api` CLI entry
+│   ├── runner.py                  # orchestrator wiring sensor → controller → actuator → evaluation
+│   └── config.py                  # PMSSettings (pydantic-settings) + data_dir()
+├── dashboard/                     # Next.js console on port 3100 + Playwright e2e
+├── rust/                          # PyO3 workspace stub (scaffolded — pms-v1 canonical refs
+│                                  #   in READMEs/crate docstrings are historical)
+├── tests/                         # pytest suite (unit + integration), with fixtures/
+├── docs/                          # research notes + historical continuation guide
+├── .data/                         # gitignored JSONL state (override via PMS_DATA_DIR)
+├── .harness/{pms-v1,pms-v2}/      # spec + checkpoint artifacts per task
+└── .harness/retro/                # task retros + index.md (promoted rules live here)
 ```
+
+Note: `benchmarks/`, `candidates/`, `scripts/`, and the `tool_harness/` module
+from pms-v1 no longer exist in v2. The v2 architecture replaces that
+benchmark-driven tool-evaluation pipeline with the cybernetic loop (sensor →
+controller → actuator → evaluation). Historical references to those pms-v1
+paths survive in `.harness/retro/` and the rust crate docstrings — do not
+treat them as a map of current code.
 
 ## Useful commands
 
 ```bash
-# Full single-module evaluation against the real candidate dirs.
-uv run pms-harness evaluate --module data_connector \
-    --output-dir /tmp/p2_eval
+# Run the FastAPI backend (port 8000). PMS_AUTO_START=1 auto-starts the runner.
+uv run pms-api
 
-# Cross-module run with eval_results.yaml aggregate.
-uv run pms-harness evaluate-all --output-dir /tmp/p2_run
+# Run the dashboard against the live backend.
+cd dashboard
+PMS_API_BASE_URL=http://127.0.0.1:8000 npm run dev   # → http://127.0.0.1:3100
 
-# Convert eval_results.yaml → human_feedback.md for auto-research handoff.
-uv run python scripts/export_to_auto_research.py \
-    --eval-results /tmp/p2_run/eval_results.yaml
+# Full test + type baseline (matches the canonical gates at the top of this file).
+uv run pytest -q
+uv run mypy src/ tests/ --strict
 
-# Run the integration smoke test against real py-clob-client.
-PMS_RUN_INTEGRATION=1 uv run pytest \
-    tests/test_subprocess_runner.py::test_py_clob_client_probe_end_to_end -q
+# Integration tests against the live Polymarket REST API (no credentials needed).
+PMS_RUN_INTEGRATION=1 uv run pytest -m integration
+
+# Isolate dev JSONL state from the committed repo.
+export PMS_DATA_DIR=/tmp/pms-dev
+uv run pms-api
+# When done, rm -rf /tmp/pms-dev (or unset PMS_DATA_DIR and delete .data/).
+
+# Dashboard Playwright e2e (requires backend OR will fall back to mock-store).
+cd dashboard && npx playwright test
 ```

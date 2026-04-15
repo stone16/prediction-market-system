@@ -17,7 +17,7 @@ choice, read here first.
 *auto-research run: `pms-schema-design` — score 1.0 / 1.0, 5 iterations*
 
 The definitive specification for all internal data types. Use this as the
-reference when writing or reviewing any model under `python/pms/models/`.
+reference when writing or reviewing any model under `src/pms/core/models.py`.
 
 **What it contains:**
 - **8 fully annotated entities** — every field has: type, required/nullable,
