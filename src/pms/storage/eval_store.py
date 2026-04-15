@@ -6,12 +6,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pms.config import data_dir
 from pms.core.models import EvalRecord
 
 
 @dataclass
 class EvalStore:
-    path: Path | None = field(default_factory=lambda: Path(".data/eval_records.jsonl"))
+    path: Path | None = field(default_factory=lambda: data_dir() / "eval_records.jsonl")
     _items: list[EvalRecord] = field(default_factory=list)
 
     def append(self, record: EvalRecord) -> None:
