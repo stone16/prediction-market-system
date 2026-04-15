@@ -2,6 +2,12 @@ import { expect, test } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 
+// Visual baseline storage: dashboard/e2e/baseline/ is NOT gitignored
+// (checked against root .gitignore and dashboard/.gitignore), so screenshots
+// are committed and can be diffed across PRs.  To regenerate:
+//   cd dashboard && PMS_API_BASE_URL=http://127.0.0.1:8000 \
+//     npx playwright test dashboard.spec.ts -g "visual baseline"
+
 const evidenceDir = path.resolve(process.cwd(), '..', '.harness', 'pms-v2', 'checkpoints', '10', 'iter-1', 'evidence');
 const dataDir = path.resolve(process.cwd(), '..', '.data');
 const feedbackPath = path.join(dataDir, 'feedback.jsonl');
@@ -82,5 +88,39 @@ test('feedback panel resolves without full page reload and required pages are qu
   await page.goto('/backtest');
   await expect(page.getByRole('heading', { name: 'Backtest Run' })).toBeVisible();
 
+  expect(errors).toEqual([]);
+});
+
+test('visual baseline: all five dashboard pages render under live backend', async ({ page }) => {
+  // Heading strings verified against the actual page.tsx h1 elements:
+  //   app/page.tsx            → 'Cybernetic Console'  (confirmed in existing spec line 66)
+  //   app/signals/page.tsx    → 'Signal Stream'        (grep-confirmed)
+  //   app/decisions/page.tsx  → 'Decision Ledger'      (confirmed in existing spec line 80)
+  //   app/metrics/page.tsx    → 'Metric Review'        (grep-confirmed — NOT 'Metrics')
+  //   app/backtest/page.tsx   → 'Backtest Run'         (confirmed in existing spec line 83)
+  const pages: Array<{ path: string; heading: string; file: string }> = [
+    { path: '/',          heading: 'Cybernetic Console', file: 'home.png'      },
+    { path: '/signals',   heading: 'Signal Stream',      file: 'signals.png'   },
+    { path: '/decisions', heading: 'Decision Ledger',    file: 'decisions.png' },
+    { path: '/metrics',   heading: 'Metric Review',      file: 'metrics.png'   },
+    { path: '/backtest',  heading: 'Backtest Run',       file: 'backtest.png'  },
+  ];
+
+  const errors: string[] = [];
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(`${m.location().url}: ${m.text()}`); });
+  page.on('pageerror', (e) => errors.push(e.message));
+
+  const baselineDir = path.join(__dirname, 'baseline');
+  fs.mkdirSync(baselineDir, { recursive: true });
+
+  for (const p of pages) {
+    await page.goto(p.path);
+    // Soft assertion: if the heading renames the test still captures the screenshot
+    // so the visual diff is informative rather than just failing with no evidence.
+    await expect.soft(page.getByRole('heading', { name: p.heading })).toBeVisible({ timeout: 5_000 });
+    await page.screenshot({ path: path.join(baselineDir, p.file), fullPage: true });
+  }
+
+  // Console errors on any page are a real regression — fail hard.
   expect(errors).toEqual([]);
 });
