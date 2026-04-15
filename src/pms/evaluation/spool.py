@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from pms.core.models import EvalRecord, FillRecord, MarketSignal, TradeDecision
@@ -64,9 +64,20 @@ class EvalSpool:
                     )
                     continue
                 if fill is not None:
-                    self.store.append(self.scorer.score(fill, decision))
+                    self.store.append(
+                        replace(
+                            self.scorer.score(fill, decision),
+                            recorded_at=_recorded_at(fill, signal),
+                        )
+                    )
                 else:
-                    self.store.append(_unfilled_record(decision, resolved_outcome))
+                    self.store.append(
+                        _unfilled_record(
+                            decision,
+                            resolved_outcome,
+                            _recorded_at(fill, signal),
+                        )
+                    )
             finally:
                 self._queue.task_done()
 
@@ -84,8 +95,21 @@ def _resolved_outcome(
     return None
 
 
+def _recorded_at(
+    fill: FillRecord | None,
+    signal: MarketSignal | None,
+) -> datetime:
+    if signal is not None:
+        return signal.fetched_at
+    if fill is not None:
+        return fill.filled_at
+    return datetime.now(tz=UTC)
+
+
 def _unfilled_record(
-    decision: TradeDecision, resolved_outcome: float
+    decision: TradeDecision,
+    resolved_outcome: float,
+    recorded_at: datetime,
 ) -> EvalRecord:
     """Build an EvalRecord for a decision that was rejected / never filled."""
     brier_score = (decision.prob_estimate - resolved_outcome) ** 2
@@ -96,7 +120,7 @@ def _unfilled_record(
         resolved_outcome=resolved_outcome,
         brier_score=brier_score,
         fill_status="unfilled",
-        recorded_at=datetime.now(tz=UTC),
+        recorded_at=recorded_at,
         citations=[],
         category=None,
         model_id=None,
