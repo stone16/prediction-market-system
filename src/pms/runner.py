@@ -305,7 +305,7 @@ def _fill_from_order(
         filled_at=order_state.last_updated_at,
         status=order_state.status,
         anomaly_flags=[],
-        resolved_outcome=_resolved_outcome(signal),
+        resolved_outcome=_extract_resolved_outcome(signal),
     )
 
 
@@ -364,7 +364,7 @@ def _same_position(position: Position, fill: FillRecord) -> bool:
     )
 
 
-def _resolved_outcome(signal: MarketSignal) -> float | None:
+def _extract_resolved_outcome(signal: MarketSignal) -> float | None:
     raw_outcome = signal.external_signal.get("resolved_outcome")
     if raw_outcome is not None:
         return min(max(float(raw_outcome), 0.0), 1.0)
