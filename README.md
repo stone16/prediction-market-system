@@ -254,27 +254,18 @@ untouched regardless of `PMS_DATA_DIR`.
 
 Reset the repo-default store with `rm -rf .data/`.
 
-### Known open questions
+### Resolved implementation notes
 
-- `/feedback` has no `limit` query parameter, unlike `/signals` and
-  `/decisions` (both default 50). A long-running dev session can push
-  700+ entries to `/api/pms/feedback`, bloating the home-page render and
-  the visual smoke capture. Fix: mirror the `_latest(limit)` pattern
-  around the handler in `src/pms/api/app.py`.
-- Paper-mode was observed on 2026-04-15 producing decisions but zero
-  fills in a 126 s window. Either the paper actuator is not incrementing
-  `fills_total`, or the observation window was too short for any paper
-  order to fill. See `claudedocs/paper-mode-smoke-2026-04-15.md`.
-- `brier_series` and `pnl_series` timestamps collapse into a sub-second
-  window in backtest mode because `HistoricalSensor` replays all records
-  as fast as it can. Charts on `/metrics` become unreadable. Options:
-  subsample / aggregate in the metrics collector, or space backtest
-  replay at a configurable rate.
-- The calibration curve on `/metrics` degenerates to a single point when
-  the forecaster is the placeholder "always 0.5" stub. Expected for a
-  backtest with the stub forecaster, but the chart renders as a lone dot
-  with no hint that this is a forecaster limitation rather than a UI
-  bug. Add an empty-state copy explaining the degeneracy.
+- Feedback lists are bounded like signals and decisions. `GET /feedback`
+  defaults to the latest 50 rows, supports `limit=0`, and applies the cap
+  after the optional `resolved` filter.
+- Paper mode uses Gamma market price and liquidity to derive simulated
+  one-level bid/ask depth. Accepting markets with positive liquidity can
+  produce matched paper fills without touching live execution APIs.
+- Metric series use source market timestamps from the evaluator spool, so
+  fast backtest replay preserves event spacing on `/metrics`.
+- The metrics page explains one-probability calibration samples instead of
+  leaving a lone point without context.
 
 See [`CLAUDE.md`](./CLAUDE.md) for the active engineering rules promoted
 from retros.
