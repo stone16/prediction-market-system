@@ -164,6 +164,33 @@ async def test_api_routes_expose_mock_runner_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_feedback_limit_matches_latest_list_semantics() -> None:
+    runner = Runner(
+        config=_settings(),
+        eval_store=EvalStore(path=None),
+        feedback_store=FeedbackStore(path=None),
+    )
+    for index in range(55):
+        runner.feedback_store.append(_feedback(f"fb-{index:02d}"))
+    runner.feedback_store.append(replace(_feedback("fb-resolved"), resolved=True))
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        default_feedback = (await client.get("/feedback")).json()
+        none_feedback = (await client.get("/feedback?limit=0")).json()
+        latest_unresolved = (
+            await client.get("/feedback?resolved=false&limit=1")
+        ).json()
+
+    assert len(default_feedback) == 50
+    assert default_feedback[0]["feedback_id"] == "fb-06"
+    assert default_feedback[-1]["feedback_id"] == "fb-resolved"
+    assert none_feedback == []
+    assert [item["feedback_id"] for item in latest_unresolved] == ["fb-54"]
+
+
+@pytest.mark.asyncio
 async def test_api_feedback_resolve_and_config_errors() -> None:
     runner = _runner_with_state()
     app = create_app(runner)

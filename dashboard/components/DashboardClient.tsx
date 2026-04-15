@@ -30,7 +30,7 @@ export function DashboardClient() {
       const [status, metrics, feedback] = await Promise.all([
         apiGet<StatusResponse>('/status'),
         apiGet<MetricsResponse>('/metrics'),
-        apiGet<Feedback[]>('/feedback?resolved=false')
+        apiGet<Feedback[]>('/feedback?resolved=false&limit=50')
       ]);
       if (!cancelledRef.current) setData({ status, metrics, feedback, disconnected: false });
     } catch {
