@@ -315,6 +315,43 @@ th {
   padding: 18px;
 }
 
+.run-controls {
+  align-items: center;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  margin: 18px 0;
+  padding: 18px;
+}
+
+.button-row {
+  display: flex;
+  gap: 10px;
+}
+
+.button-row button {
+  background: var(--ink);
+  color: #fff;
+  font-weight: 700;
+  padding: 9px 16px;
+}
+
+.button-row button:hover:not(:disabled) {
+  background: var(--green);
+}
+
+.button-row button:disabled {
+  background: var(--line);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.error {
+  color: var(--coral);
+  font-weight: 700;
+  margin: 0;
+}
+
 @media (max-width: 900px) {
   .shell {
     padding: 18px;

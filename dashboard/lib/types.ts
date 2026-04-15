@@ -1,6 +1,7 @@
 export type StatusResponse = {
   mode: string;
   runner_started_at: string | null;
+  running?: boolean;
   sensors: Array<{ name: string; status: string; last_signal_at: string | null }>;
   controller: { decisions_total: number };
   actuator: { fills_total: number; mode: string };

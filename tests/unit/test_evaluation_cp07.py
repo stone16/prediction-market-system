@@ -252,3 +252,33 @@ def test_eval_store_append_writes_jsonl(tmp_path: Path) -> None:
 
     assert len(store.all()) == 1
     assert "d-cp07" in (tmp_path / "eval_records.jsonl").read_text(encoding="utf-8")
+
+
+def test_feedback_store_reloads_from_disk(tmp_path: Path) -> None:
+    path = tmp_path / "feedback.jsonl"
+    first = FeedbackStore(path=path)
+    first.append(_feedback("fb-reload"))
+    first.resolve("fb-reload")
+
+    reloaded = FeedbackStore(path=path)
+
+    assert [item.feedback_id for item in reloaded.all()] == ["fb-reload"]
+    assert reloaded.all()[0].resolved is True
+
+
+def test_feedback_store_skips_malformed_reload_rows(tmp_path: Path) -> None:
+    """Regression for codex-bot C2: non-dict / partial JSONL rows must not abort init."""
+    path = tmp_path / "feedback.jsonl"
+    store = FeedbackStore(path=path)
+    store.append(_feedback("fb-good"))
+    # Append poisonous rows: array, string, number, missing-field dict, invalid JSON.
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write("[1, 2, 3]\n")
+        stream.write("\"scalar\"\n")
+        stream.write("42\n")
+        stream.write("{\"partial\": true}\n")
+        stream.write("not json at all\n")
+
+    reloaded = FeedbackStore(path=path)
+
+    assert [item.feedback_id for item in reloaded.all()] == ["fb-good"]
