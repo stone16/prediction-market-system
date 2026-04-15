@@ -2,11 +2,23 @@ import { expect, test } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 
-// Visual baseline storage: dashboard/e2e/baseline/ is NOT gitignored
+// Smoke-capture storage: dashboard/e2e/baseline/ is NOT gitignored
 // (checked against root .gitignore and dashboard/.gitignore), so screenshots
-// are committed and can be diffed across PRs.  To regenerate:
+// are committed and can be visually diffed across PRs.  To regenerate:
 //   cd dashboard && PMS_API_BASE_URL=http://127.0.0.1:8000 \
-//     npx playwright test dashboard.spec.ts -g "visual baseline"
+//     npx playwright test dashboard.spec.ts -g "smoke capture"
+//
+// IMPORTANT — these screenshots are NOT deterministic across runs.
+// Backend state (feedback count, decision count, fill timestamps) varies
+// per session and per developer machine.  Two engineers regenerating at
+// the same commit SHA will get different PNGs.  They are committed so
+// PRs *can* be visually diffed, but any diff must be manually reviewed
+// against expected state changes — do NOT treat a diff as an automatic
+// regression.
+//
+// Known open question (Task 4 README): a /feedback?limit=N cap (mirroring
+// /signals and /decisions in src/pms/api/app.py) would bound home.png
+// structurally.  Not addressed here.
 
 const evidenceDir = path.resolve(process.cwd(), '..', '.harness', 'pms-v2', 'checkpoints', '10', 'iter-1', 'evidence');
 const dataDir = path.resolve(process.cwd(), '..', '.data');
@@ -91,7 +103,7 @@ test('feedback panel resolves without full page reload and required pages are qu
   expect(errors).toEqual([]);
 });
 
-test('visual baseline: all five dashboard pages render under live backend', async ({ page }) => {
+test('smoke capture: screenshot all five dashboard pages against live backend', async ({ page }) => {
   // Heading strings verified against the actual page.tsx h1 elements:
   //   app/page.tsx            → 'Cybernetic Console'  (confirmed in existing spec line 66)
   //   app/signals/page.tsx    → 'Signal Stream'        (grep-confirmed)
@@ -115,11 +127,19 @@ test('visual baseline: all five dashboard pages render under live backend', asyn
 
   for (const p of pages) {
     await page.goto(p.path);
+    await page.waitForLoadState('networkidle');
     // Soft assertion: if the heading renames the test still captures the screenshot
     // so the visual diff is informative rather than just failing with no evidence.
     await expect.soft(page.getByRole('heading', { name: p.heading })).toBeVisible({ timeout: 5_000 });
-    await page.screenshot({ path: path.join(baselineDir, p.file), fullPage: true });
+    await page.screenshot({
+      path: path.join(baselineDir, p.file),
+      fullPage: p.path !== '/', // home: viewport-only to bound size against unbounded feedback list
+    });
   }
+
+  // If any soft heading assertion failed above, surface it as a hard failure
+  // so CI does not show green when headings drift.
+  expect(test.info().errors).toHaveLength(0);
 
   // Console errors on any page are a real regression — fail hard.
   expect(errors).toEqual([]);
