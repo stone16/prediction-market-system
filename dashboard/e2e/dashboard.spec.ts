@@ -103,6 +103,40 @@ test('feedback panel resolves without full page reload and required pages are qu
   expect(errors).toEqual([]);
 });
 
+test('degenerate calibration explains one-probability data', async ({ page }) => {
+  await page.route('**/api/pms/metrics', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      json: {
+        brier_overall: 0.25,
+        brier_by_category: { stub: 0.25 },
+        pnl: 0,
+        slippage_bps: 0,
+        fill_rate: 1,
+        win_rate: 0.5,
+        brier_series: [
+          { recorded_at: '2026-04-13T00:00:00+00:00', brier_score: 0.25 },
+          { recorded_at: '2026-04-14T00:00:00+00:00', brier_score: 0.25 }
+        ],
+        calibration_curve: [
+          { prob_estimate: 0.5, resolved_outcome: 0 },
+          { prob_estimate: 0.5, resolved_outcome: 1 }
+        ],
+        pnl_series: [
+          { recorded_at: '2026-04-13T00:00:00+00:00', pnl: 0 },
+          { recorded_at: '2026-04-14T00:00:00+00:00', pnl: 0 }
+        ]
+      }
+    });
+  });
+
+  await page.goto('/metrics');
+
+  await expect(
+    page.getByText('One probability level recorded. Calibration needs varied forecasts before a curve appears.')
+  ).toBeVisible();
+});
+
 test('smoke capture: screenshot all five dashboard pages against live backend', async ({ page }) => {
   // Heading strings verified against the actual page.tsx h1 elements:
   //   app/page.tsx            → 'Cybernetic Console'  (confirmed in existing spec line 66)
