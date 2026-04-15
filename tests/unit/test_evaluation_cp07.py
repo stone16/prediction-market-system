@@ -9,7 +9,13 @@ import pytest
 
 from pms.config import RiskSettings
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side
-from pms.core.models import EvalRecord, Feedback, FillRecord, TradeDecision
+from pms.core.models import (
+    EvalRecord,
+    Feedback,
+    FillRecord,
+    MarketSignal,
+    TradeDecision,
+)
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
@@ -103,6 +109,22 @@ def _feedback(feedback_id: str) -> Feedback:
     )
 
 
+def _signal(*, fetched_at: datetime) -> MarketSignal:
+    return MarketSignal(
+        market_id="m-cp07",
+        token_id="t-yes",
+        venue="polymarket",
+        title="Test market",
+        yes_price=0.4,
+        volume_24h=None,
+        resolves_at=None,
+        orderbook={},
+        external_signal={"resolved_outcome": 1.0},
+        fetched_at=fetched_at,
+        market_status="resolved",
+    )
+
+
 def test_scorer_brier_known_values() -> None:
     scorer = Scorer()
 
@@ -111,6 +133,27 @@ def test_scorer_brier_known_values() -> None:
 
     assert first.brier_score == pytest.approx(0.09)
     assert second.brier_score == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_uses_signal_time_for_filled_records(
+    tmp_path: Path,
+) -> None:
+    signal_time = datetime(2026, 4, 13, 12, 30, tzinfo=UTC)
+    store = EvalStore(path=tmp_path / "eval_records.jsonl")
+    spool = EvalSpool(store=store, scorer=Scorer())
+    await spool.start()
+
+    spool.enqueue(
+        _fill(resolved_outcome=1.0),
+        _decision(prob=0.7),
+        _signal(fetched_at=signal_time),
+    )
+
+    await asyncio.wait_for(spool.join(), timeout=1.0)
+    await spool.stop()
+
+    assert store.all()[0].recorded_at == signal_time
 
 
 @pytest.mark.asyncio
@@ -282,3 +325,38 @@ def test_feedback_store_skips_malformed_reload_rows(tmp_path: Path) -> None:
     reloaded = FeedbackStore(path=path)
 
     assert [item.feedback_id for item in reloaded.all()] == ["fb-good"]
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_unfilled_decision_regime(
+    tmp_path: Path,
+) -> None:
+    """Regime 2: fill=None with a signal carrying resolved_outcome → _unfilled_record.
+
+    Piecewise-domain coverage (CLAUDE.md rule): this test covers the regime where
+    the decision was rejected / never filled but the market has since resolved.
+    EvalSpool._run() must produce an EvalRecord with filled=False, pnl=0, slippage=0,
+    and brier_score = (prob_estimate - resolved_outcome)**2.
+    """
+    prob_estimate = 0.7
+    resolved_outcome = 1.0
+    expected_brier = (prob_estimate - resolved_outcome) ** 2  # 0.09
+    signal_time = datetime(2026, 4, 14, tzinfo=UTC)
+    signal = _signal(fetched_at=signal_time)
+
+    store = EvalStore(path=tmp_path / "eval_records.jsonl")
+    spool = EvalSpool(store=store, scorer=Scorer())
+    await spool.start()
+
+    spool.enqueue(None, _decision(prob=prob_estimate), signal)
+
+    await asyncio.wait_for(spool.join(), timeout=1.0)
+    await spool.stop()
+
+    assert len(store.all()) == 1
+    record = store.all()[0]
+    assert record.filled is False
+    assert record.pnl == 0.0
+    assert record.slippage_bps == 0.0
+    assert record.brier_score == pytest.approx(expected_brier)
+    assert record.recorded_at == signal_time

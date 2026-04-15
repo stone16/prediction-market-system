@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import inspect
+import json
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
+import httpx
 import pytest
 
 from pms.actuator import executor
@@ -14,8 +19,17 @@ from pms.actuator.adapters.polymarket import PolymarketActuator
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
 from pms.config import PMSSettings, RiskSettings
-from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side
-from pms.core.models import LiveTradingDisabledError, OrderState, Portfolio, TradeDecision
+from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, RunMode, Side
+from pms.core.models import (
+    LiveTradingDisabledError,
+    MarketSignal,
+    OrderState,
+    Portfolio,
+    TradeDecision,
+)
+from pms.runner import Runner
+from pms.sensor.adapters.polymarket_rest import PolymarketRestSensor
+from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 
 
@@ -75,6 +89,48 @@ def _order_state() -> OrderState:
         last_updated_at=now,
         raw_status="rejected",
     )
+
+
+def _gamma_market_payload() -> list[dict[str, object]]:
+    return [
+        {
+            "conditionId": "pm-paper-1",
+            "clobTokenIds": json.dumps(["yes-token", "no-token"]),
+            "question": "Will paper mode fill?",
+            "outcomePrices": json.dumps(["0.42", "0.58"]),
+            "volume24hr": 1200.0,
+            "endDateIso": "2026-04-20T00:00:00Z",
+            "active": True,
+            "closed": False,
+            "acceptingOrders": True,
+            "liquidity": 3000.0,
+        }
+    ]
+
+
+@dataclass(frozen=True)
+class OneShotSensor:
+    signal: MarketSignal
+
+    def __aiter__(self) -> AsyncIterator[MarketSignal]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[MarketSignal]:
+        yield self.signal
+
+
+class AlwaysBuyController:
+    async def decide(
+        self,
+        signal: MarketSignal,
+        portfolio: Portfolio | None = None,
+    ) -> TradeDecision:
+        return _decision(
+            decision_id="d-paper-runner",
+            market_id=signal.market_id,
+            price=signal.yes_price,
+            size=10.0,
+        )
 
 
 def test_backtest_adapter_documents_license_decision_before_internal_replay() -> None:
@@ -141,6 +197,46 @@ async def test_paper_actuator_empty_orderbook_raises_insufficient_liquidity() ->
 
     with pytest.raises(InsufficientLiquidityError):
         await actuator.execute(_decision())
+
+
+@pytest.mark.asyncio
+async def test_paper_runner_records_fill_from_gamma_derived_depth() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=_gamma_market_payload())
+
+    sensor = PolymarketRestSensor(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=0.01,
+    )
+    signals = await sensor.poll_once()
+    await sensor.aclose()
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            risk=RiskSettings(
+                max_position_per_market=1000.0,
+                max_total_exposure=10_000.0,
+            ),
+        ),
+        sensors=[OneShotSensor(signals[0])],
+        controller=cast(Any, AlwaysBuyController()),
+        eval_store=EvalStore(path=None),
+        feedback_store=FeedbackStore(path=None),
+    )
+
+    try:
+        await runner.start()
+        await runner.wait_until_idle()
+    finally:
+        await runner.stop()
+
+    assert len(runner.state.decisions) == 1
+    assert len(runner.state.fills) == 1
+    assert runner.state.fills[0].fill_price == 0.42
 
 
 @pytest.mark.asyncio

@@ -128,10 +128,16 @@ def create_app(
         return payload
 
     @app.get("/feedback")
-    async def feedback(resolved: bool | None = None) -> list[dict[str, Any]]:
+    async def feedback(
+        resolved: bool | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
         return [
             cast(dict[str, Any], _jsonable(item))
-            for item in active_runner.feedback_store.list(resolved=resolved)
+            for item in _latest(
+                active_runner.feedback_store.list(resolved=resolved),
+                limit,
+            )
         ]
 
     @app.post("/feedback/{feedback_id}/resolve")

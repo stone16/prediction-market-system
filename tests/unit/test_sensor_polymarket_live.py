@@ -57,8 +57,43 @@ async def test_polymarket_rest_sensor_polls_gamma_once() -> None:
     assert signals[0].market_id == "pm-live-1"
     assert signals[0].token_id == "yes-token"
     assert signals[0].yes_price == 0.42
-    assert signals[0].orderbook == {"bids": [], "asks": []}
+    assert signals[0].orderbook == {
+        "bids": [{"price": 0.41, "size": 3000.0}],
+        "asks": [{"price": 0.42, "size": 3000.0}],
+    }
     assert signals[0].market_status == MarketStatus.OPEN.value
+
+
+@pytest.mark.asyncio
+async def test_polymarket_rest_sensor_keeps_orderbook_empty_without_liquidity() -> None:
+    payload = [
+        {**_gamma_market_payload()[0], "liquidity": 0.0},
+        {
+            **_gamma_market_payload()[0],
+            "conditionId": "pm-live-closed",
+            "acceptingOrders": False,
+        },
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = PolymarketRestSensor(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=0.01,
+    )
+
+    signals = await sensor.poll_once()
+    await sensor.aclose()
+
+    assert [signal.orderbook for signal in signals] == [
+        {"bids": [], "asks": []},
+        {"bids": [], "asks": []},
+    ]
 
 
 @pytest.mark.asyncio

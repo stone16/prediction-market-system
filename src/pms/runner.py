@@ -239,7 +239,11 @@ class Runner:
                 if fill is not None:
                     _append_bounded(self.state.fills, fill)
                     self.portfolio = _portfolio_with_fill(self.portfolio, fill)
-                    self._evaluator_spool.enqueue(fill, decision)
+                # Always enqueue every decision so the evaluator sees the full
+                # population. fill=None for rejected/unfilled decisions, which
+                # produces an EvalRecord with filled=False, making fill_rate
+                # meaningful (fills / decisions) rather than tautologically 1.0.
+                self._evaluator_spool.enqueue(fill, decision, signal)
             except Exception as error:
                 logger.warning("actuator execution failed: %s", error)
             finally:
@@ -301,7 +305,7 @@ def _fill_from_order(
         filled_at=order_state.last_updated_at,
         status=order_state.status,
         anomaly_flags=[],
-        resolved_outcome=_resolved_outcome(signal),
+        resolved_outcome=_extract_resolved_outcome(signal),
     )
 
 
@@ -360,7 +364,7 @@ def _same_position(position: Position, fill: FillRecord) -> bool:
     )
 
 
-def _resolved_outcome(signal: MarketSignal) -> float | None:
+def _extract_resolved_outcome(signal: MarketSignal) -> float | None:
     raw_outcome = signal.external_signal.get("resolved_outcome")
     if raw_outcome is not None:
         return min(max(float(raw_outcome), 0.0), 1.0)

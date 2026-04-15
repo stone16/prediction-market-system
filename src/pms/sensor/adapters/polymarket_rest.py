@@ -87,7 +87,7 @@ def _gamma_market_to_signal(row: dict[str, Any]) -> MarketSignal:
         yes_price=yes_price,
         volume_24h=_optional_float(row.get("volume24hr")),
         resolves_at=_optional_datetime(row.get("endDateIso")),
-        orderbook={"bids": [], "asks": []},
+        orderbook=_simulated_paper_orderbook(row, yes_price),
         external_signal={
             "no_token_id": no_token,
             "accepting_orders": bool(row.get("acceptingOrders", False)),
@@ -126,6 +126,28 @@ def _optional_float(value: object) -> float | None:
     if value is None or value == "":
         return None
     return float(cast(str | int | float, value))
+
+
+def _simulated_paper_orderbook(
+    row: dict[str, Any],
+    yes_price: float,
+) -> dict[str, list[dict[str, float]]]:
+    if not bool(row.get("acceptingOrders", False)):
+        return {"bids": [], "asks": []}
+    liquidity = _optional_float(row.get("liquidity"))
+    if liquidity is None or liquidity <= 0.0:
+        return {"bids": [], "asks": []}
+
+    ask_price = _clamp_probability(yes_price)
+    bid_price = _clamp_probability(ask_price - 0.01)
+    return {
+        "bids": [{"price": bid_price, "size": liquidity}],
+        "asks": [{"price": ask_price, "size": liquidity}],
+    }
+
+
+def _clamp_probability(value: float) -> float:
+    return round(min(max(value, 0.01), 0.99), 4)
 
 
 def _optional_datetime(value: object) -> datetime | None:
