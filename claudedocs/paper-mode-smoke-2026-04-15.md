@@ -57,7 +57,7 @@ pnl_series:    series_len=100  span=0.104356s
 
 **Span is 0.10 s — far below the ≥30 s threshold for readable dashboard curves.**
 
-### Root cause analysis
+### Hypothesis
 
 Both series timestamps are from `13:44:29` — the backtest epoch that pre-dated
 the mode switch at `13:45:58`. The rolling ring-buffer in the evaluator/metrics
@@ -71,8 +71,8 @@ Consequence for dashboard UX:
 - Any chart that uses `recorded_at` as the x-axis will appear broken regardless
   of how many decisions accumulate.
 
-This is a pre-existing condition, not introduced by Task 1. It will reproduce
-reliably from the captured JSON at `/tmp/pms-paper-metrics.json`.
+This is a pre-existing condition, not introduced by Task 1. It was reproducible
+from the JSON captured at `/tmp/pms-paper-metrics.json` (ephemeral, dev machine only).
 
 ---
 
