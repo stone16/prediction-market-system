@@ -1,4 +1,16 @@
-# Feeding Phase 2 results back to auto-research (P2-06)
+# Feeding Phase 2 results back to auto-research (P2-06) — HISTORICAL (pms-v1)
+
+> **⚠ Deprecated — pms-v1 historical.** This workflow depended on
+> `pms.tool_harness.aggregate.write_eval_results_yaml`, the
+> `pms-harness evaluate-all` CLI, and `scripts/export_to_auto_research.py` —
+> none of which exist in pms-v2. The v2 architecture does not ship a
+> benchmark/candidate evaluation pipeline. If a future phase re-introduces
+> tool-catalog feedback to auto-research, this file can serve as a shape
+> reference, but do not expect any of the commands below to run against
+> the current tree.
+
+---
+
 
 After a `pms-harness evaluate-all` run produces `eval_results.yaml`,
 the manual handoff back to `auto-research` is two steps:

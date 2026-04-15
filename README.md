@@ -64,13 +64,33 @@ panel that calls these endpoints directly.
 
 ```bash
 uv sync
-uv run pytest -q                              # full suite (66 pass, 2 skip)
+uv run pytest -q                              # full suite (70 pass, 2 skip)
 uv run mypy src/ tests/ --strict              # strict type check
 PMS_RUN_INTEGRATION=1 uv run pytest -m integration   # live network tests
 ```
 
 Baseline invariants enforced by CI:
-- pytest ≥ 66 passing, 2 skipped (integration gated on `PMS_RUN_INTEGRATION=1`).
+- pytest ≥ 70 passing, 2 skipped (integration gated on `PMS_RUN_INTEGRATION=1`).
 - mypy strict must be clean on every committed source file.
+
+### Isolating dev state
+
+The backend writes two JSONL files under `.data/` by default:
+`feedback.jsonl` and `eval_records.jsonl`. Both are gitignored, but
+`FeedbackStore` reloads `feedback.jsonl` on start, so dev sessions
+persist feedback across restarts. To isolate:
+
+```bash
+export PMS_DATA_DIR=/tmp/pms-dev    # or any ephemeral path
+uv run pms-api                      # writes to $PMS_DATA_DIR/*.jsonl
+```
+
+Tests are already isolated — every `FeedbackStore` / `EvalStore` test
+instance is constructed with an explicit `tmp_path`, so the shared
+`.data/` is untouched regardless of whether `PMS_DATA_DIR` is set.
+
+To reset the repo-default store: `rm -rf .data/` (or
+`rm -f .data/feedback.jsonl .data/eval_records.jsonl` to keep other
+files you may have placed there).
 
 See `CLAUDE.md` for the active engineering rules promoted from retros.

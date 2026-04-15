@@ -1,4 +1,23 @@
-# Continuation Guide — Prediction Market System
+# Continuation Guide — Prediction Market System (HISTORICAL — pms-v1)
+
+> **⚠ Deprecated — pms-v1 historical record.** This guide describes the
+> pms-v1 harness/benchmark/candidate pipeline (`python/pms/tool_harness/`,
+> `benchmarks/`, `candidates/`, `pms-harness` CLI) that was replaced when the
+> project migrated to the v2 cybernetic architecture
+> (`src/pms/{sensor,controller,actuator,evaluation}`). The paths, phases
+> (P2-01…P2-05), and "Section 6 Hard Rules" below refer to code that no
+> longer exists.
+>
+> For the current state of the codebase, read:
+> 1. `CLAUDE.md` — active engineering rules + current layout + baseline commands.
+> 2. `README.md` — quick-start for backend + dashboard.
+> 3. `.harness/retro/index.md` — living rule index.
+>
+> This file is retained as a paper trail of the v1 → v2 migration. Do not
+> use its "Section 2 Environment Setup" or "Section 3 Phase 2" instructions
+> against the v2 tree — they will not work.
+
+---
 
 **Purpose**: Let any agent (Claude Code, Codex, etc.) on any machine pick up where the previous session left off and continue building the prediction market system step-by-step.
 
