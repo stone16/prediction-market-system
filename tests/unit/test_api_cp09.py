@@ -261,3 +261,30 @@ async def test_api_auto_start_disabled_keeps_runner_idle(tmp_path: Path) -> None
 
     async with app.router.lifespan_context(app):
         assert runner.tasks == ()
+
+
+@pytest.mark.asyncio
+async def test_api_lifespan_stops_runner_started_via_api(tmp_path: Path) -> None:
+    """Regression for codex-bot C1: /run/start-triggered runner must also be stopped on shutdown."""
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.BACKTEST,
+            risk=RiskSettings(
+                max_position_per_market=1000.0,
+                max_total_exposure=10_000.0,
+            ),
+        ),
+        historical_data_path=FIXTURE_PATH,
+        eval_store=EvalStore(path=tmp_path / "eval.jsonl"),
+        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+    )
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app)
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            started = await client.post("/run/start")
+        assert started.status_code == 200
+        assert any(not task.done() for task in runner.tasks)
+
+    assert all(task.done() for task in runner.tasks)

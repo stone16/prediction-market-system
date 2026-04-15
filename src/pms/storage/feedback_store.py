@@ -23,8 +23,17 @@ class FeedbackStore:
                 if not line:
                     continue
                 try:
-                    self._items.append(_feedback_from_json(json.loads(line)))
-                except (ValueError, KeyError):
+                    payload = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(payload, dict):
+                    # Non-object row (array / string / number) — skip instead
+                    # of letting _feedback_from_json raise TypeError and abort
+                    # the reload of every subsequent row.
+                    continue
+                try:
+                    self._items.append(_feedback_from_json(payload))
+                except (KeyError, TypeError, ValueError):
                     continue
 
     def append(self, feedback: Feedback) -> None:

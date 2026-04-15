@@ -41,15 +41,16 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        started_here = False
         if auto_start and not _is_runner_running(active_runner):
             logger.info("PMS_AUTO_START enabled — starting runner in %s mode", active_runner.state.mode.value)
             await active_runner.start()
-            started_here = True
         try:
             yield
         finally:
-            if started_here:
+            # Always stop a running runner on shutdown — covers both auto_start
+            # and runners launched by callers via POST /run/start, so sensor
+            # resources (e.g. PolymarketRestSensor's httpx client) close cleanly.
+            if _is_runner_running(active_runner):
                 await active_runner.stop()
 
     app = FastAPI(title="PMS API", lifespan=lifespan)
