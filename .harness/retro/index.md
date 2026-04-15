@@ -90,3 +90,4 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 | pms-v1      | 2026-04-08 | 10  | 9          | 11    | 0       | [2026-04-08-pms-v1.md](./2026-04-08-pms-v1.md) |
 | pms-phase2  | 2026-04-08 | 7   | 6          | 9     | 0       | [2026-04-08-pms-phase2.md](./2026-04-08-pms-phase2.md) |
 | pms-phase3  | 2026-04-09 | 4   | 4          | 4     | 0       | [2026-04-09-pms-phase3.md](./2026-04-09-pms-phase3.md) |
+| pms-known-open-questions | 2026-04-16 | 5 | 5 | 5 | 0 | [2026-04-16-pms-known-open-questions.md](./2026-04-16-pms-known-open-questions.md) |
