@@ -1929,9 +1929,9 @@ owned, all 4 inner-ring product tables (`feedback`, `eval_records`,
 columns reserved `NULLABLE`, `/signals` renders real orderbook
 depth, and the canonical gates are green on a fresh clone. Inner-
 ring product-table columns are still `NULLABLE` — S5 will upgrade
-them to `NOT NULL`; your job is the aggregate + registry + linter
-+ seed that makes the `NULLABLE` columns carry `"default"` instead
-of `NULL`.
+them to `NOT NULL`; your job is the aggregate, registry, linter,
+and seed work that makes the `NULLABLE` columns carry `"default"`
+instead of `NULL`.
 
 PREFLIGHT (boundary check — run before any authoring):
 
