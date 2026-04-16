@@ -66,6 +66,7 @@ class RiskSettings(BaseModel):
 
 class SensorSettings(BaseModel):
     poll_interval_s: float = 5.0
+    max_reconnect_interval_s: float = 60.0
 
 
 def _default_database_dsn() -> str:

@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -12,7 +13,16 @@ from typing import Any, cast
 from websockets.asyncio.client import connect
 
 from pms.core.enums import MarketStatus
-from pms.core.models import BookLevel, BookSide, BookSnapshot, MarketSignal, PriceChange, Trade
+from pms.core.models import (
+    BookLevel,
+    BookSide,
+    BookSnapshot,
+    BookSource,
+    MarketSignal,
+    PriceChange,
+    Trade,
+)
+from pms.sensor.watchdog import SensorWatchdog
 from pms.storage.market_data_store import PostgresMarketDataStore
 
 
@@ -30,10 +40,16 @@ class _BookState:
 
 
 class MarketDataSensor:
+    # Polymarket's observed market-channel idle timeout is ~60 s. Keep heartbeat
+    # comfortably below that so missed pongs trigger reconnect before the server
+    # silently drops the subscription.
     _INITIAL_BACKOFF_S = 1.0
-    _MAX_BACKOFF_S = 30.0
+    _DEFAULT_MAX_RECONNECT_INTERVAL_S = 60.0
     _POOL_SATURATION_S = 0.1
     _POOL_RETRY_BACKOFF_S = 0.05
+    _HEARTBEAT_INTERVAL_S = 10.0
+    _PONG_TIMEOUT_S = 15.0
+    _WATCHDOG_TIMEOUT_S = 120.0
 
     def __init__(
         self,
@@ -47,30 +63,77 @@ class MarketDataSensor:
         self._books: dict[str, _BookState] = {}
         self._websocket: Any = None
         self._send_lock = asyncio.Lock()
+        self._max_reconnect_interval_s = self._DEFAULT_MAX_RECONNECT_INTERVAL_S
+        self._heartbeat_interval_s = self._HEARTBEAT_INTERVAL_S
+        self._pong_timeout_s = self._PONG_TIMEOUT_S
+        self._pending_book_source: BookSource | None = None
+        self._connected_once = False
+        self._watchdog_timeout_count = 0
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._watchdog = SensorWatchdog(
+            timeout_s=self._WATCHDOG_TIMEOUT_S,
+            fallback=self._handle_watchdog_timeout,
+        )
+
+    @property
+    def max_reconnect_interval_s(self) -> float:
+        return self._max_reconnect_interval_s
+
+    @max_reconnect_interval_s.setter
+    def max_reconnect_interval_s(self, value: float) -> None:
+        self._max_reconnect_interval_s = value
+
+    @property
+    def watchdog_timeout_count(self) -> int:
+        return self._watchdog_timeout_count
 
     def __aiter__(self) -> AsyncIterator[MarketSignal]:
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[MarketSignal]:
         backoff = self._INITIAL_BACKOFF_S
-        while True:
-            try:
-                async with connect(self.ws_url) as websocket:
-                    self._websocket = websocket
-                    try:
-                        await self._send_subscription()
-                        backoff = self._INITIAL_BACKOFF_S
-                        async for raw_message in websocket:
-                            for signal in await self._handle_raw_message(raw_message):
-                                yield signal
-                    finally:
-                        self._websocket = None
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.error("market data sensor receive loop failed: %s", error)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)
+        await self._watchdog.start()
+        try:
+            while True:
+                connection_book_source: BookSource = (
+                    "reconnect" if self._connected_once else "subscribe"
+                )
+                try:
+                    async with connect(self.ws_url) as websocket:
+                        self._reset_book_state()
+                        self._websocket = websocket
+                        self._pending_book_source = connection_book_source
+                        heartbeat_task = asyncio.create_task(
+                            self._heartbeat_loop(websocket)
+                        )
+                        self._heartbeat_task = heartbeat_task
+                        try:
+                            await self._send_subscription()
+                            self._connected_once = True
+                            backoff = self._INITIAL_BACKOFF_S
+                            async for raw_message in websocket:
+                                for signal in await self._handle_raw_message(raw_message):
+                                    yield signal
+                        finally:
+                            heartbeat_task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await heartbeat_task
+                            self._heartbeat_task = None
+                            self._websocket = None
+                            self._pending_book_source = None
+                            self._reset_book_state()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.error("market data sensor receive loop failed: %s", error)
+                    await self._sleep(backoff)
+                    backoff = min(backoff * 2.0, self._max_reconnect_interval_s)
+        finally:
+            self._heartbeat_task = None
+            await self._watchdog.stop()
+            self._websocket = None
+            self._pending_book_source = None
+            self._reset_book_state()
 
     async def update_subscription(self, asset_ids: list[str]) -> None:
         self._asset_ids = list(asset_ids)
@@ -80,39 +143,58 @@ class MarketDataSensor:
         latency = await self._probe_pool_latency()
         if latency > self._POOL_SATURATION_S:
             logger.warning("subscription update delayed: pool saturated")
-            await asyncio.sleep(self._POOL_RETRY_BACKOFF_S)
+            await self._sleep(self._POOL_RETRY_BACKOFF_S)
             await self._probe_pool_latency()
 
         await self._send_subscription()
 
     async def aclose(self) -> None:
+        heartbeat_task = self._heartbeat_task
+        self._heartbeat_task = None
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+
         websocket = self._websocket
         self._websocket = None
         if websocket is not None:
             await websocket.close()
+        await self._watchdog.stop()
 
     async def _handle_raw_message(self, raw_message: str | bytes) -> list[MarketSignal]:
         loaded = json.loads(raw_message)
+        book_source = self._consume_book_source(loaded)
         if isinstance(loaded, list):
             signals: list[MarketSignal] = []
             for item in loaded:
                 if isinstance(item, dict):
-                    signals.extend(await self._handle_message(item))
+                    signals.extend(
+                        await self._handle_message(item, book_source=book_source)
+                    )
             return signals
         if isinstance(loaded, dict):
-            return await self._handle_message(loaded)
+            return await self._handle_message(loaded, book_source=book_source)
         logger.warning("unrecognised market-data payload: %s", loaded)
         return []
 
-    async def _handle_message(self, message: dict[str, Any]) -> list[MarketSignal]:
+    async def _handle_message(
+        self,
+        message: dict[str, Any],
+        *,
+        book_source: BookSource | None = None,
+    ) -> list[MarketSignal]:
         event_type = str(message.get("event_type", ""))
         if event_type in {"keepalive", "pong", "tick_size_change"}:
             return []
         if event_type == "book":
-            return [await self._handle_book(message)]
+            self._watchdog.notify_message()
+            return [await self._handle_book(message, source=book_source)]
         if event_type == "price_change":
+            self._watchdog.notify_message()
             return await self._handle_price_change(message)
         if event_type == "last_trade_price":
+            self._watchdog.notify_message()
             return [await self._handle_last_trade_price(message)]
         logger.warning(
             "unrecognised market-data payload: %s",
@@ -120,7 +202,12 @@ class MarketDataSensor:
         )
         return []
 
-    async def _handle_book(self, message: dict[str, Any]) -> MarketSignal:
+    async def _handle_book(
+        self,
+        message: dict[str, Any],
+        *,
+        source: BookSource | None = None,
+    ) -> MarketSignal:
         market_id = _required_str(message, "market")
         asset_id = _required_str(message, "asset_id")
         timestamp = _message_timestamp(message.get("timestamp"))
@@ -136,7 +223,7 @@ class MarketDataSensor:
             token_id=asset_id,
             ts=timestamp,
             hash=state.last_hash,
-            source="subscribe",
+            source=source or "subscribe",
         )
         await self.store.write_book_snapshot(snapshot, _book_levels_from_state(state))
         return _signal_from_state(
@@ -247,6 +334,45 @@ class MarketDataSensor:
             pass
         return time.perf_counter() - started
 
+    async def _sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+    async def _heartbeat_loop(self, websocket: Any) -> None:
+        while True:
+            await self._sleep(self._heartbeat_interval_s)
+            try:
+                pong_waiter = await websocket.ping()
+                await asyncio.wait_for(pong_waiter, timeout=self._pong_timeout_s)
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                logger.warning("market data sensor missed pong; reconnecting")
+                await websocket.close()
+                return
+            except Exception as error:
+                logger.error("market data sensor heartbeat failed: %s", error)
+                await websocket.close()
+                return
+
+    async def _handle_watchdog_timeout(self) -> None:
+        self._watchdog_timeout_count += 1
+        logger.warning(
+            "market data sensor silent for %.1fs",
+            self._watchdog.timeout_s,
+        )
+
+    def _consume_book_source(self, payload: object) -> BookSource | None:
+        if self._pending_book_source is None:
+            return None
+        if _payload_contains_book(payload):
+            source = self._pending_book_source
+            self._pending_book_source = None
+            return source
+        return None
+
+    def _reset_book_state(self) -> None:
+        self._books.clear()
+
 
 def _subscription_payload(asset_ids: list[str]) -> dict[str, Any]:
     return {
@@ -255,6 +381,17 @@ def _subscription_payload(asset_ids: list[str]) -> dict[str, Any]:
         "initial_dump": True,
         "level": 2,
     }
+
+
+def _payload_contains_book(payload: object) -> bool:
+    if isinstance(payload, dict):
+        return str(payload.get("event_type", "")) == "book"
+    if isinstance(payload, list):
+        return any(
+            isinstance(item, dict) and str(item.get("event_type", "")) == "book"
+            for item in payload
+        )
+    return False
 
 
 def _levels_to_map(raw_levels: object) -> dict[float, float]:

@@ -241,6 +241,13 @@ class Runner:
         if self._pg_pool is None:
             msg = "Runner PostgreSQL pool is not initialized"
             raise RuntimeError(msg)
+        market_data_sensor = MarketDataSensor(
+            store=PostgresMarketDataStore(self._pg_pool),
+            asset_ids=[],
+        )
+        market_data_sensor.max_reconnect_interval_s = (
+            self.config.sensor.max_reconnect_interval_s
+        )
         return (
             MarketDiscoverySensor(
                 store=PostgresMarketDataStore(self._pg_pool),
@@ -249,10 +256,7 @@ class Runner:
                 ),
                 poll_interval_s=self.config.sensor.poll_interval_s,
             ),
-            MarketDataSensor(
-                store=PostgresMarketDataStore(self._pg_pool),
-                asset_ids=[],
-            ),
+            market_data_sensor,
         )
 
     def _build_executor(self, mode: RunMode) -> ActuatorExecutor:

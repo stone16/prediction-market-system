@@ -9,7 +9,7 @@ from pms.sensor.watchdog import SensorWatchdog
 
 
 @pytest.mark.asyncio
-async def test_watchdog_fallback_starts_once_and_reset_is_idempotent() -> None:
+async def test_watchdog_rearms_after_activity() -> None:
     fallback_calls = 0
 
     async def fallback() -> None:
@@ -24,10 +24,16 @@ async def test_watchdog_fallback_starts_once_and_reset_is_idempotent() -> None:
     await asyncio.sleep(0.03)
     await watchdog.stop()
 
-    assert fallback_calls == 1
+    assert fallback_calls == 2
 
 
 def test_config_exposes_sensor_poll_interval() -> None:
-    settings = PMSSettings(sensor=SensorSettings(poll_interval_s=7.5))
+    settings = PMSSettings(
+        sensor=SensorSettings(
+            poll_interval_s=7.5,
+            max_reconnect_interval_s=42.0,
+        )
+    )
 
     assert settings.sensor.poll_interval_s == 7.5
+    assert settings.sensor.max_reconnect_interval_s == 42.0
