@@ -77,4 +77,58 @@ CREATE INDEX IF NOT EXISTS idx_trades_market_token_ts
 
 -- END OUTER RING
 
+-- BEGIN INNER-RING PRODUCT SHELLS
+
+CREATE TABLE IF NOT EXISTS feedback (
+    feedback_id TEXT PRIMARY KEY,
+    target TEXT NOT NULL,
+    source TEXT NOT NULL,
+    message TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    resolved BOOLEAN NOT NULL DEFAULT FALSE,
+    resolved_at TIMESTAMPTZ,
+    category TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    strategy_id TEXT NULL,
+    strategy_version_id TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS eval_records (
+    decision_id TEXT PRIMARY KEY,
+    market_id TEXT NOT NULL,
+    prob_estimate DOUBLE PRECISION NOT NULL,
+    resolved_outcome DOUBLE PRECISION NOT NULL,
+    brier_score DOUBLE PRECISION NOT NULL,
+    fill_status TEXT NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL,
+    citations JSONB NOT NULL DEFAULT '[]'::jsonb,
+    category TEXT,
+    model_id TEXT,
+    pnl DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    slippage_bps DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    filled BOOLEAN NOT NULL DEFAULT TRUE,
+    strategy_id TEXT NULL,
+    strategy_version_id TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+    order_id TEXT PRIMARY KEY,
+    market_id TEXT NOT NULL,
+    ts TIMESTAMPTZ NOT NULL,
+    strategy_id TEXT NULL,
+    strategy_version_id TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fills (
+    fill_id TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    ts TIMESTAMPTZ NOT NULL,
+    strategy_id TEXT NULL,
+    strategy_version_id TEXT NULL
+);
+
+-- END INNER-RING PRODUCT SHELLS
+
 COMMIT;
