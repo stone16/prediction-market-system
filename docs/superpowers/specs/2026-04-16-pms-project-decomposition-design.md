@@ -2014,3 +2014,675 @@ go-ahead before drafting
 ```
 
 ---
+
+## 8. Sub-spec S3 — pms-factor-panel-v1
+
+S3 is the **middle-ring sub-spec** of the DAG (§2.1): it depends on
+S2 (for the `strategy_factors` link table and the `StrategyConfig`
+projection shape) and feeds S5 + S6 with persisted factor values.
+Per the canonical execution order (§4.1, §4.2), S3 lands **before**
+S4 because it is an additive middle-ring capability (new tables, new
+service, no Sensor behaviour change) while S4 is a runtime side
+effect with larger blast radius. This section expands the skeleton
+in `agent_docs/project-roadmap.md` §S3 into the project-level
+contract that the harness run under `.harness/pms-factor-panel-v1/`
+will consume.
+
+### 8.1 Goal
+
+S3 populates the **middle ring of the onion** (Invariant 8) with
+raw `FactorDefinition` modules under `src/pms/factors/definitions/`,
+`factors` + `factor_values` tables keyed per §3.2.3 row 3 —
+`(factor_id, market_id, ts, value)` — with no `strategy_id` column
+per Invariant 8, a `FactorService` that reads the outer ring and
+persists computed factor values on a cadence, a `/factors` dashboard
+page that renders factor evolution over time (Invariant 4
+visibility), and the migration of today's `RulesForecaster` +
+`StatisticalForecaster` detection heuristics
+(`src/pms/controller/forecasters/rules.py`,
+`src/pms/controller/forecasters/statistical.py`) into raw factor
+definitions — with composition logic moving to
+`StrategyConfig.factor_composition` (a projection field owned here
+but *consumed* by S5 per §3.2.3 row 6) rather than into the `factors`
+registry (Invariant 4). The middle ring is the *strategy-agnostic
+cache* of derived signals; per Invariant 8 it is shared across every
+strategy and every backtest, paying for itself the first time two
+strategies consume `orderbook_imbalance`.
+
+### 8.2 Scope (in / out)
+
+**Scope in.** Exactly the **7 concepts** owned by S3 in §3.2.3, in
+the same order, each with a one-line scope descriptor. Reviewers
+verifying boundary integrity grep §3.2.3 against this list; the
+lists must match concept-for-concept (§3.1 ownership rule).
+
+1. **`src/pms/factors/definitions/` module tree (one file per raw
+   factor).** A `FactorDefinition` abstract base class plus one
+   module per raw factor (e.g. `orderbook_imbalance.py`,
+   `fair_value_spread.py`, `subset_pricing_violation.py`,
+   `metaculus_prior.py`, `yes_count.py`, `no_count.py`). Raw factors
+   only — **composite logic is forbidden here** and lives in
+   `StrategyConfig.factor_composition` (Invariant 4).
+2. **`factors` table (one row per factor definition).** DDL landing
+   in an S3-authored section of `schema.sql`; one row per registered
+   `FactorDefinition` with `factor_id`, human-readable name,
+   description, input schema hash, default parameters, output type,
+   direction semantics, and owner. **No `factor_type` column
+   distinguishing raw / composite** — the distinction is enforced by
+   convention + code review, not schema (§8.4 non-goal,
+   Invariant 4).
+3. **`factor_values` table
+   (`factor_id, market_id, ts, value`).** DDL landing in the same
+   S3 block, matching §3.2.3 row 3 verbatim. **No `strategy_id`
+   column and no `strategy_version_id` column** (Invariant 8 — the
+   middle ring is strategy-agnostic; §5.3 Mixed-invariant grep
+   verifies both identifiers produce zero matches inside the
+   middle-ring DDL block comments). The `param` field noted on the
+   `FactorValue` entity in `docs/notes/2026-04-16-evaluator-entity-
+   abstraction.md` (§Factor Entities) is a candidate index column
+   the harness spec resolves in CP1; if CP1's DDL review adopts
+   `param`, §3.2.3 is amended in the same PR per §3.1 "When adding
+   a new concept not in the matrix".
+4. **`FactorService` (compute + persist).** Class under
+   `src/pms/factors/service.py` (harness spec picks the final path)
+   that reads outer-ring tables via the S1
+   `PostgresMarketDataStore`, invokes each registered
+   `FactorDefinition.compute(...)`, and writes `factor_values` rows
+   on a configured cadence (Invariants 4, 8). `FactorService` is
+   **strategy-agnostic**: it never imports `pms.strategies.*`; it
+   iterates the market universe under active subscription (§8.6
+   Intake) and computes every registered factor for every market
+   (Invariant 5 partial — Factor layer stays strategy-agnostic).
+5. **Migration of existing rules-detector heuristics into raw
+   `FactorDefinition`s.** Today's `RulesForecaster`
+   (`src/pms/controller/forecasters/rules.py`) and
+   `StatisticalForecaster`
+   (`src/pms/controller/forecasters/statistical.py`) carry
+   detection + composition in one class. S3 splits the two: the
+   **detection half** (arithmetic over observables such as
+   `fair_value − yes_price`, `subset_price − superset_price`, and
+   the raw `metaculus_prob` / `yes_count` / `no_count` inputs)
+   becomes raw `FactorDefinition` modules; the **composition half**
+   (picking between spreads, blending prior strength with observed
+   counts, averaging probabilities) moves to
+   `StrategyConfig.factor_composition` and is consumed by the S5
+   per-strategy `ControllerPipeline`. After migration, the two
+   forecaster files contain **no detection logic** — only a thin
+   reference to the composition layer (Invariant 4).
+6. **`StrategyConfig.factor_composition` field (per-strategy
+   composition logic, JSONB).** A typed projection field added to
+   the S2 `StrategyConfig` projection (`@dataclass(frozen=True)`),
+   holding strategy-specific factor-composition rules as
+   well-typed nested Python structures serialised to JSONB. For the
+   S2-seeded `"default"` strategy, the field is populated with a
+   composition equivalent to today's forecaster behaviour so the
+   post-migration runtime produces the same decisions. Composition
+   is strategy-scoped, so it **lives on the projection, not in
+   `factors`** (Invariants 2, 4). The field is *owned* by S3 (§3.2.3
+   row 6) but *consumed* by S5 — S5 reads it to drive per-strategy
+   Controller dispatch.
+7. **`/factors` dashboard page.** Next.js page under `dashboard/app/`
+   that renders a multi-line chart of factor value over time for a
+   user-selected `(factor_id, market_id)` pair (extending to
+   `(factor_id, param, market_id)` if CP1 adopts the optional
+   `param` column, see scope-in row 3), reading from `factor_values`
+   via a new `dashboard/app/api/pms/factors/` route. Provides
+   Invariant 4 visibility ("raw factor values are the load-bearing
+   unit; show them directly").
+
+**Scope out.** The following look S3-adjacent but are owned by other
+sub-specs. A PR landing any of these under
+`.harness/pms-factor-panel-v1/` is scope drift (§3.1 "When reviewing
+a sub-spec PR").
+
+- `Strategy` aggregate, projection types, `strategies` /
+  `strategy_versions` tables, `strategy_factors` link table DDL,
+  `PostgresStrategyRegistry`, import-linter rules, `"default"`
+  strategy seed → **S2** (§3.2.2). S3 *extends* the S2
+  `StrategyConfig` projection with one new field
+  (`factor_composition`, row 6 above) and *populates* the empty
+  `strategy_factors` table as raw `FactorDefinition` modules land
+  (the table's DDL ships with S2 in empty shape; S3 inserts one
+  row per `(strategy_id, factor_id)` pairing per §3.2.2 row 5
+  Notes: "Empty shape in S2; S3 populates as factor definitions
+  land"). Ownership of the table stays with S2; S3 is the
+  authorised consumer-side writer (§3.1).
+- `MarketSelector`, `SensorSubscriptionController`,
+  `Strategy.select_markets(universe)` method, Runner boot-order
+  wiring → **S4** (§3.2.4). S3's `FactorService` reads from outer-
+  ring tables populated by the S1 `MarketDataSensor` against
+  whatever subscription is active; it does not drive the
+  subscription.
+- Per-strategy `ControllerPipeline` dispatch, per-strategy
+  `Evaluator` aggregation, `(strategy_id, strategy_version_id)`
+  `NOT NULL` upgrade, end-to-end strategy-field population on
+  `TradeDecision` / `OrderState` / `FillRecord` / `EvalRecord`,
+  `Opportunity` entity, `/strategies` comparative view, `/metrics`
+  per-strategy breakdown → **S5** (§3.2.5). S5 is the **consumer**
+  of the middle-ring factor values S3 persists — S3 ends at "factor
+  values land in the table on cadence"; turning those values into
+  per-strategy decisions is S5's job.
+- `FactorAttribution` as a persisted Evaluator artifact with its
+  own DDL → **deferred** per §3.4 "Entities deliberately out of
+  scope". S6's `EvaluationReport` may carry attribution commentary,
+  but a dedicated attribution table is not landed in S3.
+- `BacktestSpec` / `ExecutionModel` / `BacktestDataset` /
+  `BacktestRun` / `StrategyRun` / parameter sweep / market-universe
+  replay engine / `/backtest` ranked view → **S6** (§3.2.6). S3's
+  `FactorService` computes factor values against the live
+  subscription; S6 owns the replay engine that drives precomputed
+  factor panels over a historical window.
+
+### 8.3 Acceptance criteria (system-level)
+
+Seven observable-capability bullets. Each is verifiable at the
+system level — not a checklist item for an individual CP.
+
+1. **Factor DDL applies cleanly inside the middle-ring block of
+   `schema.sql`.** Running `schema.sql` against a fresh PostgreSQL
+   16 database produces `factors` and `factor_values` tables inside
+   a delimited middle-ring block (the same delimited-comment
+   convention §5.3 Invariant-8 evidence depends on). The
+   `factor_values` table is keyed per §3.2.3 row 3 verbatim —
+   `(factor_id, market_id, ts, value)` — with neither `strategy_id`
+   nor `strategy_version_id` as a column (Invariants 4, 8). A
+   harness-spec CP1 review may add a `param` index column per the
+   `FactorValue` entity definition in
+   `docs/notes/2026-04-16-evaluator-entity-abstraction.md`; if it
+   does, §3.2.3 is amended in the same PR (§3.1).
+2. **`FactorService` writes values on cadence for every subscribed
+   market when factor inputs are present.** For every raw factor
+   registered in `src/pms/factors/definitions/`, `FactorService`
+   writes a `factor_values` row per market within the configured
+   cadence window **whenever the factor's required inputs are
+   present** (e.g. `fair_value` for `fair_value_spread` per
+   `src/pms/controller/forecasters/rules.py:25`; subset/superset
+   for `subset_pricing_violation` per `rules.py:40`;
+   `metaculus_prob` for `metaculus_prior` per `statistical.py:20`).
+   When required inputs are absent, the corresponding row is
+   skipped (sparse panel) — `factor_values` does not encode a
+   missing-value sentinel. The cadence is observable as a steady
+   insert rate on the table modulo input availability (Invariant
+   4). If S5 or the harness-spec CP1 review requires dense panels
+   (e.g. via NULL-value rows or a separate "computed-but-absent"
+   marker), the change is scoped through §3.1 and lands as an
+   amendment to AC2, §8.2 row 3, AC3, §8.7 Leave-behind row 3, and
+   the §8.11 kickoff prompt in the same PR.
+3. **`/factors` page renders a multi-line chart of factor value over
+   time for a selected market.** A Playwright e2e test selects a
+   `(factor_id, market_id)` pair (or `(factor_id, param, market_id)`
+   if CP1 adopts the optional `param` column) that `FactorService`
+   has populated and asserts that the chart renders at least two
+   distinct timestamps with monotonically-increasing `ts` values
+   (Invariant 4 visibility).
+4. **Middle-ring tables carry no strategy tag.** A delimited-DDL
+   grep inside the middle-ring block of `schema.sql` returns **zero
+   matches** for both `strategy_id` and `strategy_version_id`
+   (Invariant 8 mechanical evidence per §5.3). Reviewer sign-off on
+   ring declaration is the second half of §5.3 Invariant-8 Mixed
+   evidence.
+5. **Every existing rules-detector heuristic is expressed as a raw
+   `FactorDefinition`.** A grep against the post-migration
+   `src/pms/controller/forecasters/rules.py` and
+   `src/pms/controller/forecasters/statistical.py` confirms **no
+   detection arithmetic remains** — the files contain only a thin
+   reference to the composition layer reading from
+   `StrategyConfig.factor_composition`. Every former heuristic is
+   findable as a `FactorDefinition` module under
+   `src/pms/factors/definitions/`. A **regression matrix** (not a
+   single canonical input) locks in that the post-migration
+   forecaster output equals the pre-migration output modulo float
+   tolerance across **every piecewise regime** of today's
+   forecasters, per the promoted rule 🟡 Piecewise-domain functions:
+   - `RulesForecaster._price_spread`
+     (`src/pms/controller/forecasters/rules.py:24-37`): edge
+     **below**, **at**, and **above** `min_edge`, plus the absent
+     `fair_value` path.
+   - `RulesForecaster._subset_violation`
+     (`src/pms/controller/forecasters/rules.py:39-56`): violation
+     **below**, **at**, and **above** `min_edge`, plus the absent
+     subset/superset path.
+   - `RulesForecaster.predict` precedence
+     (`src/pms/controller/forecasters/rules.py:14-18`): both rules
+     present (locks `_price_spread` precedence), only spread
+     present, only subset present, neither present (locks
+     `predict()` returning `None`).
+   - `RulesForecaster.forecast` `None`-fallback
+     (`src/pms/controller/forecasters/rules.py:20-22`): when
+     `predict()` returns `None`, `forecast()` returns
+     `signal.yes_price`; when `predict()` returns a non-None tuple,
+     `forecast()` returns its first element. Both branches
+     exercised — these are two distinct break points across
+     `predict()` and `forecast()` and the regression matrix locks
+     in **both** boundaries to preserve runtime equivalence.
+   - `StatisticalForecaster.predict`
+     (`src/pms/controller/forecasters/statistical.py:19-43`):
+     `metaculus_prob` **absent** vs **present**; `yes_count` /
+     `no_count` at **zero** vs **non-zero** under the seeded
+     `prior_strength`. Every break-point straddle is exercised
+     (Comments are not fixes, 🟡 — migration MUST preserve runtime
+     behaviour equivalently, not silently drop a rule).
+6. **`StrategyConfig.factor_composition` field exists on the
+   projection and is populated for the `"default"` strategy.** The
+   S2 `StrategyConfig` `@dataclass(frozen=True)` carries a
+   well-typed `factor_composition` field; the `"default"` strategy
+   row in `strategies` / `strategy_versions` is re-hashed with the
+   composition blob populated to reproduce today's forecaster
+   behaviour. No other strategy carries a populated composition
+   blob in S3 (Invariants 2, 4).
+7. **Canonical gates green on a fresh clone.** `uv run pytest -q`
+   passes with ≥ 70 tests + 2 skipped (integration gated on
+   `PMS_RUN_INTEGRATION=1`) and `uv run mypy src/ tests/ --strict`
+   is clean, on a fresh shell (§5.1, §5.2; 🟡 Fresh-clone baseline
+   verification).
+
+### 8.4 Non-goals
+
+Explicit deferrals. An S3 harness spec that lands any of these items
+is scope drift — most of them are **direct Invariant 4 violations**
+and must be rejected at spec-evaluation time.
+
+- **No `factor_type ENUM('raw','composite')` column on `factors`.**
+  This is the canonical Invariant 4 anti-pattern named in
+  `agent_docs/architecture-invariants.md` §Invariant 4
+  **Anti-patterns**. Raw-only is enforced by convention + code
+  review; the schema must not encode a distinction that should not
+  exist.
+- **No composite-factor DSL persisted in the database.** A string
+  expression like `"a * b + c"` stored as a column on `factors` is
+  the second canonical Invariant 4 anti-pattern. Composition
+  happens in strategy code reading `StrategyConfig.factor_composition`
+  as typed Python — not by evaluating a database string at runtime.
+- **No `composite_factors` table.** A separate table for composite
+  factors *is* a `factor_type` column re-expressed as table
+  cardinality; same Invariant 4 violation.
+- **No per-strategy weighting in `factor_values`.** A
+  `factor_values` row must never encode a weight derived from a
+  specific strategy's config. Per-strategy weighting belongs in
+  `StrategyConfig.factor_composition` and is applied *at read time*
+  by S5's per-strategy `ControllerPipeline`, not *at write time* by
+  `FactorService` (Invariant 4 Anti-patterns; Invariant 8
+  Anti-patterns).
+- **No `FactorAttribution` Evaluator artifact with its own DDL.**
+  Deferred per §3.4; S6's `EvaluationReport` may carry attribution
+  commentary once the research workflow proves the need.
+- **No dynamic factor loading from a runtime config file.** S3
+  starts with an explicit Python registry — each raw factor is a
+  module, import-registered at `FactorService` construction time.
+  Runtime-config-driven factor registration is a follow-up once
+  factor churn makes module-add friction visible.
+- **No factor-cache staleness framework.** `FactorService` writes
+  on a configured cadence; downstream consumers (S5) read the most
+  recent row per `(factor_id, market_id)` (or per
+  `(factor_id, param, market_id)` if the optional `param` column
+  lands at CP1). A dedicated staleness / invalidation framework is
+  deferred — if S5 or S6
+  discovers stale reads are a problem, open a retro and scope the
+  framework as a follow-on sub-spec.
+
+### 8.5 Dependencies
+
+- **Upstream sub-specs.** **S2** (`pms-strategy-aggregate-v1`). S3
+  needs the S2 `strategy_factors` link table (empty shape per
+  §3.2.2 row 5 — S3 inserts rows as `FactorDefinition` modules
+  land) and the S2 `StrategyConfig` projection (to add the
+  `factor_composition` field per §3.2.3 row 6). S3 does **not**
+  depend on S4 — per §2.4 and §4.2 the S3/S4 ordering is
+  discretionary; canonical order puts S3 first because it is
+  additive.
+- **Upstream invariants.** Primary: **4** (raw factors only) and
+  **8** (onion-concentric storage — middle ring). Partial touches:
+  **2** (`StrategyConfig.factor_composition` lives on the S2
+  projection, keeping composition strategy-scoped on the aggregate
+  side of the boundary); **5** (`FactorService` stays
+  strategy-agnostic — Controller consumes factor values, Factor
+  layer never reads `pms.strategies.*`). Invariants 1, 3, 6, 7 are
+  unrelated to S3's scope.
+
+### 8.6 Intake
+
+Minimum set that must exist before a harness run opens under
+`.harness/pms-factor-panel-v1/`. Derived from **§2.1 predecessor
+edges**: S3's only predecessor is S2 (the S3 edge carries the
+`strategy_factors` link table + `StrategyConfig` projection shape),
+and S2 transitively depends on S1's outer ring that `FactorService`
+reads.
+
+1. **§3.2.1 outer ring is populated and queryable.** S1's
+   `PostgresMarketDataStore` exposes typed read methods over
+   `markets` / `tokens` / `book_snapshots` / `book_levels` /
+   `price_changes` / `trades`; `FactorService` reads these tables
+   to compute raw factor values (Boundary Matrix §3.2.1 rows 1–7).
+   Without populated outer-ring tables, `FactorService` has nothing
+   to compute from.
+2. **§3.2.2 inner-ring aggregate tables exist.** S2's
+   `strategies`, `strategy_versions`, and `strategy_factors`
+   tables have their DDL applied; `strategies` and
+   `strategy_versions` are populated (the `"default"` strategy row
+   is seeded); `strategy_factors` ships in **empty shape** per
+   §3.2.2 row 5 Notes — S3 is the authorised consumer-side writer
+   that populates it as `FactorDefinition` modules land.
+   `PostgresStrategyRegistry` is usable. S3's CP5 (populate
+   `StrategyConfig.factor_composition` for `"default"`) writes a
+   new `strategy_versions` row re-hashing the `"default"` config
+   with the composition blob — this requires the registry to be
+   operational (Boundary Matrix §3.2.2 rows 1–8).
+3. **S2 `StrategyConfig` projection is a frozen dataclass.** The
+   projection type is `@dataclass(frozen=True)` per project
+   convention; S3 adds a field via `dataclasses.replace`-style
+   extension, not mutation.
+4. **Import-linter rules are active in CI.** S2 owns the
+   import-linter ruleset (§3.2.2 row 8); the existing rules forbid
+   `pms.sensor` / `pms.actuator` from importing `pms.strategies.*`
+   or `pms.controller.*`. S3 enforces the analogous
+   `pms.factors.*` cannot-import-`pms.strategies.aggregate`
+   constraint as **review/grep guidance during S3 PRs** (Invariant
+   5 partial). Promoting this to a codified import-linter rule
+   requires amending §3.2.2 row 8 in the same PR per §3.1 ("When
+   adding a new concept not in the matrix") and is therefore
+   scoped through S2 / harness-spec review, not unilaterally added
+   under S3.
+5. **Canonical gates green on a fresh clone.** `uv run pytest -q`
+   passes with ≥ 70 tests + 2 skipped; `uv run mypy src/ tests/
+   --strict` is clean (§5.1, §5.2; 🟡 Fresh-clone baseline
+   verification).
+
+### 8.7 Leave-behind
+
+Enumerated artefacts produced by S3, keyed back to §3.2.3 row
+numbers (1–7) so the §4.3 gate-4 boundary-integrity check can diff
+S5's Intake (authored when §10 lands) against this list.
+
+1. **`src/pms/factors/definitions/` module tree populated**
+   (§3.2.3 row 1): `FactorDefinition` ABC plus at least the raw
+   factors migrated from today's `RulesForecaster` and
+   `StatisticalForecaster` (at minimum: `fair_value_spread`,
+   `subset_pricing_violation`, `metaculus_prior`, `yes_count`,
+   `no_count`) plus at least one greenfield raw factor for
+   end-to-end validation (e.g. `orderbook_imbalance`). Each module
+   is strategy-agnostic; none import `pms.strategies.*`.
+2. **`factors` table populated in the middle-ring block of
+   `schema.sql`** (§3.2.3 row 2) with one row per registered
+   `FactorDefinition`. No `factor_type` column (Invariant 4).
+3. **`factor_values` table populated in the middle-ring block of
+   `schema.sql`** (§3.2.3 row 3) keyed `(factor_id, market_id, ts,
+   value)` per §3.2.3 row 3 verbatim, with no `strategy_id` /
+   `strategy_version_id` columns (Invariant 8 mechanical check). A
+   `param` index column may land via the CP1 harness-spec review;
+   if it does, §3.2.3 is amended in the same PR (§3.1).
+4. **`FactorService` running on a configured cadence** (§3.2.3
+   row 4) as an independent `asyncio.Task` under the Runner,
+   reading outer-ring tables through the S1 store and writing
+   `factor_values` rows. Strategy-agnostic: no import from
+   `pms.strategies.*`.
+5. **Post-migration forecaster files contain no detection logic**
+   (§3.2.3 row 5): `src/pms/controller/forecasters/rules.py` and
+   `src/pms/controller/forecasters/statistical.py` carry only a
+   thin reference to the composition layer. Every former detection
+   heuristic is now a `FactorDefinition` module under
+   `src/pms/factors/definitions/`, and a regression **matrix**
+   (covering every piecewise regime enumerated in AC5: spread
+   below/at/above `min_edge`, both rules present to lock
+   precedence, metaculus absent vs present, zero vs non-zero
+   counts) asserts the post-migration forecaster output equals
+   the pre-migration output across all regimes modulo float
+   tolerance (🟡 Comments are not fixes; 🟡 Piecewise-domain
+   functions).
+6. **`StrategyConfig.factor_composition` field lands on the S2
+   projection** (§3.2.3 row 6), typed (not stringly-typed), with
+   the `"default"` strategy's `strategy_versions` row re-hashed to
+   carry a populated composition blob reproducing today's
+   forecaster behaviour. Every other strategy continues to carry
+   an empty composition in S3.
+7. **`/factors` dashboard page renders real factor evolution**
+   (§3.2.3 row 7) from the `factor_values` table via a new
+   `dashboard/app/api/pms/factors/` route, verified by a Playwright
+   e2e test (AC 3).
+
+In addition to the §3.2.3-row-keyed leave-behinds above, S3 leaves
+the **S2-owned `strategy_factors` link table populated** (per
+§3.2.2 row 5 Notes — "Empty shape in S2; S3 populates as factor
+definitions land"): one row per `(strategy_id, factor_id)` pairing
+for every `FactorDefinition` the `"default"` strategy uses. The
+table's DDL ownership stays with S2; S3 is the authorised
+consumer-side writer.
+
+S5's Intake (authored in Commit 8 of this document authoring effort)
+reads from this list; diffing the two is the §4.3 gate-4 mechanism.
+
+### 8.8 Checkpoint skeleton
+
+Flat one-line-each list. **Not harness acceptance criteria** — the
+per-CP acceptance criteria, files-of-interest, effort estimates, and
+test expectations land in `.harness/pms-factor-panel-v1/spec.md`
+when the kickoff prompt (§8.11) triggers that authoring session.
+
+- **CP1 — `factors` + `factor_values` DDL + middle-ring block
+  comments in `schema.sql`.**
+- **CP2 — `FactorDefinition` ABC + first raw factor
+  (`orderbook_imbalance`) end-to-end (definition → `FactorService`
+  compute → `factor_values` persisted).**
+- **CP3 — Migrate `RulesForecaster` detection rules
+  (`fair_value_spread`, `subset_pricing_violation`) into
+  `FactorDefinition` modules.**
+- **CP4 — Migrate `StatisticalForecaster` raw inputs
+  (`metaculus_prior`, `yes_count`, `no_count`) into
+  `FactorDefinition` modules; derive composition into
+  `StrategyConfig.factor_composition`.**
+- **CP5 — `StrategyConfig.factor_composition` field on the S2
+  projection + `"default"` strategy re-hash carrying
+  post-migration composition blob + S2-owned `strategy_factors`
+  link table populated for `"default"` (per §3.2.2 row 5 Notes,
+  consumer-side population) + forecaster-behaviour regression
+  **matrix** covering every piecewise regime named in AC5 (🟡
+  Piecewise-domain functions).**
+- **CP6 — `FactorService` compute + persist on cadence + Runner
+  `asyncio.Task` wiring + lifecycle cleanup on all 4 exit paths
+  (🟡 Lifecycle cleanup on all exit paths).**
+- **CP7 — `/factors` dashboard page + `dashboard/app/api/pms/
+  factors/` route + Playwright e2e.**
+
+### 8.9 Effort estimate
+
+**M** (5–7 CPs per §8.8; middle-ring schema + `FactorService` +
+dashboard page; migration of the existing rules + statistical
+detectors is the risk axis). S3's surface area is narrower than S1
+(no sensor split, no storage rewrite, no CI infra) but broader than
+a greenfield service because the migration must preserve existing
+runtime behaviour exactly — the `StatisticalForecaster`'s
+Beta-posterior blend of prior strength with observed counts has
+enough interacting parameters to make a silent behavioural
+regression plausible. The regression test at CP5 is load-bearing.
+
+### 8.10 Risk register
+
+| Risk | Likelihood | Impact | Mitigation | Trigger / early-warning |
+|---|---|---|---|---|
+| Migration silently drops a rule's behaviour (e.g. `StatisticalForecaster`'s Beta-posterior blend of prior strength with observed counts is decomposed into raw factors but the composition blob does not reproduce the blend; or `RulesForecaster` precedence between `_price_spread` and `_subset_violation` is silently inverted) | M | H | CP5 regression **matrix** (per AC5; not a single canonical fixture) pins post-migration forecaster output against pre-migration output across every piecewise regime — spread below/at/above `min_edge`, subset-violation below/at/above `min_edge`, both rules present to lock precedence, metaculus absent vs present, zero vs non-zero counts under seeded `prior_strength` (🟡 Comments are not fixes; 🟡 Piecewise-domain functions) | Any matrix cell red on CP5; a fix that only matches "close enough" silently changes runtime behaviour |
+| Raw-factor design forces artificial granularity — `RulesForecaster.predict` (`src/pms/controller/forecasters/rules.py:14-18`) is a precedence chain (`_price_spread` short-circuits; `_subset_violation` runs only when the first returns `None`), and decomposing today's thresholded outputs into raw factors looks easy until a hypothetical future rule needs max/min selection across rules | M | M | Persist the **unthresholded** raw spreads as `FactorDefinition`s in S3 (`fair_value_spread = fair_value − yes_price`, `subset_pricing_violation = subset_price − superset_price`); leave thresholding (`< min_edge`) and precedence ordering in `StrategyConfig.factor_composition` consumed by S5. Do **not** persist "did this rule fire" as a raw factor — that bakes thresholded rule semantics into S3, violating Invariant 4. The hypothetical max/min-across-rules selection is a future stress test; if it ever forces strategy-specific weighting into a `FactorDefinition` body, **halt and escalate** via retro | A `FactorDefinition` module proposal encodes strategy-specific weighting or a threshold to preserve rule semantics; code review flags Invariant 4 Anti-pattern |
+| Factor cache staleness vs orderbook update cadence — `FactorService` writes every N seconds while `price_changes` arrives sub-second; S5 reads the most recent `factor_values` row and sees stale derived signals | M | M | Start with a cadence short enough that staleness is bounded (e.g. 1 s) and instrument `FactorService` latency; surface staleness as a dashboard metric on `/factors`. A proper invalidation framework is §8.4 non-goal; if staleness regressions appear in S5, open a retro | `FactorService` write p95 latency > cadence target; `/factors` staleness metric exceeds configured budget |
+| `/factors` dashboard page perf degrades on large `factor_values` tables | L | M | Query the `factor_values` table with an index on `(factor_id, market_id, ts DESC)` by default, extended to `(factor_id, param, market_id, ts DESC)` if CP1 adopts the optional `param` column (per §8.2 row 3 deferral), and cap the default time window; the dashboard API route accepts a `since` parameter for window narrowing; retention policy is deferred per §6.4 non-goal (a) — the original deferral text says the decision lands in **S3 or S6** once factor-panel / backtest-replay query shapes make the trade-offs concrete, and S3 explicitly defers the choice out of scope (§8.4 non-goal "no factor-cache staleness framework"; harness-spec CP-DQ-style review may revisit) | Dashboard `/factors` p95 render > 2 s; Next.js API route logs slow-query warnings |
+| `StrategyConfig.factor_composition` becomes a stringly-typed DSL by accident (a contributor encodes composition rules as string expressions "because JSONB accepts strings") | M | H | The S2 projection is `@dataclass(frozen=True)`; `factor_composition` is typed as a nested Python structure (e.g. `list[FactorCompositionStep]` with each step a typed dataclass), serialised to JSONB at store boundary only. A code review rejection template names the Invariant 4 Anti-pattern "factor-expression DSL stored in the database" explicitly | A PR introduces a `str`-typed field inside the composition structure; the `FactorDefinition` registry gains an `eval`-like call site |
+| `FactorService` imports from `pms.strategies.aggregate` to "look up which strategies need this factor" — Invariant 5 partial violation | L | H | `FactorService` computes every registered factor for every subscribed market unconditionally; pruning based on `strategy_factors` is explicitly out of scope for S3 (that is S5's `ControllerPipeline` concern — it reads only the factor values the strategy needs). Enforced as **S3 review/grep guidance** (`rg -n '^(from pms\.strategies|import pms\.strategies)' src/pms/factors` — zero matches expected); promoting this to a codified import-linter rule (S2-owned per §3.2.2 row 8) requires amending §3.2.2 in the same PR per §3.1 | Code review flag on a new `FactorService` constructor argument typed as `Strategy`; grep returns a non-zero match in `src/pms/factors/` |
+
+### 8.11 Kickoff Prompt
+
+The block below is **copy-paste-ready** for a fresh Claude session
+whose job is to author `.harness/pms-factor-panel-v1/spec.md` — the
+harness-executable spec with per-CP acceptance criteria,
+files-of-interest, effort, and intra-spec dependencies. The future
+session has **no memory** of this document; the prompt is
+self-contained.
+
+```
+SCOPE:
+
+You are starting harness task `pms-factor-panel-v1` in the
+prediction-market-system repository at
+/Users/stometa/dev/prediction-market-system. Your job this session
+is to author the harness-executable spec file at
+/Users/stometa/dev/prediction-market-system/.harness/pms-factor-panel-v1/spec.md
+(the directory may not yet exist; you will create it).
+
+REQUIRED READING (ordered — read in this order before touching
+anything, all paths absolute):
+
+1. /Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md
+   — specifically §8 (this sub-spec's total-spec contract) and
+   §3.2.3 (the 7 concepts S3 owns).
+2. /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+   — focus on Invariants 4 (raw factors only) and 8 (onion-
+   concentric storage, middle ring). Partial touches on 2 and 5.
+3. /Users/stometa/dev/prediction-market-system/agent_docs/promoted-rules.md
+   — especially Runtime behaviour > design intent (🔴), Comments
+   are not fixes (🟡 — migration must preserve runtime behaviour
+   exactly, not via comment), Lifecycle cleanup on all exit paths
+   (🟡 — relevant for the FactorService asyncio.Task), and
+   Fresh-clone baseline verification (🟡).
+4. /Users/stometa/dev/prediction-market-system/docs/notes/2026-04-16-evaluator-entity-abstraction.md
+   — the "Factor Entities" section. Understand the distinction
+   between FactorDefinition (raw primitive), FactorConfig
+   (strategy-scoped usage), FactorValue (computed value),
+   FactorPanel (queryable matrix), and FactorAttribution (Evaluator
+   artifact). Only raw primitives and computed values land in S3;
+   FactorAttribution is deferred per §3.4 of the project spec.
+5. /Users/stometa/dev/prediction-market-system/docs/notes/2026-04-16-repo-issues-controller-evaluator.md
+   — load-bearing sections: "Persistence Decision: PostgreSQL, All
+   Environments", "Controller: First-Class Layer, But Strategies
+   Are Not First-Class Yet" (context for the rules-detector
+   migration), and "Summary: Decisions Captured On 2026-04-16".
+6. /Users/stometa/dev/prediction-market-system/src/pms/controller/CLAUDE.md
+   — per-layer invariant enforcement for Controller. Lists today's
+   RulesForecaster / StatisticalForecaster files and marks
+   `stop_conditions` as a known violation (context for what
+   migrates to raw factors vs what stays in Controller).
+7. /Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+   — structural reference for harness-grade spec shape (CP shape,
+   acceptance-criteria shape, files-of-interest shape).
+
+CURRENT STATE SNAPSHOT:
+
+S1 (pms-market-data-v1) and S2 (pms-strategy-aggregate-v1) are
+complete. The §8.6 Intake items MUST be satisfied before any
+authoring begins — specifically:
+
+- S1's outer-ring tables (markets, tokens, book_snapshots,
+  book_levels, price_changes, trades) exist in schema.sql and are
+  populated by MarketDiscoverySensor + MarketDataSensor at
+  runtime.
+- S2's inner-ring aggregate tables (strategies, strategy_versions,
+  strategy_factors) have their DDL applied; strategies and
+  strategy_versions are populated (the "default" strategy row is
+  seeded); strategy_factors ships in EMPTY shape per Boundary
+  Matrix §3.2.2 row 5 Notes — S3 is the authorised consumer-side
+  writer that populates it as FactorDefinition modules land.
+  PostgresStrategyRegistry is operational.
+- S2's StrategyConfig projection is a frozen dataclass; S2's
+  import-linter rules are active in CI (pms.sensor and pms.actuator
+  cannot import pms.strategies.* or pms.controller.*).
+
+If any §8.6 Intake item fails, HALT and tell the user.
+
+PREFLIGHT (boundary check — run before any authoring):
+
+- Confirm §8.6 Intake items 1–5 all satisfied (verify outer-ring
+  tables queryable; strategies + strategy_versions populated;
+  strategy_factors DDL applied but empty per §3.2.2 row 5;
+  StrategyConfig frozen; import-linter rules active; canonical
+  gates green on a fresh clone).
+- Confirm §3.2.3 of the project-level spec has exactly 7 rows.
+  Recount. If more or fewer, STOP and reconcile — the scope-in
+  concept list depends on that row count being stable.
+
+TASK:
+
+Create
+/Users/stometa/dev/prediction-market-system/.harness/pms-factor-panel-v1/spec.md
+by expanding §8.8 (Checkpoint skeleton) into harness-grade CPs
+with:
+
+- Per-CP acceptance criteria (observable, falsifiable, not
+  implementation notes).
+- Per-CP files-of-interest (absolute paths under
+  /Users/stometa/dev/prediction-market-system/).
+- Per-CP effort estimate (S / M / L).
+- Intra-spec CP dependencies (which CPs block which).
+
+Use
+/Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+as the structural reference for shape. Draft only — stop and wait
+for spec-evaluation approval before running any checkpoint.
+
+CONSTRAINTS:
+
+- New feature branch `feat/pms-factor-panel-v1` off `main`. Never
+  commit to `main` directly.
+- Respect §3 Boundary Matrix of the project-level spec
+  (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md).
+  Never claim a concept owned by another sub-spec (S1, S2, S4–S6).
+  The 7 concepts enumerated in §8.2 Scope-in are the complete
+  authorised set for S3; anything else is scope drift.
+- Every Strategy / Factor / ring-ownership claim must cite an
+  invariant number from
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md.
+- No `Co-Authored-By` lines in any commit
+  (/Users/stometa/dev/prediction-market-system/CLAUDE.md §"Do
+  not"; promoted rule "Commit-message precedence").
+- Conventional-commit prefixes required (§5.6 of the project
+  spec): `feat(<scope>):`, `fix(<scope>):`, `docs(<scope>):`,
+  `test(<scope>):`, `refactor(<scope>):`, `chore(<scope>):`.
+- Follow the promoted rule 🟡 Lifecycle cleanup on all exit paths
+  for the FactorService asyncio.Task and any database connection
+  helpers: acquire + release in the same commit, `try/finally` on
+  all four exit paths.
+- Follow the promoted rule 🟡 Comments are not fixes when migrating
+  RulesForecaster / StatisticalForecaster detection into raw
+  factors: the migration MUST produce equivalent runtime behaviour
+  (CP5 regression test), not a code comment explaining the
+  equivalence.
+
+HALT CONDITIONS:
+
+- Any invariant in
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+  cannot be satisfied by the design you are authoring. Do NOT
+  silently amend the invariant. Open a retro under
+  /Users/stometa/dev/prediction-market-system/.harness/retro/ and
+  return to the user.
+- Any attempt to add a `factor_type ENUM('raw','composite')` column
+  to the `factors` table, a `composite_factors` table, or a
+  factor-expression DSL column (e.g. a string like "a * b + c"
+  stored as a `factors` column) — these are the canonical
+  Invariant 4 Anti-patterns named in
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+  §Invariant 4. STOP immediately.
+- Any attempt to add a `strategy_id` or `strategy_version_id`
+  column to `factors` or `factor_values` — this is an Invariant 8
+  violation. STOP immediately.
+- The 7 concepts you author CPs for do not match §3.2.3 of the
+  project-level spec
+  (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md),
+  concept-for-concept. Reconcile first.
+- The rules-detector migration requires strategy-specific
+  weighting inside a `FactorDefinition` module body to preserve
+  existing behaviour. This is an Invariant 4 stress test — the
+  correct response is a retro, not a composite factor.
+
+FIRST ACTION:
+
+Run:
+
+    cd /Users/stometa/dev/prediction-market-system \
+      && git status && git branch --show-current \
+      && git log --oneline -5
+
+Then read the 7 files in the REQUIRED READING block, in order,
+before drafting any content. After reading, report your
+understanding of §8.8's 7 checkpoints (CP1–CP7) and wait for
+go-ahead before drafting
+/Users/stometa/dev/prediction-market-system/.harness/pms-factor-panel-v1/spec.md.
+```
+
+---
+
+---
