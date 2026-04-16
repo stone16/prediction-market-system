@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
+import asyncpg
 from pms.actuator.adapters.backtest import BacktestActuator
 from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.adapters.polymarket import PolymarketActuator
@@ -81,6 +82,8 @@ class Runner:
     _stop_event: asyncio.Event = field(init=False)
     _controller_task: asyncio.Task[None] | None = field(init=False, default=None)
     _actuator_task: asyncio.Task[None] | None = field(init=False, default=None)
+    _task: asyncio.Task[None] | None = field(init=False, default=None)
+    _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
     _active_sensors: tuple[ISensor, ...] = field(init=False, default=())
     _paper_orderbooks: dict[str, dict[str, Any]] = field(
         init=False,
@@ -102,6 +105,14 @@ class Runner:
     @property
     def actuator_task(self) -> asyncio.Task[None] | None:
         return self._actuator_task
+
+    @property
+    def task(self) -> asyncio.Task[None] | None:
+        return self._task
+
+    @property
+    def pg_pool(self) -> asyncpg.Pool | None:
+        return self._pg_pool
 
     @property
     def evaluator_task(self) -> asyncio.Task[None] | None:
@@ -131,28 +142,77 @@ class Runner:
         self._stop_event.clear()
         self.state.runner_started_at = datetime.now(tz=UTC)
         self._active_sensors = self._build_sensors()
+        self._pg_pool = await asyncpg.create_pool(
+            dsn=self.config.database.dsn,
+            min_size=self.config.database.pool_min_size,
+            max_size=self.config.database.pool_max_size,
+        )
 
-        await self.sensor_stream.start(self._active_sensors)
-        await self._evaluator_spool.start()
-        self._controller_task = asyncio.create_task(self._controller_loop())
-        self._actuator_task = asyncio.create_task(self._actuator_loop())
+        try:
+            await self.sensor_stream.start(self._active_sensors)
+            await self._evaluator_spool.start()
+            self._controller_task = asyncio.create_task(self._controller_loop())
+            self._actuator_task = asyncio.create_task(self._actuator_loop())
+        except Exception:
+            await self._cleanup_after_start_failure()
+            raise
 
     async def stop(self) -> None:
         self._stop_event.set()
-        await self.sensor_stream.stop()
+        error: BaseException | None = None
+
+        try:
+            await self.sensor_stream.stop()
+        except BaseException as exc:  # pragma: no cover - exercised via unit tests
+            error = exc
 
         for task in (self._controller_task, self._actuator_task):
             if task is not None and not task.done():
                 task.cancel()
 
-        await asyncio.gather(
-            *(task for task in (self._controller_task, self._actuator_task) if task),
-            return_exceptions=True,
-        )
-        await self._evaluator_spool.stop()
-        await self._close_active_sensors()
+        try:
+            await asyncio.gather(
+                *(task for task in (self._controller_task, self._actuator_task) if task),
+                return_exceptions=True,
+            )
+        except BaseException as exc:  # pragma: no cover - defensive
+            if error is None:
+                error = exc
+
+        try:
+            await self._evaluator_spool.stop()
+        except BaseException as exc:  # pragma: no cover - defensive
+            if error is None:
+                error = exc
+
+        try:
+            await self._close_active_sensors()
+        except BaseException as exc:  # pragma: no cover - defensive
+            if error is None:
+                error = exc
+
         self._controller_task = None
         self._actuator_task = None
+
+        try:
+            await self._close_pg_pool()
+        except BaseException as exc:  # pragma: no cover - defensive
+            if error is None:
+                error = exc
+
+        if error is not None:
+            raise error
+
+    async def run(self) -> None:
+        self._task = asyncio.current_task()
+        try:
+            await self.start()
+            await self.wait_until_idle()
+        finally:
+            try:
+                await self.stop()
+            finally:
+                self._task = None
 
     def switch_mode(self, new_mode: RunMode) -> None:
         self.config.mode = new_mode
@@ -266,6 +326,39 @@ class Runner:
             if isinstance(sensor, AsyncCloseable):
                 await sensor.aclose()
         self._active_sensors = ()
+
+    async def _close_pg_pool(self) -> None:
+        if self._pg_pool is None:
+            return
+        pool = self._pg_pool
+        self._pg_pool = None
+        await pool.close()
+
+    async def _cleanup_after_start_failure(self) -> None:
+        stop_error: BaseException | None = None
+        try:
+            await self.sensor_stream.stop()
+        except BaseException as exc:  # pragma: no cover - defensive
+            stop_error = exc
+
+        try:
+            await self._evaluator_spool.stop()
+        except BaseException as exc:  # pragma: no cover - defensive
+            if stop_error is None:
+                stop_error = exc
+
+        try:
+            await self._close_active_sensors()
+        except BaseException as exc:  # pragma: no cover - defensive
+            if stop_error is None:
+                stop_error = exc
+
+        self._controller_task = None
+        self._actuator_task = None
+        await self._close_pg_pool()
+
+        if stop_error is not None:
+            raise stop_error
 
 
 def _append_bounded(items: list[T], item: T) -> None:

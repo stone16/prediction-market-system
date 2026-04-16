@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import getpass
 import os
 from pathlib import Path
 from typing import Any, Self
@@ -67,6 +68,19 @@ class SensorSettings(BaseModel):
     poll_interval_s: float = 5.0
 
 
+def _default_database_dsn() -> str:
+    override = os.environ.get("DATABASE_URL")
+    if override:
+        return override
+    return f"postgresql://localhost/pms_dev_{getpass.getuser()}"
+
+
+class DatabaseSettings(BaseModel):
+    dsn: str = Field(default_factory=_default_database_dsn)
+    pool_min_size: int = 2
+    pool_max_size: int = 10
+
+
 class PMSSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="PMS_",
@@ -81,6 +95,7 @@ class PMSSettings(BaseSettings):
     risk: RiskSettings = Field(default_factory=RiskSettings)
     sensor: SensorSettings = Field(default_factory=SensorSettings)
     controller: ControllerSettings = Field(default_factory=ControllerSettings)
+    database: DatabaseSettings = Field(default_factory=DatabaseSettings)
 
     @classmethod
     def load(cls, config_path: str | Path | None = "config.yaml") -> Self:
