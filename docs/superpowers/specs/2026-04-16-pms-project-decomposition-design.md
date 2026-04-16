@@ -1275,13 +1275,16 @@ sub-specs have landed. The project-level spec
 is the authoritative boundary contract: §3.2.1 enumerates the 18
 concepts S1 owns, §6 is S1's total-spec subsection.
 
-PREFLIGHT (boundary check — run before any authoring):
+PREFLIGHT (boundary check — run before any authoring; every
+shell command below assumes cwd is
+/Users/stometa/dev/prediction-market-system):
 
 - §6.6 Intake items must all be satisfied. If any fails, HALT and
   tell the user:
   * `uv run pytest -q` passes with ≥ 70 tests + 2 skipped
     (PMS_RUN_INTEGRATION=1 gate), and
-    `uv run mypy src/ tests/ --strict` is clean, on a fresh shell.
+    `uv run mypy /Users/stometa/dev/prediction-market-system/src/ /Users/stometa/dev/prediction-market-system/tests/ --strict`
+    is clean, on a fresh shell.
   * The Polymarket CLOB WebSocket at
     `wss://ws-subscriptions-clob.polymarket.com/ws/market` accepts
     a connection without authentication.
