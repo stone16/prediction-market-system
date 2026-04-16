@@ -406,3 +406,336 @@ not been assigned an owner in §3.2 are **intentionally deferred**:
 
 Any future proposal to add one of these to an owning sub-spec must
 amend §3.2 **in the same PR** that changes the sub-spec scope.
+
+---
+
+## 4. Execution order and between-spec gates
+
+§2 describes the dependency DAG; this section describes the
+**authoring order** derived from that DAG and the mechanical gates a
+human runs before moving from sub-spec N to sub-spec N+1. Authoring
+order is **orthogonal** to runtime topology (Invariant 1 — concurrent
+feedback web, not phased pipeline): sub-specs are authored one at a
+time, but the artefacts they produce continue to run concurrently
+once they land (reaffirmed here to close the conflation warning from
+§2.3).
+
+### 4.1 Canonical sequence
+
+**S1 → S2 → S3 → S4 → S5 → S6, sequentially, one harness run at a
+time.** This is the canonical topological order of the §2.1 DAG with
+the S3 ↔ S4 tie broken as §2.4 notes (rationale in §4.2 below).
+Parallel authoring across two sub-specs is not supported by this
+decomposition: the gates in §4.3 assume sub-spec N is complete before
+sub-spec N+1 begins.
+
+### 4.2 Execution rationale per edge
+
+The four directed edges in the §2.1 DAG have four distinct arguments.
+Each expands a bullet from `agent_docs/project-roadmap.md` §"Why this
+exact order".
+
+**S1 → S2.** S1's schema must reserve `(strategy_id,
+strategy_version_id)` columns on every inner-ring product table,
+`NULLABLE` in S1, upgraded to `NOT NULL` in S5 (§3.2.1 last row;
+Invariants 3, 8). If S2 does not follow S1 directly, S1 lands with
+unused columns carrying no writer — `schema.sql` declares strategy
+tagging that no code actually populates. That combination is scope
+drift against Invariant 8: the inner ring exists as a schema shape
+without the aggregate that owns it (Invariant 2). Keeping S2 second
+means the aggregate, registry, and `"default"` seed land while the
+column-reservation rationale is still fresh, and the pre-S5 runtime
+writes legitimately tag `"default"` instead of writing `NULL`.
+
+**S2 → S3 and S2 → S4.** Both S3 and S4 depend only on S2; the DAG
+does not force one before the other. The canonical order puts **S3
+before S4** for one reason: additive vs behavioural side effects. S3
+adds a strategy-agnostic middle-ring cache (§3.2.3) — writing to new
+tables, reading from outer-ring tables that S1 already owns. Nothing
+about the existing Sensor / Controller / Actuator runtime changes.
+S4, by contrast, changes the live Sensor subscription mechanism: the
+`MarketDataSensor` stops being configured from a static list and
+starts being driven by `SensorSubscriptionController` push (§3.2.4;
+Invariants 6, 7). That is a runtime side effect with a larger blast
+radius — a regression here can mis-subscribe every strategy at once.
+Scheduling S3 first means the observable factor stream exists before
+the subscription mechanism changes, so S4-induced regressions are
+easier to isolate (the factor stream is known-good reference data).
+§2.4 + §4.4 describe when this ordering can be swapped.
+
+**S3 → S5 and S4 → S5.** S5's headline deliverable is per-strategy
+`ControllerPipeline` dispatch (§3.2.5; Invariants 2, 3, 5) — each
+strategy gets its own forecaster stack, calibrator, sizer, and
+Evaluator aggregation. That dispatch needs two inputs simultaneously:
+(1) **factor values** from the S3 middle ring (strategies read
+factors to produce decisions), and (2) **per-strategy subscriptions**
+from S4 (strategies only need to reason about markets their
+`select_markets` actually returned — a universal subscription would
+waste compute on irrelevant markets and blur per-strategy
+accountability). Landing S5 before either of S3 or S4 forces either
+mocking factor values or hardcoding subscriptions; both are
+known-bad precedents. Keeping S5 after both means the per-strategy
+dispatch connects real factor reads to real subscription output in
+the same commit.
+
+**S5 → S6.** S6 introduces research-grade backtest infrastructure:
+`BacktestSpec`, `ExecutionModel`, parameter sweep, `BacktestLive-
+Comparison` (§3.2.6). Its value proposition is comparing strategies,
+which requires the full per-strategy runtime (S5) to exist as
+**reference behaviour** — backtest results are only interpretable
+relative to what the live runtime would have done. Running S6 before
+S5 means the backtest compares a global controller against itself,
+producing results that cannot be cross-checked against live. S6 also
+carries the heaviest scope of the six (market-universe replay,
+parameter-sweep infrastructure, shared factor-panel cache), so it
+benefits from landing on the most stable foundation — every invariant
+already enforced, every dashboard page already shipped.
+
+### 4.3 Between-spec gates
+
+Before opening the harness directory for sub-spec N+1, a human
+verifier must confirm every item below against sub-spec N's completed
+work. **Every item is verifiable** — no "looks good" gates.
+
+1. **Retro written and indexed.** `.harness/retro/<sub-spec-id>.md`
+   exists and is appended to `.harness/retro/index.md` per the retro
+   process documented at `.harness/retro/index.md`. A sub-spec
+   without a retro cannot clear this gate even if every other item
+   passes.
+2. **Architecture invariants spot-checked.** Grep sub-spec N's
+   introduced concepts (from the PR diff) against §3.2's Owner
+   column; every concept must appear in the matrix with sub-spec N
+   as Owner. Concepts introduced by a non-owner are boundary
+   violations (per §3.1's "When reviewing a sub-spec PR" guidance)
+   and must be reassigned before merge. Separately, grep any new
+   DDL for `strategy_id` columns on outer-ring or middle-ring tables
+   — zero matches required (Invariant 8).
+3. **`CLAUDE.md` updated with any rule promoted from the retro.**
+   If the retro produced a promoted rule per the criteria in
+   `agent_docs/promoted-rules.md` §"Promotion process" (observed
+   ≥2 times, or high-severity on first observation, or user-
+   promoted), the rule is appended to `agent_docs/promoted-rules.md`
+   with provenance and mirrored to `CLAUDE.md` §"Promoted rules
+   from retros". No mirroring = gate fails.
+4. **Boundary integrity check — Leave-behind matches Intake.**
+   Once sub-spec N's Leave-behind subsection exists (lands with
+   Commits 4–9 of this document authoring effort), diff it line-
+   by-line against sub-spec N+1's Intake subsection. Any concept
+   in sub-spec N+1's Intake that is not produced by sub-spec N's
+   Leave-behind is a boundary gap. **STOP and reconcile** — either
+   amend sub-spec N to produce the missing concept, or amend sub-
+   spec N+1 to drop the dependency. Do not proceed with a partial
+   contract. This is the mechanism that prevents drift once sub-
+   specs begin landing in `.harness/`; it is the single most
+   important gate item.
+5. **Canonical gates green on a fresh clone.** `uv run pytest -q`
+   and `uv run mypy src/ tests/ --strict` both pass on a fresh
+   shell (see §5.1, §5.2; 🟡 Fresh-clone baseline verification).
+6. **Human decision gate.** Record the decision `proceed`,
+   `pause`, or `reorder` with a timestamp. `reorder` is supported
+   **only** for the S3 ↔ S4 pair per §2.4 and §4.4 — reordering
+   any other pair breaks a real DAG edge and requires a new retro.
+
+### 4.4 Swap points and reordering
+
+Per §2.4, only **S3 ↔ S4** has a discretionary ordering. The two
+conditions under which swapping becomes attractive:
+
+- **S4 material is blocked and S3 is unblocked.** If active
+  perception discovery work reveals a gap in the `MarketSelector`
+  contract that requires a separate retro (e.g., multi-strategy
+  subscription conflict resolution turns out to need its own
+  design), then S3's additive work can proceed while S4's design
+  unblocks. This keeps the project moving without forcing the team
+  to pause.
+- **The subscription push path is the higher-risk work and we
+  want it out of the way first.** If diagnostic evidence (a bug
+  reproduction, a `file:line` failure trace in today's sensor code
+  per 🔴 Runtime behaviour > design intent) shows the
+  subscription mechanism is already misbehaving in production-
+  shape ways, S4 ahead of S3 front-loads the risk. S3's factor
+  stream lands against a known-stable subscription path instead
+  of a moving one.
+
+Either swap must be recorded in the §4.3 gate-6 decision row
+(`reorder`) with the triggering condition cited. Swapping **any
+other pair** (S1 ↔ S2, S2 ↔ S3, S4 ↔ S5, S5 ↔ S6) breaks the
+rationale in §4.2 and is not supported by this decomposition; it
+would require amending §4.2 and opening a new retro documenting
+the architectural reason the original rationale no longer holds.
+
+---
+
+## 5. Cross-spec acceptance gates
+
+Every sub-spec PR — regardless of which sub-spec, which checkpoint,
+or which harness run — passes the same baseline before merge. §4's
+between-spec gates are about the **transition** from N to N+1;
+§5's cross-spec gates are about **every PR inside every sub-spec**.
+The two layers stack; passing §5 does not skip §4.
+
+### 5.1 Test baseline
+
+`uv run pytest -q` passes with the `CLAUDE.md`-stated baseline:
+**≥ 70 tests passing, 2 skipped**, where the 2 skipped are the
+`@pytest.mark.integration` tests gated on the
+`PMS_RUN_INTEGRATION=1` env var (🟢 Integration test default-skip
+pattern, promoted from `pms-phase2` retro Proposal 3). Integration
+tests are run on demand:
+
+```bash
+PMS_RUN_INTEGRATION=1 uv run pytest -m integration
+```
+
+If the baseline fails on a **fresh clone in a fresh shell**, per
+🟡 Fresh-clone baseline verification (promoted from `pms-phase2`
+retro Proposal 2), the fix is **the first commit on the feature
+branch**, with prefix `fix(tests):` or `fix(build):`, and feature
+work only begins after that commit lands. Dev-machine state (IDE
+plugins, stale venv, `sys.path` injections) can hide config bugs
+that bite the next contributor — do not start feature work against
+a broken baseline. The rule is load-bearing: running the gates on a
+stale venv and declaring the baseline holds is precisely what the
+retro was promoted to prevent.
+
+### 5.2 Strict typing
+
+`uv run mypy src/ tests/ --strict` is clean. Every committed module
+— `src/pms/**`, `tests/**`, dashboard Python ingress if any — is
+strict-typed. No `# type: ignore` may be introduced without a
+comment naming the specific type-system limitation (no generic "mypy
+is wrong" justifications). Newly-introduced ignores surface in code
+review; reviewers reject the ignore unless the accompanying comment
+identifies the limitation (stub gap, variance limitation,
+third-party lib without py.typed).
+
+### 5.3 Invariant conformance
+
+Every sub-spec PR must demonstrate conformance with every one of
+the 8 invariants in `agent_docs/architecture-invariants.md`. Some
+invariants are **grep-checkable** (mechanical, one-liner); some are
+**behavioural** (enforced by acceptance criteria inside the sub-
+spec, not by a grep). Be honest about which is which — inventing a
+grep recipe for a behavioural invariant gives a false-green signal.
+
+**Grep-checkable invariants.**
+
+- **Invariant 3** — every new DDL migration for an inner-ring
+  product table (`orders`, `fills`, `eval_records`, `feedback`)
+  must declare `strategy_id` and `strategy_version_id` columns.
+  Grep: the table's `CREATE TABLE` block must contain both column
+  names. Zero-match = reject.
+- **Invariant 5** — import-linter rule (codified in S2's
+  `pyproject.toml` or `ruff.toml`): `pms.sensor` and `pms.actuator`
+  cannot import from `pms.strategies.aggregate` or from
+  `pms.controller.*`. The rule runs as part of the lint pass; any
+  violation fails CI. Grep complement: `rg 'from pms\.strategies\.
+  aggregate' src/pms/sensor src/pms/actuator` must produce zero
+  matches on every PR once S2 lands.
+- **Invariant 6** — import-linter rule: `pms.sensor` cannot import
+  from `pms.market_selection`. Same mechanism as Invariant 5.
+  Grep complement: `rg 'from pms\.market_selection' src/pms/sensor`
+  must produce zero matches.
+- **Invariant 7** — after S1 lands, `MarketDiscoverySensor` and
+  `MarketDataSensor` are separate classes with single
+  responsibilities. Grep: the two class names must exist in
+  `src/pms/sensor/adapters/*.py` and no single file defines both.
+- **Invariant 8** — zero `strategy_id` columns on outer-ring or
+  middle-ring tables. Grep: `rg 'strategy_id' schema.sql` filtered
+  to the outer-ring / middle-ring DDL blocks must produce zero
+  matches. This is the rule `agent_docs/architecture-invariants.md`
+  §Invariant 8 **Enforcement** names explicitly as grep-checkable.
+
+**Behavioural invariants** (no grep; enforced by acceptance
+criteria).
+
+- **Invariant 1** — concurrent feedback web, not phased runtime.
+  There is no grep for "does the runtime actually run layers
+  concurrently" — this is enforced by each sub-spec's acceptance
+  criteria rejecting synchronous barriers between layers, and by
+  code review rejecting any new `asyncio.gather` that blocks one
+  layer on another (per `agent_docs/architecture-invariants.md`
+  §Invariant 1 **Enforcement**).
+- **Invariant 2** — `Strategy` as rich aggregate. The import-linter
+  rule (Invariant 5) catches the most common violation, but
+  semantic violations like "projection class with mutable
+  containers" or "downstream entity field duplicating strategy
+  state" are caught by code review reading the diff, not by grep.
+- **Invariant 4** — raw factors only. No mechanical check
+  distinguishes a "raw" factor from a thinly-disguised composite;
+  code review reads the factor definition and rejects any factor
+  that encodes strategy-specific weighting (per §3.2.3 and
+  `agent_docs/architecture-invariants.md` §Invariant 4
+  **Enforcement**).
+
+A sub-spec PR's invariant-conformance section lists (a) which
+invariants apply to its scope, (b) for each grep-checkable one, the
+exact grep command and expected zero-match result, (c) for each
+behavioural one, the acceptance-criterion language in the sub-spec
+that enforces it.
+
+### 5.4 Boundary matrix audit
+
+Any load-bearing concept introduced by the sub-spec PR (module,
+class, table, DDL change, enforcement hook, dashboard page, named
+policy object) must already appear in §3.2 Boundary Matrix with this
+sub-spec as its Owner **or** must be added to §3.2 **in the same
+PR** — per the §3.1 guidance "When adding a new concept not in the
+matrix". A PR that introduces a concept absent from the matrix fails
+this gate; the reviewer either approves the matrix update in the
+same PR or rejects the concept addition as scope drift.
+
+Reviewer workflow: grep the PR diff for every new class name, table
+name, and DDL identifier; for each hit, confirm the identifier
+appears in §3.2 with this sub-spec as Owner. If the identifier is
+absent, the §3.2 update must land in the same PR.
+
+### 5.5 Retro-promotion workflow
+
+Every sub-spec ends with a retro under `.harness/retro/<sub-spec-
+id>.md` (see §4.3 gate 1). If the retro produces a rule that meets
+the promotion criteria in `agent_docs/promoted-rules.md`
+§"Promotion process" — observed in ≥ 2 task retros, **or**
+high-severity on first observation, **or** user-explicit — the rule
+is:
+
+1. Appended to `agent_docs/promoted-rules.md` with provenance
+   (`Promoted from <sub-spec-id> retro Proposal N`).
+2. Mirrored into `CLAUDE.md` §"Promoted rules from retros" with
+   severity-emoji (🔴 / 🟡 / 🟢) and a one-line summary.
+3. Recorded in `.harness/retro/index.md` with lifecycle column
+   moved to `active`.
+
+All three updates land in **one PR** (the retro-promotion PR). A
+retro whose rule meets the promotion criteria but whose promotion
+PR is not yet merged blocks the §4.3 gate 3 check for the next
+sub-spec.
+
+### 5.6 Commit-message discipline
+
+Conventional-commit prefixes are required:
+
+| Prefix | Use for |
+|---|---|
+| `feat(<scope>):` | New feature / capability |
+| `fix(<scope>):` | Bug fix |
+| `docs(<scope>):` | Documentation-only change |
+| `test(<scope>):` | Test additions / refactoring without behaviour change |
+| `refactor(<scope>):` | Code refactor without behaviour change |
+| `chore(<scope>):` | Tooling, config, dependency bumps |
+
+Scope is the affected module, sub-spec id, or `build` / `tests` as
+appropriate (e.g., `fix(tests): pin pytest-asyncio>=0.23`,
+`feat(sensor): two-layer discovery + data split`).
+
+**No `Co-Authored-By` lines.** This is stated twice in the project
+rules — once in `CLAUDE.md` §"Do not" (`Never add Co-Authored-By
+lines`) and once in `agent_docs/promoted-rules.md` §"Commit-
+message precedence" (*Promoted from `pms-v1` retro Proposal 7*).
+They are the same rule, promoted. The user's global git rule wins
+against any harness / template / upstream default that would add
+the line — this is settled, do not re-derive at every commit.
+Review-loop commits (`review-loop: changes from round N`) inherit
+the same rule.
+
+---
