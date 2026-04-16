@@ -508,8 +508,10 @@ work. **Every item is verifiable** — no "looks good" gates.
    as Owner. Concepts introduced by a non-owner are boundary
    violations (per §3.1's "When reviewing a sub-spec PR" guidance)
    and must be reassigned before merge. Separately, grep any new
-   DDL for `strategy_id` columns on outer-ring or middle-ring tables
-   — zero matches required (Invariant 8).
+   DDL for `strategy_id` **or** `strategy_version_id` columns on
+   outer-ring or middle-ring tables — zero matches required for
+   both identifiers (Invariant 8 Enforcement explicitly names both,
+   `agent_docs/architecture-invariants.md` §Invariant 8).
 3. **`CLAUDE.md` updated with any rule promoted from the retro.**
    If the retro produced a promoted rule per the criteria in
    `agent_docs/promoted-rules.md` §"Promotion process" (observed
@@ -517,17 +519,25 @@ work. **Every item is verifiable** — no "looks good" gates.
    promoted), the rule is appended to `agent_docs/promoted-rules.md`
    with provenance and mirrored to `CLAUDE.md` §"Promoted rules
    from retros". No mirroring = gate fails.
-4. **Boundary integrity check — Leave-behind matches Intake.**
-   Once sub-spec N's Leave-behind subsection exists (lands with
-   Commits 4–9 of this document authoring effort), diff it line-
-   by-line against sub-spec N+1's Intake subsection. Any concept
-   in sub-spec N+1's Intake that is not produced by sub-spec N's
+4. **Boundary integrity check — Leave-behind union matches Intake.**
+   Sub-spec N+1's Intake is diffed against the **union of all
+   predecessor Leave-behinds** — every sub-spec that has an
+   incoming edge to N+1 in the §2.1 DAG, not just the immediately
+   prior one in the §4.1 sequence. Concretely: S3's Intake is
+   matched against S2's Leave-behind (S2 → S3 is S3's only
+   predecessor edge); S4's Intake against S2's Leave-behind (same
+   shape); **S5's Intake against S3's Leave-behind ∪ S4's Leave-
+   behind** (both edges land into S5 per §2.1); S6's Intake
+   against S5's Leave-behind. Once each sub-spec's Leave-behind
+   subsection exists (lands with Commits 4–9 of this document
+   authoring effort), diff the union line-by-line. Any concept in
+   sub-spec N+1's Intake that is not produced by some predecessor's
    Leave-behind is a boundary gap. **STOP and reconcile** — either
-   amend sub-spec N to produce the missing concept, or amend sub-
-   spec N+1 to drop the dependency. Do not proceed with a partial
-   contract. This is the mechanism that prevents drift once sub-
-   specs begin landing in `.harness/`; it is the single most
-   important gate item.
+   amend a predecessor to produce the missing concept, or amend
+   sub-spec N+1 to drop the dependency. Do not proceed with a
+   partial contract. This is the mechanism that prevents drift
+   once sub-specs begin landing in `.harness/`; it is the single
+   most important gate item.
 5. **Canonical gates green on a fresh clone.** `uv run pytest -q`
    and `uv run mypy src/ tests/ --strict` both pass on a fresh
    shell (see §5.1, §5.2; 🟡 Fresh-clone baseline verification).
@@ -612,42 +622,80 @@ third-party lib without py.typed).
 ### 5.3 Invariant conformance
 
 Every sub-spec PR must demonstrate conformance with every one of
-the 8 invariants in `agent_docs/architecture-invariants.md`. Some
-invariants are **grep-checkable** (mechanical, one-liner); some are
-**behavioural** (enforced by acceptance criteria inside the sub-
-spec, not by a grep). Be honest about which is which — inventing a
-grep recipe for a behavioural invariant gives a false-green signal.
+the 8 invariants in `agent_docs/architecture-invariants.md`. The 8
+split into three buckets, mirroring what each invariant's
+**Enforcement** block actually says is mechanically checkable:
 
-**Grep-checkable invariants.**
+- **Mechanically checkable** — a machine check (import-linter run,
+  delimited-DDL grep) is sufficient PR evidence. Invariants 5, 6, 8.
+- **Mixed (schema + query review)** — a schema constraint is
+  mechanically checkable, but a second enforcement half (query-
+  shape review, aggregation audit) is code review. Invariant 3.
+- **Behavioural** — no mechanical check faithfully captures the
+  invariant; acceptance criteria + code review are the enforcement.
+  Invariants 1, 2, 4, 7.
 
-- **Invariant 3** — every new DDL migration for an inner-ring
-  product table (`orders`, `fills`, `eval_records`, `feedback`)
-  must declare `strategy_id` and `strategy_version_id` columns.
-  Grep: the table's `CREATE TABLE` block must contain both column
-  names. Zero-match = reject.
+Be honest about which bucket each invariant lives in — inventing a
+grep recipe for a behavioural invariant gives a false-green signal,
+and a partial grep for a mechanically-checkable invariant misses
+real violations.
+
+**Mechanically checkable invariants.** The primary evidence is a
+machine check (import-linter run, DDL schema constraint, grep over
+explicitly-delimited DDL blocks). A grep complement is listed where
+it usefully smoke-checks the same property, but the import-linter
+result or the schema constraint itself is the PR evidence — not a
+partial grep recipe.
+
 - **Invariant 5** — import-linter rule (codified in S2's
   `pyproject.toml` or `ruff.toml`): `pms.sensor` and `pms.actuator`
-  cannot import from `pms.strategies.aggregate` or from
-  `pms.controller.*`. The rule runs as part of the lint pass; any
-  violation fails CI. Grep complement: `rg 'from pms\.strategies\.
-  aggregate' src/pms/sensor src/pms/actuator` must produce zero
-  matches on every PR once S2 lands.
+  cannot import from `pms.strategies.aggregate` **or** from
+  `pms.controller.*`. The linter rule runs as part of the lint pass;
+  the linter report is the PR evidence. Any violation fails CI. A
+  grep smoke check exists but must cover both banned targets and
+  both `from … import …` and plain `import …` syntaxes (e.g.
+  `rg -n '^(from pms\.strategies\.aggregate|from pms\.controller|
+  import pms\.strategies\.aggregate|import pms\.controller)'
+  src/pms/sensor src/pms/actuator` — zero matches). The grep is not
+  a substitute for the linter; it is a cheap preflight.
 - **Invariant 6** — import-linter rule: `pms.sensor` cannot import
-  from `pms.market_selection`. Same mechanism as Invariant 5.
-  Grep complement: `rg 'from pms\.market_selection' src/pms/sensor`
-  must produce zero matches.
-- **Invariant 7** — after S1 lands, `MarketDiscoverySensor` and
-  `MarketDataSensor` are separate classes with single
-  responsibilities. Grep: the two class names must exist in
-  `src/pms/sensor/adapters/*.py` and no single file defines both.
-- **Invariant 8** — zero `strategy_id` columns on outer-ring or
-  middle-ring tables. Grep: `rg 'strategy_id' schema.sql` filtered
-  to the outer-ring / middle-ring DDL blocks must produce zero
-  matches. This is the rule `agent_docs/architecture-invariants.md`
-  §Invariant 8 **Enforcement** names explicitly as grep-checkable.
+  from `pms.market_selection`. Same mechanism as Invariant 5. Grep
+  smoke check must cover both syntaxes
+  (`rg -n '^(from pms\.market_selection|import pms\.market_selection)'
+  src/pms/sensor` — zero matches).
+- **Invariant 8** — zero `strategy_id` **and** zero
+  `strategy_version_id` columns on outer-ring or middle-ring
+  tables. `agent_docs/architecture-invariants.md` §Invariant 8
+  **Enforcement** names both identifiers explicitly as the grep-
+  checkable rule. Grep: within the outer-ring and middle-ring DDL
+  blocks of `schema.sql` (delimited by the block comments
+  introduced in S1 / S3), both identifiers must produce zero
+  matches. The DDL block comments are what make this mechanical —
+  without them, a naive `rg strategy_id schema.sql` would hit
+  legitimate inner-ring declarations.
+
+**Mixed invariants (schema constraint + query-time review).** The
+schema half is mechanical; the query half is code review.
+
+- **Invariant 3** — two independent enforcement mechanisms per
+  `agent_docs/architecture-invariants.md` §Invariant 3
+  **Enforcement**: (a) **schema**: `strategy_version_id` is
+  `NOT NULL` on every inner-ring product table after S5 completes,
+  plus a `CHECK` constraint forbidding known sentinel values
+  (empty string). This half is mechanical — the DDL block must
+  declare both columns AND `NOT NULL` AND the `CHECK` once the S5
+  upgrade lands. A grep recipe that only verifies column presence
+  (ignoring `NOT NULL` / `CHECK`) is insufficient; the PR evidence
+  is the schema file itself plus a post-migration `\d+` or
+  `information_schema` query showing the constraint is active.
+  (b) **query-time**: no SQL aggregation query over `eval_records`
+  or `fills` may omit `GROUP BY strategy_version_id` without an
+  explicit comment justifying the cross-version aggregation. This
+  half is code review, not grep — a grep can find `GROUP BY` clauses
+  but cannot judge whether an omission was intentional.
 
 **Behavioural invariants** (no grep; enforced by acceptance
-criteria).
+criteria and code review).
 
 - **Invariant 1** — concurrent feedback web, not phased runtime.
   There is no grep for "does the runtime actually run layers
@@ -667,12 +715,27 @@ criteria).
   that encodes strategy-specific weighting (per §3.2.3 and
   `agent_docs/architecture-invariants.md` §Invariant 4
   **Enforcement**).
+- **Invariant 7** — two-layer sensor (discovery + data), with
+  single-responsibility per class and the discipline that future
+  venue adapters land as a pair. `agent_docs/architecture-
+  invariants.md` §Invariant 7 **Enforcement** names two review
+  gates: (a) S1 acceptance criteria (two separate classes, each
+  with a single responsibility); (b) code review of any future
+  venue adapter requiring a discovery/data pair. Neither is
+  mechanically detectable by a class-name grep — a hybrid adapter
+  can satisfy "two class names exist in different files" while
+  still owning both responsibilities. A class-name / file-
+  separation grep is a useful **smoke check** (zero-match on a
+  single-file definition of both classes) but the PR evidence is
+  the acceptance-criterion reference and the code-review record.
 
 A sub-spec PR's invariant-conformance section lists (a) which
-invariants apply to its scope, (b) for each grep-checkable one, the
-exact grep command and expected zero-match result, (c) for each
-behavioural one, the acceptance-criterion language in the sub-spec
-that enforces it.
+invariants apply to its scope, (b) for each mechanically checkable
+one, the machine-check evidence (import-linter report, schema
+constraint, or delimited-DDL grep with expected zero-match), (c)
+for Invariant 3 when it applies, both the schema-constraint evidence
+and the aggregation-query review note, (d) for each behavioural one,
+the acceptance-criterion language in the sub-spec that enforces it.
 
 ### 5.4 Boundary matrix audit
 
