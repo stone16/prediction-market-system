@@ -4625,8 +4625,13 @@ effort estimates, and test expectations land in
   over a date range (read-only against outer + middle rings).**
 - **CP3 — `FactorService` integration: precompute panels for the
   replay window; cache keyed for sharing across sweep variants.**
-- **CP4 — `BacktestRun` + `StrategyRun` DDL + run-execution loop
-  populating `(strategy_id, strategy_version_id)` `NOT NULL`.**
+- **CP4a — `BacktestRun` + `StrategyRun` DDL (frozen-dataclass
+  entities + `schema.sql` extension; columns include
+  `(strategy_id, strategy_version_id)` `NOT NULL` per Invariant 3).**
+- **CP4b — Run-execution loop populating `BacktestRun` and
+  `StrategyRun` rows end-to-end (consumes CP4a's DDL, drives a
+  single end-to-end backtest from `BacktestSpec` input to populated
+  rows).**
 - **CP5 — `EvaluationReport` generator (metrics + benchmarks +
   attribution commentary + ranking).**
 - **CP6 — Parameter sweep CLI / entry point + shared-cache
