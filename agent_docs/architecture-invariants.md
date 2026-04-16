@@ -344,10 +344,11 @@ perception.
 **Runtime evidence.**
 - Today: `src/pms/sensor/adapters/polymarket_rest.py` — conflated
   implementation. S1 splits this file into two sensor classes.
-- Today: `src/pms/sensor/adapters/polymarket_stream.py:71-90` —
-  `_message_to_signal` discards `book` and `price_change` events.
-  S1/S5 (stream sensor upgrade) replaces this with a stateful
-  parser that writes to the outer ring.
+- Today: `src/pms/sensor/adapters/polymarket_stream.py:71-77` —
+  `_message_dict_to_signal` (module-level helper) drops `book` and
+  `price_change` events by accepting only messages that carry
+  `price` + `market_id`. S1 (stream sensor upgrade) replaces this
+  with a stateful parser that writes to the outer ring.
 
 **Anti-patterns.**
 - A Sensor class that both polls the market universe and maintains

@@ -137,21 +137,29 @@ subscription.
 
 Today (as of the `main` tip on 2026-04-16, commit `b4734fb`):
 
-- `PolymarketRestSensor._simulated_paper_orderbook` fabricates
-  single-level bids/asks from a scalar `liquidity` value
-  (`src/pms/sensor/adapters/polymarket_rest.py:131-146`).
-- `PolymarketStreamSensor._message_to_signal` discards `book` and
-  `price_change` events (lines 71–90 of
-  `src/pms/sensor/adapters/polymarket_stream.py`).
+- The REST sensor's `_gamma_market_to_signal` emits
+  `orderbook={"bids": [], "asks": []}` — real orderbook depth is
+  absent, not even fabricated
+  (`src/pms/sensor/adapters/polymarket_rest.py:90`, inside the
+  helper that starts at line 78).
+- The stream adapter's top-level `_message_dict_to_signal` keeps
+  only messages carrying both `price` and `market_id`, which
+  silently drops `book` and `price_change` events
+  (`src/pms/sensor/adapters/polymarket_stream.py:71-77`).
+  `Runner._build_sensors` never wires the stream sensor in for
+  non-backtest modes either
+  (`src/pms/runner.py:177-185` — only `PolymarketRestSensor` is
+  returned).
 - `ControllerPipeline` runs one global pipeline; `TradeDecision`
   has no `strategy_id` / `strategy_version_id` fields.
 - `FeedbackStore` and `EvalStore` persist to JSONL under `.data/`;
   there is no PostgreSQL in the runtime path.
 - `Factor`, `Strategy`, `MarketSelector`, `BacktestSpec`,
   `StrategyRun` — none of these entities exist.
-- The dashboard exposes `/signals`, `/decisions`, `/metrics`,
-  `/feedback`, `/backtest` but none render per-strategy
-  comparison.
+- The dashboard exposes `/signals`, `/decisions`, `/metrics`, and
+  `/backtest` pages plus a feedback panel on the main overview page
+  (fed by API routes under `dashboard/app/api/pms/feedback/`). None
+  render per-strategy comparison.
 
 End state closes every item above.
 
