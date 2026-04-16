@@ -4044,3 +4044,849 @@ go-ahead before drafting
 ---
 
 ---
+
+## 11. Sub-spec S6 — pms-research-backtest-v1
+
+S6 is the **terminal node** of the DAG (§2.1): it has no downstream
+sub-specs, every upstream sub-spec (S1–S5) has already landed by the
+time S6 opens, and S6 closes **no new architecture invariants** —
+instead it *uses* all eight (§2.2 row 6 of the node summary; §3.3
+Gap-check shows S6 carries Invariants 3 and 8 only via reference, not
+ownership). This section expands the skeleton in
+`agent_docs/project-roadmap.md` §S6 into the project-level contract
+that the harness run under `.harness/pms-research-backtest-v1/` will
+consume.
+
+### 11.1 Goal
+
+S6 lands the **research-grade backtest engine** — the offline harness
+that lets a researcher generate, compare, and rank N strategies
+against a shared market-data window without ever touching the live
+runtime. `BacktestSpec` defines a single run by combining a strategy
+version (S2), a `BacktestDataset` reference (outer ring per S1, middle
+ring per S3), an `ExecutionModel`, a risk policy, a date range, and a
+config hash. `ExecutionModel` is the **only** place backtest / paper
+/ live legitimately diverge — fill policy, fee model, slippage model,
+latency model, and staleness policy live here so the selection path
+stays shared (`Factor → StrategySelection → Opportunity →
+PortfolioTarget` per §1.1 capability #8). A market-universe replay
+engine reads the outer-ring tables for the replay window and drives
+`FactorService` (S3) to precompute factor panels once; a parameter
+sweep generates N `BacktestSpec` variants that share the same
+factor-panel cache (cache-hit-rate becomes an acceptance criterion,
+not a hope). `BacktestLiveComparison` reconciles a backtest run
+against a live window and reports equity divergence, selection
+overlap with an explicit denominator, plus the backtest-only / live-
+only symbol sets — answering "which strategy worked, where, why, and
+under what market conditions?" (the unanswered question called out in
+`docs/notes/2026-04-16-repo-issues-controller-evaluator.md` §3
+Evaluator gap). `TimeAlignmentPolicy` + `SymbolNormalizationPolicy`
+make that comparison meaningful by aligning timestamps and
+identifiers before the diff happens. `SelectionSimilarityMetric`
+quantifies overlap with the denominator declared up-front (backtest
+set / live set / union — never inferred). `EvaluationReport` ties
+run metadata, metrics, benchmarks, and attribution commentary into a
+single artifact. `PortfolioTarget` materialises time-indexed target
+exposure as the research-side abstraction. The `/backtest` dashboard
+page is upgraded from today's smoke-replay view into a ranked
+N-strategy comparison page, closing observable-capability item #6 of
+§1.1.
+
+### 11.2 Scope (in / out)
+
+**Scope in.** Exactly the 13 concepts owned by S6 in §3.2.6, in the
+same order, each with a one-line scope descriptor. Reviewers
+verifying boundary integrity grep §3.2.6 against this list; the
+lists must match concept-for-concept.
+
+1. **`BacktestSpec` (strategy version + dataset + execution model
+   + risk policy + date range + config hash).** Frozen dataclass at
+   `src/pms/research/specs.py` (harness spec may choose final path)
+   that captures every input necessary to reproduce a backtest;
+   `config_hash` is a deterministic hash over the full spec so
+   identical specs collide and a sweep can de-duplicate runs
+   (Invariant 3 — version provenance carries through into research
+   artefacts).
+2. **`ExecutionModel` (fill / fee / slippage / latency / staleness
+   policy).** Frozen dataclass with named, defaulted fields so a
+   single named profile (e.g. `ExecutionModel.polymarket_paper()`)
+   can be referenced from multiple `BacktestSpec`s; this is the
+   **only** place backtest / paper / live legitimately diverge
+   (§1.1 capability #8 + §3.2.6 Notes column).
+3. **`BacktestDataset` (source, version, coverage, data-quality
+   gaps).** Frozen dataclass referencing outer-ring tables (`book_
+   snapshots`, `book_levels`, `price_changes`, `trades`) and middle-
+   ring tables (`factor_values`) **by ring**, not by strategy id
+   (Invariant 8); records the date range, market-universe filter,
+   and any known data-quality gaps so an `EvaluationReport` can warn
+   when a backtest straddles a known gap.
+4. **`BacktestRun` (materialized run with artifact paths).** Inner-
+   ring entity (per `(strategy_id, strategy_version_id)` tagging)
+   recording run id, spec hash, status, timestamps, and artifact
+   paths. One `BacktestRun` parents many `StrategyRun`s when the
+   spec spans multiple strategies (§3.2.6 Notes column).
+5. **`StrategyRun` (materialized per-strategy run record for
+   backtest runs).** Inner-ring entity capturing per-strategy
+   results inside a multi-strategy `BacktestRun`. **Backtest-only**
+   — live / paper per-strategy tracking continues to flow through
+   inner-ring product tables (`fills`, `eval_records`, …) grouped
+   by `(strategy_id, strategy_version_id)` per S5; introducing a
+   live `strategy_runs` table would create a reverse S5 → S6 DAG
+   edge that §2 forbids (§3.2.6 row 5 Notes verbatim).
+6. **Market-universe replay engine (multi-day, multi-market outer-
+   ring reader).** Module under `src/pms/research/replay.py`
+   (harness spec final path) that reads `book_snapshots` /
+   `book_levels` / `price_changes` / `trades` over the
+   `BacktestSpec` date range and replays them into the per-strategy
+   `ControllerPipeline` flow without touching live sensor adapters.
+   Drives `FactorService` (S3) to precompute panels once for the
+   replay window so the sweep cache (concept #7) can hit (Invariant
+   8 — replay reads outer ring; never writes).
+7. **Parameter sweep (generate N `BacktestSpec`s, compare results
+   with shared factor-panel cache).** CLI or programmatic entry
+   point (`uv run pms-research sweep ...` or equivalent) that
+   takes a sweep spec (parameter grid + base `BacktestSpec`),
+   materialises N variants, runs each through the replay engine,
+   and emits the comparison artefact. The factor-panel cache is
+   keyed so identical factor inputs across variants produce a hit
+   (Invariant 4 — raw factors are reusable across strategies, hence
+   across `BacktestSpec` variants that differ only on composition).
+8. **`BacktestLiveComparison` (equity divergence + selection
+   overlap + backtest-only / live-only opportunities).** Module +
+   entity that aligns a backtest `BacktestRun` against a live
+   window (filtered from inner-ring product tables) and emits
+   equity-curve delta, the `SelectionSimilarityMetric` value,
+   backtest-only symbol set, and live-only symbol set. Closes the
+   "validation loop before live promotion" lesson from
+   `docs/notes/2026-04-16-evaluator-entity-abstraction.md`
+   §"Production/live framework lessons".
+9. **`TimeAlignmentPolicy` + `SymbolNormalizationPolicy`.** Frozen
+   policy dataclasses that the comparison module applies before
+   diffing. `TimeAlignmentPolicy` resolves generated / exchange /
+   ingest / evaluation timestamp skew (the select-coin
+   `hour_offset` analogue called out in
+   `docs/notes/2026-04-16-evaluator-entity-abstraction.md`
+   §"Evaluation Entities"). `SymbolNormalizationPolicy` maps venue
+   identifiers, token ids, and human-readable symbols across the
+   backtest dataset and live artefacts.
+10. **`SelectionSimilarityMetric` (denominator explicit: backtest
+    set / live set / union).** Frozen metric definition that **must**
+    declare its denominator at construction time; the metric value
+    has no meaning without it (§Risk register row 4). Used inside
+    `BacktestLiveComparison` and exposed as a column on the
+    `/backtest` page.
+11. **`EvaluationReport` (run metadata + metrics + attribution +
+    benchmarks).** Inner-ring entity tying together a `BacktestRun`
+    or `BacktestLiveComparison` with: run metadata (spec hash,
+    dataset reference, execution model name), metric values
+    (Brier / Sharpe / cumulative P&L / drawdown / fill rate /
+    slippage), benchmark comparison rows, attribution commentary,
+    warnings (data-quality gaps, time-alignment corrections), and
+    a recommended-next-action field. `FactorAttribution` as a
+    dedicated table is intentionally deferred (§3.4); attribution
+    appears here as commentary, not as its own row type.
+12. **`PortfolioTarget` (time-indexed target exposure per
+    strategy).** Frozen dataclass capturing a strategy's desired
+    exposure per `(market_id, token_id, side, ts)` over the
+    backtest window. Research-side abstraction — the live runtime
+    continues to produce `TradeDecision` directly through the per-
+    strategy `ControllerPipeline` (§3.2.6 row 12 Notes verbatim).
+13. **`/backtest` ranked N-strategy comparison view.** Dashboard
+    page that ranks N strategies by a configurable metric (Brier /
+    Sharpe / cumulative P&L) with the underlying `BacktestRun` +
+    `StrategyRun` rows queryable by run id; upgrades today's
+    `/backtest` page (§1.1 capability #6).
+
+**Scope out.** The following are S6-adjacent but are owned by other
+sub-specs **or** are intentionally deferred per §3.4. A PR landing
+any of these under `.harness/pms-research-backtest-v1/` is scope
+drift; entities listed in §3.4 are explicitly **deferred** by the
+project decomposition and reviving them as first-class citizens
+inside S6 is a §3.4 violation that requires a §3.2 amendment in the
+same PR (per §3.1's "When adding a new concept not in the matrix").
+
+Owned by other sub-specs:
+
+- Outer-ring DDL + sensors + the `asyncpg.Pool` lifecycle + JSONL→PG
+  unification → **S1** (§3.2.1). S6 is a **reader** of outer-ring
+  tables; never writes them, never adds a `strategy_id` column to
+  any of them (Invariant 8).
+- `Strategy` aggregate, projection types (`StrategyConfig`,
+  `RiskParams`, `EvalSpec`, `ForecasterSpec`,
+  `MarketSelectionSpec`), `strategies` / `strategy_versions` /
+  `strategy_factors` tables, `PostgresStrategyRegistry`, import-
+  linter rules, `"default"` strategy seed → **S2** (§3.2.2). S6 is
+  an aggregate **reader** (Controller / Evaluator allow-list per
+  Invariant 5).
+- `factors` / `factor_values` tables, `FactorService`, raw factor
+  definitions, `StrategyConfig.factor_composition`, `/factors`
+  page → **S3** (§3.2.3). S6 invokes `FactorService` to precompute
+  panels; never adds new factors (any new factor required by a
+  backtest must land via S3, not S6 — Invariant 4).
+- `MarketSelector`, `SensorSubscriptionController`,
+  `Strategy.select_markets(universe)`, Runner boot-order wiring →
+  **S4** (§3.2.4). S6 reads `select_markets` output to compute the
+  backtest's market universe; never writes a `market_ids` list
+  through any other channel.
+- Per-strategy `ControllerPipeline` dispatch, per-strategy
+  `Evaluator` aggregation, `(strategy_id, strategy_version_id)`
+  `NOT NULL` upgrade, `TradeDecision` / `OrderState` /
+  `FillRecord` / `EvalRecord` strategy-field population, the
+  `Opportunity` entity, `/strategies` comparative-metrics view,
+  `/metrics` per-strategy breakdown → **S5** (§3.2.5). S6 reuses
+  the per-strategy `Evaluator` aggregation shape inside the
+  backtest evaluator; never re-implements it.
+
+Intentionally deferred per §3.4 (NOT to be revived by S6):
+
+- **`StrategyBundle`** (multi-strategy group mapping to one live
+  account) — deferred per §3.4. S6 may run multiple strategies
+  through one `BacktestRun` (one-to-many `BacktestRun` →
+  `StrategyRun`), but the *bundle* abstraction with shared
+  account / risk-budget semantics is post-S5 work and would expand
+  the schema beyond S6's scope.
+- **`MarketUniverse` as a first-class entity** — deferred per §3.4.
+  S6 treats the backtest universe as a derived view: the rows in
+  `markets` matching the `BacktestDataset.market_universe_filter`
+  for the spec date range. Persisting a separate `market_universes`
+  table is not S6 work; if S6 discovers it must be persisted (e.g.,
+  for dated universe snapshots), §3.4 + §3.2 are amended in the
+  same PR before any code lands.
+- **`FactorAttribution` as a dedicated table** — deferred per §3.4.
+  `EvaluationReport` may carry attribution **commentary** as a text
+  field, but a dedicated `factor_attribution` row type is not S6
+  work; if the research workflow proves the need, §3.4 + §3.2 are
+  amended in a follow-on retro and matrix update.
+- **`SelectionSnapshot` / `PriceLevel` / `MarketUpdate` as
+  persisted event types** — deferred per §3.4. The outer-ring
+  tables already encode equivalent state; S6 reads them as-is.
+- **Live-execution infrastructure** — stays in S5 plus the existing
+  `live_trading_enabled=false` guard (§1.2 first bullet). S6 is
+  offline-research-only; flipping the live gate is a human decision
+  outside this decomposition.
+- **Kalshi venue integration** — venue-agnostic interfaces stay
+  in place per §1.2; a Kalshi adapter pair is a follow-on after S6
+  (§1.2 third bullet). S6 ships against Polymarket-only data.
+
+### 11.3 Acceptance criteria (system-level)
+
+Eight observable-capability bullets. Each is verifiable at the
+system level — not a checklist item for an individual CP.
+
+1. **Single-spec end-to-end run produces a ranked report.** A
+   `BacktestSpec` with **3 strategies** + a **30-day date window**
+   + a shared `ExecutionModel` runs end-to-end through the replay
+   engine and produces a ranked `EvaluationReport` within a
+   configurable time budget. The report includes per-`StrategyRun`
+   Brier, cumulative P&L, drawdown, and fill-rate columns, all
+   tagged with `(strategy_id, strategy_version_id)` (Invariant 3 —
+   research artefacts inherit version provenance).
+2. **Parameter sweep hits the shared factor-panel cache.** A sweep
+   over **10 `BacktestSpec` variants** that share an
+   `ExecutionModel` and a date range completes with a factor-panel
+   cache **hit rate > 95%** measured across variants. The replay
+   engine reuses the precomputed panel; only the strategy
+   composition (`StrategyConfig.factor_composition`) varies across
+   variants. A measured hit rate ≤ 95% **fails the gate** and
+   stops the sweep with a diagnostic — the cache is the load-
+   bearing performance contract for the sweep, not an optimisation
+   (§Risk register row 1).
+3. **`BacktestLiveComparison` against a live window emits the four
+   required artefacts.** A comparison against a **7-day live
+   window** reports: equity-curve delta (per-day), selection-
+   overlap ratio with **explicit denominator** (backtest set /
+   live set / union — declared up-front, never inferred per §Risk
+   register row 4), backtest-only symbol set, live-only symbol
+   set. Each artefact references the same
+   `(strategy_id, strategy_version_id)` pair on both sides
+   (Invariant 3).
+4. **`/backtest` page ranks N strategies and links to underlying
+   rows.** The dashboard page renders an N-row ranked table sorted
+   by a **user-configurable metric** (default Brier; switchable to
+   Sharpe and cumulative P&L); each row drills into the
+   `BacktestRun` + `StrategyRun` rows queryable by run id
+   (capability #6 of §1.1; observable via Playwright e2e against
+   a fixture run).
+5. **Replay engine is read-only against outer + middle rings.**
+   Running the replay engine against a fresh PostgreSQL with read-
+   only outer-ring + middle-ring credentials succeeds; any attempt
+   to write to `book_snapshots` / `book_levels` / `price_changes`
+   / `trades` / `factors` / `factor_values` from inside the replay
+   engine fails the test (Invariant 8 — outer ring is shared and
+   strategy-agnostic; middle ring is shared cache).
+6. **`BacktestSpec.config_hash` is deterministic and stable.** Two
+   `BacktestSpec` instances with byte-identical fields (modulo
+   field ordering) produce the **same** `config_hash`; any field
+   change produces a different hash; the hash is recorded on
+   `BacktestRun.spec_hash` and is queryable for de-duplication
+   inside the sweep (Invariant 3 — version hashing extends to
+   research artefacts).
+7. **No outer-ring or middle-ring DDL gains a `strategy_id` or
+   `strategy_version_id` column under S6.** S6 ships zero schema
+   migrations against `markets`, `tokens`, `book_snapshots`,
+   `book_levels`, `price_changes`, `trades`, `factors`,
+   `factor_values`. The mechanical schema grep that witnesses this
+   invariant lives in §5.3 Mixed-invariant evidence; AC #7 names
+   the obligation here so reviewers can spot scope drift early
+   (Invariant 8).
+8. **Canonical gates green on a fresh clone.** `uv run pytest -q`
+   passes with ≥ 70 tests + 2 skipped (integration gated on
+   `PMS_RUN_INTEGRATION=1`) and `uv run mypy src/ tests/ --strict`
+   is clean, on a fresh shell per 🟡 Fresh-clone baseline
+   verification (§5.1, §5.2).
+
+### 11.4 Non-goals
+
+Explicit deferrals. An S6 harness spec that lands any of these is
+scope drift. Items marked **(§3.4)** are entities the project
+decomposition has *intentionally deferred* — reviving them as
+first-class citizens inside S6 requires a §3.2 + §3.4 amendment in
+the same PR before any code lands.
+
+- **Kalshi venue integration.** Venue-agnostic interfaces remain
+  in place per §1.2, but a Kalshi sensor / actuator pair is a
+  follow-on effort after S6 ships. S6 ships against Polymarket
+  data only — both the replay engine and the comparison tool
+  assume the outer-ring tables filled by S1's
+  `MarketDataSensor`. Cross-venue replay is not S6 scope.
+- **Portfolio-level risk optimization.** `PortfolioTarget` lands
+  as a research-side dataclass (concept #12) capturing per-
+  strategy time-indexed exposure, but a portfolio optimiser that
+  reweights `PortfolioTarget`s across strategies is not S6 work.
+  Each strategy's `PortfolioTarget` stands on its own; aggregation
+  across strategies is left to a follow-on retro-triggered design.
+- **Automated paper/live → backtest promotion workflow.**
+  `BacktestLiveComparison` produces the artefacts a human reviewer
+  needs to make a promotion decision (capability #3 above), but
+  the **promotion itself** stays a human action — automated
+  promotion is explicitly out of scope (matches §1.2 second
+  bullet on "no automated feedback loop reconfigures
+  strategies").
+- **ML-driven parameter search.** The sweep is **grid-based** in
+  S6 — generate N `BacktestSpec`s by enumerating a parameter grid
+  declared up-front. Bayesian / RL / surrogate-model parameter
+  search is not S6 work; the sweep entry point's API can be
+  extended later, but the S6 deliverable is the grid baseline.
+- **Streaming backtest.** A `BacktestRun` is **batch**: the spec
+  defines a closed date range, the replay engine reads all
+  matching outer-ring rows up-front (or in bounded chunks), and
+  the run terminates when the window completes. Incremental /
+  streaming backtest that consumes new outer-ring rows as they
+  arrive is not S6 work — that pattern blurs the offline-research
+  / live-runtime boundary the decomposition is built around.
+- **Multi-account `StrategyBundle` mapping (§3.4).** Per §3.4,
+  `StrategyBundle` is intentionally deferred. S6 supports
+  multiple strategies inside one `BacktestRun` (one-to-many
+  `BacktestRun` → `StrategyRun`) but does **not** introduce a
+  bundle abstraction with shared account / risk-budget semantics.
+  Reviving this entity requires the §3.2 + §3.4 amendment cited
+  above.
+- **Persisting `FactorAttribution` rows (§3.4).** Per §3.4,
+  `FactorAttribution` as a dedicated table is intentionally
+  deferred. `EvaluationReport` may carry attribution **commentary**
+  as a text field — sufficient for the research workflows S6
+  ships against — but a `factor_attribution` row type with its
+  own DDL is post-S6 work.
+- **`MarketUniverse` as a first-class entity (§3.4).** Per §3.4,
+  the universe is the implicit set of `markets` rows matching the
+  `BacktestDataset.market_universe_filter`. S6 does **not** add a
+  `market_universes` table or a dated-universe-snapshot mechanism.
+  If S6 discovers persistence is required, §3.2 + §3.4 are
+  amended before any DDL lands.
+- **`SelectionSnapshot` / `PriceLevel` / `MarketUpdate` as
+  persisted event types (§3.4).** Per §3.4, the outer-ring tables
+  already encode equivalent state; S6 reads them as-is. No new
+  event-type tables are introduced.
+
+### 11.5 Dependencies
+
+- **Upstream sub-specs.** Direct edge: **S5** (per-strategy
+  Controller dispatch + per-strategy Evaluator aggregation +
+  `(strategy_id, strategy_version_id)` `NOT NULL` upgrade +
+  `Opportunity` entity + `/strategies` comparative view +
+  `/metrics` per-strategy breakdown). Transitive predecessors via
+  the §2.1 DAG: **S1** (outer-ring tables for replay), **S2**
+  (`Strategy` aggregate + projections + `strategy_versions` for
+  `BacktestSpec` reproducibility), **S3** (factor panel +
+  `FactorService` invocation for the shared sweep cache),
+  **S4** (`select_markets` output for backtest universe filtering).
+- **Upstream invariants.** S6 **uses every invariant** but
+  **closes none new** (§2.2 row 6, §3.3 Gap-check row legend "S6
+  carries Invariants 3 and 8 only via reference, not ownership").
+  S6 introduces **no new mechanical enforcement hooks** — every
+  Mechanically-checkable and Mixed invariant is enforced by a
+  machine check owned by an earlier sub-spec, and S6 inherits
+  those checks as-is. Behavioural invariants (1, 2, 4, 7) have
+  no machine check by their nature (§5.3 "Behavioural" bucket);
+  S6 discharges them through its own acceptance criteria and
+  code review, just like every prior sub-spec does. The
+  conformance bar applies to all 8 invariants per §5.3 buckets:
+  - **Mechanically checkable**: 5 — the existing import-linter
+    rule (S2-owned, §3.2.2) banning `pms.sensor` / `pms.actuator`
+    from importing `pms.strategies.aggregate` or `pms.controller.*`
+    is the authoritative enforcement; S6 does **not** introduce a
+    new `pms.research.*` linter rule. S6's obligation is to author
+    research code that does not push Sensor or Actuator across
+    that boundary (e.g., the replay engine reads outer-ring
+    tables directly via `PostgresMarketDataStore`, not by importing
+    Sensor; the comparison module reads inner-ring tables, not
+    Actuator).
+  - **Mixed (machine + review)**: 3 (every research artefact
+    carries `(strategy_id, strategy_version_id)` and every
+    aggregation `GROUP BY`s on it; the schema mechanical check is
+    the S5-owned `NOT NULL` + `CHECK` constraint per §5.3
+    Invariant 3 evidence — S6 inherits it), 6 (replay engine
+    derives the backtest universe via `Strategy.select_markets`
+    (S4-owned), never via a sensor-side or research-side static
+    list; the import-linter rule against Sensor importing
+    `pms.market_selection` is S2-owned and unchanged), 8 (no
+    `strategy_id` / `strategy_version_id` columns added to outer-
+    or middle-ring tables under S6; AC #7 above is the local
+    obligation, the S1 + S3 owned grep is the mechanical check).
+  - **Behavioural**: 1 (replay engine runs the per-strategy
+    `ControllerPipeline` flow concurrently across strategies in
+    one `BacktestRun`, not phased), 2 (research code is an
+    aggregate reader allowed by §3.2.6 — same allow-list shape as
+    S5 + Controller / Evaluator; S6 introduces no new aggregate
+    consumers beyond research code itself), 4 (every new factor
+    required by a backtest must land via S3 first as a raw
+    `FactorDefinition`; S6 never registers a research-only factor),
+    7 (S6 does not add Sensor classes; the replay engine is a
+    reader of outer-ring tables, not a third sensor).
+
+### 11.6 Intake
+
+Minimum set that must exist before a harness run opens under
+`.harness/pms-research-backtest-v1/`. S5's Leave-behind (authored
+in Commit 8 of this document authoring effort) is the **primary
+fan-in**; S3, S4, S2, S1 contribute through the §2.1 DAG transitive
+edges that funnel into S5. The list below is what reviewers diff
+against the union of predecessor Leave-behinds during the §4.3
+gate-4 boundary-integrity check.
+
+1. **Per-strategy `ControllerPipeline` dispatch operational** (S5
+   primary, §3.2.5 row 1). The `BacktestRun` execution loop runs
+   the same per-strategy dispatch the live runtime uses; without
+   this, the backtest compares a global controller against itself
+   — the very pathology §4.2 names as the reason S6 must be last.
+2. **Per-strategy `Evaluator` aggregation shape stable** (S5
+   primary, §3.2.5 row 2). The backtest evaluator reuses this
+   `GROUP BY (strategy_id, strategy_version_id)` shape inside
+   `EvaluationReport` (Invariant 3); a different aggregation
+   shape between live and backtest would break §1.1 capability #8
+   ("shared selection path; divergence only in `ExecutionModel`").
+3. **`(strategy_id, strategy_version_id)` `NOT NULL` on inner-
+   ring product tables** (S5 primary, §3.2.5 row 3). Pre-S5 the
+   columns are `NULLABLE` with `"default"` tagging; post-S5 every
+   product row carries a real strategy version. S6's
+   `BacktestRun` / `StrategyRun` populate the same columns — a
+   pre-S5 backtest would write `NULL` (or `"default"`) and break
+   reproducibility (Invariant 3).
+4. **`Opportunity` entity stable in shape** (S5 primary, §3.2.5
+   row 5). `BacktestRun` artefacts reference `Opportunity` rows
+   with the same fields the live runtime produces (selected
+   factor values, expected edge, rationale); changing the shape
+   under S6 would re-litigate S5 work.
+5. **`/strategies` comparative view + `/metrics` per-strategy
+   breakdown shipped** (S5 primary, §3.2.5 rows 6–7). The
+   `/backtest` page (concept #13) reuses the comparative-view
+   patterns shipped in S5; without them, S6 would be re-
+   inventing a UI baseline.
+6. **`FactorService` reader interface stable** (S3 transitive,
+   §3.2.3 row 4). The replay engine drives `FactorService` to
+   precompute panels for the replay window; the reader signature
+   must already exist (S3 owns the **definition**; S6 is a
+   **consumer** — Invariant 4 is enforced by S3 rejecting any
+   composite factor that the sweep tries to introduce as a "raw"
+   one).
+7. **Outer-ring tables populated with sufficient history** (S1
+   transitive, §3.2.1 rows 1–6 + 11). The replay engine reads
+   `book_snapshots` / `book_levels` / `price_changes` / `trades`
+   over the spec date range; if the outer ring contains less than
+   the requested window, the run terminates with a diagnostic, not
+   a partial result.
+8. **`Strategy` aggregate + `strategy_versions` table populated**
+   (S2 transitive, §3.2.2 rows 1, 4). `BacktestSpec` references
+   a `(strategy_id, strategy_version_id)` pair that must already
+   exist in `strategy_versions`; the deterministic config hash on
+   `BacktestSpec` (concept #1) is what makes this lookup stable
+   across sweep variants (Invariant 3 — version hashing already
+   established by S2).
+9. **`MarketSelector` + `Strategy.select_markets(universe)` stable**
+   (S4 transitive, §3.2.4 rows 1, 3). The replay engine derives
+   the backtest universe by invoking the same `select_markets`
+   method that `MarketSelector` uses to drive live subscription
+   (Invariant 6 — active perception). Without this, the backtest
+   would have to re-implement universe derivation, breaking §1.1
+   capability #8 ("shared selection path; divergence only in
+   `ExecutionModel`") and re-litigating the S4 design.
+10. **Canonical gates green on a fresh clone.** `uv run pytest
+    -q` passes with ≥ 70 tests + 2 skipped; `uv run mypy src/
+    tests/ --strict` is clean (§5.1, §5.2; 🟡 Fresh-clone
+    baseline verification).
+
+### 11.7 Leave-behind
+
+S6 is the **terminal sub-spec** of the §2.1 DAG: no downstream
+sub-spec consumes its Leave-behind. The list below exists so the
+§4.3 gate-4 boundary-integrity check can confirm S6's outputs match
+its §3.2.6 ownership **row-for-row** (13 numbered items, each
+keyed back to a specific §3.2.6 row), and so a future post-S6
+retro can audit what landed. Documentation deliverables that are
+not §3.2.6 rows are listed under **Companion artefacts** below the
+row-matched list.
+
+1. **`BacktestSpec`** (§3.2.6 row 1) at
+   `src/pms/research/specs.py` (harness spec final path) as a
+   frozen dataclass with deterministic `config_hash` and a
+   `from_strategy_version(...)` constructor that pulls
+   `(strategy_id, strategy_version_id)` from S2's
+   `strategy_versions`.
+2. **`ExecutionModel`** (§3.2.6 row 2) at
+   `src/pms/research/execution.py` (or co-located with
+   `BacktestSpec`) as a frozen dataclass with named profile
+   constructors (`ExecutionModel.polymarket_paper()`,
+   `ExecutionModel.polymarket_live_estimate()`); fields cover
+   fill / fee / slippage / latency / staleness policy.
+3. **`BacktestDataset`** (§3.2.6 row 3) as a frozen dataclass
+   referencing outer-ring + middle-ring tables by ring (Invariant
+   8); records date range, market-universe filter, and known
+   data-quality gaps.
+4. **`BacktestRun` DDL + entity** (§3.2.6 row 4) added to
+   `schema.sql` as an inner-ring table carrying `(strategy_id,
+   strategy_version_id)` `NOT NULL`; records run id, spec hash,
+   status, timestamps, artifact paths. Parents `StrategyRun`
+   (item 5) via a `run_id` foreign key for multi-strategy runs.
+5. **`StrategyRun` DDL + entity** (§3.2.6 row 5) added to
+   `schema.sql` as an inner-ring table carrying `(strategy_id,
+   strategy_version_id)` `NOT NULL` plus the parent `run_id`.
+   **Backtest-only** — no live `strategy_runs` table is created
+   (§3.2.6 row 5 Notes; introducing one would create a reverse
+   S5 → S6 DAG edge that §2 forbids).
+6. **Market-universe replay engine** (§3.2.6 row 6) at
+   `src/pms/research/replay.py` driving the per-strategy
+   `ControllerPipeline` flow over outer-ring rows in the spec
+   window; read-only against outer + middle rings (AC #5).
+7. **Parameter sweep CLI / entry point** (§3.2.6 row 7) at
+   `src/pms/research/sweep.py` (or `pms-research sweep` console
+   script) that materialises N `BacktestSpec`s from a sweep spec,
+   executes each via the replay engine, and emits a comparison
+   artefact. Factor-panel cache hit rate observable + asserted in
+   tests (AC #2).
+8. **`BacktestLiveComparison`** (§3.2.6 row 8) as a module +
+   inner-ring entity emitting equity-curve delta + selection-
+   overlap (with declared denominator) + backtest-only / live-
+   only symbol sets. Returns an `EvaluationReport` (item 11).
+9. **`TimeAlignmentPolicy` + `SymbolNormalizationPolicy`**
+   (§3.2.6 row 9) as frozen policy dataclasses applied inside
+   `BacktestLiveComparison` before diffing.
+10. **`SelectionSimilarityMetric`** (§3.2.6 row 10) as a frozen
+    metric definition that **requires** an explicit denominator at
+    construction; usable inside `BacktestLiveComparison` and
+    surfaced on `/backtest`.
+11. **`EvaluationReport`** (§3.2.6 row 11) as an inner-ring
+    entity tying `BacktestRun` (or `BacktestLiveComparison`) to
+    metrics + benchmarks + attribution commentary + warnings +
+    next-action field. `FactorAttribution` rows are NOT created
+    (§3.4).
+12. **`PortfolioTarget`** (§3.2.6 row 12) as a frozen dataclass
+    capturing time-indexed target exposure per strategy; emitted
+    by the replay engine as a research-side artefact.
+13. **`/backtest` ranked N-strategy comparison view** (§3.2.6
+    row 13) on the dashboard, drilling from a ranked table into
+    `BacktestRun` + `StrategyRun` detail; verified by Playwright
+    e2e against a fixture run.
+
+**Companion artefacts** (not §3.2.6 rows; documentation
+deliverables that accompany the 13 row-matched items above):
+
+- **Documented `BacktestSpec` config format.** Reference
+  documentation (likely under `docs/research/` or `agent_docs/`)
+  describing how to author a `BacktestSpec` / sweep spec by hand
+  — sufficient for a future researcher to onboard without reading
+  the code. Lands as part of CP-DC (§11.8). Not a §3.2.6 row, so
+  not counted in the row-for-row boundary-integrity check; tracked
+  separately so a reviewer can still confirm the doc shipped.
+
+### 11.8 Checkpoint skeleton
+
+Flat one-line-each list — the **largest sub-spec by CP count**
+because S6 carries: research-grade entity DDL, a replay engine, a
+sweep workflow with cache contract, comparison tooling, evaluation-
+report wiring, and a dashboard rewrite. **Not harness acceptance
+criteria** — the per-CP acceptance criteria, files-of-interest,
+effort estimates, and test expectations land in
+`.harness/pms-research-backtest-v1/spec.md` when the kickoff prompt
+(§11.11) triggers that authoring session.
+
+- **CP1 — `BacktestSpec` + `ExecutionModel` + `BacktestDataset`
+  entities (frozen dataclasses + deterministic `config_hash`).**
+- **CP2 — Market-universe replay engine reading outer-ring tables
+  over a date range (read-only against outer + middle rings).**
+- **CP3 — `FactorService` integration: precompute panels for the
+  replay window; cache keyed for sharing across sweep variants.**
+- **CP4 — `BacktestRun` + `StrategyRun` DDL + run-execution loop
+  populating `(strategy_id, strategy_version_id)` `NOT NULL`.**
+- **CP5 — `EvaluationReport` generator (metrics + benchmarks +
+  attribution commentary + ranking).**
+- **CP6 — Parameter sweep CLI / entry point + shared-cache
+  guarantee (cache-hit-rate > 95% asserted in tests).**
+- **CP7 — `TimeAlignmentPolicy` + `SymbolNormalizationPolicy` +
+  `SelectionSimilarityMetric` (with explicit denominator).**
+- **CP8 — `BacktestLiveComparison` tooling (equity delta +
+  selection overlap + backtest-only / live-only symbol sets).**
+- **CP9 — `PortfolioTarget` materialisation in the replay engine
+  output.**
+- **CP10 — `/backtest` ranked N-strategy comparison dashboard
+  page + Playwright e2e.**
+- **CP-DC — `BacktestSpec` config-format documentation (spec-
+  review checkpoint, no runtime code).**
+
+### 11.9 Effort estimate
+
+**L** (8–10 CPs by the §11.8 skeleton — actually 11 with CP-DC
+included, the largest sub-spec by CP count of S1–S6). S6 carries
+the broadest research surface area: research-grade entities and
+their DDL (`BacktestSpec`, `ExecutionModel`, `BacktestDataset`,
+`BacktestRun`, `StrategyRun`, `EvaluationReport`, `PortfolioTarget`,
+plus three policies and two metric definitions), a market-universe
+replay engine that drives `FactorService` against precomputed
+panels, a parameter-sweep workflow with a load-bearing cache
+contract, a comparison module with two policy classes plus the
+`SelectionSimilarityMetric`, a dashboard rewrite, and config-format
+documentation. As the **terminal** sub-spec of the §2.1 DAG, S6
+benefits from the most stable foundation — every prior sub-spec's
+invariants are already enforced, every dashboard baseline is
+already shipped — which is what makes the broadest scope tractable
+in one harness run.
+
+### 11.10 Risk register
+
+| Risk | Likelihood | Impact | Mitigation | Trigger / early-warning |
+|---|---|---|---|---|
+| Factor-panel cache invalidation correctness across sweep variants (a wrong cache hit silently corrupts results) | M | H | Cache key includes the full set of `(factor_id, param, market_id, ts_window)` inputs the variant reads; cache-key derivation is unit-tested for every sweep variant pair (variant A + variant B with one parameter difference must produce different cache keys for the affected factor); sweep run logs the cache-hit-rate plus the per-variant key set so manual audit is possible | Two sweep variants that should differ produce identical `EvaluationReport.metrics`; cache-hit-rate goes to 100% on a sweep that has at least one variant differing in a factor parameter (must be < 100% on such sweeps) |
+| Replay-engine performance on multi-year windows (the engine reads every outer-ring row in the window; volume scales with date range × market count) | M | M | Replay engine reads in bounded chunks (week-sized by default, configurable on `BacktestSpec`); the chunk boundary is an explicit field on the spec so a researcher can tune; `BacktestSpec` time-budget gate (AC #1) fails the run if the chunk strategy is mis-sized | Single `BacktestRun` runtime exceeds the `BacktestSpec.time_budget` field; `pool.acquire()` p99 latency on the replay engine's read connection > 500 ms |
+| `ExecutionModel` defaults drift from live reality (backtest success → live disappointment) | M | H | Named profile constructors (`ExecutionModel.polymarket_paper()`, `ExecutionModel.polymarket_live_estimate()`) carry the canonical defaults; profile values are sourced from a documented fixture (live Polymarket fee schedule, observed slippage from `/metrics` per-strategy slippage column shipped in S5, observed latency from sensor watchdog telemetry); `BacktestLiveComparison` AC (#3) explicitly surfaces equity-delta — a persistent positive delta across runs is the early warning that the model is too generous | `BacktestLiveComparison` equity-delta consistently positive across multiple comparison runs; reviewer notes a `BacktestSpec` overriding profile defaults without justification |
+| `SelectionSimilarityMetric` denominator ambiguity surfacing as reviewer disagreement (overlap can be measured against backtest set, live set, or union — each yields a different number) | M | M | The metric class **requires** the denominator at construction time (concept #10 row text + AC #3 explicit-denominator language); attempting to construct without a denominator is a type error; `BacktestLiveComparison` records the chosen denominator on the report so two reviewers cannot read different numbers from the same artefact | A reviewer comments on a `BacktestLiveComparison` artefact citing a different overlap number than the report shows; an `EvaluationReport` is generated without the denominator field populated |
+| `BacktestLiveComparison` requiring time-alignment corrections that themselves need validation (a wrong `TimeAlignmentPolicy` produces convincing-looking but incorrect comparisons) | M | M | `TimeAlignmentPolicy` is a frozen dataclass with named offsets (generated / exchange / ingest / evaluation skew, each separately settable); the comparison module records the applied policy on the `EvaluationReport.warnings` field whenever a non-identity policy is applied; per-policy unit tests cover an identity case + at least one non-trivial offset; reviewers can replay the policy against fixture timestamps | A `BacktestLiveComparison` shows zero equity-delta across two runs that should differ (suggests a policy is masking the divergence); `EvaluationReport.warnings` empty on a comparison that applied a non-identity policy |
+| Scope creep into deferred entities (§3.4) during CP execution — a CP that "almost needs" `StrategyBundle` / `MarketUniverse` / `FactorAttribution` / `SelectionSnapshot` / `PriceLevel` / `MarketUpdate` quietly introduces it as a "small" entity | M | H | §11.4 Non-goals explicitly cite §3.4 entry-by-entry; reviewer workflow grep on every CP PR for new class / table names against §3.4 list (per §3.1 + §5.4 boundary-matrix audit); HALT condition in §11.11 Kickoff Prompt makes the rule explicit at session start; any §3.4 revival requires a §3.2 + §3.4 amendment in the same PR before any code lands | A PR introduces a `StrategyBundle` / `MarketUniverse` / `FactorAttribution` / `SelectionSnapshot` / `PriceLevel` / `MarketUpdate` class or table without an accompanying §3.2 + §3.4 amendment |
+| Live + backtest artefact-shape divergence (selection path drifts so a live `Opportunity` and a backtest `Opportunity` no longer compare row-for-row) | L | H | `Opportunity` entity is owned by S5 (§3.2.5 row 5) — S6 reuses it verbatim; any S6 PR introducing a research-only "Opportunity-like" type fails the §5.4 Boundary Matrix audit; `BacktestLiveComparison` AC (#3) requires the same `(strategy_id, strategy_version_id)` pair on both sides — a shape mismatch fails the comparison test | A research-only entity shaped like `Opportunity` appears under `src/pms/research/`; `BacktestLiveComparison` test fails with a field-mismatch error |
+
+### 11.11 Kickoff Prompt
+
+The block below is **copy-paste-ready** for a fresh Claude session
+whose job is to author `.harness/pms-research-backtest-v1/spec.md`
+— the harness-executable spec with per-CP acceptance criteria,
+files-of-interest, effort, and intra-spec dependencies. The future
+session has **no memory** of this document; the prompt is
+self-contained.
+
+```
+SCOPE:
+
+You are starting harness task `pms-research-backtest-v1` in the
+prediction-market-system repository at
+/Users/stometa/dev/prediction-market-system. Your job this
+session is to author the harness-executable spec file at
+/Users/stometa/dev/prediction-market-system/.harness/pms-research-backtest-v1/spec.md
+(the directory may not yet exist; you will create it).
+
+REQUIRED READING (ordered — read in this order before touching
+anything, all paths absolute):
+
+1. /Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md
+   — specifically §11 (this sub-spec's total-spec contract),
+   §3.2.6 (the 13 concepts S6 owns), §3.4 (entities deliberately
+   out of scope — DO NOT revive without a §3.2 + §3.4 amendment
+   in the same PR), §4.3 gate 4 (Leave-behind / Intake diff with
+   S5 as the primary fan-in).
+2. /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+   — read all 8 invariants. S6 USES every invariant but CLOSES
+   none new. The conformance bar in §5.3 of the project spec
+   applies in full: mechanically checkable (5), Mixed (3, 6, 8),
+   behavioural (1, 2, 4, 7).
+3. /Users/stometa/dev/prediction-market-system/agent_docs/promoted-rules.md
+   — especially Runtime behaviour > design intent (🔴), Review-
+   loop rejection discipline (🔴), Comments are not fixes (🟡),
+   Lifecycle cleanup on all exit paths (🟡 — relevant for the
+   `asyncpg` read connections inside the replay engine and the
+   factor-panel cache lifecycle), Fresh-clone baseline verification
+   (🟡), Integration test default-skip pattern (🟢), Piecewise-
+   domain functions (🟡 — relevant for `ExecutionModel` slippage /
+   fill regimes).
+4. /Users/stometa/dev/prediction-market-system/docs/notes/2026-04-16-evaluator-entity-abstraction.md
+   — load-bearing sections: §"Evaluation Entities" block
+   (BacktestSpec, ExecutionModel, BacktestRun, StrategyRun,
+   EvaluationMetric, StrategyMetrics, EvaluationReport,
+   BacktestLiveComparison, SelectionSimilarityMetric,
+   TimeAlignmentPolicy, SymbolNormalizationPolicy);
+   §"Reference Backtesting Repos" (select-coin lessons:
+   factor-first, strategy-then, execution-last; backtest/live
+   diverge only in execution).
+5. /Users/stometa/dev/prediction-market-system/docs/notes/2026-04-16-repo-issues-controller-evaluator.md
+   — §"Reference: Select-Coin Backtesting Framework" §"Core
+   abstraction order" (Factor → Filter → Strategy → BacktestConfig
+   → ExecutionSimulation → Evaluation; this is the architectural
+   shape S6 is implementing).
+6. /Users/stometa/dev/prediction-market-system/src/pms/evaluation/CLAUDE.md
+   — per-layer invariant enforcement for Evaluator; S6 reuses the
+   per-strategy aggregation shape inside the backtest evaluator
+   (Invariant 3).
+7. /Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+   — structural reference for harness-grade spec shape (CP shape,
+   acceptance-criteria shape, files-of-interest shape). If this
+   path does not exist on the current branch, fall back to
+   /Users/stometa/dev/prediction-market-system/.harness/pms-v1/spec.md
+   for the same structural reference.
+
+CURRENT STATE SNAPSHOT:
+
+S6 is the terminal node of the project decomposition DAG (§2.1 of
+the project spec). All prior sub-specs (S1, S2, S3, S4, S5) have
+landed; §11.6 Intake items are satisfied. The project-level spec
+(/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md)
+is the authoritative boundary contract: §3.2.6 enumerates the 13
+concepts S6 owns, §3.4 enumerates the entities S6 must NOT revive
+without a matrix amendment, and §11 is S6's total-spec subsection.
+
+PREFLIGHT (boundary check — run before any authoring; every
+shell command below assumes cwd is
+/Users/stometa/dev/prediction-market-system):
+
+- §11.6 Intake items must all be satisfied. If any fails, HALT
+  and tell the user:
+  * Per-strategy `ControllerPipeline` dispatch is operational
+    (S5 §3.2.5 row 1; observable via the `/strategies` page
+    rendering per-strategy decisions tagged with non-`"default"`
+    `(strategy_id, strategy_version_id)`).
+  * Per-strategy `Evaluator` aggregation is shipping per-
+    strategy metrics on `/metrics` (S5 §3.2.5 rows 2 + 7).
+  * `(strategy_id, strategy_version_id)` is `NOT NULL` on every
+    inner-ring product table (S5 §3.2.5 row 3); SQL check:
+    `\d+ fills` / `\d+ eval_records` show both columns NOT NULL
+    plus the CHECK constraint forbidding empty strings (Invariant
+    3 mechanical enforcement, project spec §5.3 Mixed bucket).
+  * `Opportunity` entity shape is stable (S5 §3.2.5 row 5).
+  * `/strategies` comparative view + `/metrics` per-strategy
+    breakdown are shipped and rendering live data (S5 §3.2.5
+    rows 6 + 7).
+  * `FactorService` reader interface is stable and accepts a
+    date-range / market-universe argument (S3 §3.2.3 row 4).
+  * Outer-ring tables contain at least the date range S6 plans
+    to replay across (S1 §3.2.1 rows 1–6; SQL check:
+    `SELECT min(ts), max(ts) FROM book_snapshots;`).
+  * `Strategy` aggregate + `strategy_versions` table contain at
+    least one strategy with at least one version row (S2
+    §3.2.2 rows 1, 4).
+  * `MarketSelector` + `Strategy.select_markets(universe)` are
+    operational and produce a non-empty market-id list for at
+    least one registered strategy (S4 §3.2.4 rows 1, 3;
+    Invariant 6 — replay engine derives the backtest universe
+    via this same code path).
+  * `uv run pytest -q` passes with ≥ 70 tests + 2 skipped
+    (PMS_RUN_INTEGRATION=1 gate), and
+    `uv run mypy /Users/stometa/dev/prediction-market-system/src/ /Users/stometa/dev/prediction-market-system/tests/ --strict`
+    is clean, on a fresh shell.
+
+TASK:
+
+Create
+/Users/stometa/dev/prediction-market-system/.harness/pms-research-backtest-v1/spec.md
+by expanding §11.8 (Checkpoint skeleton) into harness-grade CPs
+with:
+
+- Per-CP acceptance criteria (observable, falsifiable, not
+  implementation notes).
+- Per-CP files-of-interest (absolute paths under
+  /Users/stometa/dev/prediction-market-system/).
+- Per-CP effort estimate (S / M / L).
+- Intra-spec CP dependencies (which CPs block which).
+
+Use
+/Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+(falling back to
+/Users/stometa/dev/prediction-market-system/.harness/pms-v1/spec.md
+if pms-v2 is absent on the branch) as the structural reference
+for shape. Draft only — stop and wait for spec-evaluation approval
+before running any checkpoint.
+
+CONSTRAINTS:
+
+- New feature branch `feat/pms-research-backtest-v1` off `main`.
+  Never commit to `main` directly.
+- Respect §3 Boundary Matrix of the project-level spec
+  (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md).
+  Never claim a concept owned by another sub-spec (S1–S5). The 13
+  concepts enumerated in §11.2 Scope-in are the complete authorised
+  set for S6; anything else is scope drift.
+- Respect §3.4 of the project-level spec. The entities listed
+  there (`StrategyBundle`, `MarketUniverse` as first-class,
+  `FactorAttribution` as a dedicated table, `SelectionSnapshot` /
+  `PriceLevel` / `MarketUpdate` as persisted event types) are
+  intentionally deferred — DO NOT revive them as first-class S6
+  citizens without first amending §3.2 + §3.4 in the same PR.
+- Every Strategy / Factor / Sensor / ring-ownership claim must
+  cite an invariant number from
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md.
+- No `Co-Authored-By` lines in any commit
+  (/Users/stometa/dev/prediction-market-system/CLAUDE.md §"Do
+  not"; promoted rule "Commit-message precedence").
+- Conventional-commit prefixes required (§5.6 of the project
+  spec): `feat(<scope>):`, `fix(<scope>):`, `docs(<scope>):`,
+  `test(<scope>):`, `refactor(<scope>):`, `chore(<scope>):`.
+- Follow the promoted rule 🟡 Lifecycle cleanup on all exit paths
+  for the asyncpg read connections inside the replay engine and
+  the factor-panel cache: acquire + release in the same commit,
+  `try/finally` on all four exit paths.
+
+HALT CONDITIONS:
+
+- Any attempt to revive a §3.4-deferred entity (`StrategyBundle`,
+  `MarketUniverse` as first-class, `FactorAttribution` as a
+  dedicated table, `SelectionSnapshot` / `PriceLevel` /
+  `MarketUpdate` as persisted event types) as a first-class S6
+  citizen WITHOUT a §3.2 + §3.4 amendment in the same PR. STOP
+  and ask the parent before any DDL or dataclass for those types
+  lands.
+- A factor-panel cache design that does NOT share across sweep
+  variants (e.g., per-variant cache namespaces, per-spec cache
+  invalidation that defeats sharing). This violates §11.3 AC #2
+  (cache-hit-rate > 95% across variants) — STOP immediately and
+  reconsider the cache-key derivation.
+- Any attempt to add a `strategy_id` or `strategy_version_id`
+  column to an outer-ring table (`markets`, `tokens`,
+  `book_snapshots`, `book_levels`, `price_changes`, `trades`) or
+  middle-ring table (`factors`, `factor_values`). This is an
+  Invariant 8 violation and §11.3 AC #7 — STOP immediately.
+- Any invariant in
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+  cannot be satisfied by the design you are authoring. Do NOT
+  silently amend the invariant. Open a retro under
+  /Users/stometa/dev/prediction-market-system/.harness/retro/ and
+  return to the user.
+- The 13 concepts you author CPs for do not match §3.2.6 of the
+  project-level spec
+  (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md),
+  concept-for-concept. Reconcile first.
+
+FIRST ACTION:
+
+Run:
+
+    cd /Users/stometa/dev/prediction-market-system \
+      && git status && git branch --show-current \
+      && git log --oneline -5
+
+Then verify the §11.6 Intake satisfaction items above (each one
+is a concrete check against either a SQL query, a dashboard URL,
+or a fresh-clone gate). After verifying, read the 7 files in the
+REQUIRED READING block, in order, before drafting any content.
+After reading, report your understanding of §11.8's 11
+checkpoints (CP1–CP10 + CP-DC) and wait for go-ahead before
+drafting
+/Users/stometa/dev/prediction-market-system/.harness/pms-research-backtest-v1/spec.md.
+```
+
+---
+
+---
