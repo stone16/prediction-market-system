@@ -626,10 +626,11 @@ third-party lib without py.typed).
 Every sub-spec PR must demonstrate conformance with every one of
 the 8 invariants in `agent_docs/architecture-invariants.md`. The 8
 split into three buckets, mirroring what each invariant's
-**Enforcement** block actually says. None of the non-behavioural
-invariants are enforced by a machine check *alone*: every one of
-Invariants 3, 5, 6, 8 also has a code-review component named in
-its Enforcement block, and the PR evidence must surface both halves.
+**Enforcement** block actually says. Of the four non-behavioural
+invariants, exactly one (Invariant 5) is enforced by a machine
+check alone; the other three (Invariants 3, 6, 8) each name a
+second, review-gate enforcement half in their Enforcement block,
+and the PR evidence must surface both halves.
 
 - **Mechanically checkable (machine check is sufficient PR
   evidence)** — a machine check (import-linter run, delimited-DDL
