@@ -49,7 +49,7 @@ def create_app(
         finally:
             # Always stop a running runner on shutdown — covers both auto_start
             # and runners launched by callers via POST /run/start, so sensor
-            # resources (e.g. PolymarketRestSensor's httpx client) close cleanly.
+            # resources (for example venue HTTP clients) close cleanly.
             if _is_runner_running(active_runner):
                 await active_runner.stop()
 

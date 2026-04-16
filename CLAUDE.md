@@ -32,10 +32,9 @@ uv run mypy src/ tests/ --strict         # strict on every committed module
 ```
 
 **Baseline (as of 2026-04-16, feat/pms-market-data-v1):** `pytest`
-76 passing, 8 skipped. The 8 skips are integration tests: 6 database-
-backed checks gated on `PMS_RUN_INTEGRATION=1` plus
-`PMS_TEST_DATABASE_URL`, and 2 live Polymarket checks gated on
-`PMS_RUN_INTEGRATION=1`. mypy strict must be clean. If the baseline
+79 passing, 17 skipped. The 17 skips are PostgreSQL-backed integration
+checks gated on `PMS_RUN_INTEGRATION=1` and, where needed,
+`PMS_TEST_DATABASE_URL`. mypy strict must be clean. If the baseline
 fails on a fresh clone, fix the config — not the test — and commit
 with a `fix(tests):` or `fix(build):` prefix before starting feature
 work (see promoted rule: *Fresh-clone baseline verification*).
@@ -53,6 +52,7 @@ PMS_RUN_INTEGRATION=1 uv run pytest -q \
   tests/integration/test_schema_apply_outer.py \
   tests/integration/test_schema_apply_inner.py \
   tests/integration/test_db_conn_rollback.py \
+  tests/integration/test_market_discovery.py \
   tests/integration/test_runner_pool_integration.py
 ```
 

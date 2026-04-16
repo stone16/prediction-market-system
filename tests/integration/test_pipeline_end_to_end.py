@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -177,26 +176,3 @@ async def test_paper_runner_records_liquidity_rejections_in_order_state(
     assert runner.state.orders[0].raw_status == "insufficient_liquidity"
     assert runner.state.fills == []
 
-
-@pytest.mark.integration
-@pytest.mark.skipif(
-    os.environ.get("PMS_RUN_INTEGRATION") != "1",
-    reason="set PMS_RUN_INTEGRATION=1 to run live Polymarket integration tests",
-)
-@pytest.mark.asyncio
-async def test_paper_mode_live_polymarket_produces_market_signal(
-    tmp_path: Path,
-) -> None:
-    runner = Runner(
-        config=_settings(RunMode.PAPER),
-        eval_store=EvalStore(path=tmp_path / "eval_records.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
-    )
-
-    await runner.start()
-    try:
-        await asyncio.wait_for(runner.wait_for_signals(1), timeout=60.0)
-    finally:
-        await asyncio.wait_for(runner.stop(), timeout=5.0)
-
-    assert len(runner.state.signals) >= 1

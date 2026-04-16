@@ -6,9 +6,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Protocol, TypeVar, runtime_checkable
 
 import asyncpg
+import httpx
 from pms.actuator.adapters.backtest import BacktestActuator
 from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.adapters.polymarket import PolymarketActuator
@@ -30,10 +31,11 @@ from pms.core.models import (
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.spool import EvalSpool
 from pms.sensor.adapters.historical import HistoricalSensor
-from pms.sensor.adapters.polymarket_rest import PolymarketRestSensor
+from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
 from pms.sensor.stream import SensorStream
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.market_data_store import PostgresMarketDataStore
 
 
 logger = logging.getLogger(__name__)
@@ -85,10 +87,6 @@ class Runner:
     _task: asyncio.Task[None] | None = field(init=False, default=None)
     _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
     _active_sensors: tuple[ISensor, ...] = field(init=False, default=())
-    _paper_orderbooks: dict[str, dict[str, Any]] = field(
-        init=False,
-        default_factory=dict,
-    )
 
     def __post_init__(self) -> None:
         self.state = RunnerState(mode=self.config.mode)
@@ -141,12 +139,12 @@ class Runner:
 
         self._stop_event.clear()
         self.state.runner_started_at = datetime.now(tz=UTC)
-        self._active_sensors = self._build_sensors()
         self._pg_pool = await asyncpg.create_pool(
             dsn=self.config.database.dsn,
             min_size=self.config.database.pool_min_size,
             max_size=self.config.database.pool_max_size,
         )
+        self._active_sensors = self._build_sensors()
 
         try:
             await self.sensor_stream.start(self._active_sensors)
@@ -239,8 +237,17 @@ class Runner:
             return tuple(self.sensors)
         if self.config.mode == RunMode.BACKTEST:
             return (HistoricalSensor(self.historical_data_path),)
+        if self._pg_pool is None:
+            msg = "Runner PostgreSQL pool is not initialized"
+            raise RuntimeError(msg)
         return (
-            PolymarketRestSensor(poll_interval_s=self.config.sensor.poll_interval_s),
+            MarketDiscoverySensor(
+                store=PostgresMarketDataStore(self._pg_pool),
+                http_client=httpx.AsyncClient(
+                    base_url="https://gamma-api.polymarket.com"
+                ),
+                poll_interval_s=self.config.sensor.poll_interval_s,
+            ),
         )
 
     def _build_executor(self, mode: RunMode) -> ActuatorExecutor:
@@ -254,7 +261,7 @@ class Runner:
         if mode == RunMode.BACKTEST:
             return BacktestActuator(self.historical_data_path)
         if mode == RunMode.PAPER:
-            return PaperActuator(orderbooks=self._paper_orderbooks)
+            return PaperActuator()
         return PolymarketActuator(self.config)
 
     async def _controller_loop(self) -> None:
@@ -289,7 +296,6 @@ class Runner:
                 continue
 
             try:
-                self._paper_orderbooks[decision.market_id] = signal.orderbook
                 order_state = await self.actuator_executor.execute(
                     decision,
                     self.portfolio,
