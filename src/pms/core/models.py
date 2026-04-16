@@ -13,6 +13,9 @@ from typing import Any, Literal
 
 
 Venue = Literal["polymarket", "kalshi"]
+Outcome = Literal["YES", "NO"]
+BookSide = Literal["BUY", "SELL"]
+BookSource = Literal["subscribe", "reconnect", "checkpoint"]
 
 
 class LiveTradingDisabledError(RuntimeError):
@@ -127,6 +130,66 @@ class VenueCredentials:
     api_key_id: str | None = field(default=None, repr=False)
     private_key_pem: str | None = field(default=None, repr=False)
     chain_id: int | None = None
+
+
+@dataclass(frozen=True)
+class Market:
+    condition_id: str
+    slug: str
+    question: str
+    venue: Venue
+    resolves_at: datetime | None
+    created_at: datetime
+    last_seen_at: datetime
+
+
+@dataclass(frozen=True)
+class Token:
+    token_id: str
+    condition_id: str
+    outcome: Outcome
+
+
+@dataclass(frozen=True)
+class BookSnapshot:
+    id: int
+    market_id: str
+    token_id: str
+    ts: datetime
+    hash: str | None
+    source: BookSource
+
+
+@dataclass(frozen=True)
+class BookLevel:
+    snapshot_id: int
+    market_id: str
+    side: BookSide
+    price: float
+    size: float
+
+
+@dataclass(frozen=True)
+class PriceChange:
+    id: int
+    market_id: str
+    token_id: str
+    ts: datetime
+    side: BookSide
+    price: float
+    size: float
+    best_bid: float | None
+    best_ask: float | None
+    hash: str | None
+
+
+@dataclass(frozen=True)
+class Trade:
+    id: int
+    market_id: str
+    token_id: str
+    ts: datetime
+    price: float
 
 
 @dataclass(frozen=True)
