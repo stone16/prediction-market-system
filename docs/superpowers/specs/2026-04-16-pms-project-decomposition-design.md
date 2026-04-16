@@ -3359,3 +3359,688 @@ go-ahead before drafting
 ---
 
 ---
+
+## 10. Sub-spec S5 — pms-controller-per-strategy-v1
+
+S5 is the **fan-in** node of the §2.1 DAG: both S3 (factor panel) and
+S4 (active perception) terminate here, and every load-bearing
+strategy-aware concept this decomposition needs the runtime to honour
+lands inside this sub-spec. By the end of S5 the system runs multiple
+strategies concurrently through per-strategy `ControllerPipeline`
+instances, every product-table row carries a real
+`(strategy_id, strategy_version_id)` pair (Invariant 3 columns
+upgraded to `NOT NULL` and populated end-to-end), the Evaluator's
+metric surface partitions by strategy, the `Opportunity` entity
+replaces the stringly-typed `stop_conditions` mix that today carries
+routing + model_id, and the `/strategies` page becomes the
+comparative-metrics dashboard. This section expands the skeleton in
+`agent_docs/project-roadmap.md` §S5 into the project-level contract
+that the harness run under `.harness/pms-controller-per-strategy-v1/`
+will consume.
+
+### 10.1 Goal
+
+S5 closes Invariants 2, 3, and 5 simultaneously by upgrading the
+runtime from "one global pipeline tagged `\"default\"`" to
+"per-strategy dispatch with real version tags end-to-end". Concretely:
+the `ControllerPipeline` becomes a per-strategy factory (one instance
+per registered strategy, each with its own forecaster stack /
+calibrator / sizer composition read from `StrategyConfig` and
+`ForecasterSpec` projections); the Evaluator's `MetricsCollector`
+rewrites every aggregation to `GROUP BY strategy_id,
+strategy_version_id`; the `(strategy_id, strategy_version_id)`
+columns reserved `NULLABLE` by S1 (§3.2.1 row 18) and seeded with
+`"default"` by S2 are upgraded to `NOT NULL` on every inner-ring
+product table (`feedback`, `eval_records`, `orders`, `fills`); the
+`TradeDecision` / `OrderState` / `FillRecord` / `EvalRecord` emit
+paths populate real values from the per-strategy dispatch; the
+`Opportunity` entity lands as the Controller's pre-execution output
+and replaces the Invariant 2 violation where strategy provenance hides
+inside `stop_conditions: list[str]` (`src/pms/controller/CLAUDE.md`
+"known violation" note); the `/strategies` page upgrades from S2's
+listing view to a comparative-metrics view (Brier / P&L / fill rate /
+slippage / drawdown side-by-side per strategy); and the existing
+`/metrics` page extends from a global rollup to a per-strategy
+breakdown. S5 is the fan-in point of the DAG (§2.1) — Invariants 2,
+3, and 5 all become enforceable end-to-end inside this sub-spec, not
+"declared in S2 and partially satisfied".
+
+### 10.2 Scope (in / out)
+
+**Scope in.** Exactly the **7 concepts** owned by S5 in §3.2.5, in
+the same order, each with a one-line scope descriptor. Reviewers
+verifying boundary integrity grep §3.2.5 against this list; the lists
+must match concept-for-concept.
+
+1. **Per-strategy `ControllerPipeline` dispatch.** A per-strategy
+   factory under `src/pms/controller/pipeline.py` (or successor
+   module) that constructs one `ControllerPipeline` instance per
+   registered strategy from the `StrategyConfig` + `ForecasterSpec` +
+   `RiskParams` projections (Invariant 2 — projection-only consumption;
+   Invariant 5 — strategy-aware boundary).
+2. **Per-strategy `Evaluator` aggregation.** `MetricsCollector` and
+   the relevant `metrics.py` queries rewritten to `GROUP BY
+   strategy_id, strategy_version_id`, retiring the global
+   `MetricsCollector.snapshot()` shape (Invariants 3, 5).
+3. **`(strategy_id, strategy_version_id)` `NOT NULL` DDL upgrade on
+   all inner-ring product tables.** Schema-change-only migration on
+   `feedback`, `eval_records`, `orders`, `fills` with a `CHECK`
+   constraint forbidding sentinel values (`agent_docs/architecture-
+   invariants.md` §Invariant 3 Enforcement). Pre-S5 columns are
+   `NULLABLE` with `"default"` tagging; the upgrade does not add new
+   tables (Invariant 3).
+4. **`TradeDecision` / `OrderState` / `FillRecord` / `EvalRecord`
+   strategy-field population end-to-end.** S1 reserved the columns,
+   S2 seeded `"default"`, S5 populates real values from the
+   per-strategy dispatch. Each downstream emit path
+   (Controller → Actuator → Evaluator) forwards the
+   `(strategy_id, strategy_version_id)` pair without re-deriving it
+   (Invariant 3).
+5. **`Opportunity` entity (Controller output pre-execution).** New
+   `@dataclass(frozen=True)` under `src/pms/core/models.py` (or
+   `src/pms/controller/models.py` per harness-spec choice) carrying
+   selected factor values + expected edge + rationale; replaces the
+   stringly-typed `stop_conditions: list[str]` routing / model_id mix
+   identified in `src/pms/controller/CLAUDE.md` as a known Invariant 2
+   violation. Inspecting an `Opportunity` explains why the Controller
+   made the decision (Invariant 2).
+6. **`/strategies` comparative-metrics view.** Upgrades S2's
+   listing-only page to display Brier / P&L / fill rate / slippage /
+   drawdown side-by-side per strategy, each grouped by
+   `(strategy_id, strategy_version_id)` (Invariant 3; observable-
+   capability item §1.1.3).
+7. **`/metrics` per-strategy breakdown.** Existing global `/metrics`
+   page extends to a per-strategy rollup partitioned by
+   `(strategy_id, strategy_version_id)`; the cross-strategy aggregates
+   that exist for ops dashboards remain but must be explicitly
+   annotated per `agent_docs/architecture-invariants.md` §Invariant 3
+   Enforcement (Invariant 3).
+
+**Scope out.** The following look S5-adjacent but are owned by other
+sub-specs. A PR landing any of these under
+`.harness/pms-controller-per-strategy-v1/` is scope drift.
+
+- `Strategy` aggregate, projection types (`StrategyConfig`,
+  `RiskParams`, `EvalSpec`, `ForecasterSpec`, `MarketSelectionSpec`),
+  `strategies` / `strategy_versions` / `strategy_factors` tables, and
+  `PostgresStrategyRegistry` → **S2** (§3.2.2). S5 *consumes* the
+  aggregate as an authorised reader (Invariants 2, 5) but never
+  modifies the aggregate's shape, the projection contracts, or the
+  registry tables.
+- `factors` / `factor_values` tables, `FactorService`, raw
+  `FactorDefinition` modules, the rules-detector migration into raw
+  factors, and `StrategyConfig.factor_composition` JSONB field →
+  **S3** (§3.2.3). S5 reads `factor_values` (Invariant 8) but never
+  declares new factors, never modifies `FactorService`, and never
+  changes the `factor_composition` schema.
+- `MarketSelector`, `SensorSubscriptionController`,
+  `Strategy.select_markets(universe)` method, and the boot-order /
+  incremental-resubscribe Runner wiring → **S4** (§3.2.4). S5
+  consumes the merged subscription path (`MarketSelector` produces
+  the merged set per §3.2.4 row 1; `SensorSubscriptionController`
+  is the only subscriber-facing path per §3.2.4 row 2) and derives
+  per-strategy market scope by calling `Strategy.select_markets(
+  universe)` directly (S4-owned method per §3.2.4 row 3); S5 does
+  not modify the selector, the controller, the method, or the
+  wiring.
+- `BacktestSpec`, `ExecutionModel`, `BacktestDataset`, `BacktestRun`,
+  `StrategyRun` (the materialised per-strategy backtest entity),
+  market-universe replay engine, parameter sweep,
+  `BacktestLiveComparison`, `TimeAlignmentPolicy`,
+  `SymbolNormalizationPolicy`, `SelectionSimilarityMetric`,
+  `EvaluationReport`, `PortfolioTarget`, and `/backtest` ranked
+  N-strategy view → **S6** (§3.2.6). Live / paper per-strategy
+  tracking happens through the inner-ring product tables grouped by
+  `(strategy_id, strategy_version_id)`; introducing a runtime
+  `strategy_runs` table inside S5 would create a reverse dependency
+  S5 → S6 that the §2.1 DAG forbids (§3.2.6 row 5 explicitly states
+  this).
+- Outer-ring DDL, `MarketDiscoverySensor` / `MarketDataSensor`,
+  `PostgresMarketDataStore`, JSONL → PG migration, `/signals` page
+  → **S1** (§3.2.1). S5's storage work is the inner-ring `NOT NULL`
+  upgrade only; outer-ring schema is untouched.
+
+### 10.3 Acceptance criteria (system-level)
+
+Eight observable-capability bullets. Each is verifiable at the system
+level — not a checklist item for an individual CP.
+
+1. **Three concurrent per-strategy `ControllerPipeline` instances
+   from a single Runner.** Registering 3 strategies in `strategies`
+   (with distinct `strategy_versions` rows) and starting the Runner
+   produces 3 concurrent `ControllerPipeline` instances; each reads
+   the asset ids returned by its own `Strategy.select_markets(universe)`
+   call (the S4-owned method on the aggregate, per §3.2.4 row 3) and
+   filters incoming `MarketSignal`s to that scope before dispatching;
+   each emits `TradeDecision`s tagged with that strategy's
+   `strategy_version_id`. The Sensor subscription itself remains the
+   merged set (`MarketSelector` produces the union, S4-owned per
+   §3.2.4 row 1; `SensorSubscriptionController` is the only
+   subscriber-facing path per §3.2.4 row 2). Verified by an
+   asyncio-task introspection probe (3 distinct pipeline tasks
+   running concurrently) plus a behavioural probe over the in-memory
+   `TradeDecision` stream (`pms.runner.RunnerState.decisions`) and
+   the inner-ring product tables (`SELECT DISTINCT strategy_id,
+   strategy_version_id FROM eval_records` and the same query over
+   `fills` once any decision has resolved) returning exactly the
+   registered set (Invariants 1, 2, 5).
+2. **Every aggregate query in `MetricsCollector` groups by
+   `(strategy_id, strategy_version_id)`.** Verified per
+   `agent_docs/architecture-invariants.md` §Invariant 3 Enforcement
+   — the schema half by post-migration `information_schema` queries,
+   the query-time half by §5.3 Mixed-invariant evidence (reviewer
+   sign-off on every aggregation query, plus a code-review gate
+   that rejects any SQL aggregation over `eval_records` or `fills`
+   omitting the `GROUP BY` without an explicit cross-version
+   justification comment) (Invariant 3).
+3. **`/strategies` page renders comparative metrics side-by-side.**
+   The dashboard `/strategies` page shows per-strategy Brier / P&L /
+   fill rate / slippage / drawdown columns for every registered
+   strategy, each grouped by `(strategy_id, strategy_version_id)`;
+   a Playwright assertion confirms ≥ 2 distinct strategy rows
+   render with non-null metric cells when ≥ 2 strategies have
+   produced fills (Invariant 3; observable-capability §1.1.3).
+4. **`Opportunity` carries decision rationale and replaces the
+   `stop_conditions` mix.** Inspecting an `Opportunity` row exposes
+   selected factor values + expected edge + rationale + target size
+   + expiry / staleness policy + `(strategy_id,
+   strategy_version_id)`. The Controller emits an `Opportunity`
+   before constructing a `TradeDecision`; `stop_conditions` no
+   longer carries routing / model_id semantics (the Invariant 2
+   violation called out in `src/pms/controller/CLAUDE.md` is
+   removed). Verified by a behavioural test that asserts on the
+   `Opportunity` payload shape and a grep that fails the build if
+   `stop_conditions` regains stringly-typed strategy semantics
+   (Invariants 2, 3).
+5. **No product-table row exists where `strategy_id` or
+   `strategy_version_id` IS NULL post-S5.** Per
+   `agent_docs/architecture-invariants.md` §Invariant 3 Enforcement
+   (a — schema half), the `NOT NULL` constraint plus the `CHECK`
+   forbidding sentinel values are active on every inner-ring product
+   table after the migration; an `information_schema` probe in CI
+   confirms both the constraint definitions and the `\d+` view
+   matches what the spec declares. Pre-S5 rows already carry the
+   `"default"` strategy tag seeded by S2 (per §3.2.2 row 8 and
+   `agent_docs/architecture-invariants.md` §Invariant 3 Runtime
+   evidence — `"default"` is a real strategy id, not a sentinel), so
+   the `NOT NULL` upgrade is schema-change-only — no historical
+   re-attribution to a different strategy is performed. Only S5-era
+   and post-S5 writes populate real per-strategy
+   `(strategy_id, strategy_version_id)` from the per-strategy
+   dispatch (Invariant 3).
+6. **`/metrics` per-strategy breakdown is the default view.** The
+   existing `/metrics` page renders a per-strategy rollup keyed on
+   `(strategy_id, strategy_version_id)` as the primary section;
+   cross-strategy aggregates remain available but are explicitly
+   annotated as "ops view" per the §Invariant 3 Enforcement
+   review-gate guidance (Invariant 3).
+7. **Strategy unregister releases pipeline lifecycle resources.**
+   Unregistering a strategy from the registry (within a Runner that
+   is already running) cancels the corresponding
+   `ControllerPipeline` task and releases every tracked resource
+   (subscription side-effects via `SensorSubscriptionController`'s
+   S4 contract, in-flight `Opportunity` queue, calibrator state),
+   verified by a behavioural test that asserts on
+   `asyncio.all_tasks()` shrinking by exactly the unregistered
+   strategy's pipeline count plus the absence of dangling per-
+   strategy state in memory snapshots. The acquire / release pairing
+   lands in the same commit per the promoted rule
+   🟡 Lifecycle cleanup on all exit paths.
+8. **Canonical gates green on a fresh clone.** `uv run pytest -q`
+   passes with the project baseline (≥ 70 tests + 2 skipped,
+   `PMS_RUN_INTEGRATION=1`-gated) and `uv run mypy src/ tests/
+   --strict` is clean, on a fresh shell per 🟡 Fresh-clone baseline
+   verification (§5.1, §5.2).
+
+### 10.4 Non-goals
+
+Explicit deferrals. An S5 harness spec that lands any of these items
+is scope drift.
+
+- **No backtest-framework replay engine.** Market-universe replay,
+  multi-day backtest history reconstruction, and the
+  `BacktestSpec` → `BacktestRun` → `StrategyRun` materialisation
+  chain are S6's headline scope (§3.2.6). S5 produces *runtime*
+  per-strategy metrics that S6 reuses as the reference behaviour
+  for backtest comparison.
+- **No parameter sweep or `BacktestLiveComparison`.** Per-strategy
+  parameter exploration (generate N `BacktestSpec`s with shared
+  factor-panel cache) and live-vs-backtest equity / selection
+  comparison both live in S6.
+- **No multi-account dispatch / `StrategyBundle`.** The
+  `StrategyBundle` entity (multi-strategy group mapping to one live
+  account) is intentionally deferred per §3.4. Today each strategy
+  runs independently with shared risk budget at the Runner level;
+  multi-account work happens after S5 closes, before any Kalshi or
+  multi-account expansion.
+- **No strategy hot-reload without Runner restart.** Re-configuring
+  a registered strategy at runtime (without process restart)
+  requires careful pipeline-rebuild + state-handoff semantics that
+  exceed S5's scope. Today's flow is: stop Runner → update
+  `StrategyConfig` → restart Runner. Live reconfiguration is a
+  follow-on concern after S6 closes.
+- **No materialised `StrategyRun` runtime entity.** Per §3.2.6 row 5
+  ("`StrategyRun`"), live / paper per-strategy tracking happens
+  through the inner-ring product tables grouped by `(strategy_id,
+  strategy_version_id)`; no separate runtime `strategy_runs` table
+  is introduced. `StrategyRun` exists as a backtest-only entity
+  owned by S6.
+- **No automated feedback-loop strategy adjustment.** `Feedback`
+  rows continue to be surfaced for human resolution per
+  observable-capability §1.2 — automated strategy reconfiguration
+  in response to threshold breaches is explicitly out of scope
+  (carried forward from `.harness/pms-v2/` non-goals).
+
+### 10.5 Dependencies
+
+- **Upstream sub-specs (fan-in: S3 + S4).** S5 has **two** incoming
+  edges in the §2.1 DAG (`S3 → S5` and `S4 → S5`), the only fan-in
+  node in the decomposition. §4.3 gate 4 explicitly classifies
+  S5's Intake check as "S5's Intake against **S3's Leave-behind ∪
+  S4's Leave-behind**" (union semantics — both predecessor sets
+  participate), so §10.6 below cites the union directly.
+- **Transitive predecessors (referenced, NOT included in §10.6
+  Intake).** S3 and S4 each carry their own dependency on S2 (per
+  §2.1 DAG edges `S2 → S3` and `S2 → S4`); S2 in turn depends on
+  S1. The S2 aggregate + registry tables (§3.2.2) and S1 outer-ring
+  tables (§3.2.1) reach S5 transitively through S3 and S4 — but
+  they are **not** part of S5's Intake, because §4.3 gate 4 mandates
+  the union diff against the **immediate** predecessor edges only.
+  Including transitive S1 / S2 concepts in §10.6 would force
+  predecessor specs to duplicate concepts they do not own and
+  would break the mechanical boundary-integrity diff. They appear
+  here as documented references for spec readers, not as gate
+  artefacts.
+- **Upstream invariants.** Primary: **2** (aggregate reader +
+  projection consumption — S5's per-strategy `ControllerPipeline`
+  factory is the canonical example of layer-side projection
+  consumption); **3** (`NOT NULL` upgrade on every inner-ring
+  product table, plus end-to-end field population through
+  Controller → Actuator → Evaluator emit paths); **5** (Controller
+  + Evaluator are the two strategy-aware layers, and S5 is where
+  that boundary becomes load-bearing in production code, not just
+  an import-linter rule). Transitive: **8** (Controller reads
+  middle ring written by S3, writes inner ring whose schema was
+  reserved by S1 and seeded by S2) and **6** (per-strategy
+  dispatch pairs each pipeline with the per-strategy market scope
+  computed by `Strategy.select_markets(universe)` while
+  `SensorSubscriptionController` continues to drive the merged
+  subscription).
+
+### 10.6 Intake
+
+Minimum set that must exist before a harness run opens under
+`.harness/pms-controller-per-strategy-v1/`. **S5's Intake is the
+union of S3's Leave-behind (§3.2.3 / §8.7 once landed) AND S4's
+Leave-behind (§3.2.4 / §9.7 once landed)** — both predecessor edges
+participate, matching the §4.3 gate-4 union formula
+(`S5's Intake against S3's Leave-behind ∪ S4's Leave-behind`). The
+union-based check is what commit 3 of this document authoring
+effort established for fan-in nodes; S5 is the only fan-in node in
+the decomposition, so this Intake is the canonical exercise of that
+gate semantic. **Transitive S1 / S2 prerequisites are deliberately
+NOT listed here** — including them would break the §4.3 gate-4
+mechanical diff against the immediate-predecessor union. Those
+transitive predecessors are documented in §10.5 Dependencies as
+references for spec readers.
+
+**From S3's Leave-behind (factor panel — §3.2.3 owners).**
+
+1. **`factor_values` table populated and queryable.** Reads against
+   `factor_values(factor_id, market_id, ts, value)` return non-empty
+   results for at least the migrated rules-detector factors — the
+   per-strategy `ControllerPipeline` cannot dispatch without real
+   factor reads (Invariants 4, 8).
+2. **`FactorService` available for read.** `FactorService` exposes
+   the read API the per-strategy pipeline calls during forecaster /
+   sizer composition; `FactorService` itself is S3-owned, S5 is a
+   consumer only (Invariant 4).
+3. **`StrategyConfig.factor_composition` JSONB field readable.**
+   The per-strategy projection passed into the
+   `ControllerPipeline` factory exposes `factor_composition` so
+   strategy-specific composition logic resolves at dispatch time;
+   the field is S3-owned (per §3.2.3 row 6) but consumed by S5
+   (Invariants 2, 4).
+4. **Migration of existing rules-detector heuristics into raw
+   factors complete.** The pre-S5 `RulesForecaster` /
+   `StatisticalForecaster` heuristics are now expressed as raw
+   `FactorDefinition` rows so the per-strategy pipeline can compose
+   them via `factor_composition` (Invariant 4).
+
+**From S4's Leave-behind (active perception — §3.2.4 owners).**
+
+5. **`MarketSelector` produces the merged subscription set.**
+   `MarketSelector` reads the universe, applies each strategy's
+   `select_markets(universe)`, and returns the **merged** market-id
+   list per §3.2.4 row 1 + Invariant 6 (this contract is S4-owned
+   and S5 does not change its shape). The per-strategy
+   `ControllerPipeline` reasons about its own market scope by
+   calling `Strategy.select_markets(universe)` directly (item 7
+   below), not by reading a per-strategy view off `MarketSelector`
+   (Invariants 2, 6).
+6. **`SensorSubscriptionController` is the only subscriber-facing
+   path.** `MarketDataSensor` is driven by push from
+   `SensorSubscriptionController` (per §3.2.4 row 2); per-strategy
+   pipelines never write to the sensor directly. The Sensor stays
+   strategy-agnostic per Invariant 5 (Invariants 5, 6, 7).
+7. **`Strategy.select_markets(universe)` method present on the
+   aggregate.** S4 owns the entire surface (declaration + body +
+   per-strategy tests, per §3.2.4 row 3); S5's per-strategy
+   `ControllerPipeline` calls this method directly to derive the
+   per-strategy market scope it filters incoming `MarketSignal`s
+   against (Invariants 2, 6).
+8. **Boot-order Runner wiring intact.** DiscoverySensor → Selector →
+   SubscriptionController → DataSensor wiring, plus incremental
+   resubscribe on strategy-config change, are operational so the
+   per-strategy pipeline can register / unregister strategies
+   without breaking the cold-start path (Invariant 6).
+
+S6's Intake (authored in the §11 / commit 9 effort) reads from S5's
+§10.7 Leave-behind below; diffing the two is the §4.3 gate-4
+mechanism that closes S5 → S6.
+
+### 10.7 Leave-behind
+
+Enumerated artefacts produced by S5, keyed back to §3.2.5 row
+numbers so the §4.3 gate-4 boundary-integrity check can diff S6's
+Intake (once §11.6 lands) against this list.
+
+1. **Per-strategy `ControllerPipeline` dispatch** (§3.2.5 row 1) at
+   `src/pms/controller/pipeline.py` (or successor module) — a
+   factory that constructs one `ControllerPipeline` per registered
+   strategy from `(StrategyConfig, ForecasterSpec, RiskParams)`
+   projections; each instance runs as an independent `asyncio.Task`
+   inside the Runner (Invariants 1, 2, 5).
+2. **Per-strategy `Evaluator` aggregation** (§3.2.5 row 2) inside
+   `src/pms/evaluation/metrics.py` — every `MetricsCollector` query
+   rewritten to `GROUP BY strategy_id, strategy_version_id`; the
+   global snapshot shape retired; cross-strategy aggregates remain
+   available with explicit ops-view annotation per §5.3 Invariant 3
+   Mixed-evidence gate (Invariants 3, 5).
+3. **Inner-ring `NOT NULL` DDL migration** (§3.2.5 row 3) applied
+   to `feedback`, `eval_records`, `orders`, `fills`; the pair
+   `(strategy_id, strategy_version_id)` is `NOT NULL` post-migration,
+   plus the `CHECK` constraint forbidding sentinel values per
+   `agent_docs/architecture-invariants.md` §Invariant 3 Enforcement.
+   Schema-change-only: the constraint succeeds because every pre-S5
+   row already carries the `"default"` strategy id seeded by S2 (per
+   §3.2.2 row 8); legacy rows retain that tag as their honest
+   provenance — only S5-era and post-S5 writes carry real
+   per-strategy values from the new dispatch (Invariant 3).
+4. **`TradeDecision` / `OrderState` / `FillRecord` / `EvalRecord`
+   strategy-field population end-to-end** (§3.2.5 row 4) — every
+   Controller emit path stamps `(strategy_id, strategy_version_id)`
+   from the dispatching pipeline; every Actuator emit path forwards
+   the pair without re-deriving it; every Evaluator scoring path
+   reads the pair from the upstream record. No emit path falls back
+   to `"default"` (Invariant 3).
+5. **`Opportunity` entity + emit path** (§3.2.5 row 5) as a
+   `@dataclass(frozen=True)` carrying selected factor values +
+   expected edge + rationale + target size + expiry / staleness
+   policy + `(strategy_id, strategy_version_id)`; emitted by the
+   per-strategy pipeline before `TradeDecision` construction;
+   `stop_conditions: list[str]` no longer carries strategy
+   provenance (the Invariant 2 violation called out in
+   `src/pms/controller/CLAUDE.md` is removed) (Invariant 2).
+6. **`/strategies` comparative-metrics view** (§3.2.5 row 6) at
+   `dashboard/app/strategies/page.tsx` (or successor route) showing
+   Brier / P&L / fill rate / slippage / drawdown side-by-side per
+   strategy, each grouped by `(strategy_id, strategy_version_id)`;
+   replaces S2's listing-only view (Invariant 3; observable-
+   capability §1.1.3).
+7. **`/metrics` per-strategy breakdown** (§3.2.5 row 7) at
+   `dashboard/app/metrics/page.tsx` (or successor route) extending
+   the existing global rollup with a per-strategy section keyed on
+   `(strategy_id, strategy_version_id)`; cross-strategy aggregates
+   remain with explicit ops-view annotation (Invariant 3).
+
+S6's Intake reads from this list as its sole upstream contribution
+(S5 is S6's only predecessor edge per §2.1); diffing the two is the
+§4.3 gate-4 mechanism that S5 → S6 must satisfy.
+
+### 10.8 Checkpoint skeleton
+
+Flat one-line-each list. **Not harness acceptance criteria** — the
+per-CP acceptance criteria, files-of-interest, effort estimates,
+and test expectations land in
+`.harness/pms-controller-per-strategy-v1/spec.md` when the kickoff
+prompt (§10.11) triggers that authoring session.
+
+- **CP1 — Per-strategy `ControllerPipeline` factory (one instance
+  per registered strategy, projection-only construction).**
+- **CP2 — `Opportunity` entity + emit path replacing stringly-typed
+  `stop_conditions` strategy semantics.**
+- **CP3 — Per-strategy Evaluator aggregation (`GROUP BY strategy_id,
+  strategy_version_id`) + `MetricsCollector.snapshot` rewrite.**
+- **CP4 — Inner-ring product-table `NOT NULL` DDL migration +
+  `CHECK` constraint (schema-change-only; pre-S5 rows retain S2's
+  `"default"` tag as legitimate provenance, no historical
+  re-attribution).**
+- **CP5 — `TradeDecision` / `OrderState` / `FillRecord` /
+  `EvalRecord` field population end-to-end (Controller → Actuator →
+  Evaluator forwarding).**
+- **CP6 — `/strategies` comparative-metrics view (Brier / P&L /
+  fill rate / slippage / drawdown side-by-side per strategy).**
+- **CP7 — `/metrics` per-strategy breakdown extending the existing
+  global page.**
+- **CP8 — Strategy register / unregister lifecycle: pipeline
+  acquire + release in the same commit, `try/finally` on all four
+  exit paths per 🟡 Lifecycle cleanup.**
+
+### 10.9 Effort estimate
+
+**L** (6–8 CPs per §10.8; touches all four runtime layers except
+Sensor — Controller and Evaluator are upgraded, Actuator forwards
+the new strategy fields, and the dashboard gains two upgraded views;
+concurrent per-strategy pipelines + schema-change-only `NOT NULL`
+upgrade over pre-tagged `"default"` rows + dashboard upgrades
+collectively make S5 the highest blast-radius sub-spec after S1). The runtime
+behavioural surface is the largest of any post-S1 sub-spec: S5 is
+where the per-strategy production runtime stops being a "tagged
+default" and becomes a concurrent feedback web (Invariant 1) of
+multiple strategies, each with its own dispatch chain.
+
+### 10.10 Risk register
+
+| Risk | Likelihood | Impact | Mitigation | Trigger / early-warning |
+|---|---|---|---|---|
+| `NOT NULL` migration fails on dev databases with rows where the S2 `"default"` seed never tagged historic data (e.g., a dev DB created before S2 landed and not re-seeded) | M | H | Pre-migration probe in CI verifies every pre-existing row already carries a non-NULL `(strategy_id, strategy_version_id)` pair (S2's `"default"` seed) before the `ALTER COLUMN ... SET NOT NULL` statement runs; if any NULL row survives, the migration aborts with a clear remediation ("re-run S2 seed against this DB before applying S5"); rollback to `NULLABLE` is a single statement if the gate trips | Pre-migration probe finds NULL rows on `(strategy_id, strategy_version_id)`; CI migration step fails with a `NOT NULL` constraint violation |
+| Per-strategy pipeline memory footprint scales linearly with strategy count and crosses headroom under proliferation | M | M | Each `ControllerPipeline` owns only the per-strategy state it requires (calibrator / sizer / forecaster cache — projection-derived, bounded); a Runner-level `/health` endpoint publishes per-pipeline `sys.getsizeof` rollups and `pool.acquire()` p99 latency; if an upper bound becomes load-bearing, a future retro adds a per-strategy resource cap before §3.4's `StrategyBundle` lands | `/health` reports per-pipeline RSS growth > 50 MB / hour or `pool.acquire()` p99 > 100 ms; new strategies registered cause measurable startup slowdown |
+| Race between pipeline dispatch and strategy unregister leaves `Opportunity` queue items, in-flight `TradeDecision` rows, or subscription side-effects orphaned | M | M | Acquire / release wired in the same commit per 🟡 Lifecycle cleanup, with `try/finally` covering every exit path (success, exception, cancel, registry remove); `asyncio.all_tasks()` introspection asserts pipeline-task count drops by exactly one per unregister; behavioural test exercises unregister-while-dispatching with an `Opportunity` mid-flight | Behavioural test reports a non-zero residual task count after unregister; `Opportunity` queue drains slower than registered strategies removed |
+| `Opportunity` schema drift breaks Actuator consumers (Actuator silently accepts the change because `stop_conditions` was previously stringly-typed and forgiving) | L | H | `Opportunity` is `@dataclass(frozen=True)` per project convention (typed, mypy-strict-checked); Actuator consumes via Protocol interface in `pms.core.interfaces` so any field-set change at the boundary is a mypy-strict failure; an end-to-end behavioural test pins the `Opportunity` payload shape | mypy strict fails on Actuator consumer; behavioural payload-shape test fails after `Opportunity` field add / remove |
+| Dashboard query performance on the multi-strategy comparative view degrades as `eval_records` and `fills` grow | M | M | The `/strategies` view runs against grouped queries with explicit `(strategy_id, strategy_version_id)` indexes added in the same migration (S5's DDL upgrade); query-plan capture in CI catches any seq-scan regression; if N-strategy aggregation latency grows past comfort, a future retro adds materialised views or adds a small precomputed `metrics_snapshot` table (S6 may absorb this work) | `/strategies` page p95 > 1 s in dev with ≥ 3 strategies; CI query-plan check finds an unexpected seq scan |
+| Lifecycle cleanup gap on strategy unregister leaks subscription state in `SensorSubscriptionController` (S4 boundary side) | L | M | Unregister path explicitly calls the S4 `SensorSubscriptionController` decrement / removal API (S4 owns the contract per §3.2.4 row 2) inside the `try/finally`; the S4 contract documents idempotent decrement so a double-call cannot regress; reviewer grep on every `acquire` / `add` / `register` call in the diff verifies a matching cleanup call exists per the 🟡 Lifecycle cleanup checklist | Behavioural test asserts `MarketDataSensor` subscription set shrinks by exactly the unregistered strategy's selected markets; a missing cleanup leaves stale subscription entries |
+
+### 10.11 Kickoff Prompt
+
+The block below is **copy-paste-ready** for a fresh Claude session
+whose job is to author
+`.harness/pms-controller-per-strategy-v1/spec.md` — the harness-
+executable spec with per-CP acceptance criteria, files-of-interest,
+effort, and intra-spec dependencies. The future session has **no
+memory** of this document; the prompt is self-contained.
+
+```
+SCOPE:
+
+You are starting harness task `pms-controller-per-strategy-v1` in the
+prediction-market-system repository at
+/Users/stometa/dev/prediction-market-system. Your job this
+session is to author the harness-executable spec file at
+/Users/stometa/dev/prediction-market-system/.harness/pms-controller-per-strategy-v1/spec.md
+(the directory may not yet exist; you will create it).
+
+REQUIRED READING (ordered — read in this order before touching
+anything, all paths absolute):
+
+1. /Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md
+   — specifically §10 (this sub-spec's total-spec contract), and
+   §3.2.5 (the 7 concepts S5 owns). Cross-reference §3.2.3 + §3.2.4
+   for upstream Leave-behind.
+2. /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+   — focus on Invariants 2 (aggregate + projections), 3 (immutable
+   version tagging — note the `NOT NULL` upgrade landing in S5),
+   and 5 (Controller + Evaluator are the strategy-aware boundary).
+   Transitive: 6 (active perception — `MarketSelector` produces
+   the merged subscription; per-strategy scope comes from
+   `Strategy.select_markets(universe)`) and 8 (inner-ring writes).
+3. /Users/stometa/dev/prediction-market-system/agent_docs/promoted-rules.md
+   — especially Runtime behaviour > design intent (🔴), Comments
+   are not fixes (🟡 — applies to every behavioural finding in
+   per-strategy dispatch / metrics code), Lifecycle cleanup on all
+   exit paths (🟡 — load-bearing for strategy register / unregister
+   and pipeline lifecycle), and Fresh-clone baseline verification
+   (🟡).
+4. /Users/stometa/dev/prediction-market-system/docs/notes/2026-04-16-evaluator-entity-abstraction.md
+   — load-bearing sections: §"Execution and Risk Entities" (these
+   pre-existing entities gain strategy provenance in S5) and
+   §"Evaluation Entities" (the Evaluator-side run-oriented
+   abstraction direction; S5 lands `Opportunity` as the bridge
+   between Strategy and Actuator per §"Strategy Entities").
+5. /Users/stometa/dev/prediction-market-system/src/pms/controller/CLAUDE.md
+   — per-layer invariant enforcement for Controller; note the
+   "known violation of Invariant 2" callout for stringly-typed
+   `stop_conditions` that S5 fixes via the new `Opportunity`
+   entity.
+6. /Users/stometa/dev/prediction-market-system/src/pms/evaluation/CLAUDE.md
+   — per-layer invariant enforcement for Evaluator; note the
+   "Currently global; S5 makes per-strategy" callout on
+   `metrics.py`.
+7. /Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+   — structural reference for harness-grade spec shape (CP shape,
+   acceptance-criteria shape, files-of-interest shape).
+
+CURRENT STATE SNAPSHOT:
+
+S1 (pms-market-data-v1), S2 (pms-strategy-aggregate-v1),
+S3 (pms-factor-panel-v1), and S4 (pms-active-perception-v1) are
+complete; their Leave-behind subsections are landed. §10.6 Intake
+items are satisfied (fan-in from S3 + S4): `factor_values` queryable
+via `FactorService`, `StrategyConfig.factor_composition` populated,
+rules-detector heuristics migrated to raw factors (S3 side);
+`MarketSelector` produces the merged subscription set per §3.2.4
+row 1, `SensorSubscriptionController` push channel active per
+§3.2.4 row 2, `Strategy.select_markets(universe)` method present
+on the aggregate per §3.2.4 row 3, boot-order Runner wiring intact
+per §3.2.4 row 4 (S4 side). Transitive (per §10.5 Dependencies, NOT
+part of §10.6 Intake): S1 outer-ring tables populated, S2 aggregate
++ registry + import-linter rules in place. S5 is the fan-in node of
+the §2.1 DAG — both predecessor edges (S3 → S5 and S4 → S5)
+terminate here.
+
+PREFLIGHT (boundary check — run before any authoring; every
+shell command below assumes cwd is
+/Users/stometa/dev/prediction-market-system):
+
+- §10.6 Intake items must all be satisfied. If any fails, HALT and
+  tell the user:
+  * `uv run pytest -q` passes with ≥ 70 tests + 2 skipped
+    (PMS_RUN_INTEGRATION=1 gate), and
+    `uv run mypy /Users/stometa/dev/prediction-market-system/src/ /Users/stometa/dev/prediction-market-system/tests/ --strict`
+    is clean, on a fresh shell.
+  * `factor_values` returns non-empty results for the migrated
+    rules-detector factors (S3's Leave-behind);
+    `StrategyConfig.factor_composition` reads succeed.
+  * `MarketSelector` returns the merged subscription set when
+    invoked with the registered strategies; `SensorSubscriptionController`
+    push channel is active; `Strategy.select_markets(universe)` is
+    callable directly from the per-strategy `ControllerPipeline`
+    factory (S5 derives per-strategy market scope from this
+    method, not from a per-strategy view on `MarketSelector`).
+  * S2's import-linter rules pass on a clean lint pass (transitive
+    pre-condition; not part of §10.6 Intake but documented in
+    §10.5 Dependencies).
+
+TASK:
+
+Create
+/Users/stometa/dev/prediction-market-system/.harness/pms-controller-per-strategy-v1/spec.md
+by expanding §10.8 (Checkpoint skeleton) into harness-grade CPs
+with:
+
+- Per-CP acceptance criteria (observable, falsifiable, not
+  implementation notes).
+- Per-CP files-of-interest (absolute paths under
+  /Users/stometa/dev/prediction-market-system/).
+- Per-CP effort estimate (S / M / L).
+- Intra-spec CP dependencies (which CPs block which).
+
+Use
+/Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+as the structural reference for shape. Draft only — stop and wait
+for spec-evaluation approval before running any checkpoint.
+
+CONSTRAINTS:
+
+- New feature branch `feat/pms-controller-per-strategy-v1` off
+  `main`. Never commit to `main` directly.
+- Respect §3 Boundary Matrix of the project-level spec
+  (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md).
+  Never claim a concept owned by another sub-spec (S1–S4, S6). The
+  7 concepts enumerated in §10.2 Scope-in are the complete
+  authorised set for S5; anything else is scope drift.
+- Every Strategy / Factor / Sensor / ring-ownership claim must
+  cite an invariant number from
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md.
+- No `Co-Authored-By` lines in any commit
+  (/Users/stometa/dev/prediction-market-system/CLAUDE.md §"Do
+  not"; promoted rule "Commit-message precedence").
+- Conventional-commit prefixes required (§5.6 of the project
+  spec): `feat(<scope>):`, `fix(<scope>):`, `docs(<scope>):`,
+  `test(<scope>):`, `refactor(<scope>):`, `chore(<scope>):`.
+- Follow the promoted rule 🟡 Lifecycle cleanup on all exit paths
+  for the strategy register / unregister surface and the
+  per-strategy `ControllerPipeline` lifecycle: acquire + release
+  in the same commit, `try/finally` on all four exit paths
+  (success, exception, cancel, registry remove).
+- Follow the promoted rule 🟡 Comments are not fixes — every
+  behavioural finding (per-strategy dispatch, metrics aggregation,
+  field population) needs a behavioural fix plus a new test, not
+  a docstring.
+
+HALT CONDITIONS:
+
+- Any attempt to add a `strategy_id` or `strategy_version_id`
+  column to an outer-ring table (`markets`, `tokens`,
+  `book_snapshots`, `book_levels`, `price_changes`, `trades`) or
+  a middle-ring table (`factors`, `factor_values`). This is an
+  Invariant 8 violation — STOP immediately.
+- Any row where `strategy_id` IS NULL or `strategy_version_id`
+  IS NULL exists when the `NOT NULL` migration runs. Pre-S5 rows
+  must already carry the `"default"` strategy id seeded by S2; if
+  a NULL row survives the pre-migration probe, STOP — re-run S2's
+  `"default"` seed against the affected database before applying
+  S5, and do NOT silently amend the constraint or perform
+  invented-provenance re-attribution to a non-`"default"` strategy
+  (Invariant 3 — `"default"` is a real strategy, not a sentinel,
+  per `agent_docs/architecture-invariants.md` §Invariant 3 Runtime
+  evidence).
+- Any invariant in
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+  cannot be satisfied by the design you are authoring. Do NOT
+  silently amend the invariant. Open a retro under
+  /Users/stometa/dev/prediction-market-system/.harness/retro/ and
+  return to the user.
+- The 7 concepts you author CPs for do not match §3.2.5 of the
+  project-level spec
+  (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md),
+  concept-for-concept. Reconcile first.
+
+FIRST ACTION:
+
+Run:
+
+    cd /Users/stometa/dev/prediction-market-system \
+      && git status && git branch --show-current \
+      && git log --oneline -5
+
+Then read the 7 files in the REQUIRED READING block, in order,
+before drafting any content. After reading, report your
+understanding of §10.8's 8 checkpoints (CP1–CP8) and wait for
+go-ahead before drafting
+/Users/stometa/dev/prediction-market-system/.harness/pms-controller-per-strategy-v1/spec.md.
+```
+
+---
+
+---
