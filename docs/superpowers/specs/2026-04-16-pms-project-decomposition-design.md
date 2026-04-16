@@ -1356,7 +1356,7 @@ CONSTRAINTS:
   commit to `main` directly.
 - Respect §3 Boundary Matrix of the project-level spec
   (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md).
-  Never claim a concept owned by another sub-spec (S2–S6). The 18
+  Never claim a concept owned by another sub-spec (S2–S6). The 19
   concepts enumerated in §6.2 Scope-in are the complete authorised
   set for S1; anything else is scope drift.
 - Every Strategy / Factor / Sensor / ring-ownership claim must
