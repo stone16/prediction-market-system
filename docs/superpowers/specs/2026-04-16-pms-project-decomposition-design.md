@@ -273,7 +273,7 @@ Column semantics:
 | `trades` table | S1 | S3, S6 | 7, 8 | — |
 | `PostgresMarketDataStore` (typed methods over outer ring) | S1 | S3, S5, S6 | 8 | Single concrete class; no Protocol abstraction today (§Q5 of discovery note). |
 | `asyncpg.Pool` lifecycle (Runner-owned) | S1 | all | — | `min_size=2`, `max_size=10` per §Q6 of discovery note. |
-| `schema.sql` file (startup-applied) | S1 | S2, S3, S5 extend it | — | No migration framework yet. |
+| `schema.sql` file (startup-applied) | S1 | S2, S3, S5, S6 extend it | — | No migration framework yet. |
 | `MarketDiscoverySensor` class | S1 | S4 | 7 | Unconditional universe scan; writes `markets` / `tokens`. |
 | `MarketDataSensor` class | S1 | S4 | 6, 7 | Subscription-driven; consumes push from `SensorSubscriptionController` (S4). |
 | `SensorWatchdog` wiring to stream sensor | S1 | — | 7 | Watchdog class exists today; S1 wires it. |
@@ -282,7 +282,8 @@ Column semantics:
 | Transaction-rollback test fixture (`db_conn`) | S1 | all test-side | — | Per §Test strategy of discovery note. |
 | `compose.yml` for local PG (dev) | S1 | all | — | `postgres:16` image; CI matches tag. |
 | `/signals` dashboard page (real orderbook depth) | S1 | — | 7 | Replaces today's empty orderbook with live book / delta rendering. |
-| Inner-ring `(strategy_id, strategy_version_id)` columns reserved `NULLABLE` on product tables | S1 | S2, S5 | 3, 8 | Columns land here; S2 seeds `"default"`; S5 upgrades to `NOT NULL`. |
+| `orders` + `fills` inner-ring product tables (DDL, empty shape) | S1 | S2, S5 | 3, 8 | Per `agent_docs/architecture-invariants.md` §Invariant 8 enumeration of inner-ring product tables. Land as empty tables with `(strategy_id, strategy_version_id)` `NULLABLE` columns (column reservation handled by the next row). Today's runtime emits `OrderState` / `FillRecord` in-memory only; S1 grants persistence so S5's `NOT NULL` migration has all 4 product tables to upgrade uniformly (`feedback`, `eval_records`, `orders`, `fills`). |
+| Inner-ring `(strategy_id, strategy_version_id)` columns reserved `NULLABLE` on product tables | S1 | S2, S5 | 3, 8 | Columns land here on all 4 product tables (`feedback`, `eval_records`, `orders`, `fills`); S2 seeds `"default"`; S5 upgrades to `NOT NULL`. |
 
 #### 3.2.2 Inner ring — aggregate + registry (S2 owns)
 
@@ -866,11 +867,14 @@ Polymarket CLOB data persisted in PostgreSQL and rendered on
 S1 also lands as the **schema-foundation sub-spec**: `schema.sql`
 declares the outer-ring tables plus the inner-ring product-table
 shells that existing runtime code already depends on — today that
-is exactly `feedback` and `eval_records`, the two JSONL stores
-being migrated per §3.2.1 row 14. Both carry `(strategy_id,
-strategy_version_id)` columns reserved `NULLABLE` so S2 can seed
-`"default"` and S5 can upgrade to `NOT NULL` without a second
-full-table migration (§3.2.1 row 18, Invariants 3 + 8). The middle
+includes all 4 inner-ring product tables: `feedback` and
+`eval_records` from the JSONL→PG migration (§3.2.1 row 14), plus
+`orders` and `fills` as empty shells (§3.2.1 row 18, added per
+`agent_docs/architecture-invariants.md` §Invariant 8 enumeration).
+All 4 carry `(strategy_id, strategy_version_id)` columns reserved
+`NULLABLE` so S2 can seed `"default"` and S5 can upgrade to
+`NOT NULL` without a second full-table migration (§3.2.1 row 19,
+Invariants 3 + 8). The middle
 ring (`factors` / `factor_values`) is owned by S3 (§3.2.3) and does
 not appear in S1's `schema.sql` — Invariant 8 (onion-concentric
 ring ownership) keeps the middle-ring DDL outside the outer-ring
@@ -878,7 +882,7 @@ sub-spec.
 
 ### 6.2 Scope (in / out)
 
-**Scope in.** Exactly the 18 concepts owned by S1 in §3.2.1, in the
+**Scope in.** Exactly the 19 concepts owned by S1 in §3.2.1, in the
 same order, each with a one-line scope descriptor. Reviewers
 verifying boundary integrity grep §3.2.1 against this list; the
 lists must match concept-for-concept.
@@ -954,15 +958,21 @@ lists must match concept-for-concept.
     reconstructed from `book_snapshots` + `book_levels` + recent
     `price_changes` (Invariant 7).
 
-18. **Inner-ring `(strategy_id, strategy_version_id)` columns
-    reserved `NULLABLE` on product tables.** `feedback` +
-    `eval_records` (the two inner-ring product tables S1 creates,
-    matching the JSONL→PG migration in §3.2.1 row 14) carry both
-    columns `NULLABLE`; S2 seeds `"default"`, S5 upgrades to
-    `NOT NULL` (Invariants 3, 8). Additional inner-ring product
-    tables (e.g. for `OrderState` / `FillRecord` persistence) are
-    introduced by the sub-spec that needs them with the matching
-    §3.2 amendment per §5.4 boundary-matrix audit.
+18. **`orders` + `fills` inner-ring product tables (DDL, empty
+    shape).** Per `agent_docs/architecture-invariants.md` §Invariant
+    8 enumeration of inner-ring product tables (`eval_records`,
+    `feedback`, `orders`, `fills`). Land as empty tables with
+    `(strategy_id, strategy_version_id)` `NULLABLE` columns
+    (column reservation handled by item 19); today's runtime emits
+    `OrderState` / `FillRecord` in-memory only, so S1 grants
+    persistence so S5's `NOT NULL` migration has all 4 product
+    tables to upgrade uniformly (Invariants 3, 8).
+19. **Inner-ring `(strategy_id, strategy_version_id)` columns
+    reserved `NULLABLE` on product tables.** All 4 inner-ring
+    product tables (`feedback` + `eval_records` from the JSONL→PG
+    migration in §3.2.1 row 14, plus `orders` + `fills` from item
+    18 above) carry both columns `NULLABLE`; S2 seeds `"default"`,
+    S5 upgrades to `NOT NULL` (Invariants 3, 8).
 
 **Scope out.** The following look S1-adjacent but are owned by
 other sub-specs. A PR landing any of these under `.harness/pms-
@@ -1154,12 +1164,17 @@ can diff S2's Intake (once §7.6 lands) against this list.
    - Outer ring: `markets`, `tokens`, `book_snapshots`,
      `book_levels`, `price_changes`, `trades` (§3.2.1 rows 1–6;
      Invariants 7, 8).
-   - Inner-ring product-table shells: `feedback`, `eval_records`,
-     each with `(strategy_id, strategy_version_id)` `NULLABLE`
-     (§3.2.1 row 18, Invariants 3, 8). Additional inner-ring
-     product tables for `OrderState` / `FillRecord` persistence
-     are explicitly out of S1 scope — added by the sub-spec that
-     needs them per the §5.4 boundary-matrix audit rule.
+   - Inner-ring product-table shells: all 4 tables `feedback`,
+     `eval_records`, `orders`, `fills` (matching
+     `agent_docs/architecture-invariants.md` §Invariant 8
+     enumeration), each with `(strategy_id, strategy_version_id)`
+     `NULLABLE` (§3.2.1 rows 14, 18, 19 respectively for
+     migration-sourced tables, fresh `orders`/`fills` shells, and
+     column reservation; Invariants 3, 8). `orders` and `fills`
+     are empty-shape tables; today's runtime emits `OrderState` /
+     `FillRecord` in-memory only, so S1 grants persistence so
+     S5's `NOT NULL` migration has all 4 tables to upgrade
+     uniformly.
    - Middle ring: **no** `factors` / `factor_values` DDL lands in
      S1's `schema.sql` — S3 owns both tables (§3.2.3, Invariants
      4 + 8 — middle-ring ownership).
@@ -1188,9 +1203,10 @@ can diff S2's Intake (once §7.6 lands) against this list.
 10. **`/signals` dashboard page rendering real depth** (§3.2.1
     row 17) from outer-ring tables, verified by Playwright e2e.
 11. **Inner-ring product tables reserve `(strategy_id,
-    strategy_version_id)` `NULLABLE` columns** (§3.2.1 row 18) so
-    S2 can seed `"default"` and S5 can upgrade to `NOT NULL`
-    schema-change-only.
+    strategy_version_id)` `NULLABLE` columns** (§3.2.1 row 19) on
+    all 4 product tables (`feedback`, `eval_records`, `orders`,
+    `fills`) so S2 can seed `"default"` and S5 can upgrade to
+    `NOT NULL` schema-change-only.
 
 S2's Intake (authored in Commit 5 of this document authoring
 effort) reads from this list; diffing the two is the §4.3 gate-4
@@ -1365,7 +1381,7 @@ HALT CONDITIONS:
   column to an outer-ring table (`markets`, `tokens`,
   `book_snapshots`, `book_levels`, `price_changes`, `trades`).
   This is an Invariant 8 violation — STOP immediately.
-- The 18 concepts you author CPs for do not match §3.2.1 of the
+- The 19 concepts you author CPs for do not match §3.2.1 of the
   project-level spec
   (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md),
   concept-for-concept. Reconcile first.
@@ -1683,16 +1699,16 @@ list against S1's Leave-behind mechanically.
    created in `Runner.start()` and closed in `Runner.stop()`;
    S2's registry acquires connections from the same pool.
 4. **Inner-ring product tables with `(strategy_id,
-   strategy_version_id)` reserved `NULLABLE`** (§3.2.1 row 18).
-   The two inner-ring product tables S1 creates — `feedback` and
-   `eval_records`, matching the JSONL→PG migration of §3.2.1 row
-   14 — carry both columns `NULLABLE`; S2 seeds `"default"` to
-   populate the columns without requiring a schema change.
-   Additional inner-ring product tables (e.g. for `OrderState` /
-   `FillRecord` persistence) are explicitly **out of S1 scope**
-   per S1 §6.7 item 1 + S1 §6.2 concept 18; if S2 needs an
-   `orders` or `fills` table, S2 must add it with the matching
-   §3.2.2 amendment per the §5.4 boundary-matrix audit rule.
+   strategy_version_id)` reserved `NULLABLE`** (§3.2.1 row 19).
+   All 4 inner-ring product tables S1 creates — `feedback` and
+   `eval_records` from the JSONL→PG migration (§3.2.1 row 14),
+   plus `orders` and `fills` as empty shells (§3.2.1 row 18,
+   added per `agent_docs/architecture-invariants.md` §Invariant 8
+   enumeration) — carry both columns `NULLABLE`; S2 seeds
+   `"default"` to populate the columns on every existing row
+   without requiring a schema change. S2 does not extend the
+   schema for `orders` / `fills` — S1 has already landed the
+   shells.
 5. **`/signals` page rendering real depth from outer-ring
    tables** (§3.2.1 row 17). The Playwright e2e confirming real
    depth is green on main; S2's `/strategies` page is additive
@@ -1923,8 +1939,9 @@ PREFLIGHT (boundary check — run before any authoring):
     (S1 §3.2.1 row 7).
   * `Runner.start()` creates the `asyncpg.Pool`; `Runner.stop()`
     closes it (S1 §3.2.1 row 8; `min_size=2` / `max_size=10`).
-  * `feedback` and `eval_records` carry `(strategy_id,
-    strategy_version_id)` `NULLABLE` columns (S1 §3.2.1 row 18).
+  * All 4 inner-ring product tables (`feedback`, `eval_records`,
+    `orders`, `fills`) carry `(strategy_id, strategy_version_id)`
+    `NULLABLE` columns (S1 §3.2.1 rows 18 + 19).
   * `/signals` renders real depth end-to-end; Playwright e2e green
     on main.
   * `db_conn` transaction-rollback fixture is importable from
@@ -3389,9 +3406,10 @@ calibrator / sizer composition read from `StrategyConfig` and
 `ForecasterSpec` projections); the Evaluator's `MetricsCollector`
 rewrites every aggregation to `GROUP BY strategy_id,
 strategy_version_id`; the `(strategy_id, strategy_version_id)`
-columns reserved `NULLABLE` by S1 (§3.2.1 row 18) and seeded with
+columns reserved `NULLABLE` by S1 (§3.2.1 row 19) and seeded with
 `"default"` by S2 are upgraded to `NOT NULL` on every inner-ring
-product table (`feedback`, `eval_records`, `orders`, `fills`); the
+product table (`feedback`, `eval_records`, `orders`, `fills` —
+all 4 created by S1 per §3.2.1 rows 14 and 18); the
 `TradeDecision` / `OrderState` / `FillRecord` / `EvalRecord` emit
 paths populate real values from the per-strategy dispatch; the
 `Opportunity` entity lands as the Controller's pre-execution output
