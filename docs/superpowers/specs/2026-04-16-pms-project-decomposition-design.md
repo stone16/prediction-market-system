@@ -844,3 +844,524 @@ Review-loop commits (`review-loop: changes from round N`) inherit
 the same rule.
 
 ---
+
+## 6. Sub-spec S1 — pms-market-data-v1
+
+S1 is the **entry point** of the DAG (§2.1): it has no predecessors,
+and the five downstream sub-specs all depend — directly or
+transitively — on its outer-ring schema, the `asyncpg.Pool` the
+Runner owns, and the two-sensor split that Invariant 7 requires.
+This section expands the skeleton in `agent_docs/project-roadmap.md`
+§S1 into the project-level contract that the harness run under
+`.harness/pms-market-data-v1/` will consume.
+
+### 6.1 Goal
+
+S1 replaces today's fabricated orderbook depth with **live
+Polymarket CLOB data persisted in PostgreSQL and rendered on
+`/signals`** — closing observable-capability items #2 and #4 of §1.1
+(real book snapshots + `price_change` deltas land in
+`book_snapshots` / `book_levels` / `price_changes` / `trades`;
+`/signals` renders real depth, not fabricated bid/ask). In doing so,
+S1 also lands as the **schema-foundation sub-spec**: `schema.sql`
+declares the outer-ring, middle-ring shell, and inner-ring product
+tables in one file, with `(strategy_id, strategy_version_id)`
+columns reserved `NULLABLE` on inner-ring product tables so S2 can
+seed `"default"` and S5 can upgrade to `NOT NULL` without a
+second full-table migration (§3.2.1 last row, Invariants 3 + 8).
+
+### 6.2 Scope (in / out)
+
+**Scope in.** Exactly the 18 concepts owned by S1 in §3.2.1, in the
+same order, each with a one-line scope descriptor. Reviewers
+verifying boundary integrity grep §3.2.1 against this list; the
+lists must match concept-for-concept.
+
+1. **`markets` table (DDL + writes).** Outer-ring table keyed on
+   Polymarket `condition_id`; populated by `MarketDiscoverySensor`
+   polling the Gamma `/markets` endpoint (Invariants 7, 8).
+2. **`tokens` table (DDL + writes).** Per-outcome `YES` / `NO`
+   token ids referencing `markets.condition_id`; populated
+   alongside `markets` (Invariants 7, 8).
+3. **`book_snapshots` table.** One row per `book` event (subscribe /
+   reconnect / periodic checkpoint); stores metadata (`ts`, `hash`,
+   `source`) (Invariants 7, 8).
+4. **`book_levels` table.** Per-level rows referencing
+   `book_snapshots.id` with `ON DELETE CASCADE`; no JSON blobs, per
+   discovery-note Q2 resolution (Invariants 7, 8).
+5. **`price_changes` table.** One row per `price_change` event with
+   `size` as the NEW total at the level (Polymarket delta semantics,
+   `size = 0` means level removed), plus `best_bid` / `best_ask` for
+   quick-scan queries (Invariants 7, 8).
+6. **`trades` table.** One row per `last_trade_price` event; minimal
+   columns (`market_id`, `token_id`, `ts`, `price`) (Invariants 7, 8).
+7. **`PostgresMarketDataStore` (typed methods over outer ring).**
+   Single concrete class under `src/pms/storage/` with typed methods
+   (`write_market`, `write_token`, `write_book_snapshot`,
+   `write_book_level`, `write_price_change`, `write_trade`, plus
+   read helpers the dashboard and evaluator need). No
+   `IMarketDataStore` Protocol — discovery-note Q5 resolved
+   (Invariant 8).
+8. **`asyncpg.Pool` lifecycle (Runner-owned).** Single pool created
+   in `Runner.start()`, closed in `Runner.stop()`, `min_size=2` /
+   `max_size=10`, shared across sensor / controller / actuator /
+   evaluator / API tasks (discovery-note Q6).
+9. **`schema.sql` file (startup-applied).** One file declaring
+   outer-ring tables plus inner-ring product-table shells with
+   reserved nullable strategy columns; applied on Runner boot if
+   target tables do not exist; no migration framework.
+10. **`MarketDiscoverySensor` class.** Low-frequency, strategy-
+    agnostic, unconditional; polls Gamma `/markets` on a coarse
+    cadence; writes `markets` + `tokens` (Invariant 7).
+11. **`MarketDataSensor` class.** High-frequency, subscription-
+    driven; connects to the CLOB WebSocket market channel; parses
+    `book` + `price_change` + `last_trade_price` events with a
+    stateful per-asset orderbook mirror; writes
+    `book_snapshots` / `book_levels` / `price_changes` / `trades`
+    (Invariants 6, 7).
+12. **`SensorWatchdog` wiring to stream sensor.** Existing
+    `src/pms/sensor/watchdog.py` class wired to `MarketDataSensor`
+    via the same stale-detection hook used elsewhere in the Sensor
+    layer (Invariant 7).
+13. **WebSocket heartbeat + reconnect reconciliation.** 10-second
+    PING / PONG loop on the CLOB connection; on reconnect, re-issue
+    the subscribe message and treat the first arriving `book` event
+    as the canonical snapshot (`source='reconnect'` on the row);
+    resolves discovery-note §1a Q4 (Invariant 7).
+14. **JSONL → PG migration (`FeedbackStore` + `EvalStore` rewritten
+    over SQL).** Both stores become thin SQL wrappers over the
+    shared pool; `.data/*.jsonl` retires from the runtime contract;
+    per-shell DB isolation replaces `PMS_DATA_DIR` (discovery-note
+    "Storage unification" decision, Invariant 8).
+15. **Transaction-rollback test fixture (`db_conn`).** Session-
+    scoped schema load + per-test transaction that rolls back on
+    teardown; no `pytest-postgresql` dependency. Cross-connection
+    integration tests fall back to `TRUNCATE` in an `autouse`
+    fixture (discovery-note "Test strategy" decision).
+16. **`compose.yml` for local PG (dev).** Committed `postgres:16`
+    service definition; CI uses the same image tag via GitHub
+    Actions `services.postgres.image`.
+17. **`/signals` dashboard page (real orderbook depth).** Replaces
+    today's empty-orderbook rendering
+    (`src/pms/sensor/adapters/polymarket_rest.py:90` —
+    `orderbook={"bids": [], "asks": []}`) with a live view
+    reconstructed from `book_snapshots` + `book_levels` + recent
+    `price_changes` (Invariant 7).
+
+18. **Inner-ring `(strategy_id, strategy_version_id)` columns
+    reserved `NULLABLE` on product tables.** `feedback` +
+    `eval_records` (and stubs for `orders` + `fills` to be populated
+    post-S1) carry both columns `NULLABLE`; S2 seeds `"default"`,
+    S5 upgrades to `NOT NULL` (Invariants 3, 8).
+
+**Scope out.** The following look S1-adjacent but are owned by
+other sub-specs. A PR landing any of these under `.harness/pms-
+market-data-v1/` is scope drift.
+
+- `Strategy` aggregate + projection types (`StrategyConfig`,
+  `RiskParams`, `EvalSpec`, `ForecasterSpec`, `MarketSelectionSpec`)
+  → **S2** (§3.2.2). S1 does not import `pms.strategies.*` from any
+  sensor or storage module (Invariant 5).
+- `strategies` / `strategy_versions` aggregate tables and the
+  `PostgresStrategyRegistry` → **S2** (§3.2.2).
+- `strategy_factors` link table → **S2** (§3.2.2); empty shape only.
+- `factors` / `factor_values` tables and `FactorService` → **S3**
+  (§3.2.3).
+- `/factors` dashboard page → **S3** (§3.2.3).
+- `MarketSelector` + `SensorSubscriptionController` +
+  `Strategy.select_markets(universe)` method + boot-order wiring
+  (DiscoverySensor → Selector → SubscriptionController → DataSensor)
+  → **S4** (§3.2.4). S1's `MarketDataSensor` ships as a subscription
+  *sink* but gets its asset-id list from configuration (or a stub
+  loader) until S4 lands the push channel.
+- Per-strategy `ControllerPipeline` dispatch, per-strategy Evaluator
+  aggregation, the `(strategy_id, strategy_version_id)` `NOT NULL`
+  schema upgrade, `Opportunity` entity, `/strategies` comparative
+  view, `/metrics` per-strategy breakdown → **S5** (§3.2.5).
+- `BacktestSpec` / `ExecutionModel` / `BacktestDataset` /
+  `BacktestRun` / `StrategyRun` / parameter sweep /
+  `BacktestLiveComparison` / `/backtest` ranked N-strategy view →
+  **S6** (§3.2.6).
+
+### 6.3 Acceptance criteria (system-level)
+
+Nine observable-capability bullets. Each is verifiable at the
+system level — not a checklist item for an individual CP.
+
+1. **`schema.sql` applies cleanly.** Running the file against a
+   fresh PostgreSQL 16 database via `psql -f schema.sql` completes
+   with zero errors and produces `markets`, `tokens`,
+   `book_snapshots`, `book_levels`, `price_changes`, `trades`,
+   `feedback`, `eval_records`, plus inner-ring product-table shells
+   with `(strategy_id, strategy_version_id)` columns `NULLABLE`
+   (Invariants 3, 7, 8).
+2. **A `book` event arrives within 5 seconds of subscription.**
+   From a cold start against live Polymarket CLOB, the first
+   `book_snapshots` row with `source='subscribe'` is written within
+   5 seconds of `MarketDataSensor.subscribe(asset_ids)` being
+   called (Invariant 7).
+3. **Delta semantics are lossless.** Applying every `price_changes`
+   row for a given `(market_id, token_id)` in insertion order on
+   top of the most recent `book_snapshots` + `book_levels` rows
+   reconstructs an orderbook identical (modulo float tolerance) to
+   what the WebSocket last pushed — including zero-size level
+   removal per Polymarket semantics (Invariants 7, 8).
+4. **`/signals` renders real depth, not fabricated bid/ask.** The
+   dashboard `/signals` page displays actual bid/ask levels drawn
+   from the outer-ring tables; a Playwright assertion confirms at
+   least two distinct depth levels are present on an active market
+   (closing `1a Orderbook Data: Simulated, Not Real` of
+   `docs/notes/2026-04-16-repo-issues-controller-evaluator.md`).
+5. **JSONL runtime contract is retired.** `Runner.start()` +
+   `FeedbackStore` + `EvalStore` never read from nor write to
+   `.data/*.jsonl`; the runtime contract is the PostgreSQL pool.
+   A startup-time assertion fails loudly if the legacy directory
+   path is referenced anywhere in the runtime path (Invariant 8).
+6. **Discovery and data sensors are two distinct classes.**
+   `MarketDiscoverySensor` and `MarketDataSensor` live in separate
+   modules under `src/pms/sensor/` (or `src/pms/sensor/adapters/`);
+   neither imports the other; `Runner._build_sensors()`
+   instantiates both for non-backtest modes (Invariant 7).
+7. **Heartbeat + reconnect reconciliation work end-to-end.** A
+   forced WebSocket disconnect mid-run is followed by an automatic
+   reconnect, a re-subscribe message, and a `book_snapshots` row
+   with `source='reconnect'`; the stateful parser resumes without
+   double-counting or dropping deltas (Invariant 7).
+8. **Outer-ring tables contain zero `strategy_id` columns.** A
+   grep of the outer-ring section of `schema.sql` (delimited by
+   block comments) returns zero matches for both `strategy_id` and
+   `strategy_version_id` identifiers (Invariant 8 mechanical
+   half; §5.3 Mixed-invariant evidence).
+9. **Canonical gates green on a fresh clone.** `uv run pytest -q`
+   passes with ≥ 70 tests + 2 skipped (integration gated on
+   `PMS_RUN_INTEGRATION=1`) and `uv run mypy src/ tests/ --strict`
+   is clean, on a fresh shell per 🟡 Fresh-clone baseline
+   verification (§5.1, §5.2).
+
+### 6.4 Non-goals
+
+Explicit deferrals. An S1 harness spec that lands any of these
+items is scope drift.
+
+- **No ORM, no SQLAlchemy, no SQL query builder.** Raw SQL strings
+  via `asyncpg` return frozen dataclasses (discovery-note
+  "Persistence Decision" §Non-goals).
+- **No migration framework.** No Alembic, no Sqitch, no in-house
+  migration runner. Schema iteration during S1–S5 goes through
+  edits to `schema.sql`; fresh-dev-DB and fresh-CI-DB reloads
+  re-apply the full file. Alembic or Sqitch is reconsidered only
+  if the single-file approach becomes painful.
+- **No `MarketSignal.orderbook` in-memory model refactor.** The
+  in-memory dict shape (`{"bids": [...], "asks": [...]}`) stays as
+  today's backward-compatible presentation layer; the new outer-
+  ring tables are the authoritative durable record. Revisit only
+  if downstream consumers (S3 factors, S5 controller) need a
+  different shape — the discovery-note Q2 open sub-question.
+- **No backtest replay engine changes.** `HistoricalSensor` keeps
+  its current JSONL/CSV replay behaviour; outer-ring reads against
+  persisted Polymarket history land in S6.
+- **No per-strategy subscription logic.** `MarketDataSensor`
+  accepts a flat `asset_ids: list[str]` at start-up. The push
+  channel from `SensorSubscriptionController` is S4-owned; S1
+  stubs the loader so S4 can replace it without touching sensor
+  internals (Invariants 5, 6).
+- **Discovery-note open questions NOT resolved in S1:**
+  (a) **retention policy** (§Schema Design Q4) — deferred; keep
+  everything until disk pressure forces action; revisit during S3
+  or S6 when factor-panel / backtest-replay query shapes make the
+  decision concrete. (b) **`price_changes` UNIQUE constraint on
+  `(market_id, ts, price, side)` vs. allow duplicates** (§Q2 sub-
+  question) — deferred to harness-spec review (see §6.8 CP-DQ
+  below). (c) **`sensor_sessions` lifecycle table** (§Q2 sub-
+  question) — deferred to the same CP; if the review chooses to
+  add the table, it becomes an S1 concept and §3.2.1 must be
+  amended in the same PR. If it stays deferred, Evaluator-side
+  "no event vs. sensor down" discrimination lands as a separate
+  future retro-triggered change, not inside S1.
+
+### 6.5 Dependencies
+
+- **Upstream sub-specs.** None. S1 is the entry point of the
+  §2.1 DAG; no other sub-spec appears as a predecessor edge.
+- **Upstream invariants.** Primary: **7** (two-layer sensor) and
+  **8** (onion-concentric storage). Partial touches:
+  **3** (reserved `NULLABLE` strategy-version columns on inner-ring
+  product tables so S5's `NOT NULL` upgrade is a schema-change-only
+  migration) and **6** (`MarketDataSensor` ships as the
+  subscription sink, shaped so S4's `SensorSubscriptionController`
+  push channel drops in without changing Sensor internals —
+  Invariants 5 + 6 enforced by the S2 import-linter rule once S2
+  lands).
+
+### 6.6 Intake
+
+Minimum set that must exist before a harness run opens under
+`.harness/pms-market-data-v1/`. S1 being the DAG entry point,
+this list is the shortest in the document.
+
+1. **Canonical gates green on a fresh clone.** `uv run pytest -q`
+   passes with ≥ 70 tests + 2 skipped; `uv run mypy src/ tests/
+   --strict` is clean (§5.1, §5.2; 🟡 Fresh-clone baseline
+   verification).
+2. **Polymarket CLOB WebSocket reachable from the dev
+   environment.** `wss://ws-subscriptions-clob.polymarket.com/ws/
+   market` accepts a connection and responds to a subscribe
+   message without authentication — the market channel is public
+   per the discovery note §1a "Available Polymarket APIs".
+3. **`uv.lock` is current.** `uv sync` leaves no unlocked
+   dependency edits in the working tree; `asyncpg` and any
+   websocket client updates are captured in the lockfile.
+4. **No conflicting migration or schema files in the tree.** No
+   `alembic/`, `migrations/`, or `schema/versions/` directories
+   exist — S1 is the first sub-spec to introduce durable schema,
+   and partial pre-work would indicate scope overlap with a
+   parallel effort that must first reconcile.
+
+### 6.7 Leave-behind
+
+Enumerated artefacts produced by S1, keyed back to §3.2.1 row
+numbers so the §4.3 gate-4 boundary-integrity check (§4.3 gate 4)
+can diff S2's Intake (once §7.6 lands) against this list.
+
+1. **`schema.sql`** (§3.2.1 row 9) applies cleanly against a fresh
+   PG 16 DB and produces:
+   - Outer ring: `markets`, `tokens`, `book_snapshots`,
+     `book_levels`, `price_changes`, `trades` (§3.2.1 rows 1–6).
+   - Inner-ring product-table shells: `feedback`, `eval_records`,
+     plus stubs for `orders` / `fills` as needed by S2, each with
+     `(strategy_id, strategy_version_id)` `NULLABLE` (§3.2.1 row 18,
+     Invariant 3).
+   - Middle-ring shell only: empty `factors` / `factor_values` are
+     **not** created here — S3 owns them (§3.2.3).
+2. **`PostgresMarketDataStore`** (§3.2.1 row 7) at
+   `src/pms/storage/market_data_store.py` (harness spec may choose
+   final path) with typed methods matching discovery-note Q6 shape
+   (one INSERT per event, `write_price_change` / `write_book_level`
+   signatures batch-friendly for future COPY upgrade).
+3. **`asyncpg.Pool` owned by `Runner`** (§3.2.1 row 8) created in
+   `Runner.start()`, closed in `Runner.stop()`,
+   `min_size=2` / `max_size=10`, shared across every runtime task.
+4. **`MarketDiscoverySensor` + `MarketDataSensor` as separate
+   classes** (§3.2.1 rows 10–11) with `Runner._build_sensors()`
+   instantiating both for non-backtest modes.
+5. **`SensorWatchdog` wired to `MarketDataSensor`** (§3.2.1 row 12).
+6. **WebSocket heartbeat + reconnect reconciliation** (§3.2.1
+   row 13) active on `MarketDataSensor`; reconnect produces a
+   `book_snapshots` row with `source='reconnect'`.
+7. **`FeedbackStore` + `EvalStore` rewritten as SQL wrappers**
+   (§3.2.1 row 14); `.data/*.jsonl` retired from the runtime
+   contract.
+8. **Transaction-rollback `db_conn` fixture** (§3.2.1 row 15)
+   usable by every subsequent sub-spec's storage-layer tests.
+9. **`compose.yml` for local PG + matching CI service
+   definition** (§3.2.1 row 16).
+10. **`/signals` dashboard page rendering real depth** (§3.2.1
+    row 17) from outer-ring tables, verified by Playwright e2e.
+11. **Inner-ring product tables reserve `(strategy_id,
+    strategy_version_id)` `NULLABLE` columns** (§3.2.1 row 18) so
+    S2 can seed `"default"` and S5 can upgrade to `NOT NULL`
+    schema-change-only.
+
+S2's Intake (authored in Commit 5 of this document authoring
+effort) reads from this list; diffing the two is the §4.3 gate-4
+mechanism.
+
+### 6.8 Checkpoint skeleton
+
+Flat one-line-each list. **Not harness acceptance criteria** — the
+per-CP acceptance criteria, files-of-interest, and effort estimates
+land in `.harness/pms-market-data-v1/spec.md` when the kickoff
+prompt (§6.11) triggers that authoring session.
+
+- **CP1 — PG pool + `schema.sql` bootstrap.** Runner owns an
+  `asyncpg.Pool` (min=2, max=10); `schema.sql` applies on start
+  if absent; outer-ring tables created; smoke integration test
+  confirms `SELECT 1` through the pool.
+- **CP2 — Test infra (fixture + compose + CI service).** `db_conn`
+  transaction-rollback fixture + `compose.yml` (`postgres:16`) +
+  GitHub Actions `services.postgres` config; canonical gates
+  still green.
+- **CP3 — `PostgresMarketDataStore` typed methods.** Concrete class
+  with one-INSERT-per-event methods for `markets`, `tokens`,
+  `book_snapshots` / `book_levels`, `price_changes`, `trades`;
+  unit-tested against the `db_conn` fixture.
+- **CP4 — `MarketDiscoverySensor` split.** Unconditional Gamma
+  `/markets` scan writes `markets` + `tokens`; no WebSocket
+  dependency; replaces the discovery half of today's conflated
+  `PolymarketRestSensor`.
+- **CP5 — `MarketDataSensor` split + stateful parser.** CLOB
+  WebSocket connection; `book` + `price_change` + `last_trade_price`
+  events parsed; stateful per-asset orderbook mirror; writes to
+  outer-ring tables; accepts a flat `asset_ids` list at start-up.
+- **CP6 — Heartbeat + reconnect reconciliation +
+  `SensorWatchdog`.** 10-second PING / PONG; on disconnect,
+  exponential backoff + resubscribe + `source='reconnect'`
+  snapshot row; watchdog wired to stream sensor.
+- **CP7 — JSONL → PG storage unification.** `FeedbackStore` +
+  `EvalStore` rewritten over `asyncpg`; `.data/*.jsonl` retired
+  from runtime contract; one-off migration script (or "drop and
+  restart" option) documented in the harness spec.
+- **CP8 — `/signals` dashboard page upgrade.** Dashboard route
+  + API handler read outer-ring tables and render live depth;
+  Playwright e2e asserts multiple depth levels render.
+- **CP9 — Inner-ring column reservations + `"default"`
+  tolerance.** `feedback` / `eval_records` (plus `orders` /
+  `fills` stubs as needed) carry `(strategy_id,
+  strategy_version_id)` `NULLABLE`; legacy runtime writes tolerate
+  a `"default"` placeholder (to be populated by S2's seed).
+- **CP-DQ — Decide deferred schema questions.** Spec-review
+  checkpoint (no code): the harness spec's reviewers decide
+  (a) retention policy (discovery-note §Schema Design Q4),
+  (b) whether `price_changes` gets a UNIQUE constraint on
+  `(market_id, ts, price, side)` or allows duplicates
+  (§Q2 sub-question), (c) whether a `sensor_sessions` table is
+  added to S1 (§Q2 sub-question). Decisions are recorded in the
+  harness spec and propagated back into this §6 and §3.2.1 in
+  the same PR if they expand S1 scope.
+
+### 6.9 Effort estimate
+
+**L** (largest sub-spec; 10 CPs per §6.8 — CP1–CP9 + CP-DQ;
+schema + two sensors + storage layer + CI infra). S1 is the
+foundation for every downstream sub-spec and carries the broadest
+surface area: a new persistence backend (PostgreSQL + `asyncpg`),
+a sensor split that rewrites the conflated `PolymarketRestSensor`,
+a WebSocket parser with stateful orderbook reconstruction +
+reconnect handling, a JSONL-to-SQL migration for two existing
+stores, committed local-dev + CI infra, and a dashboard page
+rewrite — each individually medium, together the largest S1–S6
+scope.
+
+### 6.10 Risk register
+
+| Risk | Likelihood | Impact | Mitigation | Trigger / early-warning |
+|---|---|---|---|---|
+| Polymarket WebSocket contract drift (`book` / `price_change` event shape changes upstream) | M | H | Parser writes raw event JSON to an audit column alongside structured fields; schema-validation test fixtures replay known-good events; upgrade window tracked against Polymarket SDK changelogs | CI integration test fails on a known-good fixture replay; live sensor error-rate counter spikes |
+| `asyncpg.Pool` starvation under burst event rates (price_change bursts during high-volatility periods) | M | M | Start at `max_size=10` per discovery-note Q6; add a bounded in-memory buffer with "batch flush" escape hatch if observed; metrics on `pool.acquire()` latency published to `/metrics` | `pool.acquire()` p99 latency > 100 ms under normal paper-mode load |
+| Local PG provisioning friction for contributors without Docker | M | L | `compose.yml` is the primary path; `brew install postgresql@16` documented as fallback; README links directly; CI uses the same image tag so "works in CI" is reproducible locally | New contributor opens a `help wanted` issue citing DB setup; CI green but local `pytest` red |
+| Dual-write race between `MarketDiscoverySensor` and `MarketDataSensor` on the same `market` row | L | M | `markets` upsert uses `INSERT ... ON CONFLICT (condition_id) DO UPDATE`; discovery sensor runs on a coarse cadence (seconds), data sensor never writes `markets` (only `book_snapshots` / `book_levels` / `price_changes` / `trades`) — separation is ownership-based, not timing-based (Invariant 7) | Deadlock / lock-wait timeout entries in PG logs; duplicate-key errors in Runner logs |
+| JSONL → PG migration data loss for dev environments with existing `.data/*.jsonl` | L | L | `.data/*.jsonl` is gitignored and dev-only per discovery-note §"Storage unification"; a one-off read-only migration script is provided but contributors can also drop-and-restart; migration is bounded (two files, flat schema) | Contributor reports `.data/feedback.jsonl` they wanted to preserve; migration script produces a row-count mismatch |
+| `schema.sql`-only approach making iteration painful without a migration framework | M | M | Schema iteration during S1–S5 lands as edits to `schema.sql` with fresh-DB reloads in dev + CI; re-evaluate at S5 completion — if the pattern becomes painful, open a retro and add Alembic or Sqitch before S6 (discovery-note "Persistence Decision" §Non-goals) | Schema-iteration PRs during S2–S4 trigger more than three "had to drop my dev DB" follow-ups across contributors |
+
+### 6.11 Kickoff Prompt
+
+The block below is **copy-paste-ready** for a fresh Claude session
+whose job is to author `.harness/pms-market-data-v1/spec.md` — the
+harness-executable spec with per-CP acceptance criteria,
+files-of-interest, effort, and intra-spec dependencies. The future
+session has **no memory** of this document; the prompt is
+self-contained.
+
+```
+You are starting harness task `pms-market-data-v1` in the
+prediction-market-system repo.
+
+REQUIRED READING (ordered, absolute paths — read in this order
+before touching anything):
+
+1. /Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md
+   — specifically §6 (this sub-spec's total-spec contract).
+2. /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+   — focus on Invariants 7 (two-layer sensor) and 8 (onion-
+   concentric storage). Partial touches on 3 and 6.
+3. /Users/stometa/dev/prediction-market-system/agent_docs/promoted-rules.md
+   — especially Runtime behaviour > design intent (🔴),
+   Fresh-clone baseline verification (🟡), Integration test
+   default-skip pattern (🟢), and Lifecycle cleanup on all exit
+   paths (🟡 — relevant for pool + WebSocket lifecycle).
+4. /Users/stometa/dev/prediction-market-system/docs/notes/2026-04-16-repo-issues-controller-evaluator.md
+   — the primary source document. Load-bearing sections:
+   "Persistence Decision: PostgreSQL, All Environments",
+   "Schema Design: Open Questions" Q1 / Q2 / Q4 / Q5 / Q6,
+   "Summary: Decisions Captured On 2026-04-16".
+5. /Users/stometa/dev/prediction-market-system/src/pms/sensor/CLAUDE.md
+   — per-layer invariant enforcement for Sensor.
+6. /Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+   — structural reference for harness-grade spec shape (CP shape,
+   acceptance-criteria shape, files-of-interest shape).
+
+CURRENT STATE SNAPSHOT:
+
+S1 is the entry point of the project decomposition DAG. No prior
+sub-specs have landed. The project-level spec
+(docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md)
+is the authoritative boundary contract: §3.2.1 enumerates the 18
+concepts S1 owns, §6 is S1's total-spec subsection.
+
+PREFLIGHT (boundary check — run before any authoring):
+
+- §6.6 Intake items must all be satisfied. If any fails, HALT and
+  tell the user:
+  * `uv run pytest -q` passes with ≥ 70 tests + 2 skipped
+    (PMS_RUN_INTEGRATION=1 gate), and
+    `uv run mypy src/ tests/ --strict` is clean, on a fresh shell.
+  * The Polymarket CLOB WebSocket at
+    `wss://ws-subscriptions-clob.polymarket.com/ws/market` accepts
+    a connection without authentication.
+  * `uv sync` leaves no unlocked dependency edits in the working
+    tree.
+  * No `alembic/`, `migrations/`, or `schema/versions/` directory
+    exists.
+
+TASK:
+
+Create `.harness/pms-market-data-v1/spec.md` by expanding §6.8
+(Checkpoint skeleton) into harness-grade CPs with:
+
+- Per-CP acceptance criteria (observable, falsifiable, not
+  implementation notes).
+- Per-CP files-of-interest (absolute paths under
+  /Users/stometa/dev/prediction-market-system/).
+- Per-CP effort estimate (S / M / L).
+- Intra-spec CP dependencies (which CPs block which).
+
+Use `.harness/pms-v2/spec.md` as the structural reference for
+shape. Draft only — stop and wait for spec-evaluation approval
+before running any checkpoint.
+
+CONSTRAINTS:
+
+- New feature branch `feat/pms-market-data-v1` off `main`. Never
+  commit to `main` directly.
+- Respect §3 Boundary Matrix of the project-level spec. Never
+  claim a concept owned by another sub-spec (S2–S6). The 18
+  concepts enumerated in §6.2 Scope-in are the complete authorised
+  set for S1; anything else is scope drift.
+- Every Strategy / Factor / Sensor / ring-ownership claim must
+  cite an invariant number from agent_docs/architecture-
+  invariants.md.
+- No `Co-Authored-By` lines in any commit (CLAUDE.md §"Do not";
+  promoted rule "Commit-message precedence").
+- Conventional-commit prefixes required (§5.6 of the project
+  spec): `feat(<scope>):`, `fix(<scope>):`, `docs(<scope>):`,
+  `test(<scope>):`, `refactor(<scope>):`, `chore(<scope>):`.
+- Follow the promoted rule 🟡 Lifecycle cleanup on all exit paths
+  for the asyncpg pool and the WebSocket client: acquire + release
+  in the same commit, `try/finally` on all four exit paths.
+
+HALT CONDITIONS:
+
+- Any invariant in agent_docs/architecture-invariants.md cannot
+  be satisfied by the design you are authoring. Do NOT silently
+  amend the invariant. Open a retro under `.harness/retro/` and
+  return to the user.
+- Any attempt to add a `strategy_id` or `strategy_version_id`
+  column to an outer-ring table (`markets`, `tokens`,
+  `book_snapshots`, `book_levels`, `price_changes`, `trades`).
+  This is an Invariant 8 violation — STOP immediately.
+- The 18 concepts you author CPs for do not match §3.2.1 of the
+  project-level spec, concept-for-concept. Reconcile first.
+
+FIRST ACTION:
+
+Run:
+
+    git status && git branch --show-current && git log --oneline -5
+
+Then read the 6 files in the REQUIRED READING block, in order,
+before drafting any content. After reading, report your
+understanding of §6.8's 10 checkpoints (CP1–CP9 + CP-DQ) and wait
+for go-ahead before drafting `.harness/pms-market-data-v1/spec.md`.
+```
+
+---
