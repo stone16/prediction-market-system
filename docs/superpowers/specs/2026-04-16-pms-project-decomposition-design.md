@@ -523,15 +523,17 @@ work. **Every item is verifiable** — no "looks good" gates.
    Sub-spec N+1's Intake is diffed against the **union of all
    predecessor Leave-behinds** — every sub-spec that has an
    incoming edge to N+1 in the §2.1 DAG, not just the immediately
-   prior one in the §4.1 sequence. Concretely: S3's Intake is
-   matched against S2's Leave-behind (S2 → S3 is S3's only
-   predecessor edge); S4's Intake against S2's Leave-behind (same
-   shape); **S5's Intake against S3's Leave-behind ∪ S4's Leave-
-   behind** (both edges land into S5 per §2.1); S6's Intake
-   against S5's Leave-behind. Once each sub-spec's Leave-behind
-   subsection exists (lands with Commits 4–9 of this document
-   authoring effort), diff the union line-by-line. Any concept in
-   sub-spec N+1's Intake that is not produced by some predecessor's
+   prior one in the §4.1 sequence. The five predecessor sets,
+   enumerated against §2.1, are: **S2's Intake against S1's
+   Leave-behind** (S1 → S2 is S2's only predecessor edge);
+   **S3's Intake against S2's Leave-behind** (single edge);
+   **S4's Intake against S2's Leave-behind** (same shape);
+   **S5's Intake against S3's Leave-behind ∪ S4's Leave-behind**
+   (both edges land into S5 per §2.1); **S6's Intake against S5's
+   Leave-behind**. Once each sub-spec's Leave-behind subsection
+   exists (lands with Commits 4–9 of this document authoring
+   effort), diff the union line-by-line. Any concept in sub-spec
+   N+1's Intake that is not produced by some predecessor's
    Leave-behind is a boundary gap. **STOP and reconcile** — either
    amend a predecessor to produce the missing concept, or amend
    sub-spec N+1 to drop the dependency. Do not proceed with a
