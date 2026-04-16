@@ -4790,9 +4790,11 @@ shell command below assumes cwd is
     strategy metrics on `/metrics` (S5 §3.2.5 rows 2 + 7).
   * `(strategy_id, strategy_version_id)` is `NOT NULL` on every
     inner-ring product table (S5 §3.2.5 row 3); SQL check:
-    `\d+ fills` / `\d+ eval_records` show both columns NOT NULL
-    plus the CHECK constraint forbidding empty strings (Invariant
-    3 mechanical enforcement, project spec §5.3 Mixed bucket).
+    `\d+ feedback` / `\d+ eval_records` / `\d+ orders` /
+    `\d+ fills` show both columns NOT NULL plus the CHECK
+    constraint forbidding empty strings on all 4 product tables
+    (Invariant 3 mechanical enforcement, project spec §5.3 Mixed
+    bucket).
   * `Opportunity` entity shape is stable (S5 §3.2.5 row 5).
   * `/strategies` comparative view + `/metrics` per-strategy
     breakdown are shipped and rendering live data (S5 §3.2.5
