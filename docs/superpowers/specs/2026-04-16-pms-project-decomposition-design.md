@@ -218,3 +218,192 @@ Only one pair of sub-specs has a discretionary ordering: **S3 and
 S4** both depend only on S2, and neither is on the other's Intake
 chain. §4 (Execution order) explains why the canonical sequence puts
 S3 before S4 and the conditions under which the swap is acceptable.
+
+---
+
+## 3. Boundary Matrix
+
+The Boundary Matrix is the single source of truth for **who owns
+what** across the six sub-specs. Every load-bearing concept —
+component, table, entity, enforcement hook, dashboard page —
+appears exactly once and has exactly one **Owner**. Any sub-spec
+that needs to reference the concept appears only as a **Consumer**;
+it may not claim ownership.
+
+### 3.1 How to use this matrix
+
+- **When authoring a sub-spec's *Scope in / out*** (§§6.2, 7.2, …):
+  include only concepts whose Owner is this sub-spec. If a concept
+  you need is owned elsewhere, list it under *Dependencies* or
+  *Intake*, never under *Scope in*.
+- **When reviewing a sub-spec PR:** grep for every concept the PR
+  introduces; verify the PR's sub-spec is this matrix's Owner. A
+  concept introduced by a non-owner is a boundary violation and
+  must be reassigned before merge.
+- **When adding a new concept not in the matrix:** open a PR to
+  this document first, pick exactly one Owner, list Consumers, note
+  the invariant(s) touched. The concept is not ready for
+  implementation until the matrix is updated.
+
+### 3.2 Matrix
+
+Column semantics:
+
+- **Concept** — the load-bearing unit of ownership (module, class,
+  table, DDL change, enforcement hook, dashboard page, named
+  policy object).
+- **Owner** — exactly one sub-spec ID.
+- **Consumers** — sub-specs that reference / read / invoke the
+  concept. Not owners.
+- **Invariant** — comma-separated invariant numbers from
+  `agent_docs/architecture-invariants.md` that the concept touches.
+  A dash means "no invariant directly; scaffolding."
+- **Notes** — one-line clarification where the ownership choice is
+  non-obvious.
+
+#### 3.2.1 Outer ring (S1 owns)
+
+| Concept | Owner | Consumers | Invariant | Notes |
+|---|---|---|---|---|
+| `markets` table (DDL + writes) | S1 | S2, S3, S4, S5, S6 | 7, 8 | — |
+| `tokens` table (DDL + writes) | S1 | S2, S3, S4, S5, S6 | 7, 8 | — |
+| `book_snapshots` table | S1 | S3, S6 | 7, 8 | — |
+| `book_levels` table | S1 | S3, S6 | 7, 8 | Per-level rows, no JSON blobs (§Q2 of `docs/notes/2026-04-16-repo-issues-controller-evaluator.md`). |
+| `price_changes` table | S1 | S3, S6 | 7, 8 | `size=0` means level removed; Polymarket semantics. |
+| `trades` table | S1 | S3, S6 | 7, 8 | — |
+| `PostgresMarketDataStore` (typed methods over outer ring) | S1 | S3, S5, S6 | 8 | Single concrete class; no Protocol abstraction today (§Q5 of discovery note). |
+| `asyncpg.Pool` lifecycle (Runner-owned) | S1 | all | — | `min_size=2`, `max_size=10` per §Q6 of discovery note. |
+| `schema.sql` file (startup-applied) | S1 | S2, S3, S5 extend it | — | No migration framework yet. |
+| `MarketDiscoverySensor` class | S1 | S4 | 7 | Unconditional universe scan; writes `markets` / `tokens`. |
+| `MarketDataSensor` class | S1 | S4 | 6, 7 | Subscription-driven; consumes push from `SensorSubscriptionController` (S4). |
+| `SensorWatchdog` wiring to stream sensor | S1 | — | 7 | Watchdog class exists today; S1 wires it. |
+| WebSocket heartbeat + reconnect reconciliation (snapshot re-request) | S1 | — | 7 | Closes open question Q4 of the discovery note. |
+| JSONL → PG migration (`FeedbackStore` + `EvalStore` rewritten over SQL) | S1 | S5 (reads) | 8 | Retires `.data/*.jsonl` as runtime contract. |
+| Transaction-rollback test fixture (`db_conn`) | S1 | all test-side | — | Per §Test strategy of discovery note. |
+| `compose.yml` for local PG (dev) | S1 | all | — | `postgres:16` image; CI matches tag. |
+| `/signals` dashboard page (real orderbook depth) | S1 | — | 7 | Replaces today's empty orderbook with live book / delta rendering. |
+| Inner-ring `(strategy_id, strategy_version_id)` columns reserved `NULLABLE` on product tables | S1 | S2, S5 | 3, 8 | Columns land here; S2 seeds `"default"`; S5 upgrades to `NOT NULL`. |
+
+#### 3.2.2 Inner ring — aggregate + registry (S2 owns)
+
+| Concept | Owner | Consumers | Invariant | Notes |
+|---|---|---|---|---|
+| `Strategy` aggregate (`src/pms/strategies/aggregate.py`) | S2 | S4 (via projections), S5 (aggregate reader), S6 (aggregate reader) | 2 | Controller + Evaluator are the only aggregate readers. |
+| Projection types (`StrategyConfig`, `RiskParams`, `EvalSpec`, `ForecasterSpec`, `MarketSelectionSpec`) | S2 | S4, S5, S6 | 2, 5 | All `@dataclass(frozen=True)`. |
+| `strategies` table | S2 | S5, S6 | 3, 8 | One row per strategy id. |
+| `strategy_versions` table (immutable, hash-keyed) | S2 | S3, S4, S5, S6 | 3, 8 | Config hash = deterministic over full config; re-config produces a new row. |
+| `strategy_factors` link table | S2 | S3, S5 | 2, 4, 8 | Empty shape in S2; S3 populates as factor definitions land. |
+| `PostgresStrategyRegistry` | S2 | S4, S5 | — | CRUD over `strategies` + `strategy_versions`. |
+| Import-linter rules (`pms.sensor`, `pms.actuator` cannot import `pms.strategies.*` or `pms.controller.*`; `pms.sensor` cannot import `pms.market_selection`) | S2 | all (enforced in CI) | 5, 6 | Codified in `pyproject.toml` or `ruff.toml`; covers Invariants 5 and 6 import directions. |
+| `"default"` strategy + version row seed | S2 | pre-S5 runtime writes | 3 | Lets legacy runtime continue writing product rows tagged to `"default"` until S5 upgrades columns to `NOT NULL`. |
+| `/strategies` page — registry listing view | S2 | — | — | Minimal listing of registered strategies. Comparative metrics land in S5. |
+| `Strategy.select_markets(universe)` method **signature** (stub body raising `NotImplementedError`) | S2 | S4 (fills body) | 2, 6 | Signature belongs on the aggregate in S2; real implementations + tests land in S4. |
+
+#### 3.2.3 Middle ring — factor panel (S3 owns)
+
+| Concept | Owner | Consumers | Invariant | Notes |
+|---|---|---|---|---|
+| `src/pms/factors/definitions/` module tree (one file per raw factor) | S3 | S5, S6 | 4 | Raw factors only; composite logic lives in `StrategyConfig.factor_composition`. |
+| `factors` table (one row per factor definition) | S3 | S5, S6 | 4, 8 | No `factor_type` column distinguishing raw / composite. |
+| `factor_values` table (`factor_id, market_id, ts, value`) | S3 | S5, S6 | 4, 8 | No `strategy_id` column (Invariant 8). |
+| `FactorService` (compute + persist) | S3 | S5, S6 | 4 | Reads outer ring, writes middle ring. |
+| Migration of existing rules-detector heuristics into raw `FactorDefinition`s | S3 | S5 (factors feed forecasters) | 4 | Today's `RulesForecaster` / `StatisticalForecaster` split: raw detection → S3 factors, composition → S5 strategy config. |
+| `StrategyConfig.factor_composition` field (per-strategy composition logic, JSONB) | S3 | S5 | 2, 4 | Composition is strategy-scoped — lives on the projection, not in `factors`. |
+| `/factors` dashboard page | S3 | — | 4 | Shows factor values per `(factor_id, param, market_id)`. |
+
+#### 3.2.4 Active perception (S4 owns)
+
+| Concept | Owner | Consumers | Invariant | Notes |
+|---|---|---|---|---|
+| `MarketSelector` (`src/pms/market_selection/selector.py`) | S4 | S5 | 6 | Reads universe, applies each strategy's `select_markets(universe)`, returns merged market-id list. |
+| `SensorSubscriptionController` | S4 | — | 6, 7 | Pushes subscription updates to `MarketDataSensor`; Sensor never pulls. |
+| `Strategy.select_markets` **body + per-strategy tests** | S4 | S5 (per-strategy dispatch) | 2, 6 | Signature reserved in S2; body + coverage land here. |
+| Runner wiring: boot order (DiscoverySensor → Selector → SubscriptionController → DataSensor) + incremental resubscribe on strategy-config change | S4 | — | 6 | Cold-start handling per §Invariant 6 of `agent_docs/architecture-invariants.md`. |
+
+#### 3.2.5 Per-strategy Controller + Evaluator (S5 owns)
+
+| Concept | Owner | Consumers | Invariant | Notes |
+|---|---|---|---|---|
+| Per-strategy `ControllerPipeline` dispatch | S5 | — | 2, 5 | Each strategy gets its own forecaster stack / calibrator / sizer; aggregate reader. |
+| Per-strategy `Evaluator` aggregation (`GROUP BY strategy_id, strategy_version_id`) | S5 | S6 (reuses shape in backtest evaluator) | 3, 5 | Retires the global `MetricsCollector.snapshot()` shape. |
+| `(strategy_id, strategy_version_id)` `NOT NULL` DDL upgrade on all inner-ring product tables | S5 | — | 3 | Pre-S5 columns are `NULLABLE` with `"default"` tagging; upgrade is schema-change-only, no new table. |
+| `TradeDecision` / `OrderState` / `FillRecord` / `EvalRecord` strategy-field population end-to-end | S5 | — | 3 | S1 reserves columns, S2 seeds `"default"`, S5 populates real values from per-strategy dispatch. |
+| `Opportunity` entity (Controller output pre-execution) | S5 | S6 | 2 | Carries selected factor values + expected edge + rationale; replaces stringly-typed `stop_conditions` routing / model_id mix. |
+| `/strategies` comparative-metrics view (Brier / P&L / fill rate / slippage per strategy) | S5 | — | 3 | Upgrades the S2 listing page. |
+| `/metrics` per-strategy breakdown | S5 | — | 3 | Current global `/metrics` page extends to per-strategy rollup. |
+
+#### 3.2.6 Research backtest framework (S6 owns)
+
+| Concept | Owner | Consumers | Invariant | Notes |
+|---|---|---|---|---|
+| `BacktestSpec` (strategy version + dataset + execution model + risk policy + date range + config hash) | S6 | — | 3 | Stable hash for reproducibility across sweep runs. |
+| `ExecutionModel` (fill / fee / slippage / latency / staleness policy) | S6 | — | — | The only place backtest / paper / live legitimately diverge. |
+| `BacktestDataset` (source, version, coverage, data-quality gaps) | S6 | — | 8 | References outer + middle ring tables by ring, not by strategy id. |
+| `BacktestRun` (materialized run with artifact paths) | S6 | — | 3 | One `BacktestRun`, many `StrategyRun`s when multi-strategy. |
+| `StrategyRun` (materialized per-strategy run record, live or backtest) | S6 | S5 (reads the shape when persisting live per-strategy sessions) | 3 | Entity + DDL owned by S6; S5 may persist rows under the same shape for live sessions. |
+| Market-universe replay engine (multi-day, multi-market outer-ring reader) | S6 | — | 8 | Drives `FactorService` (S3) to precompute panels for the replay window. |
+| Parameter sweep (generate N `BacktestSpec`s, compare results with shared factor-panel cache) | S6 | — | — | — |
+| `BacktestLiveComparison` (equity divergence + selection overlap + backtest-only / live-only opportunities) | S6 | — | — | — |
+| `TimeAlignmentPolicy` + `SymbolNormalizationPolicy` | S6 | — | — | Aligns live and backtest timestamps / identifiers before comparison. |
+| `SelectionSimilarityMetric` (denominator explicit: backtest set / live set / union) | S6 | — | — | — |
+| `EvaluationReport` (run metadata + metrics + attribution + benchmarks) | S6 | — | — | — |
+| `PortfolioTarget` (time-indexed target exposure per strategy) | S6 | — | — | Research abstraction; live runtime continues to produce `TradeDecision` directly. |
+| `/backtest` ranked N-strategy comparison view | S6 | — | — | Upgrades the existing `/backtest` page. |
+
+### 3.3 Completeness checks
+
+Two mechanical checks make overlap and gap detectable without
+reading the sub-specs themselves.
+
+**Overlap check.** Every value in the **Concept** column of §3.2
+must be unique across *all* sub-matrices. Any duplicate is an
+overlap by definition. Reviewers should grep the `#### 3.2.\d+`
+blocks for concept-name duplication before approving any sub-spec
+PR.
+
+**Gap check.** Every one of the 8 invariants in
+`agent_docs/architecture-invariants.md` must appear in the
+**Invariant** column of at least one row below. A missing invariant
+is a gap — either the decomposition is incomplete, or the invariant
+is silently dropped. Current coverage:
+
+| Invariant | Carried by rows in… |
+|---|---|
+| 1 (concurrent feedback web) | *not a row* — enforced per sub-spec's *Acceptance criteria* (see §4 and each sub-spec). Invariant 1 is about runtime topology, not ownership. |
+| 2 (aggregate + projections) | S2 (aggregate + projections), S4 (`select_markets` body), S5 (per-strategy dispatch, `Opportunity`) |
+| 3 (immutable version tagging) | S1 (reserved columns + JSONL→PG migration), S2 (`strategy_versions` + `"default"` seed), S5 (`NOT NULL` upgrade + field population + per-strategy aggregation), S6 (`BacktestSpec` + `BacktestRun` + `StrategyRun`) |
+| 4 (raw factors only) | S2 (`strategy_factors` link table), S3 (all factor concepts), S5 (`Opportunity` carries selected factor values) |
+| 5 (strategy-aware boundary) | S2 (import-linter rules + projections), S5 (per-strategy dispatch + per-strategy aggregation) |
+| 6 (active perception) | S1 (`MarketDataSensor` as subscription sink), S2 (`select_markets` signature + import-linter rules), S4 (`MarketSelector` + `SensorSubscriptionController` + `select_markets` body + Runner wiring) |
+| 7 (two-layer sensor) | S1 (`MarketDiscoverySensor` + `MarketDataSensor` + watchdog + outer-ring DDL + `/signals` page) |
+| 8 (onion-concentric storage) | S1 (outer ring + JSONL→PG + column reservations), S2 (inner-ring aggregate + `strategy_factors`), S3 (middle ring), S5 (inner-ring product population via `NOT NULL` upgrade), S6 (`BacktestDataset` references rings by ring, not by strategy) |
+
+Every invariant has at least one owning row (Invariant 1 excepted
+for the reason noted).
+
+### 3.4 Entities deliberately out of scope for this decomposition
+
+Entities from
+`docs/notes/2026-04-16-evaluator-entity-abstraction.md` that have
+not been assigned an owner in §3.2 are **intentionally deferred**:
+
+- `StrategyBundle` (multi-strategy group mapping to one live
+  account): intentionally deferred. Today each strategy runs
+  independently with shared risk budget at the Runner level. Revisit
+  after S5, before considering Kalshi or multi-account expansion.
+- `MarketUniverse` as a first-class entity: the universe is the
+  implicit set of rows in `markets` today. Elevating it becomes an
+  entity only if S6 discovers it must be persisted separately from
+  the outer-ring tables (e.g., for dated universe snapshots).
+- `FactorAttribution` as a first-class Evaluator artifact: S6
+  introduces a `EvaluationReport` that *can* carry attribution
+  commentary, but a dedicated attribution entity with its own table
+  is deferred until the research workflow proves the need.
+- Finer-grained backtest entities (`SelectionSnapshot`,
+  `PriceLevel`, `MarketUpdate` as persisted event types): the
+  outer-ring tables (`book_snapshots`, `book_levels`,
+  `price_changes`) already encode equivalent state. Deferred unless
+  S6 finds the extraction worth the schema work.
+
+Any future proposal to add one of these to an owning sub-spec must
+amend §3.2 **in the same PR** that changes the sub-spec scope.
