@@ -251,8 +251,10 @@ or execution.
 **Enforcement.**
 - Import-linter rule: `pms.sensor`, `pms.actuator` cannot import
   anything from `pms.strategies.aggregate` nor from
-  `pms.controller.*`. This is codified in S1 (pyproject.toml or
-  ruff.toml) and enforced in every subsequent spec.
+  `pms.controller.*`. This is codified in S2 (pyproject.toml or
+  ruff.toml) — S2 is the first sub-spec where `pms.strategies.*`
+  exists, so the rule cannot meaningfully run before S2. Enforced
+  in every subsequent spec.
 
 ---
 
@@ -332,22 +334,24 @@ input) before any strategy runs its `select_markets`. Boot order:
   Writes to the outer ring `book_snapshots`, `book_levels`,
   `price_changes`, and `trades` tables.
 
-**Rationale.** Today's `PolymarketRestSensor` conflates the two: it
-polls `/markets` (discovery) and fabricates per-market orderbooks
-(data) in one class. This coupling makes it impossible to answer
-the cold-start of Invariant 6, because the sensor that provides the
-universe is the same sensor that needs a subscription list. Splitting
-the two lets the discovery sensor run unconditionally (no strategy
-dependency) while the data sensor becomes fully driven by active
-perception.
+**Rationale.** Today's `PolymarketRestSensor` conflates the two:
+from one class it polls `/markets` (discovery) and emits
+`MarketSignal`s whose `orderbook` is always `{"bids": [], "asks":
+[]}` — a market-data-shaped output without real depth (data). This
+coupling makes it impossible to answer the cold-start of
+Invariant 6, because the sensor that provides the universe is the
+same sensor that needs a subscription list. Splitting the two lets
+the discovery sensor run unconditionally (no strategy dependency)
+while the data sensor becomes fully driven by active perception.
 
 **Runtime evidence.**
 - Today: `src/pms/sensor/adapters/polymarket_rest.py` — conflated
   implementation. S1 splits this file into two sensor classes.
-- Today: `src/pms/sensor/adapters/polymarket_stream.py:71-90` —
-  `_message_to_signal` discards `book` and `price_change` events.
-  S1/S5 (stream sensor upgrade) replaces this with a stateful
-  parser that writes to the outer ring.
+- Today: `src/pms/sensor/adapters/polymarket_stream.py:71-77` —
+  `_message_dict_to_signal` (module-level helper) drops `book` and
+  `price_change` events by accepting only messages that carry
+  `price` + `market_id`. S1 (stream sensor upgrade) replaces this
+  with a stateful parser that writes to the outer ring.
 
 **Anti-patterns.**
 - A Sensor class that both polls the market universe and maintains

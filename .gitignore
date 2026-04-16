@@ -27,3 +27,6 @@ target/
 
 # OpenViking memory (per-user, not committed)
 .openviking/
+
+# Claude worktrees (created by agent skills; local only)
+.claude/
