@@ -1,7 +1,7 @@
 ---
 title: PMS Project Decomposition Design
 task_id: pms-project-decomposition
-status: draft
+status: active
 created: 2026-04-16
 updated: 2026-04-16
 scope: project-level (spans 6 harness sub-specs)
