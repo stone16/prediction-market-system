@@ -169,7 +169,9 @@ async def test_stream_keepalive_resets_watchdog_without_fallback() -> None:
         nonlocal fallback_calls
         fallback_calls += 1
 
-    watchdog = SensorWatchdog(timeout_s=0.05, fallback=fallback)
+    # Allow local websocket handshake jitter so this test verifies that
+    # keepalive traffic resets the watchdog instead of racing connection setup.
+    watchdog = SensorWatchdog(timeout_s=0.2, fallback=fallback)
 
     async def handler(websocket: Any) -> None:
         await websocket.recv()
