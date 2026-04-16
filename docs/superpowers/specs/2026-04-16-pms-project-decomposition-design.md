@@ -865,14 +865,16 @@ Polymarket CLOB data persisted in PostgreSQL and rendered on
 `/signals` renders real depth, not fabricated bid/ask). In doing so,
 S1 also lands as the **schema-foundation sub-spec**: `schema.sql`
 declares the outer-ring tables plus the inner-ring product-table
-shells that existing runtime code already depends on (`feedback`,
-`eval_records`, plus stubs for `orders` / `fills` as the S2
-aggregate needs them), with `(strategy_id, strategy_version_id)`
-columns reserved `NULLABLE` on the inner-ring product tables so S2
-can seed `"default"` and S5 can upgrade to `NOT NULL` without a
-second full-table migration (§3.2.1 row 18, Invariants 3 + 8).
-The middle ring (`factors` / `factor_values`) is owned by S3 and
-does not appear in S1's `schema.sql`.
+shells that existing runtime code already depends on — today that
+is exactly `feedback` and `eval_records`, the two JSONL stores
+being migrated per §3.2.1 row 14. Both carry `(strategy_id,
+strategy_version_id)` columns reserved `NULLABLE` so S2 can seed
+`"default"` and S5 can upgrade to `NOT NULL` without a second
+full-table migration (§3.2.1 row 18, Invariants 3 + 8). The middle
+ring (`factors` / `factor_values`) is owned by S3 (§3.2.3) and does
+not appear in S1's `schema.sql` — Invariant 8 (onion-concentric
+ring ownership) keeps the middle-ring DDL outside the outer-ring
+sub-spec.
 
 ### 6.2 Scope (in / out)
 
@@ -954,9 +956,13 @@ lists must match concept-for-concept.
 
 18. **Inner-ring `(strategy_id, strategy_version_id)` columns
     reserved `NULLABLE` on product tables.** `feedback` +
-    `eval_records` (and stubs for `orders` + `fills` to be populated
-    post-S1) carry both columns `NULLABLE`; S2 seeds `"default"`,
-    S5 upgrades to `NOT NULL` (Invariants 3, 8).
+    `eval_records` (the two inner-ring product tables S1 creates,
+    matching the JSONL→PG migration in §3.2.1 row 14) carry both
+    columns `NULLABLE`; S2 seeds `"default"`, S5 upgrades to
+    `NOT NULL` (Invariants 3, 8). Additional inner-ring product
+    tables (e.g. for `OrderState` / `FillRecord` persistence) are
+    introduced by the sub-spec that needs them with the matching
+    §3.2 amendment per §5.4 boundary-matrix audit.
 
 **Scope out.** The following look S1-adjacent but are owned by
 other sub-specs. A PR landing any of these under `.harness/pms-
@@ -964,28 +970,37 @@ market-data-v1/` is scope drift.
 
 - `Strategy` aggregate + projection types (`StrategyConfig`,
   `RiskParams`, `EvalSpec`, `ForecasterSpec`, `MarketSelectionSpec`)
-  → **S2** (§3.2.2). S1 does not import `pms.strategies.*` from any
-  sensor or storage module (Invariant 5).
+  → **S2** (§3.2.2; Invariants 2 + 5 — Strategy as rich aggregate,
+  strategy-aware boundary). S1 does not import `pms.strategies.*`
+  from any sensor or storage module.
 - `strategies` / `strategy_versions` aggregate tables and the
-  `PostgresStrategyRegistry` → **S2** (§3.2.2).
-- `strategy_factors` link table → **S2** (§3.2.2); empty shape only.
+  `PostgresStrategyRegistry` → **S2** (§3.2.2; Invariants 3 + 8 —
+  immutable version tagging, inner-ring ownership).
+- `strategy_factors` link table → **S2** (§3.2.2; Invariants 2 + 4
+  + 8 — strategy-side composition over raw factors, inner-ring
+  ownership); empty shape only in S2.
 - `factors` / `factor_values` tables and `FactorService` → **S3**
-  (§3.2.3).
-- `/factors` dashboard page → **S3** (§3.2.3).
+  (§3.2.3; Invariants 4 + 8 — raw factors only, middle-ring
+  ownership).
+- `/factors` dashboard page → **S3** (§3.2.3; Invariant 4).
 - `MarketSelector` + `SensorSubscriptionController` +
   `Strategy.select_markets(universe)` method + boot-order wiring
   (DiscoverySensor → Selector → SubscriptionController → DataSensor)
-  → **S4** (§3.2.4). S1's `MarketDataSensor` ships as a subscription
-  *sink* but gets its asset-id list from configuration (or a stub
-  loader) until S4 lands the push channel.
+  → **S4** (§3.2.4; Invariants 6 + 7 — active perception,
+  subscription sink on data sensor). S1's `MarketDataSensor` ships
+  as a subscription *sink* but gets its asset-id list from
+  configuration (or a stub loader) until S4 lands the push channel.
 - Per-strategy `ControllerPipeline` dispatch, per-strategy Evaluator
   aggregation, the `(strategy_id, strategy_version_id)` `NOT NULL`
   schema upgrade, `Opportunity` entity, `/strategies` comparative
-  view, `/metrics` per-strategy breakdown → **S5** (§3.2.5).
+  view, `/metrics` per-strategy breakdown → **S5** (§3.2.5;
+  Invariants 2 + 3 + 5 — projections, immutable version tagging,
+  strategy-aware boundary for Controller + Evaluator).
 - `BacktestSpec` / `ExecutionModel` / `BacktestDataset` /
   `BacktestRun` / `StrategyRun` / parameter sweep /
   `BacktestLiveComparison` / `/backtest` ranked N-strategy view →
-  **S6** (§3.2.6).
+  **S6** (§3.2.6; uses Invariants 3 + 8 — version-tagged
+  reproducibility and ring-respecting reads).
 
 ### 6.3 Acceptance criteria (system-level)
 
@@ -1137,13 +1152,17 @@ can diff S2's Intake (once §7.6 lands) against this list.
 1. **`schema.sql`** (§3.2.1 row 9) applies cleanly against a fresh
    PG 16 DB and produces:
    - Outer ring: `markets`, `tokens`, `book_snapshots`,
-     `book_levels`, `price_changes`, `trades` (§3.2.1 rows 1–6).
+     `book_levels`, `price_changes`, `trades` (§3.2.1 rows 1–6;
+     Invariants 7, 8).
    - Inner-ring product-table shells: `feedback`, `eval_records`,
-     plus stubs for `orders` / `fills` as needed by S2, each with
-     `(strategy_id, strategy_version_id)` `NULLABLE` (§3.2.1 row 18,
-     Invariant 3).
+     each with `(strategy_id, strategy_version_id)` `NULLABLE`
+     (§3.2.1 row 18, Invariants 3, 8). Additional inner-ring
+     product tables for `OrderState` / `FillRecord` persistence
+     are explicitly out of S1 scope — added by the sub-spec that
+     needs them per the §5.4 boundary-matrix audit rule.
    - Middle ring: **no** `factors` / `factor_values` DDL lands in
-     S1's `schema.sql` — S3 owns both tables (§3.2.3).
+     S1's `schema.sql` — S3 owns both tables (§3.2.3, Invariants
+     4 + 8 — middle-ring ownership).
 2. **`PostgresMarketDataStore`** (§3.2.1 row 7) at
    `src/pms/storage/market_data_store.py` (harness spec may choose
    final path) with typed methods matching discovery-note Q6 shape
