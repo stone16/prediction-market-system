@@ -297,7 +297,6 @@ Column semantics:
 | Import-linter rules (`pms.sensor`, `pms.actuator` cannot import `pms.strategies.*` or `pms.controller.*`; `pms.sensor` cannot import `pms.market_selection`) | S2 | all (enforced in CI) | 5, 6 | Codified in `pyproject.toml` or `ruff.toml`; covers Invariants 5 and 6 import directions. |
 | `"default"` strategy + version row seed | S2 | pre-S5 runtime writes | 3 | Lets legacy runtime continue writing product rows tagged to `"default"` until S5 upgrades columns to `NOT NULL`. |
 | `/strategies` page — registry listing view | S2 | — | — | Minimal listing of registered strategies. Comparative metrics land in S5. |
-| `Strategy.select_markets(universe)` method **signature** (stub body raising `NotImplementedError`) | S2 | S4 (fills body) | 2, 6 | Signature belongs on the aggregate in S2; real implementations + tests land in S4. |
 
 #### 3.2.3 Middle ring — factor panel (S3 owns)
 
@@ -317,7 +316,7 @@ Column semantics:
 |---|---|---|---|---|
 | `MarketSelector` (`src/pms/market_selection/selector.py`) | S4 | S5 | 6 | Reads universe, applies each strategy's `select_markets(universe)`, returns merged market-id list. |
 | `SensorSubscriptionController` | S4 | — | 6, 7 | Pushes subscription updates to `MarketDataSensor`; Sensor never pulls. |
-| `Strategy.select_markets` **body + per-strategy tests** | S4 | S5 (per-strategy dispatch) | 2, 6 | Signature reserved in S2; body + coverage land here. |
+| `Strategy.select_markets(universe)` method (declaration + body + per-strategy tests) | S4 | S5 (per-strategy dispatch) | 2, 6 | Entire method surface is S4-owned: the aggregate class lives on S2's `Strategy` type, but this method lands with the active-perception machinery (`MarketSelector` + subscription controller) to keep the method and its first consumer in the same commit. |
 | Runner wiring: boot order (DiscoverySensor → Selector → SubscriptionController → DataSensor) + incremental resubscribe on strategy-config change | S4 | — | 6 | Cold-start handling per §Invariant 6 of `agent_docs/architecture-invariants.md`. |
 
 #### 3.2.5 Per-strategy Controller + Evaluator (S5 owns)
@@ -340,7 +339,7 @@ Column semantics:
 | `ExecutionModel` (fill / fee / slippage / latency / staleness policy) | S6 | — | — | The only place backtest / paper / live legitimately diverge. |
 | `BacktestDataset` (source, version, coverage, data-quality gaps) | S6 | — | 8 | References outer + middle ring tables by ring, not by strategy id. |
 | `BacktestRun` (materialized run with artifact paths) | S6 | — | 3 | One `BacktestRun`, many `StrategyRun`s when multi-strategy. |
-| `StrategyRun` (materialized per-strategy run record, live or backtest) | S6 | S5 (reads the shape when persisting live per-strategy sessions) | 3 | Entity + DDL owned by S6; S5 may persist rows under the same shape for live sessions. |
+| `StrategyRun` (materialized per-strategy run record for backtest runs) | S6 | — | 3 | Backtest-only entity. Live / paper per-strategy tracking happens through the inner-ring product tables (`fills`, `eval_records`, …) grouped by `(strategy_id, strategy_version_id)` — no separate live `strategy_runs` table is needed, and introducing one would create a reverse dependency S5 → S6 that the DAG (§2) forbids. |
 | Market-universe replay engine (multi-day, multi-market outer-ring reader) | S6 | — | 8 | Drives `FactorService` (S3) to precompute panels for the replay window. |
 | Parameter sweep (generate N `BacktestSpec`s, compare results with shared factor-panel cache) | S6 | — | — | — |
 | `BacktestLiveComparison` (equity divergence + selection overlap + backtest-only / live-only opportunities) | S6 | — | — | — |
@@ -370,13 +369,13 @@ is silently dropped. Current coverage:
 | Invariant | Carried by rows in… |
 |---|---|
 | 1 (concurrent feedback web) | *not a row* — enforced per sub-spec's *Acceptance criteria* (see §4 and each sub-spec). Invariant 1 is about runtime topology, not ownership. |
-| 2 (aggregate + projections) | S2 (aggregate + projections), S4 (`select_markets` body), S5 (per-strategy dispatch, `Opportunity`) |
-| 3 (immutable version tagging) | S1 (reserved columns + JSONL→PG migration), S2 (`strategy_versions` + `"default"` seed), S5 (`NOT NULL` upgrade + field population + per-strategy aggregation), S6 (`BacktestSpec` + `BacktestRun` + `StrategyRun`) |
-| 4 (raw factors only) | S2 (`strategy_factors` link table), S3 (all factor concepts), S5 (`Opportunity` carries selected factor values) |
-| 5 (strategy-aware boundary) | S2 (import-linter rules + projections), S5 (per-strategy dispatch + per-strategy aggregation) |
-| 6 (active perception) | S1 (`MarketDataSensor` as subscription sink), S2 (`select_markets` signature + import-linter rules), S4 (`MarketSelector` + `SensorSubscriptionController` + `select_markets` body + Runner wiring) |
-| 7 (two-layer sensor) | S1 (`MarketDiscoverySensor` + `MarketDataSensor` + watchdog + outer-ring DDL + `/signals` page) |
-| 8 (onion-concentric storage) | S1 (outer ring + JSONL→PG + column reservations), S2 (inner-ring aggregate + `strategy_factors`), S3 (middle ring), S5 (inner-ring product population via `NOT NULL` upgrade), S6 (`BacktestDataset` references rings by ring, not by strategy) |
+| 2 (aggregate + projections) | S2 (aggregate, projections, `strategy_factors`), S3 (`factor_composition` field), S4 (`select_markets` method), S5 (per-strategy `ControllerPipeline`, `Opportunity`) |
+| 3 (immutable version tagging) | S1 (reserved columns + JSONL→PG migration), S2 (`strategies` + `strategy_versions` + `"default"` seed), S5 (`NOT NULL` upgrade + field population + per-strategy aggregation + comparative view + per-strategy metrics), S6 (`BacktestSpec` + `BacktestRun` + `StrategyRun`) |
+| 4 (raw factors only) | S2 (`strategy_factors` link table), S3 (definitions module, `factors`, `factor_values`, `FactorService`, rules-detector migration, `factor_composition`, `/factors` page) |
+| 5 (strategy-aware boundary) | S2 (projections, import-linter rules), S5 (per-strategy `ControllerPipeline` + per-strategy `Evaluator` aggregation) |
+| 6 (active perception) | S1 (`MarketDataSensor` as subscription sink), S2 (import-linter rules covering `pms.sensor` → `pms.market_selection`), S4 (`MarketSelector` + `SensorSubscriptionController` + `select_markets` method + Runner wiring) |
+| 7 (two-layer sensor) | S1 (`MarketDiscoverySensor` + `MarketDataSensor` + watchdog wiring + outer-ring DDL + `/signals` page), S4 (`SensorSubscriptionController` as the subscription push channel) |
+| 8 (onion-concentric storage) | S1 (outer-ring DDL + column reservations + JSONL→PG), S2 (inner-ring aggregate tables + `strategy_factors`), S3 (middle-ring tables), S6 (`BacktestDataset` references rings by ring, not by strategy id) |
 
 Every invariant has at least one owning row (Invariant 1 excepted
 for the reason noted).

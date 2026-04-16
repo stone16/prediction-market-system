@@ -251,8 +251,10 @@ or execution.
 **Enforcement.**
 - Import-linter rule: `pms.sensor`, `pms.actuator` cannot import
   anything from `pms.strategies.aggregate` nor from
-  `pms.controller.*`. This is codified in S1 (pyproject.toml or
-  ruff.toml) and enforced in every subsequent spec.
+  `pms.controller.*`. This is codified in S2 (pyproject.toml or
+  ruff.toml) — S2 is the first sub-spec where `pms.strategies.*`
+  exists, so the rule cannot meaningfully run before S2. Enforced
+  in every subsequent spec.
 
 ---
 
