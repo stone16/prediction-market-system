@@ -332,14 +332,15 @@ input) before any strategy runs its `select_markets`. Boot order:
   Writes to the outer ring `book_snapshots`, `book_levels`,
   `price_changes`, and `trades` tables.
 
-**Rationale.** Today's `PolymarketRestSensor` conflates the two: it
-polls `/markets` (discovery) and fabricates per-market orderbooks
-(data) in one class. This coupling makes it impossible to answer
-the cold-start of Invariant 6, because the sensor that provides the
-universe is the same sensor that needs a subscription list. Splitting
-the two lets the discovery sensor run unconditionally (no strategy
-dependency) while the data sensor becomes fully driven by active
-perception.
+**Rationale.** Today's `PolymarketRestSensor` conflates the two:
+from one class it polls `/markets` (discovery) and emits
+`MarketSignal`s whose `orderbook` is always `{"bids": [], "asks":
+[]}` — a market-data-shaped output without real depth (data). This
+coupling makes it impossible to answer the cold-start of
+Invariant 6, because the sensor that provides the universe is the
+same sensor that needs a subscription list. Splitting the two lets
+the discovery sensor run unconditionally (no strategy dependency)
+while the data sensor becomes fully driven by active perception.
 
 **Runtime evidence.**
 - Today: `src/pms/sensor/adapters/polymarket_rest.py` — conflated
