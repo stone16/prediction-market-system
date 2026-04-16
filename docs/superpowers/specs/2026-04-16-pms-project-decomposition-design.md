@@ -1386,3 +1386,631 @@ for go-ahead before drafting
 ```
 
 ---
+
+## 7. Sub-spec S2 — pms-strategy-aggregate-v1
+
+S2 is the **second node** of the DAG (§2.1). Its single predecessor
+edge is S1 (S1 → S2); its outgoing edges are S2 → S3 and S2 → S4
+(§2.1, §2.4). S2 is the sub-spec that turns S1's reserved
+`NULLABLE` strategy columns into a populated inner-ring aggregate,
+puts the import-linter rules that Invariants 2 + 5 + 6 require into
+CI, and seeds a `"default"` strategy so legacy runtime writes stop
+producing implicit `NULL` tags. This section expands the skeleton in
+`agent_docs/project-roadmap.md` §S2 into the project-level contract
+that the harness run under `.harness/pms-strategy-aggregate-v1/`
+will consume.
+
+### 7.1 Goal
+
+S2 delivers the **inner-ring aggregate and registry** that makes
+**strategy onboarding without code rewrite** possible — closing
+observable-capability item #7 of §1.1 (new strategy = new row in
+`strategies` + a module under `src/pms/strategies/<id>/` + a
+`StrategyConfig` blob, with no changes required in `src/pms/sensor/`
+or `src/pms/actuator/`; Invariant 5 — strategy-agnostic boundary).
+Concretely, S2 lands a rich `Strategy` aggregate (Invariant 2) with
+frozen projection types (`StrategyConfig`, `RiskParams`, `EvalSpec`,
+`ForecasterSpec`, `MarketSelectionSpec`), the
+`strategies` + `strategy_versions` + `strategy_factors` DDL
+(Invariants 3, 8), a `PostgresStrategyRegistry` CRUD class,
+import-linter rules in CI that codify Invariants 2 + 5 + 6 import
+directions, a `"default"` strategy + version row seed so legacy
+runtime writes tag `"default"` instead of `NULL` during the pre-S5
+window (Invariant 3 pattern: NULLABLE → seed → NOT NULL), and a
+minimal `/strategies` listing page. **No per-strategy dispatch
+lands in S2** — per-strategy `ControllerPipeline` dispatch,
+per-strategy Evaluator aggregation, and the `(strategy_id,
+strategy_version_id)` `NOT NULL` upgrade are S5-owned (§3.2.5).
+
+### 7.2 Scope (in / out)
+
+**Scope in.** Exactly the 9 concepts owned by S2 in §3.2.2, in the
+same order, each with a one-line scope descriptor. Reviewers
+verifying boundary integrity grep §3.2.2 against this list; the
+lists must match concept-for-concept.
+
+1. **`Strategy` aggregate** at
+   `src/pms/strategies/aggregate.py`. The DDD-style rich aggregate
+   that owns factor specs, risk params, eval spec, market selection
+   rules, forecaster composition, router gating, and versioning
+   (Invariant 2). Consumed by S4 (via projections), S5 (aggregate
+   reader), and S6 (aggregate reader).
+2. **Projection types** (`StrategyConfig`, `RiskParams`,
+   `EvalSpec`, `ForecasterSpec`, `MarketSelectionSpec`) at
+   `src/pms/strategies/projections.py`. All `@dataclass(frozen=
+   True)`; downstream layers receive these, never the aggregate
+   itself (Invariants 2, 5). Consumed by S4, S5, S6.
+3. **`strategies` table.** One row per strategy id; the inner-ring
+   identity table (Invariants 3, 8). Consumed by S5, S6.
+4. **`strategy_versions` table** (immutable, hash-keyed). Config
+   hash = deterministic hash over the full `StrategyConfig` +
+   `RiskParams` + `EvalSpec` + `ForecasterSpec` +
+   `MarketSelectionSpec` projection set; re-configuring produces a
+   new row, never an in-place edit (Invariants 3, 8). Consumed by
+   S3, S4, S5, S6.
+5. **`strategy_factors` link table.** Empty shape in S2 —
+   columns `(strategy_id, strategy_version_id, factor_id, param,
+   weight, direction)` declared but no rows populated until S3
+   lands factor definitions. The `strategy_version_id` column is
+   required so old strategy versions retain their factor wiring
+   after a strategy re-config creates a new version row
+   (Invariant 3 immutability). Consumed by S3, S5 (Invariants 2,
+   4, 8).
+6. **`PostgresStrategyRegistry`.** CRUD class over `strategies` +
+   `strategy_versions` using the S1-owned `asyncpg.Pool`; typed
+   methods return frozen dataclasses (matches S1's raw-SQL
+   convention). Consumed by S4, S5.
+7. **Import-linter rules.** Codified in `pyproject.toml` or
+   `ruff.toml` per the wording of §3.2.2 row 7: `pms.sensor` and
+   `pms.actuator` cannot import `pms.strategies.*` or
+   `pms.controller.*`; `pms.sensor` cannot import
+   `pms.market_selection`. The authoritative rule target is
+   `pms.strategies.aggregate` (per
+   `agent_docs/architecture-invariants.md` §§Invariants 2 + 5
+   Enforcement); the `pms.strategies.projections` submodule is
+   explicitly **allowed** for downstream layers (`RiskParams` is
+   the canonical Actuator-boundary import). The linter config
+   implements the narrower rule (aggregate forbidden, projections
+   allowed) so legitimate projection imports continue to work
+   (Invariants 5, 6). Enforced in CI; consumed by all sub-specs
+   transitively (every PR runs the linter).
+8. **`"default"` strategy + version row seed.** A single seed row
+   in `strategies` and a corresponding deterministic-hash row in
+   `strategy_versions` so legacy runtime writes (which predate
+   per-strategy dispatch) tag `(strategy_id='default',
+   strategy_version_id='default-v1')` on every inner-ring product
+   row (Invariant 3, NULLABLE→seed pattern). Consumed by pre-S5
+   runtime writes.
+9. **`/strategies` dashboard page — registry listing view.** A
+   minimal Next.js page that reads `strategies` +
+   `strategy_versions` through the FastAPI layer and lists each
+   registered strategy (id, active version id, created_at).
+   Comparative Brier / P&L / fill-rate metrics **do not** land
+   here; those are an S5 upgrade to this page (§3.2.5).
+
+**Scope out.** The following look S2-adjacent but are owned by
+other sub-specs. A PR landing any of these under
+`.harness/pms-strategy-aggregate-v1/` is scope drift.
+
+- **`MarketDiscoverySensor` / `MarketDataSensor` / outer-ring DDL /
+  `PostgresMarketDataStore` / `asyncpg.Pool` lifecycle /
+  `schema.sql` bootstrap / JSONL → PG migration / `/signals`
+  dashboard page → S1** (§3.2.1). S2 extends `schema.sql` to add
+  the aggregate tables but does not modify the outer-ring DDL S1
+  already applied.
+- **`factors` table / `factor_values` table / `FactorService` /
+  `src/pms/factors/definitions/` module tree / rules-detector
+  migration into raw factors / `StrategyConfig.factor_composition`
+  body wiring / `/factors` dashboard page → S3** (§3.2.3). S2
+  declares the `strategy_factors` link table as an empty shape
+  only; populating it is S3 work.
+- **`MarketSelector` / `SensorSubscriptionController` /
+  `Strategy.select_markets(universe)` method (declaration + body +
+  per-strategy tests) / Runner wiring for the boot order → S4**
+  (§3.2.4). §3.2.4 row 3 states the *entire method surface* is
+  S4-owned — S2 does **not** ship a `select_markets` signature
+  declaration, signature stub, or docstring on the aggregate;
+  the method lands wholesale with S4's active-perception
+  machinery to keep the method and its first consumer in the
+  same commit.
+- **Per-strategy `ControllerPipeline` dispatch / per-strategy
+  Evaluator aggregation / `(strategy_id, strategy_version_id)`
+  `NOT NULL` DDL upgrade on inner-ring product tables /
+  `TradeDecision` + `OrderState` + `FillRecord` + `EvalRecord`
+  strategy-field population / `Opportunity` entity / `/strategies`
+  comparative-metrics view / `/metrics` per-strategy breakdown →
+  S5** (§3.2.5). S2 keeps product-table columns `NULLABLE` with
+  the `"default"` seed tagging legacy writes; upgrading to
+  `NOT NULL` is S5 schema-change-only work.
+- **`BacktestSpec` / `ExecutionModel` / `BacktestDataset` /
+  `BacktestRun` / `StrategyRun` / market-universe replay engine /
+  parameter sweep / `BacktestLiveComparison` /
+  `TimeAlignmentPolicy` / `SymbolNormalizationPolicy` /
+  `SelectionSimilarityMetric` / `EvaluationReport` /
+  `PortfolioTarget` / `/backtest` ranked view → S6** (§3.2.6).
+  Strategy-parameter-sweep tooling is an S6 concern; S2 produces
+  the aggregate + version hash that S6 will reference, not the
+  sweep infrastructure.
+
+### 7.3 Acceptance criteria (system-level)
+
+Eight observable-capability bullets. Each is verifiable at the
+system level — not a checklist item for an individual CP.
+
+1. **Aggregate + projection types exist with correct shape.**
+   `src/pms/strategies/aggregate.py` defines a `Strategy` class
+   that owns `StrategyConfig`, `RiskParams`, `EvalSpec`,
+   `ForecasterSpec`, `MarketSelectionSpec`;
+   `src/pms/strategies/projections.py` declares all five as
+   `@dataclass(frozen=True)` with no setters and no mutable
+   containers (Invariant 2). Mypy strict is clean on both modules
+   (§5.2).
+2. **`strategies` + `strategy_versions` + `strategy_factors` DDL
+   lands in `schema.sql` and applies cleanly.** Running `psql -f
+   schema.sql` against a fresh PG 16 DB now produces the three
+   aggregate tables alongside S1's outer-ring tables; zero errors
+   (Invariants 3, 8). All three tables are inner-ring;
+   `strategy_factors` is a link table that will carry
+   `strategy_id` + `strategy_version_id` + `factor_id` + per-
+   strategy weighting columns (populated by S3), which is correct
+   for its inner-ring classification. The Invariant 8 check
+   (§5.3 mechanical half) is that **no outer-ring or middle-ring
+   table gains a `strategy_id` or `strategy_version_id` column** —
+   verified by the delimited-DDL grep on the outer-ring and
+   middle-ring blocks of `schema.sql`; zero matches required.
+3. **Version-hash function is deterministic across processes.**
+   Given identical projection inputs, the hash function in
+   `src/pms/strategies/versioning.py` (or wherever the harness
+   spec places it) produces identical `strategy_version_id`
+   output across Python 3.13 sub-interpreters, across machines,
+   and across repeated module reloads. A test locks this in
+   against at least three synthetic `StrategyConfig` inputs
+   (Invariant 3 immutability rationale).
+4. **`PostgresStrategyRegistry` CRUD round-trips.** Inserting a
+   `Strategy` aggregate via the registry, then reading it back
+   through the registry's `get_by_id` + `list_versions` methods,
+   produces a byte-identical projection tuple; all tests run
+   against the S1-owned `db_conn` transaction-rollback fixture
+   (Invariant 2).
+5. **Every legacy runtime write carries `(strategy_id='default',
+   strategy_version_id='default-v1')`.** A system-level
+   integration test drives a signal → decision → eval_record flow
+   through the pre-S5 Runner; every resulting row in the
+   inner-ring product tables that exist by the end of S2
+   (`feedback` and `eval_records` from S1, plus any S2 tables)
+   carries the `"default"` tag (Invariant 3 NULLABLE→seed pattern
+   enforced; no implicit `NULL` strategy-tag rows). `OrderState`
+   / `FillRecord` persistence tables are out of S1 scope per S1
+   §6.7 and so are out of this acceptance criterion's surface
+   unless S2 introduces them with a §3.2.2 amendment.
+6. **Import-linter rules run in CI and block violations.** A PR
+   that introduces `from pms.strategies.aggregate import Strategy`
+   inside `src/pms/sensor/` or `src/pms/actuator/` fails CI at the
+   linter stage; a PR that introduces `from pms.market_selection`
+   inside `src/pms/sensor/` fails likewise. Both rule targets are
+   codified; the linter report is the PR evidence (Invariants 5,
+   6 — Invariant 5 is mechanically checkable per §5.3; Invariant 6
+   is Mixed per §5.3 and also requires reviewer sign-off on
+   Sensor strategy-agnosticism).
+7. **`/strategies` page renders the seeded `"default"` row.** A
+   Playwright assertion loads `/strategies`, confirms at least one
+   row is present with id `"default"` and version `"default-v1"`,
+   and confirms the page fetches via the FastAPI route rather than
+   a hardcoded fixture.
+8. **Canonical gates green on a fresh clone.** `uv run pytest -q`
+   passes with the §5.1 baseline (≥ 70 tests + 2 skipped
+   integration tests gated on `PMS_RUN_INTEGRATION=1`) and
+   `uv run mypy src/ tests/ --strict` is clean, on a fresh shell
+   per 🟡 Fresh-clone baseline verification (§5.1, §5.2).
+
+### 7.4 Non-goals
+
+Explicit deferrals. An S2 harness spec that lands any of these
+items is scope drift.
+
+- **No per-strategy `ControllerPipeline` dispatch.** The existing
+  single-global `ControllerPipeline` keeps running through S2;
+  dispatching a pipeline per registered strategy is S5 (§3.2.5,
+  Invariants 2, 5).
+- **No `Strategy.select_markets(universe)` method at all** — no
+  declaration, no signature stub, no docstring. Per §3.2.4 row 3
+  of the main spec the entire method surface (declaration + body
+  + per-strategy tests) is S4-owned and lands wholesale with the
+  active-perception machinery in the same commit (§3.2.4,
+  Invariant 6).
+- **No factor definitions.** `src/pms/factors/definitions/`, the
+  `factors` and `factor_values` tables, and `FactorService` are
+  S3 (§3.2.3, Invariant 4). The `strategy_factors` link table
+  lands as an empty shape only — its rows populate in S3.
+- **No `NOT NULL` upgrade on inner-ring product tables.**
+  Whatever inner-ring product tables exist by the start of S5
+  (`feedback` and `eval_records` from S1, plus any additional
+  tables introduced by S2–S4 with matching §3.2 amendments per
+  §5.4) keep `(strategy_id, strategy_version_id)` `NULLABLE`
+  through S2–S4; the schema-change-only upgrade is S5 (§3.2.5,
+  Invariant 3).
+- **No parameter-sweep tooling or `BacktestSpec` / `BacktestRun`
+  integration.** Strategy-parameter sweeps, backtest run
+  materialisation, and N-strategy comparison reports are S6
+  (§3.2.6).
+- **No `StrategyBundle` / multi-strategy account grouping.**
+  §3.4 defers `StrategyBundle` to post-S5; S2 treats each
+  strategy as independent.
+
+### 7.5 Dependencies
+
+- **Upstream sub-specs.** **S1 only.** S2's single incoming DAG
+  edge is S1 → S2 (§2.1); S2's Intake (§7.6) reads S1's
+  Leave-behind (§6.7) concept-for-concept.
+- **Upstream invariants.** Primary: **2** (Strategy as rich
+  aggregate; projections), **3** (immutable version tagging),
+  **5** (strategy-agnostic Sensor + Actuator boundary),
+  **8** (inner-ring ownership of aggregate + product tables).
+  Partial touches:
+  - **4** — S2 lands the `strategy_factors` link table as an empty
+    shape so S3 has the foreign-key shape to populate when factor
+    definitions arrive; the raw-factors-only rule (Invariant 4
+    Enforcement) is S3-owned.
+  - **6** — S2 closes only the **import-boundary half** of
+    Invariant 6 (the import-linter rule `pms.sensor` cannot import
+    `pms.market_selection`, codified per §3.2.2 row 7 with
+    Invariant column "5, 6"). The **behavioural half** of
+    Invariant 6 (`MarketSelector` + `SensorSubscriptionController`
+    + active-perception loop wiring) is S4-owned (§3.2.4,
+    §5.3 Mixed-invariant review gate).
+
+### 7.6 Intake
+
+Minimum set that must exist before a harness run opens under
+`.harness/pms-strategy-aggregate-v1/`. S1's Leave-behind (§6.7) is
+the source of truth; the items below reference §3.2.1 rows by
+number so the §4.3 gate-4 boundary-integrity check can diff this
+list against S1's Leave-behind mechanically.
+
+1. **Outer-ring DDL applied via `schema.sql`** (§3.2.1 rows 1–6 +
+   row 9). `markets`, `tokens`, `book_snapshots`, `book_levels`,
+   `price_changes`, `trades` all exist in a fresh PG 16 DB; S2's
+   new `strategies` / `strategy_versions` / `strategy_factors`
+   tables land as additions to the same `schema.sql` file, not a
+   replacement (Invariant 8 — outer ring untouched by S2).
+2. **`PostgresMarketDataStore` available** (§3.2.1 row 7). The
+   typed-methods storage layer over the outer ring is in place;
+   S2's `PostgresStrategyRegistry` follows the same shape
+   (concrete class, no Protocol abstraction, returns frozen
+   dataclasses).
+3. **`asyncpg.Pool` lifecycle in Runner** (§3.2.1 row 8). The
+   Runner-owned pool with `min_size=2` / `max_size=10` is
+   created in `Runner.start()` and closed in `Runner.stop()`;
+   S2's registry acquires connections from the same pool.
+4. **Inner-ring product tables with `(strategy_id,
+   strategy_version_id)` reserved `NULLABLE`** (§3.2.1 row 18).
+   The two inner-ring product tables S1 creates — `feedback` and
+   `eval_records`, matching the JSONL→PG migration of §3.2.1 row
+   14 — carry both columns `NULLABLE`; S2 seeds `"default"` to
+   populate the columns without requiring a schema change.
+   Additional inner-ring product tables (e.g. for `OrderState` /
+   `FillRecord` persistence) are explicitly **out of S1 scope**
+   per S1 §6.7 item 1 + S1 §6.2 concept 18; if S2 needs an
+   `orders` or `fills` table, S2 must add it with the matching
+   §3.2.2 amendment per the §5.4 boundary-matrix audit rule.
+5. **`/signals` page rendering real depth from outer-ring
+   tables** (§3.2.1 row 17). The Playwright e2e confirming real
+   depth is green on main; S2's `/strategies` page is additive
+   and must not regress this.
+6. **Transaction-rollback `db_conn` fixture** (§3.2.1 row 15).
+   Every S2 storage-layer test uses this fixture; no test-side
+   schema work is required.
+
+The §5.1 / §5.2 **canonical gates green on a fresh clone** is a
+cross-spec gate (per §4.3 gate 5 and §§5.1, 5.2; 🟡 Fresh-clone
+baseline verification) that every sub-spec's harness run must
+satisfy before opening — it is **not** an S1 Leave-behind concept
+and therefore not an Intake line item. The §4.3 gate-4 diff
+mechanism only compares S1's §6.7 Leave-behind rows against this
+§7.6 Intake list; the baseline gates are verified separately under
+§4.3 gate 5 and enumerated again in the §7.11 Kickoff Prompt
+preflight.
+
+### 7.7 Leave-behind
+
+Enumerated artefacts produced by S2, keyed back to §3.2.2 row
+numbers so the §4.3 gate-4 boundary-integrity check can diff S3's
+and S4's Intake subsections (once §§8.6, 9.6 land) against this
+list.
+
+1. **`Strategy` aggregate class** (§3.2.2 row 1) at
+   `src/pms/strategies/aggregate.py` — DDD-style aggregate with no
+   setters, no mutable containers, and no direct persistence hooks
+   (persistence goes through the registry).
+2. **Five frozen projection dataclasses** (§3.2.2 row 2) at
+   `src/pms/strategies/projections.py`: `StrategyConfig`,
+   `RiskParams`, `EvalSpec`, `ForecasterSpec`,
+   `MarketSelectionSpec`. All `@dataclass(frozen=True)`, mypy
+   strict clean.
+3. **`strategies` table** (§3.2.2 row 3) populated with at least
+   the `"default"` seed row.
+4. **`strategy_versions` table** (§3.2.2 row 4) populated with
+   at least the `"default-v1"` seed row; the deterministic-hash
+   function used to compute `strategy_version_id` is exported and
+   reusable from tests.
+5. **`strategy_factors` link table** (§3.2.2 row 5) declared as
+   an empty shape with columns `(strategy_id,
+   strategy_version_id, factor_id, param, weight, direction)`; S3
+   populates rows as factor definitions land.
+6. **`PostgresStrategyRegistry`** (§3.2.2 row 6) at
+   `src/pms/storage/strategy_registry.py` (harness spec may pick
+   the final path) with typed CRUD methods
+   (`create_strategy`, `create_version`, `get_by_id`,
+   `list_strategies`, `list_versions`) acquiring from the S1
+   pool.
+7. **Import-linter rules in CI** (§3.2.2 row 7) codified in
+   `pyproject.toml` or `ruff.toml`. The narrowed rule set,
+   resolving the §3.2.2 row 7 wildcard against the
+   `agent_docs/architecture-invariants.md` §§Invariants 2 + 5
+   Enforcement text:
+   - `pms.sensor` cannot import from `pms.strategies.aggregate`
+     or `pms.controller.*` (Invariant 5);
+   - `pms.actuator` cannot import from `pms.strategies.aggregate`
+     or `pms.controller.*` (Invariant 5);
+   - `pms.sensor` cannot import from `pms.market_selection`
+     (Invariant 6 import-boundary half).
+   - `pms.strategies.projections` is **explicitly allowed** for
+     both `pms.sensor` and `pms.actuator` (Invariant 2 / 5
+     Enforcement: "they may import from
+     `pms.strategies.projections`").
+   A PR violating any of the four bans above fails CI at the
+   linter stage.
+8. **`"default"` strategy + version seed** (§3.2.2 row 8) applied
+   on Runner boot alongside `schema.sql` (either as a trailing
+   `INSERT ... ON CONFLICT DO NOTHING` in the same file or as a
+   one-shot boot hook — harness spec decides); every legacy
+   runtime write from S2 onward carries `"default"` tags.
+9. **`/strategies` listing page** (§3.2.2 row 9) under
+   `dashboard/app/strategies/` with a matching FastAPI route under
+   `src/pms/api/strategies.py` (or the current API convention);
+   Playwright e2e asserts the `"default"` row renders.
+
+S3's Intake (authored in Commit 6 of this document authoring
+effort) and S4's Intake (Commit 7) both read from this list;
+diffing the two is the §4.3 gate-4 mechanism.
+
+### 7.8 Checkpoint skeleton
+
+Flat one-line-each list. **Not harness acceptance criteria** — the
+per-CP acceptance criteria, files-of-interest, and effort
+estimates land in `.harness/pms-strategy-aggregate-v1/spec.md`
+when the kickoff prompt (§7.11) triggers that authoring session.
+
+- **CP1 — Strategy aggregate + projection types.** Frozen
+  dataclasses for the five projections under
+  `src/pms/strategies/projections.py`; `Strategy` aggregate class
+  under `src/pms/strategies/aggregate.py` with no setters, no
+  mutable containers; mypy strict clean (Invariant 2).
+- **CP2 — `strategies` + `strategy_versions` tables DDL +
+  version-hash function.** Both tables added to `schema.sql`;
+  deterministic hash function exported from
+  `src/pms/strategies/versioning.py`; hash-stability tests lock
+  in byte-identical output across repeated calls (Invariants 3,
+  8).
+- **CP3 — `strategy_factors` link table (empty shape).** DDL
+  added to `schema.sql` with columns `(strategy_id,
+  strategy_version_id, factor_id, param, weight, direction)`;
+  no rows populated; foreign-key columns declared so S3 can
+  insert definitions without a schema change (Invariants 2, 4, 8).
+- **CP4 — `PostgresStrategyRegistry` CRUD.** Concrete class with
+  typed methods acquiring from the S1 pool; unit-tested against
+  the `db_conn` fixture; frozen-dataclass returns match the
+  projection types (Invariant 2).
+- **CP5 — Import-linter rules in CI.** Rules codified in
+  `pyproject.toml` or `ruff.toml`; CI runs the linter as part of
+  the lint pass; at least one test-fixture PR (or a unit-level
+  equivalent) demonstrates the rule blocks a known violation
+  (Invariants 5, 6).
+- **CP6 — `"default"` strategy + version seed + legacy runtime
+  tagging.** Seed applied on Runner boot (trailing
+  `INSERT ... ON CONFLICT DO NOTHING` or equivalent boot hook);
+  legacy Runner write paths (`FeedbackStore`, `EvalStore`, and
+  any inner-ring writers S1 shipped) tag `"default"` on every
+  row; integration test confirms no `NULL` tag slips through
+  (Invariant 3 NULLABLE→seed pattern).
+- **CP7 — `/strategies` listing page.** Next.js page under
+  `dashboard/app/strategies/` + FastAPI route reading the
+  registry; Playwright e2e asserts the `"default"` row renders;
+  no per-strategy metrics yet (that upgrade is S5).
+
+### 7.9 Effort estimate
+
+**M** (5–8 CPs; new aggregate + registry + import-linter rules).
+Seven CPs per §7.8. S2's scope is narrower than S1's L (10 CPs
+including schema foundation, two sensors, and a dashboard
+rewrite): S2 adds a bounded surface area — one Python module for
+the aggregate, one for projections, one for versioning, one for
+the registry, three aggregate-ring DDL blocks appended to the
+existing `schema.sql`, a lint-rule block in `pyproject.toml`, a
+seed row, and a minimal listing page. No new persistence backend,
+no new streaming adapter, no WebSocket state machine. The
+import-linter rule set is the one piece with cross-cutting
+impact, but it is additive (rules fail closed — no existing
+import is allowed to violate them, so the lint pass stays green
+or an existing violation is fixed in the same PR).
+
+### 7.10 Risk register
+
+| Risk | Likelihood | Impact | Mitigation | Trigger / early-warning |
+|---|---|---|---|---|
+| Strategy config-hash instability across Python versions / runs (e.g. `dict` iteration order, `hash()` randomization, `dataclasses.asdict` field ordering changes) | M | H | Hash over a **canonical serialisation** — `json.dumps(..., sort_keys=True, separators=(",", ":"))` of a fully-sorted projection tuple — not over `repr()` or `hash()`; hash-stability test exercises at least three synthetic configs across repeated process launches; document the canonicalisation choice in `src/pms/strategies/versioning.py` docstring (Invariant 3 rationale) | Hash-stability test fails between two CI runs of the same commit; historical `strategy_versions` rows re-hash to different ids after a Python minor-version bump |
+| Import-linter false positives blocking legitimate imports (e.g. typing-only imports under `TYPE_CHECKING`, test-fixture imports that legitimately touch the aggregate) | M | M | Configure `TYPE_CHECKING`-guarded imports as an explicit exemption in the linter config; scope the rule to `src/pms/sensor/` and `src/pms/actuator/` source trees only (not `tests/pms/sensor/`); document the exemption rationale in the linter config with a comment referencing Invariants 5, 6 | Contributor opens an issue citing a rejected PR where the import is type-only; CI false-red on a PR that an independent code review confirms does not actually violate the invariant |
+| `"default"` strategy seed causing latent Invariant 3 violations when production strategies arrive in S5 (e.g. `UPDATE` queries that silently change `strategy_id` from `"default"` to a real id, or aggregate queries that double-count `"default"` rows as a real strategy) | L | H | S5's `NOT NULL` upgrade includes a one-off migration that retags legacy `"default"` rows to the appropriate real strategy id **or** archives them to a `legacy_default_records` table; §5.3 Invariant 3 review-gate enforcement (no aggregation query over `eval_records` / `fills` may omit `GROUP BY strategy_version_id` without an explicit justifying comment) catches query-level violations during S5 code review | S5 code review surfaces an aggregate query that silently groups `"default"` with a real strategy; a dashboard metric shows anomalous sample counts traceable to a mixed `"default"` + real-strategy group |
+| Projection-type serialization gap if a dashboard or API client deserializes `StrategyConfig` JSONB (e.g. `strategy_versions.config_json` as a client-visible blob) and silently drops frozen-dataclass invariants (field order, typed enums) | L | M | Projection types declare a `from_json(cls, data: dict) -> Self` class method that validates field presence and type (e.g. via `pydantic.TypeAdapter` or a hand-rolled validator); the FastAPI route reading `strategy_versions` goes through this class method, not a naive `dict(row)` dump; mypy strict on the API layer catches type drift at boundary | API integration test surfaces a `StrategyConfig` round-trip mismatch; a dashboard field renders as `null` when the backend row has a value |
+| Aggregate-to-projection conversion overhead if called per-signal in the hot controller path (pre-emptive perf concern for S5 — but the shape of the conversion is S2-owned) | L | M | Projections are designed to be **cached on the aggregate** — `Strategy.config` / `Strategy.risk_params` / `Strategy.eval_spec` / `Strategy.forecaster_spec` / `Strategy.market_selection_spec` are computed-once properties that return cached frozen dataclasses; the aggregate class exposes a `snapshot()` method returning all five projections in one call so S5's per-signal controller loop reuses the tuple; document the caching contract in the aggregate-class docstring | S5 profiling during per-strategy dispatch rollout shows projection-conversion time dominating the per-signal latency budget |
+
+### 7.11 Kickoff Prompt
+
+The block below is **copy-paste-ready** for a fresh Claude session
+whose job is to author `.harness/pms-strategy-aggregate-v1/spec.md`
+— the harness-executable spec with per-CP acceptance criteria,
+files-of-interest, effort, and intra-spec dependencies. The future
+session has **no memory** of this document; the prompt is
+self-contained.
+
+```
+You are starting harness task `pms-strategy-aggregate-v1` in the
+prediction-market-system repo.
+
+REPO ROOT: /Users/stometa/dev/prediction-market-system
+OUTPUT FILE: /Users/stometa/dev/prediction-market-system/.harness/pms-strategy-aggregate-v1/spec.md
+
+REQUIRED READING (ordered, absolute paths — read in this order
+before touching anything):
+
+1. /Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md
+   — specifically §7 (this sub-spec's total-spec contract). Also
+   §3.2.2 Boundary Matrix rows (your complete Scope-in set),
+   §3.2.1 (S1's Leave-behind, which is your Intake), §4.2 (S1 →
+   S2 execution rationale), and §5 (cross-spec acceptance gates).
+   If the absolute path above does not yet exist on `main` (i.e.
+   the project-decomposition spec has not yet merged), read the
+   branch-stable copy via:
+       git show docs/pms-project-decomposition:docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md
+   and HALT before writing any spec content — the project-level
+   spec must be merged before S2's harness run opens (it is S1's
+   §6.11 reading prerequisite as well).
+2. /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+   — focus on Invariants 2 (Strategy as rich aggregate;
+   projections), 3 (immutable version tagging), 5 (strategy-
+   agnostic Sensor + Actuator boundary), and 8 (onion-concentric
+   storage; inner ring). Partial touch on Invariant 4 via the
+   empty-shape `strategy_factors` link table.
+3. /Users/stometa/dev/prediction-market-system/agent_docs/promoted-rules.md
+   — especially Runtime behaviour > design intent (🔴),
+   Review-loop rejection discipline (🔴), Fresh-clone baseline
+   verification (🟡), and Commit-message precedence (no
+   Co-Authored-By).
+4. /Users/stometa/dev/prediction-market-system/docs/notes/2026-04-16-evaluator-entity-abstraction.md
+   — the primary source document for S2's entity design. Load-
+   bearing sections: "Strategy Entities" block (StrategyDefinition,
+   StrategyConfig, StrategyVersion, StrategySelection, Opportunity,
+   PortfolioTarget), "Proposed Abstraction Direction" §§1–3
+   (separate stages from entities, Factor as first Controller
+   primitive, Strategy as first user-facing primitive).
+5. /Users/stometa/dev/prediction-market-system/src/pms/controller/CLAUDE.md
+   — per-layer invariant enforcement for Controller; S2's
+   `Strategy` aggregate becomes what Controller reads post-S5.
+6. /Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+   — structural reference for harness-grade spec shape (CP shape,
+   acceptance-criteria shape, files-of-interest shape).
+
+CURRENT STATE SNAPSHOT:
+
+S1 is complete; its Leave-behind (§6.7 of the project-level spec)
+is your Intake (§7.6). The outer-ring DDL is applied,
+`PostgresMarketDataStore` exists, the `asyncpg.Pool` is Runner-
+owned, `feedback` + `eval_records` carry `(strategy_id,
+strategy_version_id)` columns reserved `NULLABLE`, `/signals`
+renders real orderbook depth, and the canonical gates are green on
+a fresh clone. Inner-ring product-table columns are still
+`NULLABLE` — S5 will upgrade them to `NOT NULL`; your job is the
+aggregate + registry + linter + seed that makes the `NULLABLE`
+columns carry `"default"` instead of `NULL`.
+
+PREFLIGHT (boundary check — run before any authoring):
+
+- §7.6 Intake items must all be satisfied. If any fails, HALT and
+  tell the user:
+  * Outer-ring DDL is applied in a fresh PG 16 DB via `schema.sql`
+    (S1 §3.2.1 rows 1–6 + row 9).
+  * `PostgresMarketDataStore` exists at the path S1 shipped it to
+    (S1 §3.2.1 row 7).
+  * `Runner.start()` creates the `asyncpg.Pool`; `Runner.stop()`
+    closes it (S1 §3.2.1 row 8; `min_size=2` / `max_size=10`).
+  * `feedback` and `eval_records` carry `(strategy_id,
+    strategy_version_id)` `NULLABLE` columns (S1 §3.2.1 row 18).
+  * `/signals` renders real depth end-to-end; Playwright e2e green
+    on main.
+  * `db_conn` transaction-rollback fixture is importable from
+    tests (S1 §3.2.1 row 15).
+  * `uv run pytest -q` passes with ≥ 70 tests + 2 skipped
+    (PMS_RUN_INTEGRATION=1 gate), and
+    `uv run mypy src/ tests/ --strict` is clean, on a fresh shell
+    (§5.1, §5.2; 🟡 Fresh-clone baseline verification).
+
+TASK:
+
+Create `.harness/pms-strategy-aggregate-v1/spec.md` by expanding
+§7.8 (Checkpoint skeleton) into harness-grade CPs with:
+
+- Per-CP acceptance criteria (observable, falsifiable, not
+  implementation notes).
+- Per-CP files-of-interest (absolute paths under
+  /Users/stometa/dev/prediction-market-system/).
+- Per-CP effort estimate (S / M / L).
+- Intra-spec CP dependencies (which CPs block which).
+
+Use /Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+as the structural reference for shape. Draft only — stop and wait
+for spec-evaluation approval before running any checkpoint.
+
+CONSTRAINTS:
+
+- New feature branch `feat/pms-strategy-aggregate-v1` off `main`.
+  Never commit to `main` directly.
+- Respect §3 Boundary Matrix of the project-level spec. Never
+  claim a concept owned by another sub-spec (S1, S3, S4, S5, S6).
+  The 9 concepts enumerated in §7.2 Scope-in are the complete
+  authorised set for S2; anything else is scope drift.
+- Every Strategy / Factor / Sensor / ring-ownership claim must
+  cite an invariant number from
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md.
+- No `Co-Authored-By` lines in any commit
+  (/Users/stometa/dev/prediction-market-system/CLAUDE.md §"Do
+  not"; promoted rule "Commit-message precedence" in
+  /Users/stometa/dev/prediction-market-system/agent_docs/promoted-rules.md).
+- Conventional-commit prefixes required (§5.6 of the project
+  spec): `feat(<scope>):`, `fix(<scope>):`, `docs(<scope>):`,
+  `test(<scope>):`, `refactor(<scope>):`, `chore(<scope>):`.
+- Projection types are `@dataclass(frozen=True)` — no setters, no
+  mutable containers (Invariant 2 anti-patterns).
+
+HALT CONDITIONS:
+
+- Any invariant in
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+  cannot be satisfied by the design you are authoring. Do NOT
+  silently amend the invariant. Open a retro under
+  /Users/stometa/dev/prediction-market-system/.harness/retro/ and
+  return to the user.
+- Any attempt to violate the S2 import-boundary rules named in
+  §7.7 item 7:
+  - `pms.sensor` or `pms.actuator` importing from
+    `pms.strategies.aggregate` (Invariant 5 violation);
+  - `pms.sensor` or `pms.actuator` importing from
+    `pms.controller.*` (Invariant 5 violation);
+  - `pms.sensor` importing from `pms.market_selection`
+    (Invariant 6 import-boundary violation).
+  Note: imports of `pms.strategies.projections` are explicitly
+  **allowed** for both `pms.sensor` and `pms.actuator` per
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+  §§Invariants 2 + 5 Enforcement. STOP immediately on any of the
+  three bans above.
+- Any attempt to add a `strategy_id` or `strategy_version_id`
+  column to an outer-ring or middle-ring table (`markets`,
+  `tokens`, `book_snapshots`, `book_levels`, `price_changes`,
+  `trades`, `factors`, `factor_values`). STOP immediately; this
+  is an Invariant 8 violation.
+- The 9 concepts you author CPs for do not match §3.2.2 of the
+  project-level spec, concept-for-concept. Reconcile first.
+
+FIRST ACTION:
+
+Run:
+
+    git status && git branch --show-current && git log --oneline -5
+
+Then read the 6 files in the REQUIRED READING block, in order,
+before drafting any content. After reading, report your
+understanding of §7.8's 7 checkpoints (CP1–CP7) and wait for
+go-ahead before drafting
+`.harness/pms-strategy-aggregate-v1/spec.md`.
+```
+
+---
