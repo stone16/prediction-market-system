@@ -626,28 +626,38 @@ third-party lib without py.typed).
 Every sub-spec PR must demonstrate conformance with every one of
 the 8 invariants in `agent_docs/architecture-invariants.md`. The 8
 split into three buckets, mirroring what each invariant's
-**Enforcement** block actually says is mechanically checkable:
+**Enforcement** block actually says. None of the non-behavioural
+invariants are enforced by a machine check *alone*: every one of
+Invariants 3, 5, 6, 8 also has a code-review component named in
+its Enforcement block, and the PR evidence must surface both halves.
 
-- **Mechanically checkable** — a machine check (import-linter run,
-  delimited-DDL grep) is sufficient PR evidence. Invariants 5, 6, 8.
-- **Mixed (schema + query review)** — a schema constraint is
-  mechanically checkable, but a second enforcement half (query-
-  shape review, aggregation audit) is code review. Invariant 3.
+- **Mechanically checkable (machine check is sufficient PR
+  evidence)** — a machine check (import-linter run, delimited-DDL
+  grep) is sufficient because the Enforcement block names *no*
+  additional review gate. Invariant 5.
+- **Mixed (machine check + review gate)** — the Enforcement block
+  names both a mechanical rule and a code-review / reviewer-
+  rejection gate. PR evidence must cover both. Invariants 3, 6, 8.
 - **Behavioural** — no mechanical check faithfully captures the
   invariant; acceptance criteria + code review are the enforcement.
   Invariants 1, 2, 4, 7.
 
 Be honest about which bucket each invariant lives in — inventing a
-grep recipe for a behavioural invariant gives a false-green signal,
-and a partial grep for a mechanically-checkable invariant misses
-real violations.
+grep recipe for a behavioural invariant gives a false-green signal;
+a partial grep for a mechanically-checkable invariant misses real
+violations; and treating a Mixed invariant as purely mechanical
+false-greens PRs that pass the machine check while failing the
+review gate (e.g., a PR that satisfies the Invariant 6 import-
+linter rule but hardcodes a static subscription list, or a PR that
+satisfies the Invariant 8 grep but adds a new table without
+declaring its ring).
 
 **Mechanically checkable invariants.** The primary evidence is a
-machine check (import-linter run, DDL schema constraint, grep over
-explicitly-delimited DDL blocks). A grep complement is listed where
-it usefully smoke-checks the same property, but the import-linter
-result or the schema constraint itself is the PR evidence — not a
-partial grep recipe.
+machine check (import-linter run). A grep complement is listed
+where it usefully smoke-checks the same property, but the linter
+result itself is the PR evidence — not a partial grep recipe. Only
+invariants whose **Enforcement** block names *no* additional review
+gate live in this bucket.
 
 - **Invariant 5** — import-linter rule (codified in S2's
   `pyproject.toml` or `ruff.toml`): `pms.sensor` and `pms.actuator`
@@ -660,41 +670,67 @@ partial grep recipe.
   import pms\.strategies\.aggregate|import pms\.controller)'
   src/pms/sensor src/pms/actuator` — zero matches). The grep is not
   a substitute for the linter; it is a cheap preflight.
-- **Invariant 6** — import-linter rule: `pms.sensor` cannot import
-  from `pms.market_selection`. Same mechanism as Invariant 5. Grep
-  smoke check must cover both syntaxes
-  (`rg -n '^(from pms\.market_selection|import pms\.market_selection)'
-  src/pms/sensor` — zero matches).
-- **Invariant 8** — zero `strategy_id` **and** zero
-  `strategy_version_id` columns on outer-ring or middle-ring
-  tables. `agent_docs/architecture-invariants.md` §Invariant 8
-  **Enforcement** names both identifiers explicitly as the grep-
-  checkable rule. Grep: within the outer-ring and middle-ring DDL
-  blocks of `schema.sql` (delimited by the block comments
-  introduced in S1 / S3), both identifiers must produce zero
-  matches. The DDL block comments are what make this mechanical —
-  without them, a naive `rg strategy_id schema.sql` would hit
-  legitimate inner-ring declarations.
 
-**Mixed invariants (schema constraint + query-time review).** The
-schema half is mechanical; the query half is code review.
+**Mixed invariants (machine check + review gate).** Each invariant
+below has **two** enforcement halves named in its
+`agent_docs/architecture-invariants.md` **Enforcement** block: a
+mechanical rule and a code-review gate. PR evidence must cover
+**both** halves. Passing only the machine check is insufficient and
+produces a false-green signal.
 
 - **Invariant 3** — two independent enforcement mechanisms per
   `agent_docs/architecture-invariants.md` §Invariant 3
-  **Enforcement**: (a) **schema**: `strategy_version_id` is
-  `NOT NULL` on every inner-ring product table after S5 completes,
-  plus a `CHECK` constraint forbidding known sentinel values
-  (empty string). This half is mechanical — the DDL block must
-  declare both columns AND `NOT NULL` AND the `CHECK` once the S5
-  upgrade lands. A grep recipe that only verifies column presence
-  (ignoring `NOT NULL` / `CHECK`) is insufficient; the PR evidence
-  is the schema file itself plus a post-migration `\d+` or
-  `information_schema` query showing the constraint is active.
-  (b) **query-time**: no SQL aggregation query over `eval_records`
-  or `fills` may omit `GROUP BY strategy_version_id` without an
-  explicit comment justifying the cross-version aggregation. This
-  half is code review, not grep — a grep can find `GROUP BY` clauses
-  but cannot judge whether an omission was intentional.
+  **Enforcement**: (a) **schema (mechanical)**: `strategy_version_id`
+  is `NOT NULL` on every inner-ring product table after S5
+  completes, plus a `CHECK` constraint forbidding known sentinel
+  values (empty string). The DDL block must declare both columns
+  AND `NOT NULL` AND the `CHECK` once the S5 upgrade lands. A grep
+  recipe that only verifies column presence (ignoring `NOT NULL` /
+  `CHECK`) is insufficient; the PR evidence is the schema file
+  itself plus a post-migration `\d+` or `information_schema` query
+  showing the constraint is active. (b) **query-time (review)**:
+  no SQL aggregation query over `eval_records` or `fills` may omit
+  `GROUP BY strategy_version_id` without an explicit comment
+  justifying the cross-version aggregation. A grep can find
+  `GROUP BY` clauses but cannot judge whether an omission was
+  intentional — reviewer sign-off is the PR evidence.
+- **Invariant 6** — two enforcement mechanisms per
+  `agent_docs/architecture-invariants.md` §Invariant 6
+  **Enforcement**: (a) **import boundary (mechanical)**: import-
+  linter rule — `pms.sensor` cannot import from
+  `pms.market_selection`. Same mechanism as Invariant 5; linter
+  report is the machine-side evidence. Grep smoke check must cover
+  both syntaxes
+  (`rg -n '^(from pms\.market_selection|import pms\.market_selection)'
+  src/pms/sensor` — zero matches). (b) **design review
+  (review)**: the Enforcement block requires the spec-evaluation
+  reviewer to reject any design that makes Sensor aware of
+  strategies to avoid implementing the selector. The linter catches
+  a direct import violation but not a semantic one (e.g., Sensor
+  hardcoding a static asset-id list that *is* strategy-selected but
+  lives in a config file). PR evidence must include a reviewer note
+  confirming the Sensor design remains strategy-agnostic —
+  specifically that every subscription update arrives through
+  `SensorSubscriptionController`, not through a sensor-owned config
+  or constant.
+- **Invariant 8** — two enforcement mechanisms per
+  `agent_docs/architecture-invariants.md` §Invariant 8
+  **Enforcement**: (a) **schema (mechanical)**: zero `strategy_id`
+  **and** zero `strategy_version_id` columns on outer-ring or
+  middle-ring tables. Both identifiers are named explicitly in the
+  Enforcement block as the grep-checkable rule. Grep: within the
+  outer-ring and middle-ring DDL blocks of `schema.sql` (delimited
+  by the block comments introduced in S1 / S3), both identifiers
+  must produce zero matches. The DDL block comments are what make
+  this mechanical — without them, a naive `rg strategy_id schema.sql`
+  would hit legitimate inner-ring declarations. (b) **ring-
+  declaration review (review)**: the Enforcement block requires
+  that every new-table proposal declare its ring explicitly and
+  justify the ring choice. The grep confirms no forbidden columns
+  on an existing ring; it does not confirm that a newly-introduced
+  table has been placed in the correct ring. PR evidence must
+  include the ring declaration in the PR description or migration
+  comment and a reviewer sign-off on the ring choice.
 
 **Behavioural invariants** (no grep; enforced by acceptance
 criteria and code review).
@@ -733,11 +769,14 @@ criteria and code review).
 
 A sub-spec PR's invariant-conformance section lists (a) which
 invariants apply to its scope, (b) for each mechanically checkable
-one, the machine-check evidence (import-linter report, schema
-constraint, or delimited-DDL grep with expected zero-match), (c)
-for Invariant 3 when it applies, both the schema-constraint evidence
-and the aggregation-query review note, (d) for each behavioural one,
-the acceptance-criterion language in the sub-spec that enforces it.
+one, the machine-check evidence (import-linter report with expected
+zero-match), (c) for each Mixed invariant that applies (3, 6, 8),
+**both** the mechanical evidence (schema constraint, linter report,
+or delimited-DDL grep) **and** the review-gate evidence (reviewer
+sign-off note: aggregation-query review for 3, strategy-agnostic
+Sensor design confirmation for 6, ring-declaration justification for
+8), (d) for each behavioural one, the acceptance-criterion language
+in the sub-spec that enforces it.
 
 ### 5.4 Boundary matrix audit
 
