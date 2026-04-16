@@ -4890,3 +4890,272 @@ drafting
 ---
 
 ---
+
+## 12. Maintenance and change policy
+
+This document is the project-level total spec for the six-sub-spec
+decomposition. The architecture it describes is alive: invariants
+get re-derived, sub-specs land and produce retros, the Boundary
+Matrix grows as new concepts surface, and the DAG occasionally
+shifts. §12 specifies **when** this document must be updated,
+**who** owns each update, **how** the `status:` frontmatter field
+progresses, and **how** the document relates to its sibling
+documents under `agent_docs/` and `.harness/retro/`. The mechanism
+parallels the **Change policy** at the bottom of
+`agent_docs/architecture-invariants.md`: invariants govern the
+positive architecture; this section governs the contract document
+that decomposes those invariants into harness work.
+
+§12 is deliberately shorter than §§6–11. Sub-spec scope is
+authoritative there; here the only authority is the policy that
+keeps the document honest as the work lands.
+
+### 12.1 Update triggers
+
+This document **must** be updated when any of the following events
+occur. The trigger and the document edit land in the **same PR** —
+no after-the-fact reconciliation (rationale in §12.2).
+
+- **A sub-spec (S1–S6) completes.** Append the completion date
+  and a link to the retro under `.harness/retro/<sub-spec-id>.md`
+  to the relevant §§6–11 sub-spec header / metadata. The retro
+  itself is gate 1 of §4.3 (between-spec gates), so the link
+  target always exists by the time this update lands.
+- **A Boundary Matrix row changes owner.** Owner reassignment is
+  rare and must trigger an architectural review **before** the
+  edit — open a retro under `.harness/retro/` documenting the
+  observed boundary problem, then amend §3.2 in the same PR that
+  records the retro outcome. The change cascades to the affected
+  sub-specs' *Scope in / out*, *Dependencies*, and *Intake /
+  Leave-behind* subsections, all in the same commit.
+- **A new concept is introduced that does not appear in §3.2.**
+  Per §3.1's rule "When adding a new concept not in the matrix",
+  the §3.2 amendment lands in the **same commit** that introduces
+  the concept — picking exactly one Owner, listing Consumers,
+  noting which invariant(s) the concept touches. A PR that
+  introduces a concept absent from §3.2 fails the §5.4 Boundary
+  matrix audit gate.
+- **An authoring-order swap is executed.** Per §4.3 gate 6, the
+  only supported reorder is **S3 ↔ S4** (§2.4, §4.4); the swap
+  changes authoring sequence only and **does not** edit §2.1
+  edges or §4.3 gate-4 predecessor enumeration. The update for a
+  swap is the gate-6 `reorder` decision row with the triggering
+  condition cited (§4.4 names the two acceptable conditions).
+- **A real DAG edge changes in §2.1.** Adding an edge, removing
+  an edge, or re-pointing one — anything other than the S3 ↔ S4
+  authoring swap above. The change requires updates to §2.1
+  graph, §2.2 node summary, §4.2 per-edge rationale, §4.3 gate-4
+  predecessor enumeration, and both endpoints' *Dependencies* and
+  *Intake / Leave-behind* subsections in the same PR. Per §4.3
+  gate 6, breaking any DAG edge other than the S3 ↔ S4 ordering
+  also requires a new retro documenting the architectural reason
+  the original §4.2 rationale no longer holds.
+- **A new sub-spec is inserted.** Very rare. Requires a retro
+  documenting the architectural gap that motivates it, plus
+  amendments to §2.1 (new node + edges), §2.2 (node summary),
+  §3.2 (new sub-matrix block), §4 (execution rationale + gate
+  enumeration), and a new §§6–11-style sub-spec section. The
+  retro is the prerequisite — no insertion without one.
+- **An invariant in `agent_docs/architecture-invariants.md`
+  changes.** Cascade-review every sub-spec that cites the
+  invariant by number (the §3.2.* "Invariant" column makes this
+  grep-checkable). Each affected sub-spec subsection is reviewed
+  in the same PR as the invariant change; if a sub-spec must
+  change behaviour, its Scope / Acceptance criteria / Intake /
+  Leave-behind update lands in the same commit. The invariant
+  document is the upstream authority — fix it there first, then
+  cascade here, never the other way around (this is the same
+  ordering rule as the **Change policy** in
+  `agent_docs/architecture-invariants.md`).
+- **The `status:` frontmatter field transitions.** Each move
+  along the `draft → active → superseded` ladder of §12.3 is
+  itself an update trigger. The PR performing the transition
+  edits the frontmatter, plus — for the `superseded` transition
+  — appends the §0 pointer to the replacement document.
+
+### 12.2 Update ownership
+
+- **The author of the PR triggering the update owns the update.**
+  A sub-spec completion PR includes the §§6–11 header amendment;
+  an invariant-change PR includes the cascading §§6–11 review; a
+  new-concept PR includes the §3.2 row.
+- **Updates are commit-atomic.** No "I'll fix the spec next
+  week." The trigger and the edit live in one PR, reviewed as one
+  unit. This is the same hygiene rule as 🟡 *Lifecycle cleanup on
+  all exit paths* (`agent_docs/promoted-rules.md`): acquire and
+  release ship in the same commit; here the trigger and the
+  document update ship in the same commit. After-the-fact
+  reconciliation is the failure mode this rule prevents.
+- **Reviewers enforce the atomicity.** A PR that triggers a §12
+  update without performing it fails the §5.4 Boundary matrix
+  audit gate (for §3.2 changes) or fails review against §4.3
+  gate 4 (for Leave-behind / Intake changes). The gate is the
+  enforcement; ownership defines who is on the hook to satisfy it.
+
+### 12.3 Status field semantics
+
+The frontmatter `status:` field at the top of this document
+progresses through three durable values. Each transition is a
+§12.1 update trigger — the PR performing the transition edits
+the frontmatter in the same commit. Transition criteria are
+written in document-completeness terms, not in commit-numbering
+terms, so rebases and squashes do not invalidate them.
+
+- **`draft`** — initial state. The document is partial: §3.2
+  Boundary Matrix may have rows pending, §§6–11 may be skeleton-
+  only or missing canonical subsections, the §3.3 invariant
+  Gap-check may not yet cover every invariant in
+  `agent_docs/architecture-invariants.md`. The whole authoring
+  effort lives in this state until the §12.3 `active` criteria
+  are met.
+- **`active`** — transitions to `active` when the document is
+  complete and authoritative: §§0–5 are populated and
+  consistent, §3.2 covers every load-bearing concept (the §3.3
+  Gap-check coverage table shows every invariant has at least
+  one owning row, with Invariant 1 excepted per §3.3), and
+  §§6–11 each carry the eleven canonical subsections (.1 Goal
+  through .11 Kickoff Prompt). `active` means **this document
+  is the current authoritative project-level spec**: harness
+  runs open against it (see the per-sub-spec Kickoff Prompts in
+  §§6.11–11.11), and it stays `active` for the entire span from
+  completion through S6 finishing — the meaning does not shift
+  after S6 lands. §12.5 describes the post-S6 lifecycle without
+  changing `active`.
+- **`superseded`** — transitions to `superseded` when a successor
+  decomposition spec lands at `docs/superpowers/specs/<date>-pms-
+  project-decomposition-v<N+1>.md` and reaches its own `active`
+  state. The old document is **kept for history** — never
+  deleted, never rewritten in-place. The frontmatter changes to
+  `status: superseded` and a one-line pointer to the replacement
+  is appended at the top of §0 ("Superseded by `<path>` on
+  `<date>`."). The successor document inherits the `status:
+  draft` lifecycle from scratch.
+
+### 12.4 Relationship to sibling documents
+
+The four sibling documents under `agent_docs/` and `.harness/retro/`
+each have a defined relationship to this document. None of them
+are owned by §12 — they are owned by their own files — but the
+direction of authority and the cascade rules live here.
+
+- **`agent_docs/architecture-invariants.md`** is the **upstream
+  authority** on invariant semantics, rationale, runtime
+  evidence, anti-patterns, and enforcement. This document
+  *consumes* invariants by number; it never redefines them. When
+  an invariant changes there, every §3.2 row that cites the
+  invariant in its **Invariant** column and every sub-spec
+  acceptance criterion that names the invariant is reviewed in
+  the cascade described in §12.1.
+- **`agent_docs/project-roadmap.md`** is **partially superseded**
+  by §§2–5 of this document. Its DAG, execution-order rationale,
+  and between-spec gate skeleton survive there as the **short
+  navigable summary** that contributors hit first; the detailed
+  contract (Boundary Matrix, Intake / Leave-behind, per-edge
+  rationale, mechanical and behavioural invariant evidence) lives
+  here as the authoritative source. The roadmap's §"Maintenance"
+  block is preserved because it is shorter than §12 and remains
+  useful as a quick-reference; updates to the roadmap's
+  Maintenance block must stay consistent with §12.1's trigger
+  list.
+- **`agent_docs/promoted-rules.md`** holds rules promoted from
+  retros (per its §"Promotion process"). Per §5.5 Retro-promotion
+  workflow, a promotion lands as a single PR that updates
+  `agent_docs/promoted-rules.md`, `CLAUDE.md` §"Promoted rules
+  from retros", and `.harness/retro/index.md` together — those
+  three are the only mandatory cascade. This document does not
+  store promoted rules; it only references them by name and
+  severity-emoji (🔴 / 🟡 / 🟢) where the content reinforces a
+  §12 rule (e.g., the parallel between 🟡 *Lifecycle cleanup on
+  all exit paths* and §12.2's commit-atomic update rule).
+- **`.harness/retro/<sub-spec-id>.md`** is the post-sub-spec
+  retro. It is gate 1 of §4.3 (a sub-spec without a retro cannot
+  clear the gate) and the source of any rule promotion that
+  feeds `agent_docs/promoted-rules.md`. The retro drives the
+  relevant §§6–11 header update (§12.1 first bullet) and may
+  trigger a Boundary Matrix row addition if it surfaces a missed
+  concept (§12.1 third bullet). `.harness/retro/index.md` is the
+  central index; the entry's status moves to `active` in the
+  same retro-promotion PR per §5.5.
+
+### 12.5 Retirement process
+
+When S6 lands with consensus, the document transitions from
+"active roadmap that drives sub-spec authoring" to "historical
+record of how the architecture was decomposed". The transition is
+a §12.1 update trigger, not a separate ceremony.
+
+- **The status field stays `active`** at S6 completion. Per
+  §12.3, `active` covers the full span from document completion
+  through S6 finishing without semantic shift. A new subsection
+  appended to the bottom of §11 (the S6 sub-spec) records the
+  completion date and any follow-on work the S6 retro triggered:
+  the Kalshi adapter pair (deferred per §1.2 "What the finished
+  system does not do"), and any of `StrategyBundle`,
+  `MarketUniverse`, `FactorAttribution`, or finer-grained
+  backtest entities (deferred per §3.4 "Entities deliberately
+  out of scope for this decomposition").
+- **A successor document is authored only when a major
+  architectural shift warrants it.** Examples that would warrant
+  one: a new venue layer that breaks the current Sensor / Actuator
+  abstraction; a multi-account / multi-tenant requirement that
+  invalidates the inner-ring per-strategy schema; a research
+  framework that needs a fundamentally different `BacktestSpec`
+  shape. Minor changes (a new strategy, a new factor, a new
+  dashboard page) do not warrant a successor — they happen
+  inside the existing inner-ring + middle-ring contract.
+- **When a successor lands**, this document transitions to
+  `status: superseded` per §12.3 with the §0 pointer to the
+  replacement. The successor document inherits `status: draft`
+  and runs its own §§0–12 lifecycle from scratch. Old document
+  remains in the repository under the same path; it is the
+  historical record contributors consult to understand why the
+  architecture took its current shape.
+
+### 12.6 Cross-cutting observations
+
+Two observations are worth preserving here so future authors do
+not have to re-derive them from sub-spec context.
+
+- **The Boundary Matrix (§3) is the hinge for boundary-
+  affecting changes.** Any §§6–11 edit that introduces a new
+  concept, reassigns an Owner, or changes an *Intake* / *Leave-
+  behind* contract has a §3 counterpart and must amend §3.2 in
+  the same commit. Header-and-metadata edits (sub-spec
+  completion date + retro link, §12.1 first bullet) and prose
+  cleanups do not. Maintaining the boundary-affecting subset of
+  §§6–11 updates without matching §3 edits creates silent
+  overlap (two sub-specs both claim ownership of the same
+  concept) or silent gaps (a downstream sub-spec's Intake names
+  a concept no upstream sub-spec produces). The ordering rule
+  for that subset is **always amend §3 first, or in the same
+  commit** as the §§6–11 edit — never after.
+- **Leave-behind insufficiency cascades.** §4.3 gate 4 enforces
+  Leave-behind ⊇ Intake at every sub-spec boundary by diffing
+  the union of all predecessor Leave-behinds against the
+  downstream Intake. When that diff turns up a gap — sub-spec N
+  produced X, but sub-spec N+1 needs X' — gate 4 itself names
+  two valid reconciliations and §12 covers both:
+  (a) **amend a predecessor to produce the missing concept** —
+  update the predecessor's *Leave-behind* and back-propagate to
+  its *Scope in*, *Acceptance criteria*, and the §3.2 rows that
+  cover the new artefact, then amend the §3.2 Boundary Matrix
+  row in the same PR;
+  (b) **amend sub-spec N+1 to drop the dependency** — when
+  review confirms the dependency was a false requirement (the
+  downstream did not actually need the concept), update N+1's
+  *Intake* and any *Acceptance criteria* that referenced the
+  dropped concept, **and** amend the §3.2 row for that concept
+  to remove N+1 from the *Consumers* column in the same PR (a
+  stale *Consumers* entry would re-create the same boundary
+  drift gate 4 exists to prevent). If removing N+1 leaves the
+  concept with zero remaining consumers, decide in the same PR
+  whether to retire it from §3.2 or leave it as orphaned-but-
+  owned with a note.
+  Either path lands in the same PR as the diff that surfaced
+  the gap; per §12.2, the PR author owns the chosen path. The
+  one thing both paths forbid is silently weakening N+1's
+  Intake without acknowledging the gap — that hides the choice
+  between (a) and (b) and re-creates the boundary drift §4.3
+  gate 4 exists to prevent.
+
+---
