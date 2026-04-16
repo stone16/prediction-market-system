@@ -31,9 +31,11 @@ uv run pytest -q                         # full suite — see baseline below
 uv run mypy src/ tests/ --strict         # strict on every committed module
 ```
 
-**Baseline (as of 2026-04-15, pms-v2):** `pytest` ≥ 70 passing, 2
-skipped (the 2 skips are integration tests gated on
-`PMS_RUN_INTEGRATION=1`). mypy strict must be clean. If the baseline
+**Baseline (as of 2026-04-16, feat/pms-market-data-v1):** `pytest`
+76 passing, 8 skipped. The 8 skips are integration tests: 6 database-
+backed checks gated on `PMS_RUN_INTEGRATION=1` plus
+`PMS_TEST_DATABASE_URL`, and 2 live Polymarket checks gated on
+`PMS_RUN_INTEGRATION=1`. mypy strict must be clean. If the baseline
 fails on a fresh clone, fix the config — not the test — and commit
 with a `fix(tests):` or `fix(build):` prefix before starting feature
 work (see promoted rule: *Fresh-clone baseline verification*).
@@ -42,6 +44,22 @@ Integration tests:
 ```bash
 PMS_RUN_INTEGRATION=1 uv run pytest -m integration
 ```
+
+Compose-backed PostgreSQL integration DB:
+```bash
+docker compose up -d postgres
+export PMS_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
+PMS_RUN_INTEGRATION=1 uv run pytest -q \
+  tests/integration/test_schema_apply_outer.py \
+  tests/integration/test_schema_apply_inner.py \
+  tests/integration/test_db_conn_rollback.py \
+  tests/integration/test_runner_pool_integration.py
+```
+
+Reachability note (measured 2026-04-16): cached-image `docker compose up -d postgres`
+reached `healthy` in 1.63 s. If a host PostgreSQL daemon already owns
+`localhost:5432`, clients may hit that daemon instead of the compose service;
+stop the host daemon before relying on the forwarded `localhost` DSN.
 
 ---
 
@@ -148,6 +166,10 @@ cd dashboard && PMS_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 
 # Isolate dev JSONL state (pre-S1 — migrating to per-shell PG DB).
 export PMS_DATA_DIR=/tmp/pms-dev && uv run pms-api
+
+# Compose-backed PostgreSQL integration DB.
+docker compose up -d postgres
+export PMS_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
 
 # Dashboard Playwright e2e.
 cd dashboard && npx playwright test

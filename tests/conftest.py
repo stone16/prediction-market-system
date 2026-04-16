@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 
 import pytest
@@ -23,7 +24,16 @@ class _TestAsyncpgPool:
 
 
 @pytest.fixture(autouse=True)
-def _stub_runner_asyncpg_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+def _stub_runner_asyncpg_pool(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    if (
+        request.node.get_closest_marker("integration") is not None
+        and os.environ.get("PMS_RUN_INTEGRATION") == "1"
+    ):
+        return
+
     async def fake_create_pool(*, dsn: str, min_size: int, max_size: int) -> _TestAsyncpgPool:
         return _TestAsyncpgPool()
 
