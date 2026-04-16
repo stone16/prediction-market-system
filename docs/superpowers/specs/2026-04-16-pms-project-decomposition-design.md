@@ -1019,11 +1019,14 @@ system level — not a checklist item for an individual CP.
 
 1. **`schema.sql` applies cleanly.** Running the file against a
    fresh PostgreSQL 16 database via `psql -f schema.sql` completes
-   with zero errors and produces `markets`, `tokens`,
-   `book_snapshots`, `book_levels`, `price_changes`, `trades`,
-   `feedback`, `eval_records`, plus inner-ring product-table shells
-   with `(strategy_id, strategy_version_id)` columns `NULLABLE`
-   (Invariants 3, 7, 8).
+   with zero errors and produces 6 outer-ring tables (`markets`,
+   `tokens`, `book_snapshots`, `book_levels`, `price_changes`,
+   `trades`) plus all 4 inner-ring product-table shells
+   (`feedback`, `eval_records` from the JSONL→PG migration, plus
+   `orders` and `fills` as empty shapes per `agent_docs/
+   architecture-invariants.md` §Invariant 8 enumeration). All 4
+   product tables have `(strategy_id, strategy_version_id)`
+   columns `NULLABLE` (Invariants 3, 7, 8).
 2. **A `book` event arrives within 5 seconds of subscription.**
    From a cold start against live Polymarket CLOB, the first
    `book_snapshots` row with `source='subscribe'` is written within
@@ -1307,7 +1310,7 @@ CURRENT STATE SNAPSHOT:
 S1 is the entry point of the project decomposition DAG. No prior
 sub-specs have landed. The project-level spec
 (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md)
-is the authoritative boundary contract: §3.2.1 enumerates the 18
+is the authoritative boundary contract: §3.2.1 enumerates the 19
 concepts S1 owns, §6 is S1's total-spec subsection.
 
 PREFLIGHT (boundary check — run before any authoring; every
@@ -1591,14 +1594,14 @@ system level — not a checklist item for an individual CP.
 5. **Every legacy runtime write carries `(strategy_id='default',
    strategy_version_id='default-v1')`.** A system-level
    integration test drives a signal → decision → eval_record flow
-   through the pre-S5 Runner; every resulting row in the
-   inner-ring product tables that exist by the end of S2
-   (`feedback` and `eval_records` from S1, plus any S2 tables)
-   carries the `"default"` tag (Invariant 3 NULLABLE→seed pattern
-   enforced; no implicit `NULL` strategy-tag rows). `OrderState`
-   / `FillRecord` persistence tables are out of S1 scope per S1
-   §6.7 and so are out of this acceptance criterion's surface
-   unless S2 introduces them with a §3.2.2 amendment.
+   through the pre-S5 Runner; every resulting row in any of the 4
+   inner-ring product tables S1 created (`feedback`, `eval_records`,
+   `orders`, `fills` per §3.2.1 rows 14 and 18) carries the
+   `"default"` tag (Invariant 3 NULLABLE→seed pattern enforced; no
+   implicit `NULL` strategy-tag rows). The pre-S5 Runner may
+   produce zero rows in `orders` / `fills` (today's runtime emits
+   `OrderState` / `FillRecord` in-memory only); any rows that do
+   land must satisfy the `"default"`-tag invariant.
 6. **Import-linter rules run in CI and block violations.** A PR
    that introduces `from pms.strategies.aggregate import Strategy`
    inside `src/pms/sensor/` or `src/pms/actuator/` fails CI at the
@@ -1638,13 +1641,13 @@ items is scope drift.
   `factors` and `factor_values` tables, and `FactorService` are
   S3 (§3.2.3, Invariant 4). The `strategy_factors` link table
   lands as an empty shape only — its rows populate in S3.
-- **No `NOT NULL` upgrade on inner-ring product tables.**
-  Whatever inner-ring product tables exist by the start of S5
-  (`feedback` and `eval_records` from S1, plus any additional
-  tables introduced by S2–S4 with matching §3.2 amendments per
-  §5.4) keep `(strategy_id, strategy_version_id)` `NULLABLE`
-  through S2–S4; the schema-change-only upgrade is S5 (§3.2.5,
-  Invariant 3).
+- **No `NOT NULL` upgrade on inner-ring product tables.** All 4
+  S1-owned inner-ring product tables (`feedback`, `eval_records`,
+  `orders`, `fills` per §3.2.1 rows 14 and 18) keep `(strategy_id,
+  strategy_version_id)` `NULLABLE` through S2–S4; the schema-
+  change-only upgrade is S5 (§3.2.5, Invariant 3). Any future
+  product-table addition introduced via §3.2 amendment would
+  similarly stay `NULLABLE` until the next S5-style upgrade.
 - **No parameter-sweep tooling or `BacktestSpec` / `BacktestRun`
   integration.** Strategy-parameter sweeps, backtest run
   materialisation, and N-strategy comparison reports are S6
@@ -1921,13 +1924,14 @@ CURRENT STATE SNAPSHOT:
 S1 is complete; its Leave-behind (§6.7 of the project-level spec)
 is your Intake (§7.6). The outer-ring DDL is applied,
 `PostgresMarketDataStore` exists, the `asyncpg.Pool` is Runner-
-owned, `feedback` + `eval_records` carry `(strategy_id,
-strategy_version_id)` columns reserved `NULLABLE`, `/signals`
-renders real orderbook depth, and the canonical gates are green on
-a fresh clone. Inner-ring product-table columns are still
-`NULLABLE` — S5 will upgrade them to `NOT NULL`; your job is the
-aggregate + registry + linter + seed that makes the `NULLABLE`
-columns carry `"default"` instead of `NULL`.
+owned, all 4 inner-ring product tables (`feedback`, `eval_records`,
+`orders`, `fills`) carry `(strategy_id, strategy_version_id)`
+columns reserved `NULLABLE`, `/signals` renders real orderbook
+depth, and the canonical gates are green on a fresh clone. Inner-
+ring product-table columns are still `NULLABLE` — S5 will upgrade
+them to `NOT NULL`; your job is the aggregate + registry + linter
++ seed that makes the `NULLABLE` columns carry `"default"` instead
+of `NULL`.
 
 PREFLIGHT (boundary check — run before any authoring):
 
