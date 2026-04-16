@@ -2686,3 +2686,676 @@ go-ahead before drafting
 ---
 
 ---
+
+## 9. Sub-spec S4 — pms-active-perception-v1
+
+S4 closes the **active-perception feedback edge** of the cybernetic
+loop. With S1's two-layer sensor (`MarketDiscoverySensor` +
+`MarketDataSensor`) and S2's `Strategy` aggregate + registry already
+landed, the bidirectional edge from Controller/Strategy back into
+Sensor subscription is still missing: `MarketDataSensor` today
+receives its asset-id list from a stub loader (S1 §6.4 Non-goals
+explicitly carves this out), and no module computes the merged
+market-id set that registered strategies actually need. S4 wires
+that edge. This section expands the `agent_docs/project-roadmap.md`
+§S4 skeleton into the project-level contract that the harness run
+under `.harness/pms-active-perception-v1/` will consume.
+
+### 9.1 Goal
+
+S4 wires the **Controller → Sensor feedback path** so Sensor
+subscription is derived at runtime from the union of every registered
+strategy's `select_markets(universe)` output, rather than from static
+config. A new `MarketSelector` reads the market universe from the
+outer-ring `markets` / `tokens` tables (owned by S1), applies each
+registered strategy's `Strategy.select_markets(universe)` hook, and
+produces a merged `market_ids: list[str]`. A new
+`SensorSubscriptionController` **pushes** subscription updates into
+the `MarketDataSensor` (the sensor never pulls — Invariant 6). The
+`Strategy.select_markets` **method body** lands with S4 even though
+the `Strategy` aggregate class itself was defined in S2: per the
+single-owner rule in §3.2.4, this specific method ships in the same
+commit as its first consumer (`MarketSelector`) so the hook and the
+driver land together. Runner wiring honors the **Invariant 6 boot
+order** — `MarketDiscoverySensor` populates the universe first,
+`MarketSelector` then computes the merged list from the populated
+universe, `SensorSubscriptionController` pushes the result into
+`MarketDataSensor`, and strategy-config changes trigger
+**incremental resubscribe** without a Runner restart. S4 closes
+observable-capability item #9 of §1.1 (active perception wired
+end-to-end, no sensor module imports `pms.strategies.*`).
+
+### 9.2 Scope (in / out)
+
+**Scope in.** Exactly the **4 rows** owned by S4 in §3.2.4, in the
+same order, each with a one-line scope descriptor. Reviewers
+verifying boundary integrity grep §3.2.4 against this list; the
+lists must match concept-for-concept.
+
+1. **`MarketSelector` (`src/pms/market_selection/selector.py`).**
+   Sibling module to `pms.controller` — placement under
+   `src/pms/market_selection/` rather than `src/pms/controller/`
+   (both placements were left open by `src/pms/controller/CLAUDE.md`;
+   S4 declares the sibling placement here). Rationale: the
+   import-linter rule banning `pms.sensor → pms.market_selection`
+   (Invariant 6 Enforcement, codified by S2) names
+   `pms.market_selection` as a first-class package; placing the
+   module under that package keeps the linter rule readable and
+   avoids re-exporting from `pms.controller`. Reads universe from
+   outer ring via `PostgresMarketDataStore` (S1), applies each
+   strategy's `select_markets(universe)`, returns merged market-id
+   list (Invariant 6).
+2. **`SensorSubscriptionController`
+   (`src/pms/market_selection/subscription_controller.py`).**
+   Push-only channel: invokes `MarketDataSensor.subscribe(
+   asset_ids)` / `.unsubscribe(asset_ids)` with the delta between
+   the previous and current merged list. Sensor never pulls — the
+   flow is always selector → controller → sensor (Invariants 6, 7).
+3. **`Strategy.select_markets(universe)` method (declaration +
+   body + per-strategy tests).** The aggregate class itself lives
+   on S2's `Strategy` type; this **method** ships with S4 so the
+   hook and its first consumer (`MarketSelector`) land in the same
+   commit. Returns a strategy-specific subset of the universe as a
+   `list[str]` of market ids (Invariants 2, 6).
+4. **Runner wiring: boot order + recompute on universe-refresh
+   and strategy-config change.** `src/pms/runner.py` is updated to
+   instantiate the four components in the order
+   `MarketDiscoverySensor → MarketSelector → SensorSubscription-
+   Controller → MarketDataSensor`, then drives **two** recompute
+   triggers: (a) **universe-refresh trigger** — every time
+   `MarketDiscoverySensor` completes a poll cycle that changed the
+   `markets` / `tokens` outer-ring rows (new listing, delisting, or
+   token update), Runner re-invokes `MarketSelector.compute()` and
+   pushes any delta through `SensorSubscriptionController`; this is
+   what unblocks the cold-start empty-universe boot (§9.3 AC 4) and
+   what catches newly-listed markets (§9.10 risk row 1); (b)
+   **strategy-registry trigger** — on a strategy register /
+   unregister / config change from `PostgresStrategyRegistry` (S2),
+   Runner re-invokes `MarketSelector` and pushes only the delta
+   through `SensorSubscriptionController`. Neither trigger causes a
+   Runner restart or a full resubscribe; both emit only the
+   symmetric difference of the two market-id sets (Invariant 6
+   "Cold-start handling" block — the cold-start recovery path is
+   trigger (a), incremental live evolution is the union of (a) and
+   (b)).
+
+**Scope out.** The following look S4-adjacent but are owned by
+other sub-specs. A PR landing any of these under `.harness/pms-
+active-perception-v1/` is scope drift.
+
+- **`Strategy` aggregate class + projection types
+  (`StrategyConfig`, `RiskParams`, `EvalSpec`, `ForecasterSpec`,
+  `MarketSelectionSpec`) → S2** (§3.2.2). S4 depends on the
+  aggregate class existing and being iterable via
+  `PostgresStrategyRegistry`; S4 does not redefine it. The only
+  strategy-side S4 delta is the `select_markets` **method body**,
+  per §9.2 row 3.
+- **Outer-ring `markets` / `tokens` tables (DDL + writes) → S1**
+  (§3.2.1). `MarketSelector` reads these tables via the
+  S1-provided `PostgresMarketDataStore`; S4 does not alter DDL or
+  ingestion cadence.
+- **`MarketDiscoverySensor` + `MarketDataSensor` classes → S1**
+  (§3.2.1). S4 depends on both, configures their boot order, and
+  pushes subscription updates into `MarketDataSensor`; S4 does
+  not rewrite sensor internals. `MarketDataSensor` remains a
+  subscription **sink** per its S1 contract.
+- **`factor_values` table + `FactorService` → S3** (§3.2.3). S4
+  does not consume factor values; selection is a universe → market-
+  id projection, not a factor-ranking step. Any factor-driven
+  filtering happens inside a strategy's `select_markets` body,
+  but the reads live behind `StrategyConfig` — S4 itself never
+  imports `pms.factors.*`.
+- **Per-strategy `ControllerPipeline` dispatch that consumes the
+  active subscription list → S5** (§3.2.5). S4 makes the
+  subscription active; S5 is the first consumer that dispatches
+  per-strategy pipelines against it. S4 ships with the existing
+  global `ControllerPipeline` untouched — S5 does the per-strategy
+  split.
+- **`BacktestSpec` + `ExecutionModel` + market-universe replay
+  → S6** (§3.2.6). Backtest replay of subscription changes is
+  out of S4's scope (see §9.4 Non-goals).
+
+### 9.3 Acceptance criteria (system-level)
+
+Six observable-capability bullets. Each is verifiable at the system
+level — not a checklist item for an individual CP.
+
+1. **Subscription tracks `select_markets` output live.** Registering
+   a new strategy whose `select_markets(universe)` returns market ids
+   `[A, B]` causes the `MarketDataSensor` subscription to include
+   both `A` and `B` within **5 seconds** of the registry write, with
+   no Runner restart. Verified by an integration test that registers
+   a stub strategy, reads the sensor's current subscription set, and
+   asserts set-membership within the time bound (Invariant 6).
+2. **Union semantics on shrink.** Unregistering a strategy — or
+   reducing its `select_markets` output — causes the merged
+   subscription set to shrink. A market still selected by **any**
+   remaining registered strategy stays subscribed; a market **no
+   longer** selected by any strategy is unsubscribed via an
+   explicit `unsubscribe` call on `MarketDataSensor`, within the
+   same 5-second bound. Verified by an integration test with two
+   strategies where one drops a market the other still selects and
+   a second market only the unregistered strategy selected
+   (Invariant 6).
+3. **Import-linter enforces the full Sensor import boundary.** The
+   S2-codified import-linter rule that `pms.sensor` cannot import
+   from `pms.strategies.*`, `pms.controller.*`, **or**
+   `pms.market_selection` (§3.2.2 row 7 of the project-level spec)
+   has zero violations after S4 lands. The first two legs already
+   appear as informal "Do not" bullets in the current
+   `src/pms/sensor/CLAUDE.md`; S2 is what formalises all three
+   legs into a machine-checkable rule (S2 landed before S4 per the
+   §4.1 canonical sequence), and the third leg
+   (`pms.market_selection`) is the one S4 makes load-bearing for
+   the first time since `pms.market_selection` does not exist as a
+   package before S4. Machine check: `import-linter` run in CI
+   produces a green report against all three targets; grep
+   complement `rg -n
+   '^(from pms\.strategies|from pms\.controller|from pms\.market_selection|import pms\.strategies|import pms\.controller|import pms\.market_selection)'
+   src/pms/sensor` returns zero matches. No Sensor module references
+   the selector, the controller, or the strategies aggregate
+   (Invariants 5, 6).
+4. **Cold-start boot order holds and recovers on universe
+   refresh.** Invariant 6 "Cold-start handling" is verified by a
+   two-part deterministic test: (a) if `MarketDiscoverySensor`
+   returns **0 markets** (the universe is empty — a legitimate
+   state at first boot before the Gamma poll completes),
+   `MarketSelector.compute()` returns an empty list,
+   `SensorSubscriptionController` issues **no** subscribe calls,
+   and `MarketDataSensor` stays idle (no WebSocket subscribe
+   message emitted, no book-snapshot row written); (b) the very
+   next `MarketDiscoverySensor` poll that writes a non-empty
+   `markets` set triggers the Runner's universe-refresh recompute
+   (§9.2 row 4 trigger (a)), `MarketSelector.compute()` now
+   returns the strategies' merged selection, and
+   `SensorSubscriptionController` subscribes the resulting asset
+   ids within the same 5-second bound as AC 1. The window of
+   idleness is bounded by the `MarketDiscoverySensor` cadence; it
+   is a documented boot-order ordering constraint, not an error
+   state, and not a permanent stranding.
+5. **Incremental resubscribe on strategy-config change.** Mutating
+   a registered strategy's config (re-registering with a new
+   `strategy_versions` row via `PostgresStrategyRegistry` per
+   Invariant 3) triggers only **delta** subscribe / unsubscribe
+   calls on `MarketDataSensor`, not a full unsubscribe-then-
+   resubscribe. Verified by an integration test that counts
+   `.subscribe` / `.unsubscribe` invocations across a config change
+   and asserts the count equals the symmetric difference of the
+   two market-id sets (Invariant 6).
+6. **Canonical gates green on a fresh clone.** `uv run pytest -q`
+   passes with the baseline (≥ 70 tests + 2 skipped integration)
+   and `uv run mypy src/ tests/ --strict` is clean, on a fresh
+   shell per 🟡 Fresh-clone baseline verification (§5.1, §5.2).
+
+### 9.4 Non-goals
+
+Explicit deferrals. An S4 harness spec that lands any of these
+items is scope drift.
+
+- **No per-strategy `ControllerPipeline` dispatch.** S4 makes the
+  subscription list driven by each strategy's `select_markets`,
+  but the existing global `ControllerPipeline` continues to run
+  unchanged. Per-strategy dispatch — the layer that consumes the
+  active subscription and fans decisions out per strategy — is
+  S5-owned (§3.2.5).
+- **No strategy-specific WebSocket topics.** Subscription is
+  **venue-level**, shared across strategies by construction: the
+  merged market-id list is the union, so the same `book` /
+  `price_change` event arrives once and is written once to the
+  outer ring (Invariant 8 — market data stays strategy-agnostic).
+  Per-strategy "my own stream" is explicitly rejected.
+- **No backtest replay of subscription changes.** S6 owns the
+  market-universe replay engine (§3.2.6). Backtest mode continues
+  to use `HistoricalSensor`'s flat asset-id list; active perception
+  applies only to live / paper modes in S4.
+- **No strategy-selection caching layer.** Baseline is
+  **compute-on-change** — `MarketSelector` recomputes the merged
+  list on either of the two §9.2 row 4 triggers (universe-refresh
+  from `MarketDiscoverySensor` poll-complete, or strategy-registry
+  register / unregister / config change), and that is it. No
+  memoisation of `select_markets(universe)` outputs, no
+  incremental universe-diffing inside the selector. Both triggers
+  are authorised; nothing else schedules a recompute. Add a cache
+  only if a concrete perf finding demands it, with its own retro.
+- **No multi-venue subscription coordination.** S4 covers
+  **Polymarket only**. A Kalshi adapter pair (discovery + data)
+  with its own selector entry is follow-on work — mentioned in §1.2
+  "What the finished system does not do" and deferred past S6.
+- **No runtime mutation of a registered strategy's `select_markets`
+  implementation.** Changing the method body requires a new
+  `strategy_versions` row (Invariant 3 — immutable versioning);
+  S4 does not support in-place method replacement.
+
+### 9.5 Dependencies
+
+- **Upstream sub-specs.**
+  - **S1** (§6) — `MarketDiscoverySensor` + `MarketDataSensor`
+    classes, `markets` / `tokens` tables, `PostgresMarketDataStore`
+    read helpers, `asyncpg.Pool`, Runner scaffolding. S4 wires
+    itself into the existing two-sensor split as a **subscription-
+    push channel** between them.
+  - **S2** (§7) — `Strategy` aggregate class, `strategy_versions`
+    immutability, `PostgresStrategyRegistry`, **import-linter
+    rules (including the `pms.sensor → pms.market_selection` ban
+    that S2 reserves for S4)**. S4 consumes the registry's iterable
+    of registered strategies; S4's `select_markets` **method body**
+    extends the aggregate surface that S2 declares.
+- **Upstream invariants.** Primary: **6** (active perception —
+  Controller-derived market ids feed back into Sensor subscription)
+  and **7** (two-layer sensor, with `MarketDataSensor` as the
+  subscription sink). Partial touches: **2** (the Strategy aggregate
+  is read via `select_markets`; S4 is an aggregate-reader on one
+  method only) and **5** (the import-linter rule extension
+  `pms.sensor → pms.market_selection` codified in S2 becomes
+  load-bearing once S4 introduces the `pms.market_selection`
+  package — S4 is the first PR under which the rule can actually
+  fire; the rule itself stays S2-owned).
+
+### 9.6 Intake
+
+Minimum set that must exist before a harness run opens under
+`.harness/pms-active-perception-v1/`.
+
+1. **S1 Leave-behind satisfied.** Per §6.7: `schema.sql` declares
+   outer-ring `markets` / `tokens` / `book_snapshots` /
+   `book_levels` / `price_changes` / `trades`; `MarketDiscovery-
+   Sensor` populates `markets` + `tokens`; `MarketDataSensor`
+   accepts a flat `asset_ids: list[str]` at start-up and exposes
+   `.subscribe(asset_ids)` / `.unsubscribe(asset_ids)` as the
+   subscription-sink contract; `PostgresMarketDataStore` provides
+   the outer-ring read helpers `MarketSelector` needs;
+   `asyncpg.Pool` is Runner-owned; the S1 stub loader for
+   `MarketDataSensor`'s initial asset-id list is still in place
+   (S4 replaces it with the push channel).
+2. **S2 Leave-behind satisfied.** Per §7.7: `Strategy` aggregate
+   class exists under `src/pms/strategies/aggregate.py` with
+   `MarketSelectionSpec` projection declared on it;
+   `strategy_versions` table carries the immutable config-hash row
+   per registered strategy; `PostgresStrategyRegistry` exposes an
+   iterable of registered `Strategy` aggregates and emits a
+   change-notification hook (register / unregister / config-change)
+   that S4's Runner wiring subscribes to; the `"default"` strategy
+   + version row is seeded so the pre-S5 runtime has exactly one
+   registered strategy to iterate over. **The S2 import-linter
+   rule must already codify the full three-target ban before S4
+   opens** — `pms.sensor` cannot import from `pms.strategies.*`,
+   `pms.controller.*`, OR `pms.market_selection`. S2 is the
+   sub-spec that introduces the machine-checkable rule (the
+   import-linter config is a **new** addition that lands with S2;
+   today's `pyproject.toml` has no `[tool.importlinter]` section,
+   and `src/pms/sensor/CLAUDE.md` informally records only the
+   first two legs). All three targets must be present in
+   `pyproject.toml` (or `ruff.toml`, whichever S2 chooses) ahead of
+   the S4 harness run; the `pms.market_selection` leg is the one
+   S4 makes load-bearing for the first time since
+   `pms.market_selection` does not exist as a package pre-S4, but
+   the other two legs guard against regressions during S4 wiring
+   (Invariants 5 + 6 Enforcement).
+3. **Canonical gates green on a fresh clone.** `uv run pytest -q`
+   passes with ≥ 70 tests + 2 skipped; `uv run mypy src/ tests/
+   --strict` is clean (§5.1, §5.2; 🟡 Fresh-clone baseline
+   verification).
+4. **No existing `src/pms/market_selection/` tree.** This is the
+   first sub-spec to introduce the package; a pre-existing
+   directory would indicate scope overlap with a parallel effort
+   that must first reconcile. Mechanical check:
+   `test ! -d src/pms/market_selection` (exits 0) — or equivalently
+   `find src/pms -type d -name market_selection` returns zero lines.
+   `fd` is deliberately **not** used: per the promoted rule 🟡
+   Verify isolated-env tooling assumptions, the check must work in
+   a minimal shell without third-party CLIs installed.
+
+### 9.7 Leave-behind
+
+Enumerated artefacts produced by S4, keyed back to §3.2.4 row
+numbers so the §4.3 gate-4 boundary-integrity check can diff S5's
+Intake (once §10.6 lands) against this list.
+
+1. **`src/pms/market_selection/selector.py`** (§3.2.4 row 1)
+   defining `MarketSelector` with:
+   - Constructor taking `PostgresMarketDataStore` (for outer-ring
+     universe reads) and `PostgresStrategyRegistry` (for iterating
+     registered strategies).
+   - A single public async method `compute() -> list[str]` that
+     reads the current universe, invokes each registered
+     `Strategy.select_markets(universe)`, and returns the merged
+     market-id list (order deterministic — alphabetical by
+     `market_id` — so diffs are stable).
+2. **`src/pms/market_selection/subscription_controller.py`**
+   (§3.2.4 row 2) defining `SensorSubscriptionController` with:
+   - Constructor taking a `MarketDataSensor` reference.
+   - A single public async method
+     `apply(new_market_ids: list[str]) -> None` that computes the
+     symmetric difference against the last applied list and emits
+     exactly the delta `.subscribe` / `.unsubscribe` calls. Ordering
+     contract: `.subscribe(delta_add)` runs **before**
+     `.unsubscribe(delta_remove)` within the same `apply()` call —
+     markets still in the union never briefly leave the active set
+     (§9.10 row 3).
+   - Internal state: the last applied list, scoped by instance; no
+     cross-instance shared state.
+3. **`Strategy.select_markets(universe: Sequence[MarketRow]) ->
+   list[str]` method body** (§3.2.4 row 3) on the S2 aggregate
+   class at `src/pms/strategies/aggregate.py`, with:
+   - Default implementation that reads the strategy's
+     `MarketSelectionSpec` projection and filters the universe
+     accordingly.
+   - Per-strategy tests covering: empty universe, universe with
+     no matches, universe with partial matches, and a strategy
+     whose spec rejects every row.
+4. **Runner wiring in `src/pms/runner.py`** (§3.2.4 row 4):
+   - Boot-order sequence `MarketDiscoverySensor.start() →
+     MarketSelector.compute() → SensorSubscriptionController.apply()
+     → MarketDataSensor.start()` — with `MarketSelector.compute()`
+     tolerating an empty universe and returning `[]` cleanly (§9.3
+     AC 4a).
+   - A **universe-refresh trigger** (§9.2 row 4 trigger (a)): a
+     `MarketDiscoverySensor` poll-complete hook that, whenever the
+     completed poll changed the outer-ring `markets` / `tokens`
+     rows, re-invokes `MarketSelector.compute()` +
+     `SensorSubscriptionController.apply()` pushing only the delta.
+     This is the trigger that closes the cold-start empty-universe
+     window (§9.3 AC 4b) and that catches newly-listed markets
+     (§9.10 risk row 1).
+   - A **strategy-registry trigger** (§9.2 row 4 trigger (b)): a
+     `PostgresStrategyRegistry` change-notification subscriber that
+     triggers `MarketSelector.compute()` +
+     `SensorSubscriptionController.apply()` again, pushing only
+     the delta (§9.3 AC 5).
+   - Lifecycle cleanup on **all four exit paths** (normal shutdown,
+     signal, exception, test teardown) per 🟡 Lifecycle cleanup on
+     all exit paths — `SensorSubscriptionController` releases its
+     last-applied-list state and `MarketDataSensor` receives an
+     explicit final `unsubscribe` for every active market id in a
+     `try/finally` scoped to `Runner.stop()`.
+
+S5's Intake (authored in the next drafting slot) reads from this
+list; diffing the two is the §4.3 gate-4 mechanism.
+
+### 9.8 Checkpoint skeleton
+
+Flat one-line-each list. **Not harness acceptance criteria** — the
+per-CP acceptance criteria, files-of-interest, effort estimates,
+and test expectations land in `.harness/pms-active-perception-v1/
+spec.md` when the kickoff prompt (§9.11) triggers that authoring
+session.
+
+- **CP1 — `MarketSelector` class + unit tests over synthetic
+  registry + empty-universe cold-start test** (covers §9.3 AC 4a
+  deterministically in isolation — empty universe yields empty
+  list, no side effects).
+- **CP2 — `Strategy.select_markets` method body on the S2
+  aggregate + per-strategy tests** (empty universe / no-match /
+  partial-match / reject-all).
+- **CP3 — `SensorSubscriptionController` class + delta-push
+  protocol tests** against a `MarketDataSensor` test double,
+  including the ordering test that locks in row-3-of-§9.10
+  (subscribe-first then unsubscribe for the delta-remove, so
+  markets in the union never gap).
+- **CP4 — Runner boot-order wiring + universe-refresh
+  recompute trigger** (DiscoverySensor → Selector →
+  SubscriptionController → DataSensor, plus the
+  discovery-poll-complete hook that re-invokes
+  `MarketSelector.compute()` + `SensorSubscriptionController.
+  apply()` on a changed outer-ring row set) with cold-start
+  ordering + cold-start recovery both verified end-to-end
+  (§9.3 AC 4a + AC 4b) and lifecycle cleanup on all four
+  exit paths.
+- **CP5 — Strategy-registry change trigger** — incremental
+  resubscribe on strategy register / unregister / config change
+  wired into `PostgresStrategyRegistry`'s change-notification
+  hook, verified by an integration test counting delta calls
+  (§9.3 AC 5).
+- **CP6 — Integration test: add/remove strategy observable
+  subscription delta within 5 seconds** (§9.3 AC 1 + AC 2) under
+  `@pytest.mark.integration` + `PMS_RUN_INTEGRATION=1` skipif
+  (🟢 Integration test default-skip pattern).
+
+### 9.9 Effort estimate
+
+**M** (6 CPs per §9.8; new module tree `src/pms/market_selection/`
++ one method body on the S2 aggregate + Runner wiring + integration
+tests; blast radius concentrated at the Controller ↔ Sensor
+boundary). Smaller than S1 (L — 10 CPs, persistence backend + two
+sensors + CI infra) and S2 (L — aggregate + registry + projections
++ import-linter rule codification) because the storage layer, the
+aggregate surface, and the linter rules are all pre-existing. Most
+of the design risk is concentrated in Runner lifecycle / boot-order
+sequencing, not in new persistence or schema work.
+
+### 9.10 Risk register
+
+| Risk | Likelihood | Impact | Mitigation | Trigger / early-warning |
+|---|---|---|---|---|
+| Race between `MarketDiscoverySensor` universe update and in-flight `MarketSelector.compute()` — selector reads a stale `markets` snapshot, misses a newly-listed market, and the new market is not subscribed until the next config-change event | M | M | `MarketSelector.compute()` re-reads the universe at invocation time (no cached universe); discovery sensor writes `markets` rows via `INSERT ... ON CONFLICT` (S1 §3.2.1), so a concurrent read sees either the old row or the new one but not a partial write; selector also re-runs on discovery-sensor completion heartbeat (not only on strategy register / unregister) | Integration test: race harness that listens for a `markets` row insert and asserts the subscription set contains the new market within 5 seconds of the insert; CI flake on the race test |
+| Oscillating subscriptions between two strategies disagreeing on a market with thin signal — strategy A selects then drops a market on every config-hash tick, producing a churn of subscribe / unsubscribe cycles on the WebSocket | L | M | Union semantics: unsubscribe only when **no** registered strategy selects the market (§9.3 AC 2); strategies cannot force an unsubscribe against another strategy's selection; `SensorSubscriptionController` does not emit a `.unsubscribe` for a market still in the union; the only loop that can form is strategy-vs-itself, which is bounded by the config-hash re-registration cadence | Metrics on `.subscribe` / `.unsubscribe` call rates per market id; rate > 1 per minute for any single market id during normal operation |
+| `MarketDataSensor` drops frames during resubscribe — the subscribe / unsubscribe delta is emitted while a book event is in flight, and the stateful parser sees a delta for a market it has just unsubscribed | L | M | `SensorSubscriptionController.apply()` emits `.subscribe` for the delta-add set **before** `.unsubscribe` for the delta-remove set, so markets still in the union never briefly leave the active set (the union cover at every instant is a superset of both the old and the new active sets). `MarketDataSensor`'s stateful parser (S1 §6.2 row 11) ignores events for asset ids not currently in its active set — events for a cleanly-removed market arriving after `.unsubscribe` are dropped by design, not by race; reconnect reconciliation (S1 §6.2 row 13) re-issues subscribe on the current set so any WebSocket-side race resolves within one reconnect cycle. CP3 test double locks the ordering: `.subscribe(delta_add)` invocation count is non-zero before any `.unsubscribe(delta_remove)` invocation within the same `apply()` call | `MarketDataSensor` WARN log "event for unsubscribed asset" at rate > 0.01 per second; `book_snapshots` gap > 30 seconds on an active market; CP3 ordering assertion fails in CI |
+| Cold-start timing window where `MarketDataSensor` has no subscription for the first N seconds after Runner boot — the universe is empty, `MarketSelector` returns `[]`, no subscribe is issued, and the dashboard briefly shows no live markets | **Expected, not a bug** | L | Documented in Invariant 6 "Cold-start handling" and in §9.3 AC 4 as the correct boot-order behaviour, not a failure mode; the window closes on the first `MarketDiscoverySensor` poll cycle (bounded by its configured cadence — seconds); dashboard copy on `/signals` should distinguish "no subscriptions yet (universe empty)" from "sensor error" | First-boot observer reports "no data on `/signals`"; resolve by citing this row + AC 4 — do not attempt to remove the window |
+| Import-linter rule collision with existing controller code — `src/pms/controller/router.py` or `src/pms/controller/pipeline.py` already imports something the S2 linter rule flags once `pms.market_selection` exists (e.g., a shared helper that controller unwittingly re-exports into sensor reach) | L | M | Before writing the S4 module tree, run the S2 linter against a no-op stub `src/pms/market_selection/__init__.py` to confirm the baseline is green; existing `pms.controller.*` already avoids sensor reach per S5 Invariant 5 enforcement; §9.6 Intake item 2 is load-bearing here (the rule must exist in the tree before S4 starts so violations surface at CP1, not at CP6) | S4 CP1 lint run fails on a rule not introduced by S4 itself — stop and reconcile with S2 / controller code before proceeding |
+
+### 9.11 Kickoff Prompt
+
+The block below is **copy-paste-ready** for a fresh Claude session
+whose job is to author `.harness/pms-active-perception-v1/spec.md` —
+the harness-executable spec with per-CP acceptance criteria,
+files-of-interest, effort, and intra-spec dependencies. The future
+session has **no memory** of this document; the prompt is
+self-contained.
+
+```
+SCOPE:
+
+You are starting harness task `pms-active-perception-v1` in the
+prediction-market-system repository at
+/Users/stometa/dev/prediction-market-system. Your job this
+session is to author the harness-executable spec file at
+/Users/stometa/dev/prediction-market-system/.harness/pms-active-perception-v1/spec.md
+(the directory may not yet exist; you will create it).
+
+REQUIRED READING (ordered — read in this order before touching
+anything, all paths absolute). NOTE on branch state: by the time
+this kickoff fires, the project-level decomposition spec (item 1
+below) and all S1/S2/S3 artefacts are assumed merged to `main`
+(CURRENT STATE SNAPSHOT confirms this). If a file listed below is
+NOT reachable from the current `main` checkout, run
+`git log --all --oneline -- <path>` to locate the branch it lives
+on, read it via `git show <branch>:<path>`, and HALT before
+authoring — a missing REQUIRED READING artefact means the S1/S2/S3
+retirement gates did not land correctly.
+
+1. /Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md
+   — specifically §9 (this sub-spec's total-spec contract). This
+   file lands on `main` as part of the project-decomposition PR;
+   if absent on `main`, fetch via
+   `git show docs/pms-project-decomposition:docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md`
+   and HALT with the user.
+2. /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+   — focus on Invariant 6 (active perception — Controller-derived
+   market ids feed back into Sensor subscription) and Invariant 7
+   (two-layer sensor, with `MarketDataSensor` as subscription
+   sink). Read the §"Cold-start handling" block of Invariant 6
+   carefully — the boot-order ordering constraint is load-bearing
+   for §9.3 AC 4 and §9.8 CP1 / CP4. Partial touches on
+   Invariants 2 and 5.
+3. /Users/stometa/dev/prediction-market-system/agent_docs/promoted-rules.md
+   — especially Runtime behaviour > design intent (🔴), Review-loop
+   rejection discipline (🔴), Lifecycle cleanup on all exit paths
+   (🟡 — relevant for Runner boot order and SubscriptionController
+   teardown), Fresh-clone baseline verification (🟡), and
+   Integration test default-skip pattern (🟢 — applies to the
+   §9.3 AC 1 / AC 2 / AC 5 integration tests).
+4. /Users/stometa/dev/prediction-market-system/src/pms/sensor/CLAUDE.md
+   — per-layer invariant enforcement for Sensor. Load-bearing:
+   the file's §"Do not" list informally bans `pms.strategies.*` and
+   `pms.controller.*` (Invariant 5). The third leg of the
+   three-target ban — `pms.market_selection` — is grounded in
+   Invariant 6 Enforcement (`agent_docs/architecture-invariants.md`
+   §Invariant 6) and is mechanically codified by S2's import-linter
+   rule per the §3.2.2 Boundary Matrix row; the sensor CLAUDE.md
+   does not currently mention `pms.market_selection` directly. All
+   three legs together form the rule the import-linter enforces
+   from S2 onwards.
+5. /Users/stometa/dev/prediction-market-system/src/pms/controller/CLAUDE.md
+   — per-layer invariant enforcement for Controller. Load-bearing:
+   §"Layer-relevant invariants" Invariant 6 bullet — MarketSelector
+   placement is declared as `src/pms/market_selection/` (sibling
+   module) in §9.2 of the project-level spec, not under
+   `src/pms/controller/`.
+6. /Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+   — structural reference for harness-grade spec shape (CP shape,
+   acceptance-criteria shape, files-of-interest shape).
+
+CURRENT STATE SNAPSHOT:
+
+This snapshot describes the **state the future session expects at
+the moment this kickoff fires** (after S1, S2, S3 have all
+landed per the §4.1 canonical sequence). If any item below is not
+true when the kickoff actually runs, HALT — the §4.3 between-spec
+gates for S3 did not clear. Specifically at kickoff time:
+- S1, S2, and S3 have all been merged to `main` per the
+  between-spec gates.
+- The project-level spec
+  (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md)
+  is on `main` and reachable from the current checkout.
+- The harness structural reference at
+  /Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+  is on `main` and reachable from the current checkout. (If
+  either file is absent from `main`, HALT — see REQUIRED
+  READING NOTE.)
+- S1 Leave-behind (§6.7 of the project-level spec) is satisfied:
+  outer-ring tables, `MarketDiscoverySensor`, `MarketDataSensor`
+  as subscription sink with `.subscribe` / `.unsubscribe`,
+  `PostgresMarketDataStore`, Runner-owned `asyncpg.Pool`, stub
+  loader for `MarketDataSensor`'s initial asset-id list still in
+  place.
+- S2 Leave-behind is satisfied: `Strategy` aggregate + projections,
+  `strategies` + `strategy_versions` tables, `PostgresStrategy-
+  Registry` with a change-notification hook, and the
+  import-linter configuration S2 introduces to `pyproject.toml`
+  (or `ruff.toml`) carries the full three-target ban (`pms.sensor`
+  cannot import from `pms.strategies.*`, `pms.controller.*`, OR
+  `pms.market_selection`). Note: the import-linter configuration
+  is **net-new in S2** — pre-S2 `pyproject.toml` has no
+  `[tool.importlinter]` section, and `src/pms/sensor/CLAUDE.md`
+  informally records only the first two legs. S2 is what lands
+  the mechanical enforcement of all three. `"default"` strategy
+  + version is seeded.
+- S3 Leave-behind is satisfied: `factors` + `factor_values` tables,
+  `FactorService`, rules-detector heuristics migrated to raw
+  factor definitions, `/factors` dashboard page.
+- §9.6 Intake items are all satisfied. No `src/pms/market_selection/`
+  directory yet exists in the tree.
+
+PREFLIGHT (boundary check — run before any authoring):
+
+- §9.6 Intake items must all be satisfied. If any fails, HALT and
+  tell the user:
+  * `uv run pytest -q` passes with ≥ 70 tests + 2 skipped
+    (PMS_RUN_INTEGRATION=1 gate), and
+    `uv run mypy src/ tests/ --strict` is clean, on a fresh shell.
+  * S1 and S2 Leave-behind artefacts exist per §6.7 and §7.7 of
+    the project-level spec.
+  * The full three-target S2 import-linter rule is present in
+    `pyproject.toml` or `ruff.toml`: `pms.sensor` cannot import
+    from `pms.strategies.*`, `pms.controller.*`, OR
+    `pms.market_selection`. All three legs must be in the rule —
+    the first two guard against regressions during S4 wiring,
+    the third is the one S4 makes load-bearing.
+  * No `src/pms/market_selection/` directory pre-exists under
+    /Users/stometa/dev/prediction-market-system/src/pms/.
+
+TASK:
+
+Create
+/Users/stometa/dev/prediction-market-system/.harness/pms-active-perception-v1/spec.md
+by expanding §9.8 (Checkpoint skeleton) into harness-grade CPs
+with:
+
+- Per-CP acceptance criteria (observable, falsifiable, not
+  implementation notes).
+- Per-CP files-of-interest (absolute paths under
+  /Users/stometa/dev/prediction-market-system/).
+- Per-CP effort estimate (S / M / L).
+- Intra-spec CP dependencies (which CPs block which).
+
+Use
+/Users/stometa/dev/prediction-market-system/.harness/pms-v2/spec.md
+as the structural reference for shape. Draft only — stop and wait
+for spec-evaluation approval before running any checkpoint.
+
+CONSTRAINTS:
+
+- New feature branch `feat/pms-active-perception-v1` off `main`.
+  Never commit to `main` directly.
+- Respect §3 Boundary Matrix of the project-level spec
+  (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md).
+  Never claim a concept owned by another sub-spec (S1, S2, S3,
+  S5, S6). The 4 concepts enumerated in §9.2 Scope-in are the
+  complete authorised set for S4; anything else is scope drift.
+- Every Strategy / Sensor / selector / ring-ownership claim must
+  cite an invariant number from
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md.
+- No `Co-Authored-By` lines in any commit
+  (/Users/stometa/dev/prediction-market-system/CLAUDE.md §"Do
+  not"; promoted rule "Commit-message precedence").
+- Conventional-commit prefixes required (§5.6 of the project
+  spec): `feat(<scope>):`, `fix(<scope>):`, `docs(<scope>):`,
+  `test(<scope>):`, `refactor(<scope>):`, `chore(<scope>):`.
+- Follow the promoted rule 🟡 Lifecycle cleanup on all exit paths
+  for `SensorSubscriptionController` state and `MarketDataSensor`
+  subscription teardown: acquire + release in the same commit,
+  `try/finally` on all four exit paths.
+- Follow the promoted rule 🟢 Integration test default-skip pattern
+  for the §9.3 AC 1 / AC 2 / AC 5 integration tests.
+
+HALT CONDITIONS:
+
+- Any sensor module ends up importing from `pms.strategies.*`,
+  `pms.controller.*`, OR `pms.market_selection` — STOP
+  immediately. The first two legs are the informal "Do not" rules
+  in `src/pms/sensor/CLAUDE.md` §"Do not" (Invariant 5
+  Enforcement); the third leg is grounded in Invariant 6
+  Enforcement (`agent_docs/architecture-invariants.md` §Invariant
+  6) and is mechanically codified by the S2 import-linter rule
+  (project-level spec §3.2.2 row 7). Together the three legs are
+  the full ban that S2 lands as a machine-checkable rule before
+  S4 opens. The flow is always selector → controller → sensor;
+  sensor never pulls. Do not author any CP whose files-of-interest
+  include both `src/pms/sensor/` edits and a
+  `from pms.market_selection`, `from pms.controller`, or
+  `from pms.strategies` import (also reject the plain
+  `import pms.market_selection` / `import pms.controller` /
+  `import pms.strategies` syntaxes — the linter rule covers both
+  forms).
+- Any attempt to make `MarketDataSensor` compute its own
+  subscription list (pull, rather than receive via push). This
+  is an Invariant 6 violation — STOP.
+- Any invariant in
+  /Users/stometa/dev/prediction-market-system/agent_docs/architecture-invariants.md
+  cannot be satisfied by the design you are authoring. Do NOT
+  silently amend the invariant. Open a retro under
+  /Users/stometa/dev/prediction-market-system/.harness/retro/ and
+  return to the user.
+- The 4 concepts you author CPs for do not match §3.2.4 of the
+  project-level spec
+  (/Users/stometa/dev/prediction-market-system/docs/superpowers/specs/2026-04-16-pms-project-decomposition-design.md),
+  concept-for-concept. Reconcile first.
+
+FIRST ACTION:
+
+Run:
+
+    cd /Users/stometa/dev/prediction-market-system \
+      && git status && git branch --show-current \
+      && git log --oneline -5
+
+Then read the 6 files in the REQUIRED READING block, in order,
+before drafting any content. After reading, report your
+understanding of §9.8's 6 checkpoints (CP1–CP6) and wait for
+go-ahead before drafting
+/Users/stometa/dev/prediction-market-system/.harness/pms-active-perception-v1/spec.md.
+```
+
+---
+
+---
