@@ -31,6 +31,7 @@ from pms.core.models import (
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.spool import EvalSpool
 from pms.sensor.adapters.historical import HistoricalSensor
+from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
 from pms.sensor.stream import SensorStream
 from pms.storage.eval_store import EvalStore
@@ -247,6 +248,10 @@ class Runner:
                     base_url="https://gamma-api.polymarket.com"
                 ),
                 poll_interval_s=self.config.sensor.poll_interval_s,
+            ),
+            MarketDataSensor(
+                store=PostgresMarketDataStore(self._pg_pool),
+                asset_ids=[],
             ),
         )
 

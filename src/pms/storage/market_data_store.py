@@ -16,6 +16,10 @@ class PostgresMarketDataStore:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
+    @property
+    def pool(self) -> asyncpg.Pool:
+        return self._pool
+
     async def write_market(self, market: Market) -> None:
         query = """
         INSERT INTO markets (

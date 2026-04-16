@@ -215,12 +215,15 @@ async def test_runner_builds_market_discovery_sensor_for_non_backtest_modes(
     mode: RunMode,
 ) -> None:
     from pms.runner import Runner
+    from pms.sensor.adapters.market_data import MarketDataSensor
 
     runner = Runner(config=PMSSettings(mode=mode))
     runner._pg_pool = cast(Any, object())
 
     sensors = runner._build_sensors()
 
-    assert len(sensors) == 1
+    assert len(sensors) == 2
     assert isinstance(sensors[0], MarketDiscoverySensor)
+    assert isinstance(sensors[1], MarketDataSensor)
     await sensors[0].aclose()
+    await sensors[1].aclose()
