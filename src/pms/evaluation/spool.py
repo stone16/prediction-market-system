@@ -50,6 +50,6 @@ class EvalSpool:
                         fill.trade_id,
                     )
                     continue
-                self.store.append(self.scorer.score(fill, decision))
+                await self.store.append(self.scorer.score(fill, decision))
             finally:
                 self._queue.task_done()

@@ -207,28 +207,14 @@ def test_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) -> Non
     assert env_settings.mode is RunMode.PAPER
 
 
-def test_data_dir_honours_env_override(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_database_dsn_honours_database_url_override(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pms.config import DEFAULT_DATA_DIR, data_dir
+    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/pms_override")
 
-    monkeypatch.delenv("PMS_DATA_DIR", raising=False)
-    assert data_dir() == DEFAULT_DATA_DIR
+    settings = PMSSettings()
 
-    monkeypatch.setenv("PMS_DATA_DIR", str(tmp_path))
-    assert data_dir() == tmp_path
-
-
-def test_stores_default_paths_route_through_data_dir(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    from pms.storage.eval_store import EvalStore
-    from pms.storage.feedback_store import FeedbackStore
-
-    monkeypatch.setenv("PMS_DATA_DIR", str(tmp_path))
-
-    assert FeedbackStore().path == tmp_path / "feedback.jsonl"
-    assert EvalStore().path == tmp_path / "eval_records.jsonl"
+    assert settings.database.dsn == "postgresql://localhost/pms_override"
 
 
 def test_config_loads_optional_yaml_file(tmp_path: Path) -> None:

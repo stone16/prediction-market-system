@@ -31,8 +31,8 @@ uv run pytest -q                         # full suite — see baseline below
 uv run mypy src/ tests/ --strict         # strict on every committed module
 ```
 
-**Baseline (as of 2026-04-16, feat/pms-market-data-v1):** `pytest`
-79 passing, 17 skipped. The 17 skips are PostgreSQL-backed integration
+**Baseline (as of 2026-04-17, feat/pms-market-data-v1):** `pytest`
+87 passing, 25 skipped. The 25 skips are PostgreSQL-backed integration
 checks gated on `PMS_RUN_INTEGRATION=1` and, where needed,
 `PMS_TEST_DATABASE_URL`. mypy strict must be clean. If the baseline
 fails on a fresh clone, fix the config — not the test — and commit
@@ -164,8 +164,8 @@ uv run pms-api
 # Dashboard against live backend (port 3100).
 cd dashboard && PMS_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 
-# Isolate dev JSONL state (pre-S1 — migrating to per-shell PG DB).
-export PMS_DATA_DIR=/tmp/pms-dev && uv run pms-api
+# Isolate dev DB state per shell.
+DATABASE_URL=postgres://localhost/pms_dev_$(whoami) uv run pms-api
 
 # Compose-backed PostgreSQL integration DB.
 docker compose up -d postgres

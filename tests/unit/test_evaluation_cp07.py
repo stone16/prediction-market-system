@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -16,6 +16,7 @@ from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
 from pms.evaluation.spool import EvalSpool
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
 
 def _decision(
@@ -115,9 +116,8 @@ def test_scorer_brier_known_values() -> None:
 
 @pytest.mark.asyncio
 async def test_eval_spool_enqueue_is_non_blocking_and_scores_in_background(
-    tmp_path: Path,
 ) -> None:
-    store = EvalStore(path=tmp_path / "eval_records.jsonl")
+    store = cast(EvalStore, InMemoryEvalStore())
     spool = EvalSpool(store=store, scorer=Scorer())
     await spool.start()
 
@@ -133,15 +133,13 @@ async def test_eval_spool_enqueue_is_non_blocking_and_scores_in_background(
     await spool.stop()
 
     assert elapsed_ms < 100
-    assert len(store.all()) == 100
-    assert (tmp_path / "eval_records.jsonl").exists()
+    assert len(await cast(InMemoryEvalStore, store).all()) == 100
 
 
 @pytest.mark.asyncio
 async def test_eval_spool_skips_unresolved_fills_and_keeps_running(
-    tmp_path: Path,
 ) -> None:
-    store = EvalStore(path=tmp_path / "eval_records.jsonl")
+    store = cast(EvalStore, InMemoryEvalStore())
     spool = EvalSpool(store=store, scorer=Scorer())
     await spool.start()
 
@@ -157,7 +155,7 @@ async def test_eval_spool_skips_unresolved_fills_and_keeps_running(
     await asyncio.wait_for(spool.join(), timeout=1.0)
     await spool.stop()
 
-    assert [record.decision_id for record in store.all()] == ["d-resolved"]
+    assert [record.decision_id for record in await cast(InMemoryEvalStore, store).all()] == ["d-resolved"]
 
 
 def test_metrics_snapshot_empty_and_aggregated_records() -> None:
@@ -188,9 +186,10 @@ def test_metrics_snapshot_empty_and_aggregated_records() -> None:
     assert snapshot.calibration_samples == {"model-a": 1, "model-b": 1}
 
 
-def test_evaluator_feedback_threshold_boundaries() -> None:
+@pytest.mark.asyncio
+async def test_evaluator_feedback_threshold_boundaries() -> None:
     generator = EvaluatorFeedback(
-        FeedbackStore(path=None),
+        cast(FeedbackStore, InMemoryFeedbackStore()),
         risk=RiskSettings(
             max_brier_score=0.30,
             slippage_threshold_bps=50.0,
@@ -219,66 +218,11 @@ def test_evaluator_feedback_threshold_boundaries() -> None:
         calibration_samples={"model-a": 20},
     )
 
-    assert generator.generate(below_sample_floor) == []
-    feedback = generator.generate(crossed)
+    assert await generator.generate(below_sample_floor) == []
+    feedback = await generator.generate(crossed)
 
     assert {item.category for item in feedback} == {
         "brier:model-a",
         "slippage",
         "win_rate",
     }
-
-
-def test_feedback_store_list_and_resolve_cycle(tmp_path: Path) -> None:
-    store = FeedbackStore(path=tmp_path / "feedback.jsonl")
-    first = _feedback("fb-1")
-    second = _feedback("fb-2")
-
-    store.append(first)
-    store.append(second)
-    store.resolve("fb-1")
-
-    unresolved = store.list(resolved=False)
-
-    assert unresolved == [second]
-    assert store.list(resolved=True)[0].feedback_id == "fb-1"
-    assert (tmp_path / "feedback.jsonl").read_text(encoding="utf-8").count("\n") == 2
-
-
-def test_eval_store_append_writes_jsonl(tmp_path: Path) -> None:
-    store = EvalStore(path=tmp_path / "eval_records.jsonl")
-
-    store.append(_eval_record())
-
-    assert len(store.all()) == 1
-    assert "d-cp07" in (tmp_path / "eval_records.jsonl").read_text(encoding="utf-8")
-
-
-def test_feedback_store_reloads_from_disk(tmp_path: Path) -> None:
-    path = tmp_path / "feedback.jsonl"
-    first = FeedbackStore(path=path)
-    first.append(_feedback("fb-reload"))
-    first.resolve("fb-reload")
-
-    reloaded = FeedbackStore(path=path)
-
-    assert [item.feedback_id for item in reloaded.all()] == ["fb-reload"]
-    assert reloaded.all()[0].resolved is True
-
-
-def test_feedback_store_skips_malformed_reload_rows(tmp_path: Path) -> None:
-    """Regression for codex-bot C2: non-dict / partial JSONL rows must not abort init."""
-    path = tmp_path / "feedback.jsonl"
-    store = FeedbackStore(path=path)
-    store.append(_feedback("fb-good"))
-    # Append poisonous rows: array, string, number, missing-field dict, invalid JSON.
-    with path.open("a", encoding="utf-8") as stream:
-        stream.write("[1, 2, 3]\n")
-        stream.write("\"scalar\"\n")
-        stream.write("42\n")
-        stream.write("{\"partial\": true}\n")
-        stream.write("not json at all\n")
-
-    reloaded = FeedbackStore(path=path)
-
-    assert [item.feedback_id for item in reloaded.all()] == ["fb-good"]

@@ -12,21 +12,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pms.core.enums import RunMode
 
 
-DEFAULT_DATA_DIR = Path(".data")
-
-
-def data_dir() -> Path:
-    """Resolve the per-run data directory.
-
-    Honours ``PMS_DATA_DIR`` env var so dev shells and pytest fixtures can
-    isolate state from the committed repo root. Falls back to ``.data``.
-    """
-    override = os.environ.get("PMS_DATA_DIR")
-    if override:
-        return Path(override)
-    return DEFAULT_DATA_DIR
-
-
 class PolymarketSettings(BaseModel):
     host: str = "https://clob.polymarket.com"
     websocket_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/"

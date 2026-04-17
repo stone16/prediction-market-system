@@ -1,36 +1,125 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 import json
-from pathlib import Path
-from typing import Any
+from typing import cast
 
-from pms.config import data_dir
+import asyncpg
+
 from pms.core.models import EvalRecord
 
 
 @dataclass
 class EvalStore:
-    path: Path | None = field(default_factory=lambda: data_dir() / "eval_records.jsonl")
-    _items: list[EvalRecord] = field(default_factory=list)
+    pool: asyncpg.Pool | None = None
 
-    def append(self, record: EvalRecord) -> None:
-        self._items.append(record)
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(_jsonable(asdict(record))) + "\n")
+    def bind_pool(self, pool: asyncpg.Pool) -> None:
+        self.pool = pool
 
-    def all(self) -> list[EvalRecord]:
-        return list(self._items)
+    async def append(self, record: EvalRecord) -> None:
+        async with self._pool().acquire() as connection:
+            await _insert_eval_record(connection, record)
+
+    async def all(self) -> list[EvalRecord]:
+        if self.pool is None:
+            return []
+
+        async with self.pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    market_id,
+                    decision_id,
+                    prob_estimate,
+                    resolved_outcome,
+                    brier_score,
+                    fill_status,
+                    recorded_at,
+                    citations,
+                    category,
+                    model_id,
+                    pnl,
+                    slippage_bps,
+                    filled
+                FROM eval_records
+                ORDER BY recorded_at ASC, decision_id ASC
+                """
+            )
+        return [_eval_record_from_row(row) for row in rows]
+
+    def _pool(self) -> asyncpg.Pool:
+        if self.pool is None:
+            msg = "EvalStore pool is not bound"
+            raise RuntimeError(msg)
+        return self.pool
 
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_jsonable(item) for item in value]
-    return value
+async def _insert_eval_record(
+    connection: asyncpg.Connection,
+    record: EvalRecord,
+) -> None:
+    await connection.execute(
+        """
+        INSERT INTO eval_records (
+            decision_id,
+            market_id,
+            prob_estimate,
+            resolved_outcome,
+            brier_score,
+            fill_status,
+            recorded_at,
+            citations,
+            category,
+            model_id,
+            pnl,
+            slippage_bps,
+            filled,
+            strategy_id,
+            strategy_version_id
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, NULL, NULL
+        )
+        """,
+        record.decision_id,
+        record.market_id,
+        record.prob_estimate,
+        record.resolved_outcome,
+        record.brier_score,
+        record.fill_status,
+        record.recorded_at,
+        json.dumps(record.citations),
+        record.category,
+        record.model_id,
+        record.pnl,
+        record.slippage_bps,
+        record.filled,
+    )
+
+
+def _eval_record_from_row(row: asyncpg.Record) -> EvalRecord:
+    citations_value = row["citations"]
+    citations: list[str]
+    if isinstance(citations_value, list):
+        citations = [str(item) for item in citations_value]
+    elif isinstance(citations_value, str):
+        loaded = json.loads(citations_value)
+        citations = [str(item) for item in loaded] if isinstance(loaded, list) else []
+    else:
+        citations = []
+
+    return EvalRecord(
+        market_id=cast(str, row["market_id"]),
+        decision_id=cast(str, row["decision_id"]),
+        prob_estimate=cast(float, row["prob_estimate"]),
+        resolved_outcome=cast(float, row["resolved_outcome"]),
+        brier_score=cast(float, row["brier_score"]),
+        fill_status=cast(str, row["fill_status"]),
+        recorded_at=cast(datetime, row["recorded_at"]),
+        citations=citations,
+        category=cast(str | None, row["category"]),
+        model_id=cast(str | None, row["model_id"]),
+        pnl=cast(float, row["pnl"]),
+        slippage_bps=cast(float, row["slippage_bps"]),
+        filled=cast(bool, row["filled"]),
+    )

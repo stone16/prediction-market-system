@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import asyncpg
 import pytest
@@ -18,6 +18,7 @@ from pms.core.models import MarketSignal
 from pms.runner import Runner
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
 
 WORKFLOW_PATH = Path(".github/workflows/ci.yml")
@@ -129,8 +130,8 @@ async def test_runner_start_stop_leaves_no_leaked_postgres_connections(
     runner = Runner(
         config=_settings(),
         sensors=[HoldingSensor()],
-        eval_store=EvalStore(path=tmp_path / "eval_records.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
     monitor = await asyncpg.connect(PMS_TEST_DATABASE_URL)
 

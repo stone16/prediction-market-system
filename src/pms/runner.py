@@ -145,9 +145,11 @@ class Runner:
             min_size=self.config.database.pool_min_size,
             max_size=self.config.database.pool_max_size,
         )
-        self._active_sensors = self._build_sensors()
 
         try:
+            self._assert_no_legacy_jsonl_paths()
+            self._bind_runtime_stores()
+            self._active_sensors = self._build_sensors()
             await self.sensor_stream.start(self._active_sensors)
             await self._evaluator_spool.start()
             self._controller_task = asyncio.create_task(self._controller_loop())
@@ -258,6 +260,21 @@ class Runner:
             ),
             market_data_sensor,
         )
+
+    def _assert_no_legacy_jsonl_paths(self) -> None:
+        for store in (self.eval_store, self.feedback_store):
+            if isinstance(getattr(store, "path", None), Path):
+                msg = "legacy JSONL path referenced"
+                raise RuntimeError(msg)
+
+    def _bind_runtime_stores(self) -> None:
+        if self._pg_pool is None:
+            msg = "Runner PostgreSQL pool is not initialized"
+            raise RuntimeError(msg)
+        if isinstance(self.eval_store, EvalStore):
+            self.eval_store.bind_pool(self._pg_pool)
+        if isinstance(self.feedback_store, FeedbackStore):
+            self.feedback_store.bind_pool(self._pg_pool)
 
     def _build_executor(self, mode: RunMode) -> ActuatorExecutor:
         return ActuatorExecutor(

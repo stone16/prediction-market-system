@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -14,8 +14,7 @@ from pms.controller.pipeline import ControllerPipeline
 from pms.core.enums import MarketStatus, RunMode
 from pms.core.models import MarketSignal
 from pms.runner import Runner
-from pms.storage.eval_store import EvalStore
-from pms.storage.feedback_store import FeedbackStore
+from tests.support.fake_stores import LegacyPathEvalStore
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -84,8 +83,6 @@ def _runner(tmp_path: Path, **kwargs: Any) -> Runner:
     return Runner(
         config=_settings(),
         historical_data_path=FIXTURE_PATH,
-        eval_store=EvalStore(path=tmp_path / "eval_records.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
         **kwargs,
     )
 
@@ -254,6 +251,30 @@ async def test_runner_stop_completes_with_outstanding_pool_acquires(
     acquires = [asyncio.create_task(fake_pool.acquire()) for _ in range(3)]
     await asyncio.wait_for(runner.stop(), timeout=5.0)
     await asyncio.wait_for(asyncio.gather(*acquires), timeout=5.0)
+
+    assert fake_pool.closed is True
+    assert runner.pg_pool is None
+
+
+@pytest.mark.asyncio
+async def test_runner_start_rejects_legacy_jsonl_store_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pool = FakePool()
+
+    async def fake_create_pool(*, dsn: str, min_size: int, max_size: int) -> FakePool:
+        return fake_pool
+
+    monkeypatch.setattr("pms.runner.asyncpg.create_pool", fake_create_pool)
+    runner = _runner(
+        tmp_path,
+        sensors=[HoldingSensor()],
+        eval_store=cast(Any, LegacyPathEvalStore(tmp_path / "eval_records.jsonl")),
+    )
+
+    with pytest.raises(RuntimeError, match="legacy JSONL path referenced"):
+        await runner.start()
 
     assert fake_pool.closed is True
     assert runner.pg_pool is None

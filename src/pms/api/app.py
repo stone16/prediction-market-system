@@ -12,6 +12,8 @@ from typing import Any, TypeVar, cast
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from pms.api.routes.feedback import list_feedback as list_feedback_items
+from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
@@ -58,7 +60,8 @@ def create_app(
 
     @app.get("/status")
     async def status() -> dict[str, Any]:
-        metrics_snapshot = _metrics(active_runner)
+        records = await active_runner.eval_store.all()
+        metrics_snapshot = MetricsCollector(records).snapshot()
         return {
             "mode": active_runner.state.mode.value,
             "runner_started_at": _jsonable(active_runner.state.runner_started_at),
@@ -70,7 +73,7 @@ def create_app(
                 "mode": active_runner.state.mode.value,
             },
             "evaluator": {
-                "eval_records_total": len(active_runner.eval_store.all()),
+                "eval_records_total": len(records),
                 "brier_overall": metrics_snapshot.brier_overall,
             },
         }
@@ -94,9 +97,9 @@ def create_app(
 
     @app.get("/metrics")
     async def metrics() -> dict[str, Any]:
-        snapshot = _metrics(active_runner)
+        snapshot = await _metrics(active_runner)
         records = sorted(
-            active_runner.eval_store.all(),
+            await active_runner.eval_store.all(),
             key=lambda record: record.recorded_at,
         )
         payload = cast(dict[str, Any], _jsonable(snapshot))
@@ -131,12 +134,12 @@ def create_app(
     async def feedback(resolved: bool | None = None) -> list[dict[str, Any]]:
         return [
             cast(dict[str, Any], _jsonable(item))
-            for item in active_runner.feedback_store.list(resolved=resolved)
+            for item in await list_feedback_items(active_runner.feedback_store, resolved=resolved)
         ]
 
     @app.post("/feedback/{feedback_id}/resolve")
     async def resolve_feedback(feedback_id: str) -> dict[str, Any]:
-        resolved = active_runner.feedback_store.resolve(feedback_id)
+        resolved = await resolve_feedback_item(active_runner.feedback_store, feedback_id)
         if resolved is None:
             raise HTTPException(status_code=404, detail="Feedback not found")
         return cast(dict[str, Any], _jsonable(resolved))
@@ -174,8 +177,8 @@ def _latest(items: Sequence[T], limit: int) -> list[T]:
     return list(items[-bounded_limit:])
 
 
-def _metrics(runner: Runner) -> MetricsSnapshot:
-    return MetricsCollector(runner.eval_store.all()).snapshot()
+async def _metrics(runner: Runner) -> MetricsSnapshot:
+    return MetricsCollector(await runner.eval_store.all()).snapshot()
 
 
 def _is_runner_running(runner: Runner) -> bool:

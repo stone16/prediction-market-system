@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -11,6 +12,7 @@ from pms.core.enums import RunMode
 from pms.runner import Runner
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -27,8 +29,8 @@ async def test_api_backtest_runner_get_routes(tmp_path: Path) -> None:
             ),
         ),
         historical_data_path=FIXTURE_PATH,
-        eval_store=EvalStore(path=tmp_path / "eval_records.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
 
     await runner.start()

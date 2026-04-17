@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +14,7 @@ from pms.core.models import MarketSignal
 from pms.runner import Runner
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -82,8 +83,8 @@ async def test_runner_start_stop_and_switch_mode_preserves_tasks(
     runner = Runner(
         config=_settings(RunMode.BACKTEST),
         sensors=[HoldingSensor()],
-        eval_store=EvalStore(path=tmp_path / "eval_records.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
 
     initial_started_at = runner.state.runner_started_at
@@ -122,15 +123,15 @@ async def test_backtest_end_to_end_fixture_produces_decisions_and_eval_records(
     runner = Runner(
         config=_settings(RunMode.BACKTEST),
         historical_data_path=FIXTURE_PATH,
-        eval_store=EvalStore(path=tmp_path / "eval_records.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
 
     await runner.start()
     await asyncio.wait_for(runner.wait_until_idle(), timeout=5.0)
     await asyncio.wait_for(runner.stop(), timeout=5.0)
 
-    records = runner.eval_store.all()
+    records = await cast(InMemoryEvalStore, runner.eval_store).all()
 
     assert len(runner.state.signals) == 100
     assert len(runner.state.decisions) >= 10
@@ -164,8 +165,8 @@ async def test_paper_runner_records_liquidity_rejections_in_order_state(
                 )
             )
         ],
-        eval_store=EvalStore(path=tmp_path / "eval_records.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
 
     await runner.start()
@@ -175,4 +176,3 @@ async def test_paper_runner_records_liquidity_rejections_in_order_state(
     assert len(runner.state.orders) == 1
     assert runner.state.orders[0].raw_status == "insufficient_liquidity"
     assert runner.state.fills == []
-

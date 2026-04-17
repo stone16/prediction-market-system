@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -20,6 +21,7 @@ from pms.core.models import (
 from pms.runner import Runner
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -36,19 +38,24 @@ def _settings() -> PMSSettings:
 
 
 def _runner_with_state() -> Runner:
+    pending = _feedback("fb-pending")
     runner = Runner(
         config=_settings(),
-        eval_store=EvalStore(path=None),
-        feedback_store=FeedbackStore(path=None),
+        eval_store=cast(EvalStore, InMemoryEvalStore([_eval_record()])),
+        feedback_store=cast(
+            FeedbackStore,
+            InMemoryFeedbackStore(
+                [
+                    pending,
+                    replace(_feedback("fb-resolved"), resolved=True),
+                ]
+            ),
+        ),
     )
     runner.state.runner_started_at = datetime(2026, 4, 14, tzinfo=UTC)
     runner.state.signals.append(_signal())
     runner.state.decisions.append(_decision())
     runner.state.fills.append(_fill())
-    runner.eval_store.append(_eval_record())
-    pending = _feedback("fb-pending")
-    runner.feedback_store.append(pending)
-    runner.feedback_store.append(replace(_feedback("fb-resolved"), resolved=True))
     return runner
 
 
@@ -194,8 +201,8 @@ async def test_api_run_start_stop_cycle(tmp_path: Path) -> None:
             ),
         ),
         historical_data_path=FIXTURE_PATH,
-        eval_store=EvalStore(path=tmp_path / "eval.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
     app = create_app(runner)
     transport = httpx.ASGITransport(app=app)
@@ -237,8 +244,8 @@ async def test_api_auto_start_lifespan(tmp_path: Path) -> None:
             ),
         ),
         historical_data_path=FIXTURE_PATH,
-        eval_store=EvalStore(path=tmp_path / "eval.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
     app = create_app(runner, auto_start=True)
 
@@ -254,8 +261,8 @@ async def test_api_auto_start_disabled_keeps_runner_idle(tmp_path: Path) -> None
     runner = Runner(
         config=PMSSettings(mode=RunMode.BACKTEST),
         historical_data_path=FIXTURE_PATH,
-        eval_store=EvalStore(path=tmp_path / "eval.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
     app = create_app(runner, auto_start=False)
 
@@ -275,8 +282,8 @@ async def test_api_lifespan_stops_runner_started_via_api(tmp_path: Path) -> None
             ),
         ),
         historical_data_path=FIXTURE_PATH,
-        eval_store=EvalStore(path=tmp_path / "eval.jsonl"),
-        feedback_store=FeedbackStore(path=tmp_path / "feedback.jsonl"),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
     app = create_app(runner, auto_start=False)
     transport = httpx.ASGITransport(app=app)

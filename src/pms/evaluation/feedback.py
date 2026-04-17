@@ -16,7 +16,7 @@ class EvaluatorFeedback:
     store: FeedbackStore
     risk: RiskSettings
 
-    def generate(self, metrics: MetricsSnapshot) -> list[Feedback]:
+    async def generate(self, metrics: MetricsSnapshot) -> list[Feedback]:
         feedback: list[Feedback] = []
 
         for category, brier_score in metrics.brier_by_category.items():
@@ -57,7 +57,7 @@ class EvaluatorFeedback:
             )
 
         for item in feedback:
-            self.store.append(item)
+            await self.store.append(item)
         return feedback
 
     def _build_feedback(self, *, category: str, message: str) -> Feedback:
