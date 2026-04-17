@@ -29,6 +29,7 @@ Run from a clean shell at the repo root. Both gates are load-bearing.
 uv sync                                  # install deps from uv.lock
 uv run pytest -q                         # full suite — see baseline below
 uv run mypy src/ tests/ --strict         # strict on every committed module
+uv run lint-imports                      # import boundary contracts
 ```
 
 **Baseline (as of 2026-04-17, feat/pms-market-data-v1):** `pytest`

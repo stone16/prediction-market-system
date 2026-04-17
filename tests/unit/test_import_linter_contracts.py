@@ -63,6 +63,8 @@ def test_import_linter_rejects_sensor_aggregate_violation(tmp_path: Path) -> Non
         [
             "uv",
             "run",
+            "--project",
+            str(REPO_ROOT),
             "lint-imports",
             "--config",
             str(tmp_path / "pyproject.toml"),

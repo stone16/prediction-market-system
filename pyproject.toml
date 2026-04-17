@@ -28,6 +28,7 @@ llm = ["anthropic>=0.40.0"]
 
 [dependency-groups]
 dev = [
+    "import-linter>=2.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=6.0",
@@ -72,3 +73,30 @@ explicit_package_bases = true
 [[tool.mypy.overrides]]
 module = ["asyncpg"]
 ignore_missing_imports = true
+
+[tool.importlinter]
+root_packages = ["pms"]
+
+[[tool.importlinter.contracts]]
+name = "Sensor strategy-agnostic: no aggregate import"
+type = "forbidden"
+source_modules = ["pms.sensor"]
+forbidden_modules = ["pms.strategies.aggregate"]
+
+[[tool.importlinter.contracts]]
+name = "Actuator strategy-agnostic: no aggregate import"
+type = "forbidden"
+source_modules = ["pms.actuator"]
+forbidden_modules = ["pms.strategies.aggregate"]
+
+[[tool.importlinter.contracts]]
+name = "Sensor + Actuator: no controller import"
+type = "forbidden"
+source_modules = ["pms.sensor", "pms.actuator"]
+forbidden_modules = ["pms.controller"]
+
+[[tool.importlinter.contracts]]
+name = "Sensor: no market_selection import"
+type = "forbidden"
+source_modules = ["pms.sensor"]
+forbidden_modules = ["pms.market_selection"]

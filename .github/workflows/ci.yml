@@ -64,3 +64,6 @@ jobs:
 
       - name: Run mypy
         run: uv run mypy src/ tests/ --strict
+
+      - name: Run import-linter
+        run: uv run lint-imports
