@@ -140,6 +140,7 @@ class Runner:
         owns_pool = self._owns_pg_pool
         self._pg_pool = None
         self._owns_pg_pool = False
+        self._unbind_runtime_stores()
         if owns_pool:
             await pool.close()
 
@@ -300,6 +301,12 @@ class Runner:
             self.eval_store.bind_pool(self._pg_pool)
         if isinstance(self.feedback_store, FeedbackStore):
             self.feedback_store.bind_pool(self._pg_pool)
+
+    def _unbind_runtime_stores(self) -> None:
+        if isinstance(self.eval_store, EvalStore):
+            self.eval_store.pool = None
+        if isinstance(self.feedback_store, FeedbackStore):
+            self.feedback_store.pool = None
 
     def _build_executor(self, mode: RunMode) -> ActuatorExecutor:
         return ActuatorExecutor(

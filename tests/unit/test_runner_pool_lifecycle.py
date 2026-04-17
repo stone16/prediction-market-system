@@ -273,6 +273,34 @@ async def test_runner_bind_pg_pool_publicly_without_taking_ownership(
 
 
 @pytest.mark.asyncio
+async def test_runner_close_pg_pool_unbinds_eval_and_feedback_stores(
+    tmp_path: Path,
+) -> None:
+    from pms.storage.eval_store import EvalStore
+    from pms.storage.feedback_store import FeedbackStore
+
+    fake_pool = FakePool()
+    runner = _runner(
+        tmp_path,
+        sensors=[HoldingSensor()],
+        eval_store=EvalStore(),
+        feedback_store=FeedbackStore(),
+    )
+
+    runner.bind_pg_pool(cast(Any, fake_pool))
+
+    assert isinstance(runner.eval_store, EvalStore)
+    assert isinstance(runner.feedback_store, FeedbackStore)
+    assert runner.eval_store.pool is fake_pool
+    assert runner.feedback_store.pool is fake_pool
+
+    await runner.close_pg_pool()
+
+    assert runner.eval_store.pool is None
+    assert runner.feedback_store.pool is None  # type: ignore[unreachable]
+
+
+@pytest.mark.asyncio
 async def test_runner_start_rejects_legacy_jsonl_store_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
