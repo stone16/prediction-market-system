@@ -367,9 +367,13 @@ class MarketDataSensor:
     async def _handle_watchdog_timeout(self) -> None:
         self._watchdog_timeout_count += 1
         logger.warning(
-            "market data sensor silent for %.1fs",
+            "market data sensor silent for %.1fs; forcing reconnect",
             self._watchdog.timeout_s,
         )
+        websocket = self._websocket
+        if websocket is not None:
+            with suppress(Exception):
+                await websocket.close()
 
     def _reset_book_state(self) -> None:
         self._books.clear()

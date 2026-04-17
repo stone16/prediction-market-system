@@ -742,6 +742,30 @@ async def test_market_data_sensor_watchdog_warns_after_silence(
 
 
 @pytest.mark.asyncio
+async def test_market_data_sensor_watchdog_timeout_closes_websocket() -> None:
+    sensor = MarketDataSensor(store=_store_mock())
+
+    closed_event = asyncio.Event()
+
+    class TrackingWebSocket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+            closed_event.set()
+
+    websocket = TrackingWebSocket()
+    sensor._websocket = websocket
+
+    await sensor._handle_watchdog_timeout()
+
+    assert websocket.closed is True
+    assert closed_event.is_set()
+    assert sensor.watchdog_timeout_count == 1
+
+
+@pytest.mark.asyncio
 async def test_market_data_sensor_fresh_connection_does_not_trigger_watchdog(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
