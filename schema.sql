@@ -261,4 +261,42 @@ INSERT INTO factors (
 )
 ON CONFLICT (factor_id) DO NOTHING;
 
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'fair_value_spread',
+    'Fair Value Spread',
+    'Signed difference between external fair value and the current YES price.',
+    'adb923abb80bbd30efa4db61ba846660317f138ef12c3ae521891df2831d64f9',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'subset_pricing_violation',
+    'Subset Pricing Violation',
+    'Signed difference between subset and superset prices from external signals.',
+    'c9e66b836e6fe6a9981ee6419aa38acb39de607e84fb1ff643b46bb9ac446891',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
 COMMIT;

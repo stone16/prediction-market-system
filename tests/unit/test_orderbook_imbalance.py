@@ -29,7 +29,7 @@ def _signal(*, orderbook: dict[str, Any]) -> MarketSignal:
 
 
 def test_registered_exports_orderbook_imbalance() -> None:
-    assert REGISTERED == (OrderbookImbalance,)
+    assert OrderbookImbalance in REGISTERED
 
 
 def test_orderbook_imbalance_compute_returns_factor_value_row() -> None:
