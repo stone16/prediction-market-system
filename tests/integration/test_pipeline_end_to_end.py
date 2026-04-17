@@ -176,3 +176,35 @@ async def test_paper_runner_records_liquidity_rejections_in_order_state(
     assert len(runner.state.orders) == 1
     assert runner.state.orders[0].raw_status == "insufficient_liquidity"
     assert runner.state.fills == []
+
+
+@pytest.mark.asyncio
+async def test_paper_runner_fills_against_signal_orderbook_depth(
+    tmp_path: Path,
+) -> None:
+    runner = Runner(
+        config=_settings(RunMode.PAPER),
+        sensors=[
+            OneShotSensor(
+                _signal(
+                    market_id="paper-with-depth",
+                    orderbook={
+                        "bids": [{"price": 0.39, "size": 250.0}],
+                        "asks": [{"price": 0.41, "size": 250.0}],
+                    },
+                    external_signal={"metaculus_prob": 0.9, "resolved_outcome": 1.0},
+                )
+            )
+        ],
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+
+    await runner.start()
+    await asyncio.wait_for(runner.wait_until_idle(), timeout=5.0)
+    await asyncio.wait_for(runner.stop(), timeout=5.0)
+
+    assert len(runner.state.orders) == 1
+    assert runner.state.orders[0].raw_status == "matched"
+    assert runner.state.orders[0].fill_price == pytest.approx(0.41)
+    assert len(runner.state.fills) == 1

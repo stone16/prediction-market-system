@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 import asyncpg
 import httpx
@@ -89,6 +89,9 @@ class Runner:
     _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
     _owns_pg_pool: bool = field(init=False, default=False)
     _active_sensors: tuple[ISensor, ...] = field(init=False, default=())
+    _paper_orderbooks: dict[str, dict[str, Any]] = field(
+        init=False, default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         self.state = RunnerState(mode=self.config.mode)
@@ -309,7 +312,7 @@ class Runner:
         if mode == RunMode.BACKTEST:
             return BacktestActuator(self.historical_data_path)
         if mode == RunMode.PAPER:
-            return PaperActuator()
+            return PaperActuator(orderbooks=self._paper_orderbooks)
         return PolymarketActuator(self.config)
 
     async def _controller_loop(self) -> None:
@@ -344,6 +347,8 @@ class Runner:
                 continue
 
             try:
+                if self.config.mode == RunMode.PAPER:
+                    self._paper_orderbooks[decision.market_id] = signal.orderbook
                 order_state = await self.actuator_executor.execute(
                     decision,
                     self.portfolio,
