@@ -68,7 +68,8 @@ class MarketDataSensor:
         self._max_reconnect_interval_s = self._DEFAULT_MAX_RECONNECT_INTERVAL_S
         self._heartbeat_interval_s = self._HEARTBEAT_INTERVAL_S
         self._pong_timeout_s = self._PONG_TIMEOUT_S
-        self._pending_book_source: BookSource | None = None
+        self._connection_book_source: BookSource | None = None
+        self._pending_reconnect_assets: set[str] = set()
         self._connected_once = False
         self._watchdog_timeout_count = 0
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -104,7 +105,8 @@ class MarketDataSensor:
                     async with connect(self.ws_url) as websocket:
                         self._reset_book_state()
                         self._websocket = websocket
-                        self._pending_book_source = connection_book_source
+                        self._connection_book_source = connection_book_source
+                        self._pending_reconnect_assets = set(self._asset_ids)
                         heartbeat_task = asyncio.create_task(
                             self._heartbeat_loop(websocket)
                         )
@@ -122,7 +124,8 @@ class MarketDataSensor:
                                 await heartbeat_task
                             self._heartbeat_task = None
                             self._websocket = None
-                            self._pending_book_source = None
+                            self._connection_book_source = None
+                            self._pending_reconnect_assets = set()
                             self._reset_book_state()
                 except asyncio.CancelledError:
                     raise
@@ -140,7 +143,8 @@ class MarketDataSensor:
             self._heartbeat_task = None
             await self._watchdog.stop()
             self._websocket = None
-            self._pending_book_source = None
+            self._connection_book_source = None
+            self._pending_reconnect_assets = set()
             self._reset_book_state()
 
     async def update_subscription(self, asset_ids: list[str]) -> None:
@@ -172,32 +176,27 @@ class MarketDataSensor:
 
     async def _handle_raw_message(self, raw_message: str | bytes) -> list[MarketSignal]:
         loaded = json.loads(raw_message)
-        book_source = self._consume_book_source(loaded)
         if isinstance(loaded, list):
             signals: list[MarketSignal] = []
             for item in loaded:
                 if isinstance(item, dict):
-                    signals.extend(
-                        await self._handle_message(item, book_source=book_source)
-                    )
+                    signals.extend(await self._handle_message(item))
             return signals
         if isinstance(loaded, dict):
-            return await self._handle_message(loaded, book_source=book_source)
+            return await self._handle_message(loaded)
         logger.warning("unrecognised market-data payload: %s", loaded)
         return []
 
     async def _handle_message(
         self,
         message: dict[str, Any],
-        *,
-        book_source: BookSource | None = None,
     ) -> list[MarketSignal]:
         event_type = str(message.get("event_type", ""))
         if event_type in {"keepalive", "pong", "tick_size_change"}:
             return []
         if event_type == "book":
             self._watchdog.notify_message()
-            return [await self._handle_book(message, source=book_source)]
+            return [await self._handle_book(message)]
         if event_type == "price_change":
             self._watchdog.notify_message()
             return await self._handle_price_change(message)
@@ -213,8 +212,6 @@ class MarketDataSensor:
     async def _handle_book(
         self,
         message: dict[str, Any],
-        *,
-        source: BookSource | None = None,
     ) -> MarketSignal:
         market_id = _required_str(message, "market")
         asset_id = _required_str(message, "asset_id")
@@ -225,13 +222,18 @@ class MarketDataSensor:
         state.last_hash = _optional_str(message.get("hash"))
         state.last_trade_price = _optional_float(message.get("last_trade_price"))
 
+        source: BookSource = "subscribe"
+        if asset_id in self._pending_reconnect_assets:
+            self._pending_reconnect_assets.discard(asset_id)
+            source = self._connection_book_source or "subscribe"
+
         snapshot = BookSnapshot(
             id=0,
             market_id=market_id,
             token_id=asset_id,
             ts=timestamp,
             hash=state.last_hash,
-            source=source or "subscribe",
+            source=source,
         )
         await self.store.write_book_snapshot(snapshot, _book_levels_from_state(state))
         return _signal_from_state(
@@ -369,15 +371,6 @@ class MarketDataSensor:
             self._watchdog.timeout_s,
         )
 
-    def _consume_book_source(self, payload: object) -> BookSource | None:
-        if self._pending_book_source is None:
-            return None
-        if _payload_contains_book(payload):
-            source = self._pending_book_source
-            self._pending_book_source = None
-            return source
-        return None
-
     def _reset_book_state(self) -> None:
         self._books.clear()
 
@@ -389,17 +382,6 @@ def _subscription_payload(asset_ids: list[str]) -> dict[str, Any]:
         "initial_dump": True,
         "level": 2,
     }
-
-
-def _payload_contains_book(payload: object) -> bool:
-    if isinstance(payload, dict):
-        return str(payload.get("event_type", "")) == "book"
-    if isinstance(payload, list):
-        return any(
-            isinstance(item, dict) and str(item.get("event_type", "")) == "book"
-            for item in payload
-        )
-    return False
 
 
 def _levels_to_map(raw_levels: object) -> dict[float, float]:
