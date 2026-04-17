@@ -117,34 +117,6 @@ def test_schema_sql_applies_strategy_identity_tables() -> None:
 
         assert actual_columns == EXPECTED_COLUMNS
 
-        _run_psql(
-            temp_database_url,
-            "-c",
-            """
-            BEGIN;
-            SET CONSTRAINTS ALL DEFERRED;
-            INSERT INTO strategies (
-                strategy_id,
-                active_version_id,
-                metadata_json
-            ) VALUES (
-                'default',
-                'default-v1',
-                '{}'::jsonb
-            );
-            INSERT INTO strategy_versions (
-                strategy_version_id,
-                strategy_id,
-                config_json
-            ) VALUES (
-                'default-v1',
-                'default',
-                '{}'::jsonb
-            );
-            COMMIT;
-            """,
-        )
-
         counts_result = _run_psql(
             temp_database_url,
             "-At",
@@ -173,6 +145,31 @@ def test_schema_sql_applies_strategy_identity_tables() -> None:
             "strategies": 1,
             "strategy_versions": 1,
         }
+
+        seed_result = _run_psql(
+            temp_database_url,
+            "-At",
+            "-F",
+            "|",
+            "-c",
+            """
+            SELECT
+                strategy_id,
+                active_version_id,
+                (
+                    SELECT config_json::text
+                    FROM strategy_versions
+                    WHERE strategy_version_id = 'default-v1'
+                )
+            FROM strategies
+            WHERE strategy_id = 'default'
+            """,
+        )
+
+        assert seed_result.stdout.strip() == (
+            'default|default-v1|{"eval": {}, "risk": {}, "config": {}, '
+            '"forecaster": {}, "market_selection": {}}'
+        )
     finally:
         _run_psql(
             admin_database_url,

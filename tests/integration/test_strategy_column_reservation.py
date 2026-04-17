@@ -27,10 +27,9 @@ pytestmark = [
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_feedback_and_eval_stores_accept_null_strategy_columns(
+async def test_feedback_and_eval_stores_default_strategy_columns(
     pg_pool: asyncpg.Pool,
 ) -> None:
-    # S5-MIGRATION-MARKER: flip NULL asserts after NOT NULL upgrade lands
     feedback_store = FeedbackStore(pg_pool)
     eval_store = EvalStore(pg_pool)
     created_at = datetime(2026, 4, 17, tzinfo=UTC)
@@ -80,14 +79,14 @@ async def test_feedback_and_eval_stores_accept_null_strategy_columns(
             WHERE decision_id = $1
             """,
             "reservation-decision",
-        )
+    )
 
     assert feedback_row is not None
-    assert feedback_row["strategy_id"] is None
-    assert feedback_row["strategy_version_id"] is None
+    assert feedback_row["strategy_id"] == "default"
+    assert feedback_row["strategy_version_id"] == "default-v1"
     assert eval_row is not None
-    assert eval_row["strategy_id"] is None
-    assert eval_row["strategy_version_id"] is None
+    assert eval_row["strategy_id"] == "default"
+    assert eval_row["strategy_version_id"] == "default-v1"
 
 
 @pytest.mark.asyncio(loop_scope="session")

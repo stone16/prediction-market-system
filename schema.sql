@@ -182,4 +182,22 @@ CREATE TABLE IF NOT EXISTS fills (
 
 -- END INNER-RING PRODUCT SHELLS
 
+-- default strategy seed (Invariant 3 NULLABLE→seed pattern).
+-- load-bearing legacy bootstrap row: changing `default-v1` requires a coordinated
+-- migration of every existing inner-ring product row tagged by the pre-S5 runtime.
+INSERT INTO strategies (strategy_id, active_version_id)
+    VALUES ('default', 'default-v1')
+    ON CONFLICT (strategy_id) DO NOTHING;
+
+INSERT INTO strategy_versions (
+    strategy_version_id,
+    strategy_id,
+    config_json
+) VALUES (
+    'default-v1',
+    'default',
+    '{"config":{},"risk":{},"eval":{},"forecaster":{},"market_selection":{}}'::jsonb
+)
+ON CONFLICT (strategy_version_id) DO NOTHING;
+
 COMMIT;

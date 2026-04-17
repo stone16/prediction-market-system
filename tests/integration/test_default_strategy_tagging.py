@@ -110,6 +110,28 @@ async def _strategy_pairs(
 async def test_runner_tags_inner_ring_rows_with_default_strategy(
     pg_pool: asyncpg.Pool,
 ) -> None:
+    async with pg_pool.acquire() as connection:
+        await connection.execute(
+            """
+            BEGIN;
+            SET CONSTRAINTS ALL DEFERRED;
+            INSERT INTO strategies (strategy_id, active_version_id)
+            VALUES ('default', 'default-v1')
+            ON CONFLICT (strategy_id) DO NOTHING;
+            INSERT INTO strategy_versions (
+                strategy_version_id,
+                strategy_id,
+                config_json
+            ) VALUES (
+                'default-v1',
+                'default',
+                '{"config":{},"risk":{},"eval":{},"forecaster":{},"market_selection":{}}'::jsonb
+            )
+            ON CONFLICT (strategy_version_id) DO NOTHING;
+            COMMIT;
+            """
+        )
+
     runner = Runner(
         config=_settings(),
         sensors=[

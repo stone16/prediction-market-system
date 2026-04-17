@@ -33,9 +33,20 @@ class FeedbackStore:
     def bind_pool(self, pool: asyncpg.Pool) -> None:
         self.pool = pool
 
-    async def append(self, feedback: Feedback) -> None:
+    async def append(
+        self,
+        feedback: Feedback,
+        *,
+        strategy_id: str = "default",
+        strategy_version_id: str = "default-v1",
+    ) -> None:
         async with self._pool().acquire() as connection:
-            await insert_feedback_row(connection, feedback)
+            await insert_feedback_row(
+                connection,
+                feedback,
+                strategy_id=strategy_id,
+                strategy_version_id=strategy_version_id,
+            )
 
     async def all(self) -> list[Feedback]:
         return await self.list()
@@ -87,7 +98,13 @@ class FeedbackStore:
         return self.pool
 
 
-async def insert_feedback_row(connection: asyncpg.Connection, feedback: Feedback) -> None:
+async def insert_feedback_row(
+    connection: asyncpg.Connection,
+    feedback: Feedback,
+    *,
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v1",
+) -> None:
     await connection.execute(
         """
         INSERT INTO feedback (
@@ -104,7 +121,7 @@ async def insert_feedback_row(connection: asyncpg.Connection, feedback: Feedback
             strategy_id,
             strategy_version_id
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, NULL, NULL
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12
         )
         """,
         feedback.feedback_id,
@@ -117,6 +134,8 @@ async def insert_feedback_row(connection: asyncpg.Connection, feedback: Feedback
         feedback.resolved_at,
         feedback.category,
         json.dumps(feedback.metadata),
+        strategy_id,
+        strategy_version_id,
     )
 
 

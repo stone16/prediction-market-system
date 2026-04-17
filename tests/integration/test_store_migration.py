@@ -145,8 +145,8 @@ async def test_feedback_store_persists_and_filters_rows_in_postgres(
     assert [item.feedback_id for item in resolved] == ["fb-1"]
     assert resolved[0].resolved is True
     assert stored_row is not None
-    assert stored_row["strategy_id"] is None
-    assert stored_row["strategy_version_id"] is None
+    assert stored_row["strategy_id"] == "default"
+    assert stored_row["strategy_version_id"] == "default-v1"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -169,8 +169,8 @@ async def test_eval_store_persists_rows_in_postgres(
 
     assert [record.decision_id for record in records] == ["decision-cp09"]
     assert stored_row is not None
-    assert stored_row["strategy_id"] is None
-    assert stored_row["strategy_version_id"] is None
+    assert stored_row["strategy_id"] == "default"
+    assert stored_row["strategy_version_id"] == "default-v1"
 
 
 @pytest.mark.asyncio(loop_scope="session")
