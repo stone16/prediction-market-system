@@ -196,7 +196,7 @@ INSERT INTO strategy_versions (
 ) VALUES (
     'default-v1',
     'default',
-    '{"config":{},"risk":{},"eval":{},"forecaster":{},"market_selection":{}}'::jsonb
+    '{"config":{"factor_composition":[["factor-a",0.6],["factor-b",0.4]],"metadata":[["owner","system"],["tier","default"]],"strategy_id":"default"},"eval_spec":{"metrics":["brier","pnl","fill_rate"]},"forecaster":{"forecasters":[["rules",[["threshold","0.55"]]],["stats",[["window","15m"]]]]},"market_selection":{"resolution_time_max_horizon_days":7,"venue":"polymarket","volume_min_usdc":500.0},"risk":{"max_daily_drawdown_pct":2.5,"max_position_notional_usdc":100.0,"min_order_size_usdc":1.0}}'::jsonb
 )
 ON CONFLICT (strategy_version_id) DO NOTHING;
 

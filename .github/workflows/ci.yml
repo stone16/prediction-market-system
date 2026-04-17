@@ -55,12 +55,7 @@ jobs:
         env:
           PMS_RUN_INTEGRATION: "1"
           PMS_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/pms_test
-        run: >
-          uv run pytest -q
-          tests/integration/test_schema_apply_outer.py
-          tests/integration/test_schema_apply_inner.py
-          tests/integration/test_db_conn_rollback.py
-          tests/integration/test_runner_pool_integration.py
+        run: uv run pytest -q -m integration
 
       - name: Run mypy
         run: uv run mypy src/ tests/ --strict

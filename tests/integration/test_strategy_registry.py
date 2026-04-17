@@ -16,7 +16,7 @@ from pms.strategies.projections import (
     RiskParams,
     StrategyConfig,
 )
-from pms.strategies.versioning import compute_strategy_version_id
+from pms.strategies.versioning import compute_strategy_version_id, serialize_strategy_config_json
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
@@ -112,6 +112,39 @@ async def test_create_strategy_and_list_strategies(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_get_by_id_round_trips_seeded_default_strategy(
+    db_conn: asyncpg.Connection,
+) -> None:
+    registry_cls = _load_symbol("pms.storage.strategy_registry", "PostgresStrategyRegistry")
+    registry = registry_cls(pool=cast(Any, _SingleConnectionPool(db_conn)))
+    strategy = _strategy("default", owner="system", drawdown_pct=2.5)
+
+    await db_conn.execute("SET CONSTRAINTS ALL DEFERRED")
+    await db_conn.execute(
+        """
+        INSERT INTO strategies (strategy_id, active_version_id)
+        VALUES ('default', 'default-v1')
+        ON CONFLICT (strategy_id) DO NOTHING
+        """
+    )
+    await db_conn.execute(
+        """
+        INSERT INTO strategy_versions (
+            strategy_version_id,
+            strategy_id,
+            config_json
+        ) VALUES ($1, $2, $3::jsonb)
+        ON CONFLICT (strategy_version_id) DO NOTHING
+        """,
+        "default-v1",
+        "default",
+        serialize_strategy_config_json(*strategy.snapshot()),
+    )
+
+    assert await registry.get_by_id("default") == strategy
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_create_version_and_get_by_id_round_trip_strategy(
     db_conn: asyncpg.Connection,
 ) -> None:
@@ -127,6 +160,38 @@ async def test_create_version_and_get_by_id_round_trip_strategy(
     assert isinstance(created_version, strategy_version_cls)
     assert created_version.strategy_version_id == compute_strategy_version_id(*strategy.snapshot())
     assert fetched_strategy == strategy
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_by_id_raises_type_error_for_invalid_config_json(
+    db_conn: asyncpg.Connection,
+) -> None:
+    registry_cls = _load_symbol("pms.storage.strategy_registry", "PostgresStrategyRegistry")
+    registry = registry_cls(pool=cast(Any, _SingleConnectionPool(db_conn)))
+
+    await db_conn.execute("SET CONSTRAINTS ALL DEFERRED")
+    await db_conn.execute(
+        """
+        INSERT INTO strategies (strategy_id, active_version_id)
+        VALUES ('broken', 'broken-v1')
+        """
+    )
+    await db_conn.execute(
+        """
+        INSERT INTO strategy_versions (
+            strategy_version_id,
+            strategy_id,
+            config_json
+        ) VALUES (
+            'broken-v1',
+            'broken',
+            '{"config":{"strategy_id":7,"factor_composition":[],"metadata":[]},"risk":{"max_position_notional_usdc":100.0,"max_daily_drawdown_pct":2.5,"min_order_size_usdc":1.0},"eval_spec":{"metrics":["brier"]},"forecaster":{"forecasters":[]},"market_selection":{"venue":"polymarket","resolution_time_max_horizon_days":7,"volume_min_usdc":500.0}}'::jsonb
+        )
+        """
+    )
+
+    with pytest.raises(TypeError, match="config.strategy_id"):
+        await registry.get_by_id("broken")
 
 
 @pytest.mark.asyncio(loop_scope="session")

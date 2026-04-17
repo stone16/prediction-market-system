@@ -1,8 +1,9 @@
 """Deterministic strategy-version hashing.
 
-Canonicalization uses ``json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=True)`` before hashing. The ``default=`` hook handles ``Enum``
-values via ``.value`` and nested frozen dataclasses via recursive
-``dataclasses.asdict(..., dict_factory=<sorted-dict>)`` normalization.
+Canonicalization first normalizes frozen projection dataclasses,
+``Enum`` values, and nested containers into plain builtins. The
+normalized payload is then serialized with
+``json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=True)``.
 
 The resulting SHA-256 hex digest must remain byte-identical across Python minor-version bumps and process restarts. Any accidental drift is an Invariant 3 violation.
 """
@@ -33,6 +34,8 @@ def _json_sort_key(value: Any) -> str:
 
 
 def _payload_value(value: Any) -> Any:
+    # Stored config_json must preserve sequence order so the row can round-trip
+    # back into the original projection tuple.
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value) and not isinstance(value, type):
@@ -53,6 +56,8 @@ def _payload_value(value: Any) -> Any:
 
 
 def _normalize_value(value: Any) -> Any:
+    # Version ids intentionally normalize sequence ordering so semantically
+    # equivalent projection payloads hash identically across processes.
     if isinstance(value, dict):
         return {
             key: _normalize_value(value[key])
@@ -65,14 +70,6 @@ def _normalize_value(value: Any) -> Any:
         normalized_items = [_normalize_value(item) for item in value]
         return sorted(normalized_items, key=_json_sort_key)
     return value
-
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, Enum):
-        return value.value
-    if is_dataclass(value) and not isinstance(value, type):
-        return _normalize_value(asdict(value, dict_factory=_sorted_dict_factory))
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _strategy_payload(

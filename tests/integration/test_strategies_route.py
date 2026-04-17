@@ -11,6 +11,14 @@ import pytest
 from pms.api.app import create_app
 from pms.config import DatabaseSettings, PMSSettings
 from pms.runner import Runner
+from pms.strategies.projections import (
+    EvalSpec,
+    ForecasterSpec,
+    MarketSelectionSpec,
+    RiskParams,
+    StrategyConfig,
+)
+from pms.strategies.versioning import serialize_strategy_config_json
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
@@ -34,6 +42,33 @@ def _settings() -> PMSSettings:
     )
 
 
+def _default_strategy_config_json() -> str:
+    return serialize_strategy_config_json(
+        StrategyConfig(
+            strategy_id="default",
+            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            metadata=(("owner", "system"), ("tier", "default")),
+        ),
+        RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        EvalSpec(metrics=("brier", "pnl", "fill_rate")),
+        ForecasterSpec(
+            forecasters=(
+                ("rules", (("threshold", "0.55"),)),
+                ("stats", (("window", "15m"),)),
+            )
+        ),
+        MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+        ),
+    )
+
+
 async def _seed_default_strategy(connection: asyncpg.Connection) -> datetime:
     async with connection.transaction():
         await connection.execute("SET CONSTRAINTS ALL DEFERRED")
@@ -53,10 +88,11 @@ async def _seed_default_strategy(connection: asyncpg.Connection) -> datetime:
             ) VALUES (
                 'default-v1',
                 'default',
-                '{"config":{},"risk":{},"eval":{},"forecaster":{},"market_selection":{}}'::jsonb
+                $1::jsonb
             )
             ON CONFLICT (strategy_version_id) DO NOTHING
-            """
+            """,
+            _default_strategy_config_json(),
         )
     created_at = await connection.fetchval(
         "SELECT created_at FROM strategies WHERE strategy_id = 'default'"

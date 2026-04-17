@@ -70,7 +70,7 @@ def test_versioning_module_docstring_documents_canonicalization_contract() -> No
     assert docstring is not None
     assert 'json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=True)' in docstring
     assert "Enum" in docstring
-    assert "dataclasses.asdict" in docstring
+    assert "plain builtins" in docstring
     assert "byte-identical across Python minor-version bumps and process restarts" in docstring
 
 
@@ -100,6 +100,28 @@ def test_metadata_ordering_does_not_change_strategy_version_id() -> None:
         **_build_projection_inputs(
             metadata=(("tier", "default"), ("owner", "system")),
         )
+    )
+
+    assert reordered_hash == canonical_hash
+
+
+def test_forecaster_ordering_does_not_change_strategy_version_id() -> None:
+    compute_strategy_version_id = _load_symbol(
+        "pms.strategies.versioning",
+        "compute_strategy_version_id",
+    )
+
+    canonical_hash = compute_strategy_version_id(**_build_projection_inputs())
+    reordered_hash = compute_strategy_version_id(
+        **{
+            **_build_projection_inputs(),
+            "forecaster": _load_symbol("pms.strategies.projections", "ForecasterSpec")(
+                forecasters=(
+                    ("stats", (("window", "15m"),)),
+                    ("rules", (("threshold", "0.55"),)),
+                )
+            ),
+        }
     )
 
     assert reordered_hash == canonical_hash

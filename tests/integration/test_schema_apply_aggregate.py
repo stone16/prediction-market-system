@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import uuid
@@ -7,6 +8,15 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
+
+from pms.strategies.projections import (
+    EvalSpec,
+    ForecasterSpec,
+    MarketSelectionSpec,
+    RiskParams,
+    StrategyConfig,
+)
+from pms.strategies.versioning import serialize_strategy_config_json
 
 
 SCHEMA_PATH = Path("schema.sql")
@@ -72,6 +82,33 @@ def _run_psql(
         text=True,
         capture_output=True,
         check=True,
+    )
+
+
+def _default_strategy_config_json() -> str:
+    return serialize_strategy_config_json(
+        StrategyConfig(
+            strategy_id="default",
+            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            metadata=(("owner", "system"), ("tier", "default")),
+        ),
+        RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        EvalSpec(metrics=("brier", "pnl", "fill_rate")),
+        ForecasterSpec(
+            forecasters=(
+                ("rules", (("threshold", "0.55"),)),
+                ("stats", (("window", "15m"),)),
+            )
+        ),
+        MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+        ),
     )
 
 
@@ -166,10 +203,10 @@ def test_schema_sql_applies_strategy_identity_tables() -> None:
             """,
         )
 
-        assert seed_result.stdout.strip() == (
-            'default|default-v1|{"eval": {}, "risk": {}, "config": {}, '
-            '"forecaster": {}, "market_selection": {}}'
-        )
+        strategy_id, active_version_id, config_json = seed_result.stdout.strip().split("|", 2)
+        assert strategy_id == "default"
+        assert active_version_id == "default-v1"
+        assert json.loads(config_json) == json.loads(_default_strategy_config_json())
     finally:
         _run_psql(
             admin_database_url,

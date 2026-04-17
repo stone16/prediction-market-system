@@ -46,6 +46,14 @@ class PostgresStrategyRegistry:
             await connection.execute(query, strategy_id, metadata_json)
 
     async def create_version(self, strategy: Strategy) -> StrategyVersion:
+        """Register a strategy snapshot and make that version active.
+
+        Re-registering an existing version is idempotent for the
+        `strategy_versions` row but still re-points
+        `strategies.active_version_id` to the requested version. S2
+        treats `create_version(...)` as the explicit register-and-activate
+        entrypoint until a separate activation API exists.
+        """
         strategy_id = strategy.config.strategy_id
         strategy_version_id = compute_strategy_version_id(*strategy.snapshot())
         config_json = serialize_strategy_config_json(*strategy.snapshot())
@@ -182,13 +190,19 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
     )
     return Strategy(
         config=StrategyConfig(
-            strategy_id=cast(str, config_payload["strategy_id"]),
+            strategy_id=_json_string(config_payload["strategy_id"], "config.strategy_id"),
             factor_composition=tuple(
-                (cast(str, item[0]), _json_float(item[1], "config.factor_composition"))
+                (
+                    _json_string(item[0], "config.factor_composition.key"),
+                    _json_float(item[1], "config.factor_composition"),
+                )
                 for item in _json_pairs(config_payload["factor_composition"])
             ),
             metadata=tuple(
-                (cast(str, item[0]), cast(str, item[1]))
+                (
+                    _json_string(item[0], "config.metadata.key"),
+                    _json_string(item[1], "config.metadata.value"),
+                )
                 for item in _json_pairs(config_payload["metadata"])
             ),
         ),
@@ -207,14 +221,17 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
             ),
         ),
         eval_spec=EvalSpec(
-            metrics=tuple(cast(list[str], eval_spec_payload["metrics"]))
+            metrics=tuple(_json_string_list(eval_spec_payload["metrics"], "eval_spec.metrics"))
         ),
         forecaster=ForecasterSpec(
             forecasters=tuple(
                 (
-                    cast(str, item[0]),
+                    _json_string(item[0], "forecaster.forecasters.name"),
                     tuple(
-                        (cast(str, param[0]), cast(str, param[1]))
+                        (
+                            _json_string(param[0], "forecaster.forecasters.param.key"),
+                            _json_string(param[1], "forecaster.forecasters.param.value"),
+                        )
                         for param in _json_pairs(item[1])
                     ),
                 )
@@ -222,10 +239,10 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
             )
         ),
         market_selection=MarketSelectionSpec(
-            venue=cast(str, market_selection_payload["venue"]),
-            resolution_time_max_horizon_days=cast(
-                int | None,
+            venue=_json_string(market_selection_payload["venue"], "market_selection.venue"),
+            resolution_time_max_horizon_days=_json_optional_int(
                 market_selection_payload["resolution_time_max_horizon_days"],
+                "market_selection.resolution_time_max_horizon_days",
             ),
             volume_min_usdc=_json_float(
                 market_selection_payload["volume_min_usdc"],
@@ -265,6 +282,32 @@ def _json_pairs(value: object) -> list[list[object]]:
             raise TypeError(msg)
         decoded_pairs.append(cast(list[object], pair))
     return decoded_pairs
+
+
+def _json_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        msg = f"{field_name} must decode to a string"
+        raise TypeError(msg)
+    return value
+
+
+def _json_string_list(value: object, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        msg = f"{field_name} must decode to a JSON array"
+        raise TypeError(msg)
+    decoded: list[str] = []
+    for item in value:
+        decoded.append(_json_string(item, field_name))
+    return decoded
+
+
+def _json_optional_int(value: object, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        msg = f"{field_name} must decode to an int or null"
+        raise TypeError(msg)
+    return value
 
 
 def _json_float(value: object, field_name: str) -> float:

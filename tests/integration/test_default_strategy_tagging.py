@@ -11,6 +11,14 @@ from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode
 from pms.core.models import MarketSignal
 from pms.runner import Runner
+from pms.strategies.projections import (
+    EvalSpec,
+    ForecasterSpec,
+    MarketSelectionSpec,
+    RiskParams,
+    StrategyConfig,
+)
+from pms.strategies.versioning import serialize_strategy_config_json
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 
@@ -79,6 +87,33 @@ def _signal(
     )
 
 
+def _default_strategy_config_json() -> str:
+    return serialize_strategy_config_json(
+        StrategyConfig(
+            strategy_id="default",
+            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            metadata=(("owner", "system"), ("tier", "default")),
+        ),
+        RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        EvalSpec(metrics=("brier", "pnl", "fill_rate")),
+        ForecasterSpec(
+            forecasters=(
+                ("rules", (("threshold", "0.55"),)),
+                ("stats", (("window", "15m"),)),
+            )
+        ),
+        MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+        ),
+    )
+
+
 async def _count_null_strategy_tags(connection: asyncpg.Connection, table: str) -> int:
     query = f"""
     SELECT COUNT(*)
@@ -111,26 +146,30 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
     pg_pool: asyncpg.Pool,
 ) -> None:
     async with pg_pool.acquire() as connection:
-        await connection.execute(
-            """
-            BEGIN;
-            SET CONSTRAINTS ALL DEFERRED;
-            INSERT INTO strategies (strategy_id, active_version_id)
-            VALUES ('default', 'default-v1')
-            ON CONFLICT (strategy_id) DO NOTHING;
-            INSERT INTO strategy_versions (
-                strategy_version_id,
-                strategy_id,
-                config_json
-            ) VALUES (
-                'default-v1',
-                'default',
-                '{"config":{},"risk":{},"eval":{},"forecaster":{},"market_selection":{}}'::jsonb
+        async with connection.transaction():
+            await connection.execute("SET CONSTRAINTS ALL DEFERRED")
+            await connection.execute(
+                """
+                INSERT INTO strategies (strategy_id, active_version_id)
+                VALUES ('default', 'default-v1')
+                ON CONFLICT (strategy_id) DO NOTHING
+                """
             )
-            ON CONFLICT (strategy_version_id) DO NOTHING;
-            COMMIT;
-            """
-        )
+            await connection.execute(
+                """
+                INSERT INTO strategy_versions (
+                    strategy_version_id,
+                    strategy_id,
+                    config_json
+                ) VALUES (
+                    'default-v1',
+                    'default',
+                    $1::jsonb
+                )
+                ON CONFLICT (strategy_version_id) DO NOTHING
+                """,
+                _default_strategy_config_json(),
+            )
 
     runner = Runner(
         config=_settings(),
