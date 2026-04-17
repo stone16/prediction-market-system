@@ -14,8 +14,17 @@ import pytest
 
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus
 from pms.core.models import EvalRecord, Feedback
+from pms.strategies.aggregate import Strategy
+from pms.strategies.projections import (
+    EvalSpec,
+    ForecasterSpec,
+    MarketSelectionSpec,
+    RiskParams,
+    StrategyConfig,
+)
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.strategy_registry import PostgresStrategyRegistry
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
@@ -83,6 +92,37 @@ def _eval_record(decision_id: str) -> EvalRecord:
     )
 
 
+def _strategy(*, drawdown_pct: float = 2.5) -> Strategy:
+    return Strategy(
+        config=StrategyConfig(
+            strategy_id="default",
+            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            metadata=(("owner", "system"), ("tier", "default")),
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=drawdown_pct,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier", "pnl", "fill_rate")),
+        forecaster=ForecasterSpec(
+            forecasters=(
+                ("rules", (("threshold", "0.55"),)),
+                ("stats", (("window", "15m"),)),
+            )
+        ),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+        ),
+    )
+
+
+async def _seed_active_default_strategy(pool: asyncpg.Pool) -> None:
+    await PostgresStrategyRegistry(pool).create_version(_strategy())
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -124,6 +164,9 @@ def _run_migration(data_dir: Path) -> subprocess.CompletedProcess[str]:
 async def test_feedback_store_persists_and_filters_rows_in_postgres(
     db_conn: asyncpg.Connection,
 ) -> None:
+    active_version = await PostgresStrategyRegistry(cast(Any, _SingleConnectionPool(db_conn))).create_version(
+        _strategy()
+    )
     store = FeedbackStore(pool=cast(Any, _SingleConnectionPool(db_conn)))
 
     await store.append(_feedback("fb-1"))
@@ -145,14 +188,17 @@ async def test_feedback_store_persists_and_filters_rows_in_postgres(
     assert [item.feedback_id for item in resolved] == ["fb-1"]
     assert resolved[0].resolved is True
     assert stored_row is not None
-    assert stored_row["strategy_id"] is None
-    assert stored_row["strategy_version_id"] is None
+    assert stored_row["strategy_id"] == "default"
+    assert stored_row["strategy_version_id"] == active_version.strategy_version_id
 
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_eval_store_persists_rows_in_postgres(
     db_conn: asyncpg.Connection,
 ) -> None:
+    active_version = await PostgresStrategyRegistry(cast(Any, _SingleConnectionPool(db_conn))).create_version(
+        _strategy()
+    )
     store = EvalStore(pool=cast(Any, _SingleConnectionPool(db_conn)))
 
     await store.append(_eval_record("decision-cp09"))
@@ -169,8 +215,8 @@ async def test_eval_store_persists_rows_in_postgres(
 
     assert [record.decision_id for record in records] == ["decision-cp09"]
     assert stored_row is not None
-    assert stored_row["strategy_id"] is None
-    assert stored_row["strategy_version_id"] is None
+    assert stored_row["strategy_id"] == "default"
+    assert stored_row["strategy_version_id"] == active_version.strategy_version_id
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -178,6 +224,7 @@ async def test_jsonl_migration_script_copies_feedback_and_eval_rows(
     pg_pool: asyncpg.Pool,
     tmp_path: Path,
 ) -> None:
+    await _seed_active_default_strategy(pg_pool)
     data_dir = tmp_path / ".data"
     _write_jsonl(
         data_dir / "feedback.jsonl",
@@ -203,6 +250,7 @@ async def test_jsonl_migration_script_aborts_on_invalid_json_line(
     pg_pool: asyncpg.Pool,
     tmp_path: Path,
 ) -> None:
+    await _seed_active_default_strategy(pg_pool)
     data_dir = tmp_path / ".data"
     _write_jsonl(
         data_dir / "feedback.jsonl",

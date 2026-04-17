@@ -10,6 +10,7 @@ export function Nav() {
       <div className="nav-links">
         <Link href="/">Overview</Link>
         <Link href="/signals">Signals</Link>
+        <Link href="/strategies">Strategies</Link>
         <Link href="/decisions">Decisions</Link>
         <Link href="/metrics">Metrics</Link>
         <Link href="/backtest">Backtest</Link>

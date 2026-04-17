@@ -6,9 +6,18 @@ from datetime import UTC, datetime
 import asyncpg
 import pytest
 
+from pms.strategies.aggregate import Strategy
+from pms.strategies.projections import (
+    EvalSpec,
+    ForecasterSpec,
+    MarketSelectionSpec,
+    RiskParams,
+    StrategyConfig,
+)
 from pms.core.models import EvalRecord, Feedback
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.strategy_registry import PostgresStrategyRegistry
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
@@ -26,11 +35,40 @@ pytestmark = [
 ]
 
 
+def _strategy(*, drawdown_pct: float) -> Strategy:
+    return Strategy(
+        config=StrategyConfig(
+            strategy_id="default",
+            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            metadata=(("owner", "system"), ("tier", "default")),
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=drawdown_pct,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier", "pnl", "fill_rate")),
+        forecaster=ForecasterSpec(
+            forecasters=(
+                ("rules", (("threshold", "0.55"),)),
+                ("stats", (("window", "15m"),)),
+            )
+        ),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+        ),
+    )
+
+
 @pytest.mark.asyncio(loop_scope="session")
-async def test_feedback_and_eval_stores_accept_null_strategy_columns(
+async def test_feedback_and_eval_stores_use_active_strategy_version_by_default(
     pg_pool: asyncpg.Pool,
 ) -> None:
-    # S5-MIGRATION-MARKER: flip NULL asserts after NOT NULL upgrade lands
+    active_version = await PostgresStrategyRegistry(pg_pool).create_version(
+        _strategy(drawdown_pct=3.5)
+    )
     feedback_store = FeedbackStore(pg_pool)
     eval_store = EvalStore(pg_pool)
     created_at = datetime(2026, 4, 17, tzinfo=UTC)
@@ -80,14 +118,14 @@ async def test_feedback_and_eval_stores_accept_null_strategy_columns(
             WHERE decision_id = $1
             """,
             "reservation-decision",
-        )
+    )
 
     assert feedback_row is not None
-    assert feedback_row["strategy_id"] is None
-    assert feedback_row["strategy_version_id"] is None
+    assert feedback_row["strategy_id"] == "default"
+    assert feedback_row["strategy_version_id"] == active_version.strategy_version_id
     assert eval_row is not None
-    assert eval_row["strategy_id"] is None
-    assert eval_row["strategy_version_id"] is None
+    assert eval_row["strategy_id"] == "default"
+    assert eval_row["strategy_version_id"] == active_version.strategy_version_id
 
 
 @pytest.mark.asyncio(loop_scope="session")

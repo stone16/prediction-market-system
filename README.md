@@ -70,7 +70,7 @@ PMS_RUN_INTEGRATION=1 uv run pytest -m integration   # PostgreSQL + live-network
 ```
 
 Baseline invariants enforced by CI:
-- pytest 93 passing, 32 skipped (integration gated on `PMS_RUN_INTEGRATION=1`).
+- pytest 145 passing, 42 skipped (integration gated on `PMS_RUN_INTEGRATION=1`).
 - mypy strict must be clean on every committed source file.
 
 ### Isolating dev state

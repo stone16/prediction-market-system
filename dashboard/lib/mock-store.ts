@@ -6,7 +6,8 @@ import type {
   MetricsResponse,
   Signal,
   SignalDepth,
-  StatusResponse
+  StatusResponse,
+  StrategiesResponse
 } from './types';
 
 const rootDir = path.resolve(process.cwd(), '..');
@@ -69,6 +70,18 @@ export function mockMetrics(): MetricsResponse {
       recorded_at: `2026-04-${String(1 + index).padStart(2, '0')}T00:00:00+00:00`,
       pnl: -8 + index * 3.1
     }))
+  };
+}
+
+export function mockStrategies(): StrategiesResponse {
+  return {
+    strategies: [
+      {
+        strategy_id: 'default',
+        active_version_id: 'd50c4db65699c222620c85f0cf84c0324c148a34b212c5f69903dbf4b950757c',
+        created_at: '2026-04-14T00:00:00+00:00'
+      }
+    ]
   };
 }
 
