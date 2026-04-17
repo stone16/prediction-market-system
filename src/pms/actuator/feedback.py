@@ -13,7 +13,7 @@ from pms.storage.feedback_store import FeedbackStore
 class ActuatorFeedback:
     store: FeedbackStore
 
-    def generate(self, order_state: OrderState, *, reason: str) -> Feedback:
+    async def generate(self, order_state: OrderState, *, reason: str) -> Feedback:
         feedback = Feedback(
             feedback_id=f"actuator-{uuid4().hex}",
             target=FeedbackTarget.CONTROLLER.value,
@@ -32,5 +32,5 @@ class ActuatorFeedback:
                 "status": order_state.status,
             },
         )
-        self.store.append(feedback)
+        await self.store.append(feedback)
         return feedback

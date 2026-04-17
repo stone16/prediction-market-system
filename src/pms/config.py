@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import getpass
 import os
 from pathlib import Path
 from typing import Any, Self
@@ -9,21 +10,6 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from pms.core.enums import RunMode
-
-
-DEFAULT_DATA_DIR = Path(".data")
-
-
-def data_dir() -> Path:
-    """Resolve the per-run data directory.
-
-    Honours ``PMS_DATA_DIR`` env var so dev shells and pytest fixtures can
-    isolate state from the committed repo root. Falls back to ``.data``.
-    """
-    override = os.environ.get("PMS_DATA_DIR")
-    if override:
-        return Path(override)
-    return DEFAULT_DATA_DIR
 
 
 class PolymarketSettings(BaseModel):
@@ -65,6 +51,24 @@ class RiskSettings(BaseModel):
 
 class SensorSettings(BaseModel):
     poll_interval_s: float = 5.0
+    max_reconnect_interval_s: float = 60.0
+
+
+class DashboardSettings(BaseModel):
+    stale_snapshot_threshold_s: float = 300.0
+
+
+def _default_database_dsn() -> str:
+    override = os.environ.get("DATABASE_URL")
+    if override:
+        return override
+    return f"postgresql://localhost/pms_dev_{getpass.getuser()}"
+
+
+class DatabaseSettings(BaseModel):
+    dsn: str = Field(default_factory=_default_database_dsn)
+    pool_min_size: int = 2
+    pool_max_size: int = 10
 
 
 class PMSSettings(BaseSettings):
@@ -81,6 +85,8 @@ class PMSSettings(BaseSettings):
     risk: RiskSettings = Field(default_factory=RiskSettings)
     sensor: SensorSettings = Field(default_factory=SensorSettings)
     controller: ControllerSettings = Field(default_factory=ControllerSettings)
+    database: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    dashboard: DashboardSettings = Field(default_factory=DashboardSettings)
 
     @classmethod
     def load(cls, config_path: str | Path | None = "config.yaml") -> Self:

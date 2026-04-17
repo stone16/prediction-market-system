@@ -30,6 +30,7 @@ class SensorWatchdog:
             self._task = None
 
     def notify_message(self) -> None:
+        self._fallback_started = False
         self._reset_event.set()
 
     async def _run(self) -> None:

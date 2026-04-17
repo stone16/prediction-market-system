@@ -220,6 +220,17 @@ h3 {
   padding: 20px;
 }
 
+.signal-callout {
+  margin-bottom: 18px;
+  padding: 20px;
+}
+
+.signal-callout code {
+  background: rgb(23 25 22 / 7%);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
 .feedback-list {
   display: grid;
   gap: 12px;
@@ -251,6 +262,120 @@ h3 {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+.depth-card {
+  margin-bottom: 20px;
+  padding: 20px;
+}
+
+.depth-topline {
+  align-items: start;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+}
+
+.depth-market-id {
+  color: var(--muted);
+  font-family: "Courier New", monospace;
+  margin: 10px 0 0;
+}
+
+.depth-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.badge.warning {
+  background: rgb(214 167 45 / 15%);
+  border-color: rgb(214 167 45 / 40%);
+  color: #8c6510;
+}
+
+.depth-stats {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 18px 0 20px;
+}
+
+.depth-stat {
+  background: linear-gradient(180deg, rgb(255 255 255 / 96%), rgb(244 248 242 / 90%));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.depth-stat span {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+
+.depth-stat strong {
+  display: block;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 24px;
+}
+
+.depth-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.depth-column {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.depth-column header,
+.depth-row {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.depth-column header {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 12px 14px;
+  text-transform: uppercase;
+}
+
+.depth-column.bids header {
+  background: rgb(31 138 112 / 11%);
+  color: var(--green);
+}
+
+.depth-column.asks header {
+  background: rgb(216 79 63 / 11%);
+  color: var(--coral);
+}
+
+.depth-row {
+  border-top: 1px solid rgb(203 216 196 / 75%);
+  padding: 14px;
+}
+
+.depth-row strong {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 22px;
+}
+
+.depth-row span {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
 }
 
 table {
@@ -358,7 +483,9 @@ th {
   }
 
   .hero,
-  .section-grid {
+  .section-grid,
+  .depth-grid,
+  .depth-stats {
     grid-template-columns: 1fr;
   }
 
@@ -369,6 +496,10 @@ th {
 
   h1 {
     font-size: 42px;
+  }
+
+  .depth-topline {
+    flex-direction: column;
   }
 }
 

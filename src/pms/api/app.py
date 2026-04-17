@@ -9,13 +9,18 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, TypeVar, cast
 
-from fastapi import FastAPI, HTTPException
+import asyncpg
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
+from pms.api.routes.feedback import list_feedback as list_feedback_items
+from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
+from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
 from pms.runner import Runner
+from pms.storage.market_data_store import PostgresMarketDataStore
 
 
 T = TypeVar("T")
@@ -44,21 +49,26 @@ def create_app(
         if auto_start and not _is_runner_running(active_runner):
             logger.info("PMS_AUTO_START enabled — starting runner in %s mode", active_runner.state.mode.value)
             await active_runner.start()
+        elif not auto_start:
+            await _ensure_runner_pool(active_runner)
         try:
             yield
         finally:
             # Always stop a running runner on shutdown — covers both auto_start
             # and runners launched by callers via POST /run/start, so sensor
-            # resources (e.g. PolymarketRestSensor's httpx client) close cleanly.
+            # resources (for example venue HTTP clients) close cleanly.
             if _is_runner_running(active_runner):
                 await active_runner.stop()
+            else:
+                await _close_runner_pool(active_runner)
 
     app = FastAPI(title="PMS API", lifespan=lifespan)
     app.state.runner = active_runner
 
     @app.get("/status")
     async def status() -> dict[str, Any]:
-        metrics_snapshot = _metrics(active_runner)
+        records = await active_runner.eval_store.all()
+        metrics_snapshot = MetricsCollector(records).snapshot()
         return {
             "mode": active_runner.state.mode.value,
             "runner_started_at": _jsonable(active_runner.state.runner_started_at),
@@ -70,7 +80,7 @@ def create_app(
                 "mode": active_runner.state.mode.value,
             },
             "evaluator": {
-                "eval_records_total": len(active_runner.eval_store.all()),
+                "eval_records_total": len(records),
                 "brier_overall": metrics_snapshot.brier_overall,
             },
         }
@@ -81,6 +91,24 @@ def create_app(
             cast(dict[str, Any], _jsonable(signal))
             for signal in _latest(active_runner.state.signals, limit)
         ]
+
+    @app.get("/signals/{market_id}/depth")
+    async def signal_depth(
+        market_id: str,
+        limit: int = Query(default=20, ge=1, le=200),
+    ) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            payload = await get_signal_depth(
+                PostgresMarketDataStore(active_runner.pg_pool),
+                market_id=market_id,
+                limit=limit,
+                stale_snapshot_threshold_s=active_runner.config.dashboard.stale_snapshot_threshold_s,
+            )
+        except SignalDepthNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return cast(dict[str, Any], _jsonable(payload))
 
     @app.get("/decisions")
     async def decisions(limit: int = 50) -> list[dict[str, Any]]:
@@ -94,9 +122,9 @@ def create_app(
 
     @app.get("/metrics")
     async def metrics() -> dict[str, Any]:
-        snapshot = _metrics(active_runner)
+        snapshot = await _metrics(active_runner)
         records = sorted(
-            active_runner.eval_store.all(),
+            await active_runner.eval_store.all(),
             key=lambda record: record.recorded_at,
         )
         payload = cast(dict[str, Any], _jsonable(snapshot))
@@ -131,12 +159,12 @@ def create_app(
     async def feedback(resolved: bool | None = None) -> list[dict[str, Any]]:
         return [
             cast(dict[str, Any], _jsonable(item))
-            for item in active_runner.feedback_store.list(resolved=resolved)
+            for item in await list_feedback_items(active_runner.feedback_store, resolved=resolved)
         ]
 
     @app.post("/feedback/{feedback_id}/resolve")
     async def resolve_feedback(feedback_id: str) -> dict[str, Any]:
-        resolved = active_runner.feedback_store.resolve(feedback_id)
+        resolved = await resolve_feedback_item(active_runner.feedback_store, feedback_id)
         if resolved is None:
             raise HTTPException(status_code=404, detail="Feedback not found")
         return cast(dict[str, Any], _jsonable(resolved))
@@ -174,12 +202,20 @@ def _latest(items: Sequence[T], limit: int) -> list[T]:
     return list(items[-bounded_limit:])
 
 
-def _metrics(runner: Runner) -> MetricsSnapshot:
-    return MetricsCollector(runner.eval_store.all()).snapshot()
+async def _metrics(runner: Runner) -> MetricsSnapshot:
+    return MetricsCollector(await runner.eval_store.all()).snapshot()
 
 
 def _is_runner_running(runner: Runner) -> bool:
     return any(not task.done() for task in runner.tasks)
+
+
+async def _ensure_runner_pool(runner: Runner) -> None:
+    await runner.ensure_pg_pool()
+
+
+async def _close_runner_pool(runner: Runner) -> None:
+    await runner.close_pg_pool()
 
 
 def _sensor_statuses(runner: Runner) -> list[dict[str, Any]]:

@@ -18,8 +18,8 @@ src/pms/               # Python package
   controller/          # decision pipeline
   core/                # frozen dataclasses, enums, Protocol interfaces
   evaluation/          # metrics collector + eval spool + feedback engine
-  sensor/              # HistoricalSensor + PolymarketRestSensor + stream
-  storage/             # EvalStore + FeedbackStore (JSONL persistence)
+  sensor/              # HistoricalSensor + MarketDiscoverySensor + stream
+  storage/             # JSONL stores + Postgres market-data persistence
   runner.py            # orchestrator wiring all four layers
   config.py            # PMSSettings (pydantic-settings)
 dashboard/             # Next.js console (port 3100)
@@ -64,33 +64,30 @@ panel that calls these endpoints directly.
 
 ```bash
 uv sync
-uv run pytest -q                              # full suite (70 pass, 2 skip)
+uv run pytest -q                              # full suite (79 pass, 17 skip)
 uv run mypy src/ tests/ --strict              # strict type check
-PMS_RUN_INTEGRATION=1 uv run pytest -m integration   # live network tests
+PMS_RUN_INTEGRATION=1 uv run pytest -m integration   # PostgreSQL + live-network tests
 ```
 
 Baseline invariants enforced by CI:
-- pytest ≥ 70 passing, 2 skipped (integration gated on `PMS_RUN_INTEGRATION=1`).
+- pytest 93 passing, 32 skipped (integration gated on `PMS_RUN_INTEGRATION=1`).
 - mypy strict must be clean on every committed source file.
 
 ### Isolating dev state
 
-The backend writes two JSONL files under `.data/` by default:
-`feedback.jsonl` and `eval_records.jsonl`. Both are gitignored, but
-`FeedbackStore` reloads `feedback.jsonl` on start, so dev sessions
-persist feedback across restarts. To isolate:
+Runtime state now lives in PostgreSQL. Use a per-shell database name so
+parallel sessions do not share evaluator or feedback rows:
 
 ```bash
-export PMS_DATA_DIR=/tmp/pms-dev    # or any ephemeral path
-uv run pms-api                      # writes to $PMS_DATA_DIR/*.jsonl
+export DATABASE_URL=postgres://localhost/pms_dev_$(whoami)
+uv run pms-api
 ```
 
-Tests are already isolated — every `FeedbackStore` / `EvalStore` test
-instance is constructed with an explicit `tmp_path`, so the shared
-`.data/` is untouched regardless of whether `PMS_DATA_DIR` is set.
+Legacy `.data/*.jsonl` files are no longer part of the runtime contract.
+If you need to preserve old local rows, migrate them once with:
 
-To reset the repo-default store: `rm -rf .data/` (or
-`rm -f .data/feedback.jsonl .data/eval_records.jsonl` to keep other
-files you may have placed there).
+```bash
+python scripts/migrate_jsonl_to_pg.py --data-dir .data --database-url "$DATABASE_URL"
+```
 
 See `CLAUDE.md` for the active engineering rules promoted from retros.

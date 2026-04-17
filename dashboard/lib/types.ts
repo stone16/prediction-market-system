@@ -51,3 +51,17 @@ export type Signal = {
   yes_price: number;
   fetched_at: string;
 };
+
+export type DepthLevel = {
+  price: number;
+  size: number;
+};
+
+export type SignalDepth = {
+  best_bid: number | null;
+  best_ask: number | null;
+  bids: DepthLevel[];
+  asks: DepthLevel[];
+  last_update_ts: string | null;
+  stale: boolean;
+};

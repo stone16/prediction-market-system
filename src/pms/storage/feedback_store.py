@@ -1,117 +1,145 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import datetime
 import json
-from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from pms.config import data_dir
+import asyncpg
+
 from pms.core.models import Feedback
+
+
+_SELECT_FEEDBACK_COLUMNS = """
+SELECT
+    feedback_id,
+    target,
+    source,
+    message,
+    severity,
+    created_at,
+    resolved,
+    resolved_at,
+    category,
+    metadata
+FROM feedback
+"""
 
 
 @dataclass
 class FeedbackStore:
-    path: Path | None = field(default_factory=lambda: data_dir() / "feedback.jsonl")
-    _items: list[Feedback] = field(default_factory=list)
+    pool: asyncpg.Pool | None = None
 
-    def __post_init__(self) -> None:
-        if self.path is None or not self.path.exists():
+    def bind_pool(self, pool: asyncpg.Pool) -> None:
+        self.pool = pool
+
+    async def append(self, feedback: Feedback) -> None:
+        async with self._pool().acquire() as connection:
+            await insert_feedback_row(connection, feedback)
+
+    async def all(self) -> list[Feedback]:
+        return await self.list()
+
+    async def list(self, resolved: bool | None = None) -> list[Feedback]:
+        if self.pool is None:
+            return []
+
+        query = (
+            f"{_SELECT_FEEDBACK_COLUMNS}\n"
+            "WHERE ($1::boolean IS NULL OR resolved = $1)\n"
+            "ORDER BY created_at ASC, feedback_id ASC"
+        )
+        async with self.pool.acquire() as connection:
+            rows = await connection.fetch(query, resolved)
+        return [_feedback_from_record(row) for row in rows]
+
+    async def get(self, feedback_id: str) -> Feedback | None:
+        if self.pool is None:
+            return None
+
+        query = (
+            f"{_SELECT_FEEDBACK_COLUMNS}\n"
+            "WHERE feedback_id = $1"
+        )
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(query, feedback_id)
+        if row is None:
+            return None
+        return _feedback_from_record(row)
+
+    async def resolve(self, feedback_id: str) -> None:
+        if self.pool is None:
             return
-        with self.path.open("r", encoding="utf-8") as stream:
-            for line in stream:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    payload = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(payload, dict):
-                    # Non-object row (array / string / number) — skip instead
-                    # of letting _feedback_from_json raise TypeError and abort
-                    # the reload of every subsequent row.
-                    continue
-                try:
-                    self._items.append(_feedback_from_json(payload))
-                except (KeyError, TypeError, ValueError):
-                    continue
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE feedback
+                SET resolved = TRUE, resolved_at = now()
+                WHERE feedback_id = $1
+                """,
+                feedback_id,
+            )
 
-    def append(self, feedback: Feedback) -> None:
-        self._items.append(feedback)
-        self._append_to_disk(feedback)
-
-    def all(self) -> list[Feedback]:
-        return list(self._items)
-
-    def list(self, *, resolved: bool | None = None) -> list[Feedback]:
-        if resolved is None:
-            return self.all()
-        return [feedback for feedback in self._items if feedback.resolved is resolved]
-
-    def resolve(self, feedback_id: str) -> Feedback | None:
-        for index, feedback in enumerate(self._items):
-            if feedback.feedback_id == feedback_id:
-                resolved = replace(
-                    feedback,
-                    resolved=True,
-                    resolved_at=datetime.now(tz=UTC),
-                )
-                self._items[index] = resolved
-                self._rewrite_disk()
-                return resolved
-        return None
-
-    def _append_to_disk(self, feedback: Feedback) -> None:
-        if self.path is None:
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(_jsonable(asdict(feedback))) + "\n")
-
-    def _rewrite_disk(self) -> None:
-        if self.path is None:
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("w", encoding="utf-8") as stream:
-            for feedback in self._items:
-                stream.write(json.dumps(_jsonable(asdict(feedback))) + "\n")
+    def _pool(self) -> asyncpg.Pool:
+        if self.pool is None:
+            msg = "FeedbackStore pool is not bound"
+            raise RuntimeError(msg)
+        return self.pool
 
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_jsonable(item) for item in value]
-    return value
-
-
-def _feedback_from_json(payload: dict[str, Any]) -> Feedback:
-    created_at = _parse_datetime(payload["created_at"])
-    resolved_at_raw = payload.get("resolved_at")
-    resolved_at = _parse_datetime(resolved_at_raw) if resolved_at_raw else None
-    metadata_raw = payload.get("metadata")
-    metadata: dict[str, Any] = metadata_raw if isinstance(metadata_raw, dict) else {}
-    return Feedback(
-        feedback_id=str(payload["feedback_id"]),
-        target=str(payload["target"]),
-        source=str(payload["source"]),
-        message=str(payload["message"]),
-        severity=str(payload["severity"]),
-        created_at=created_at,
-        resolved=bool(payload.get("resolved", False)),
-        resolved_at=resolved_at,
-        category=payload.get("category"),
-        metadata=metadata,
+async def insert_feedback_row(connection: asyncpg.Connection, feedback: Feedback) -> None:
+    await connection.execute(
+        """
+        INSERT INTO feedback (
+            feedback_id,
+            target,
+            source,
+            message,
+            severity,
+            created_at,
+            resolved,
+            resolved_at,
+            category,
+            metadata,
+            strategy_id,
+            strategy_version_id
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, NULL, NULL
+        )
+        """,
+        feedback.feedback_id,
+        feedback.target,
+        feedback.source,
+        feedback.message,
+        feedback.severity,
+        feedback.created_at,
+        feedback.resolved,
+        feedback.resolved_at,
+        feedback.category,
+        json.dumps(feedback.metadata),
     )
 
 
-def _parse_datetime(value: Any) -> datetime:
-    if isinstance(value, datetime):
-        return value
+def _feedback_from_record(record: asyncpg.Record) -> Feedback:
+    return Feedback(
+        feedback_id=cast(str, record["feedback_id"]),
+        target=cast(str, record["target"]),
+        source=cast(str, record["source"]),
+        message=cast(str, record["message"]),
+        severity=cast(str, record["severity"]),
+        created_at=cast(datetime, record["created_at"]),
+        resolved=cast(bool, record["resolved"]),
+        resolved_at=cast(datetime | None, record["resolved_at"]),
+        category=cast(str | None, record["category"]),
+        metadata=_metadata_from_value(record["metadata"]),
+    )
+
+
+def _metadata_from_value(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return cast(dict[str, Any], value)
     if isinstance(value, str):
-        return datetime.fromisoformat(value)
-    msg = f"Unable to parse datetime from {value!r}"
-    raise ValueError(msg)
+        loaded = json.loads(value)
+        if isinstance(loaded, dict):
+            return cast(dict[str, Any], loaded)
+    return {}

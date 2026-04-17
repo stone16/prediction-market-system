@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+
+from pms.core.models import EvalRecord, Feedback
+
+
+class InMemoryEvalStore:
+    def __init__(self, records: list[EvalRecord] | None = None) -> None:
+        self._records = list(records or [])
+
+    async def append(self, record: EvalRecord) -> None:
+        self._records.append(record)
+
+    async def all(self) -> list[EvalRecord]:
+        return list(self._records)
+
+
+class InMemoryFeedbackStore:
+    def __init__(self, items: list[Feedback] | None = None) -> None:
+        self._items = list(items or [])
+
+    async def append(self, feedback: Feedback) -> None:
+        self._items.append(feedback)
+
+    async def all(self) -> list[Feedback]:
+        return list(self._items)
+
+    async def list(self, resolved: bool | None = None) -> list[Feedback]:
+        if resolved is None:
+            return await self.all()
+        return [item for item in self._items if item.resolved is resolved]
+
+    async def get(self, feedback_id: str) -> Feedback | None:
+        for item in self._items:
+            if item.feedback_id == feedback_id:
+                return item
+        return None
+
+    async def resolve(self, feedback_id: str) -> None:
+        for index, item in enumerate(self._items):
+            if item.feedback_id == feedback_id:
+                self._items[index] = replace(
+                    item,
+                    resolved=True,
+                    resolved_at=datetime.now(tz=UTC),
+                )
+                return
+
+
+class LegacyPathEvalStore(InMemoryEvalStore):
+    def __init__(
+        self,
+        path: Path,
+        records: list[EvalRecord] | None = None,
+    ) -> None:
+        super().__init__(records)
+        self.path = path
+
+
+class LegacyPathFeedbackStore(InMemoryFeedbackStore):
+    def __init__(
+        self,
+        path: Path,
+        items: list[Feedback] | None = None,
+    ) -> None:
+        super().__init__(items)
+        self.path = path

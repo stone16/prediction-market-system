@@ -24,17 +24,21 @@ const initialData: DashboardData = {
 export function DashboardClient() {
   const [data, setData] = useState<DashboardData>(initialData);
   const cancelledRef = useRef(false);
+  const loadGenerationRef = useRef(0);
 
   const load = useCallback(async () => {
+    const generation = ++loadGenerationRef.current;
     try {
       const [status, metrics, feedback] = await Promise.all([
         apiGet<StatusResponse>('/status'),
         apiGet<MetricsResponse>('/metrics'),
         apiGet<Feedback[]>('/feedback?resolved=false')
       ]);
-      if (!cancelledRef.current) setData({ status, metrics, feedback, disconnected: false });
+      if (!cancelledRef.current && generation === loadGenerationRef.current) {
+        setData({ status, metrics, feedback, disconnected: false });
+      }
     } catch {
-      if (!cancelledRef.current) {
+      if (!cancelledRef.current && generation === loadGenerationRef.current) {
         setData((current) => ({ ...current, disconnected: true }));
       }
     }
@@ -42,11 +46,44 @@ export function DashboardClient() {
 
   useEffect(() => {
     cancelledRef.current = false;
+    let timer: number | null = null;
+
+    function stopPolling() {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    }
+
+    function startPolling() {
+      if (timer !== null) {
+        return;
+      }
+      timer = window.setInterval(() => {
+        if (document.visibilityState === 'visible') {
+          void load();
+        }
+      }, 5000);
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'hidden') {
+        loadGenerationRef.current += 1;
+        stopPolling();
+        return;
+      }
+      void load();
+      startPolling();
+    }
+
     void load();
-    const timer = window.setInterval(() => void load(), 5000);
+    startPolling();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelledRef.current = true;
-      window.clearInterval(timer);
+      loadGenerationRef.current += 1;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopPolling();
     };
   }, [load]);
 

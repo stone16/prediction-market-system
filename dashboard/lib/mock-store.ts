@@ -1,6 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Decision, Feedback, MetricsResponse, Signal, StatusResponse } from './types';
+import type {
+  Decision,
+  Feedback,
+  MetricsResponse,
+  Signal,
+  SignalDepth,
+  StatusResponse
+} from './types';
 
 const rootDir = path.resolve(process.cwd(), '..');
 const dataDir = path.join(rootDir, '.data');
@@ -62,6 +69,25 @@ export function mockMetrics(): MetricsResponse {
       recorded_at: `2026-04-${String(1 + index).padStart(2, '0')}T00:00:00+00:00`,
       pnl: -8 + index * 3.1
     }))
+  };
+}
+
+export function mockSignalDepth(_marketId: string): SignalDepth {
+  return {
+    best_bid: 0.58,
+    best_ask: 0.62,
+    bids: [
+      { price: 0.58, size: 140 },
+      { price: 0.56, size: 95 },
+      { price: 0.55, size: 80 }
+    ],
+    asks: [
+      { price: 0.62, size: 110 },
+      { price: 0.64, size: 155 },
+      { price: 0.66, size: 120 }
+    ],
+    last_update_ts: new Date(Date.UTC(2026, 3, 14, 0, 0, 0)).toISOString(),
+    stale: false
   };
 }
 

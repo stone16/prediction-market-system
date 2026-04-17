@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -17,6 +18,7 @@ from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side
 from pms.core.models import LiveTradingDisabledError, OrderState, Portfolio, TradeDecision
 from pms.storage.feedback_store import FeedbackStore
+from tests.support.fake_stores import InMemoryFeedbackStore
 
 
 def _decision(
@@ -162,21 +164,22 @@ async def test_polymarket_actuator_raises_when_live_trading_disabled() -> None:
         await actuator.execute(_decision())
 
 
-def test_actuator_feedback_appends_controller_feedback() -> None:
-    store = FeedbackStore(path=None)
+@pytest.mark.asyncio
+async def test_actuator_feedback_appends_controller_feedback() -> None:
+    store = cast(FeedbackStore, InMemoryFeedbackStore())
     generator = ActuatorFeedback(store)
 
-    feedback = generator.generate(_order_state(), reason="insufficient_liquidity")
+    feedback = await generator.generate(_order_state(), reason="insufficient_liquidity")
 
     assert feedback.source == FeedbackSource.ACTUATOR.value
     assert feedback.target == FeedbackTarget.CONTROLLER.value
     assert feedback.category == "insufficient_liquidity"
-    assert store.all() == [feedback]
+    assert await cast(InMemoryFeedbackStore, store).all() == [feedback]
 
 
 @pytest.mark.asyncio
 async def test_executor_releases_dedup_token_on_success_and_liquidity_rejection() -> None:
-    store = FeedbackStore(path=None)
+    store = cast(FeedbackStore, InMemoryFeedbackStore())
     tokens = executor.DedupTokenStore()
     ok_executor = executor.ActuatorExecutor(
         adapter=PaperActuator(
@@ -211,4 +214,4 @@ async def test_executor_releases_dedup_token_on_success_and_liquidity_rejection(
     assert rejected.status == OrderStatus.INVALID.value
     assert rejected.raw_status == "insufficient_liquidity"
     assert tokens.contains("d-fail") is False
-    assert store.all()[-1].category == "insufficient_liquidity"
+    assert (await cast(InMemoryFeedbackStore, store).all())[-1].category == "insufficient_liquidity"

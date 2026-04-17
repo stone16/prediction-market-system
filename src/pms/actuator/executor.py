@@ -51,25 +51,25 @@ class ActuatorExecutor:
         acquired = self.dedup_tokens.acquire(decision.decision_id)
         if not acquired:
             state = _rejected_order_state(decision, "duplicate_decision")
-            self.feedback.generate(state, reason="duplicate_decision")
+            await self.feedback.generate(state, reason="duplicate_decision")
             return state
 
         try:
             risk_decision = self.risk.check(decision, portfolio)
             if not risk_decision.approved:
                 state = _rejected_order_state(decision, risk_decision.reason)
-                self.feedback.generate(state, reason=risk_decision.reason)
+                await self.feedback.generate(state, reason=risk_decision.reason)
                 return state
 
             try:
                 return await self.adapter.execute(decision, portfolio)
             except InsufficientLiquidityError:
                 state = _rejected_order_state(decision, "insufficient_liquidity")
-                self.feedback.generate(state, reason="insufficient_liquidity")
+                await self.feedback.generate(state, reason="insufficient_liquidity")
                 return state
             except Exception:
                 state = _rejected_order_state(decision, "venue_rejection")
-                self.feedback.generate(state, reason="venue_rejection")
+                await self.feedback.generate(state, reason="venue_rejection")
                 raise
         finally:
             self.dedup_tokens.release(decision.decision_id)

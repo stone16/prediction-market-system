@@ -43,12 +43,12 @@ that governs this layer:
 ## Current files
 
 - `adapters/historical.py` — JSONL/CSV replay (backtest mode).
-- `adapters/polymarket_rest.py` — conflated discovery + simulated
-  data. **S1 splits this into `market_discovery.py` and
-  `market_data.py`.**
-- `adapters/polymarket_stream.py` — WebSocket sensor. Current
-  `_message_to_signal` discards `book` and `price_change` events
-  (line 71–90). **S1 upgrades this into a stateful parser.**
+- `adapters/market_discovery.py` — Gamma `/markets` discovery poller
+  that writes `markets` / `tokens`.
+- `adapters/market_data.py` — WebSocket sensor. Maintains the
+  per-asset orderbook mirror, persists `book` / `price_change` /
+  `last_trade_price`, and accepts subscription updates from
+  outside the sensor layer.
 - `stream.py` — fan-in: merges sensors into `Queue[MarketSignal]`.
 - `watchdog.py` — existing but not yet wired to stream sensor
   (S1 completes the wiring).

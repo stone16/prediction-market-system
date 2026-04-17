@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
+import asyncpg
+import httpx
 from pms.actuator.adapters.backtest import BacktestActuator
 from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.adapters.polymarket import PolymarketActuator
@@ -29,10 +31,12 @@ from pms.core.models import (
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.spool import EvalSpool
 from pms.sensor.adapters.historical import HistoricalSensor
-from pms.sensor.adapters.polymarket_rest import PolymarketRestSensor
+from pms.sensor.adapters.market_data import MarketDataSensor
+from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
 from pms.sensor.stream import SensorStream
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.market_data_store import PostgresMarketDataStore
 
 
 logger = logging.getLogger(__name__)
@@ -81,10 +85,12 @@ class Runner:
     _stop_event: asyncio.Event = field(init=False)
     _controller_task: asyncio.Task[None] | None = field(init=False, default=None)
     _actuator_task: asyncio.Task[None] | None = field(init=False, default=None)
+    _task: asyncio.Task[None] | None = field(init=False, default=None)
+    _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
+    _owns_pg_pool: bool = field(init=False, default=False)
     _active_sensors: tuple[ISensor, ...] = field(init=False, default=())
     _paper_orderbooks: dict[str, dict[str, Any]] = field(
-        init=False,
-        default_factory=dict,
+        init=False, default_factory=dict
     )
 
     def __post_init__(self) -> None:
@@ -102,6 +108,41 @@ class Runner:
     @property
     def actuator_task(self) -> asyncio.Task[None] | None:
         return self._actuator_task
+
+    @property
+    def task(self) -> asyncio.Task[None] | None:
+        return self._task
+
+    @property
+    def pg_pool(self) -> asyncpg.Pool | None:
+        return self._pg_pool
+
+    async def ensure_pg_pool(self) -> None:
+        if self._pg_pool is not None:
+            return
+        self._pg_pool = await asyncpg.create_pool(
+            dsn=self.config.database.dsn,
+            min_size=self.config.database.pool_min_size,
+            max_size=self.config.database.pool_max_size,
+        )
+        self._owns_pg_pool = True
+        self._bind_runtime_stores()
+
+    def bind_pg_pool(self, pool: asyncpg.Pool) -> None:
+        self._pg_pool = pool
+        self._owns_pg_pool = False
+        self._bind_runtime_stores()
+
+    async def close_pg_pool(self) -> None:
+        if self._pg_pool is None:
+            return
+        pool = self._pg_pool
+        owns_pool = self._owns_pg_pool
+        self._pg_pool = None
+        self._owns_pg_pool = False
+        self._unbind_runtime_stores()
+        if owns_pool:
+            await pool.close()
 
     @property
     def evaluator_task(self) -> asyncio.Task[None] | None:
@@ -130,29 +171,75 @@ class Runner:
 
         self._stop_event.clear()
         self.state.runner_started_at = datetime.now(tz=UTC)
-        self._active_sensors = self._build_sensors()
 
-        await self.sensor_stream.start(self._active_sensors)
-        await self._evaluator_spool.start()
-        self._controller_task = asyncio.create_task(self._controller_loop())
-        self._actuator_task = asyncio.create_task(self._actuator_loop())
+        try:
+            await self.ensure_pg_pool()
+            self._assert_no_legacy_jsonl_paths()
+            self._active_sensors = self._build_sensors()
+            await self.sensor_stream.start(self._active_sensors)
+            await self._evaluator_spool.start()
+            self._controller_task = asyncio.create_task(self._controller_loop())
+            self._actuator_task = asyncio.create_task(self._actuator_loop())
+        except Exception:
+            await self._cleanup_after_start_failure()
+            raise
 
     async def stop(self) -> None:
         self._stop_event.set()
-        await self.sensor_stream.stop()
+        error: BaseException | None = None
+
+        try:
+            await self.sensor_stream.stop()
+        except BaseException as exc:  # pragma: no cover - exercised via unit tests
+            error = exc
 
         for task in (self._controller_task, self._actuator_task):
             if task is not None and not task.done():
                 task.cancel()
 
-        await asyncio.gather(
-            *(task for task in (self._controller_task, self._actuator_task) if task),
-            return_exceptions=True,
-        )
-        await self._evaluator_spool.stop()
-        await self._close_active_sensors()
+        try:
+            await asyncio.gather(
+                *(task for task in (self._controller_task, self._actuator_task) if task),
+                return_exceptions=True,
+            )
+        except BaseException as exc:  # pragma: no cover - defensive
+            if error is None:
+                error = exc
+
+        try:
+            await self._evaluator_spool.stop()
+        except BaseException as exc:  # pragma: no cover - defensive
+            if error is None:
+                error = exc
+
+        try:
+            await self._close_active_sensors()
+        except BaseException as exc:  # pragma: no cover - defensive
+            if error is None:
+                error = exc
+
         self._controller_task = None
         self._actuator_task = None
+
+        try:
+            await self._close_pg_pool()
+        except BaseException as exc:  # pragma: no cover - defensive
+            if error is None:
+                error = exc
+
+        if error is not None:
+            raise error
+
+    async def run(self) -> None:
+        self._task = asyncio.current_task()
+        try:
+            await self.start()
+            await self.wait_until_idle()
+        finally:
+            try:
+                await self.stop()
+            finally:
+                self._task = None
 
     def switch_mode(self, new_mode: RunMode) -> None:
         self.config.mode = new_mode
@@ -179,9 +266,47 @@ class Runner:
             return tuple(self.sensors)
         if self.config.mode == RunMode.BACKTEST:
             return (HistoricalSensor(self.historical_data_path),)
-        return (
-            PolymarketRestSensor(poll_interval_s=self.config.sensor.poll_interval_s),
+        if self._pg_pool is None:
+            msg = "Runner PostgreSQL pool is not initialized"
+            raise RuntimeError(msg)
+        market_data_sensor = MarketDataSensor(
+            store=PostgresMarketDataStore(self._pg_pool),
+            asset_ids=[],
         )
+        market_data_sensor.max_reconnect_interval_s = (
+            self.config.sensor.max_reconnect_interval_s
+        )
+        return (
+            MarketDiscoverySensor(
+                store=PostgresMarketDataStore(self._pg_pool),
+                http_client=httpx.AsyncClient(
+                    base_url="https://gamma-api.polymarket.com"
+                ),
+                poll_interval_s=self.config.sensor.poll_interval_s,
+            ),
+            market_data_sensor,
+        )
+
+    def _assert_no_legacy_jsonl_paths(self) -> None:
+        for store in (self.eval_store, self.feedback_store):
+            if isinstance(getattr(store, "path", None), Path):
+                msg = "legacy JSONL path referenced"
+                raise RuntimeError(msg)
+
+    def _bind_runtime_stores(self) -> None:
+        if self._pg_pool is None:
+            msg = "Runner PostgreSQL pool is not initialized"
+            raise RuntimeError(msg)
+        if isinstance(self.eval_store, EvalStore):
+            self.eval_store.bind_pool(self._pg_pool)
+        if isinstance(self.feedback_store, FeedbackStore):
+            self.feedback_store.bind_pool(self._pg_pool)
+
+    def _unbind_runtime_stores(self) -> None:
+        if isinstance(self.eval_store, EvalStore):
+            self.eval_store.pool = None
+        if isinstance(self.feedback_store, FeedbackStore):
+            self.feedback_store.pool = None
 
     def _build_executor(self, mode: RunMode) -> ActuatorExecutor:
         return ActuatorExecutor(
@@ -229,7 +354,8 @@ class Runner:
                 continue
 
             try:
-                self._paper_orderbooks[decision.market_id] = signal.orderbook
+                if self.config.mode == RunMode.PAPER:
+                    self._paper_orderbooks[decision.market_id] = signal.orderbook
                 order_state = await self.actuator_executor.execute(
                     decision,
                     self.portfolio,
@@ -266,6 +392,35 @@ class Runner:
             if isinstance(sensor, AsyncCloseable):
                 await sensor.aclose()
         self._active_sensors = ()
+
+    async def _close_pg_pool(self) -> None:
+        await self.close_pg_pool()
+
+    async def _cleanup_after_start_failure(self) -> None:
+        stop_error: BaseException | None = None
+        try:
+            await self.sensor_stream.stop()
+        except BaseException as exc:  # pragma: no cover - defensive
+            stop_error = exc
+
+        try:
+            await self._evaluator_spool.stop()
+        except BaseException as exc:  # pragma: no cover - defensive
+            if stop_error is None:
+                stop_error = exc
+
+        try:
+            await self._close_active_sensors()
+        except BaseException as exc:  # pragma: no cover - defensive
+            if stop_error is None:
+                stop_error = exc
+
+        self._controller_task = None
+        self._actuator_task = None
+        await self._close_pg_pool()
+
+        if stop_error is not None:
+            raise stop_error
 
 
 def _append_bounded(items: list[T], item: T) -> None:
