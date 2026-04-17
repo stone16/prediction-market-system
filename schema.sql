@@ -77,6 +77,33 @@ CREATE INDEX IF NOT EXISTS idx_trades_market_token_ts
 
 -- END OUTER RING
 
+-- BEGIN MIDDLE RING
+
+CREATE TABLE IF NOT EXISTS factors (
+    factor_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    input_schema_hash TEXT NOT NULL,
+    default_params JSONB NOT NULL DEFAULT '{}'::jsonb,
+    output_type TEXT NOT NULL CHECK (output_type IN ('scalar', 'probability')),
+    direction TEXT NOT NULL CHECK (direction IN ('long', 'short', 'neutral')),
+    owner TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS factor_values (
+    id BIGSERIAL PRIMARY KEY,
+    factor_id TEXT NOT NULL REFERENCES factors(factor_id) ON DELETE CASCADE,
+    param TEXT NOT NULL DEFAULT '',
+    market_id TEXT NOT NULL REFERENCES markets(condition_id) ON DELETE CASCADE,
+    ts TIMESTAMPTZ NOT NULL,
+    value DOUBLE PRECISION NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_factor_values_factor_param_market_ts
+    ON factor_values(factor_id, param, market_id, ts DESC);
+
+-- END MIDDLE RING
+
 -- strategies: inner-ring identity table (Invariants 3, 8)
 
 CREATE TABLE IF NOT EXISTS strategies (
@@ -114,7 +141,6 @@ $$;
 
 -- strategy_factors: link table (empty in S2; populated by S3). Columns declared so S3 inserts do not require a schema change (Invariants 2, 4, 8)
 -- Invariant 4: raw factor rows are stored in factor_values (S3); composite factors belong in StrategyConfig.factor_composition, not as first-class rows here.
--- S3 will add: FOREIGN KEY (factor_id) REFERENCES factors(factor_id)
 CREATE TABLE IF NOT EXISTS strategy_factors (
     strategy_id TEXT NOT NULL,
     strategy_version_id TEXT NOT NULL,
@@ -127,6 +153,22 @@ CREATE TABLE IF NOT EXISTS strategy_factors (
         REFERENCES strategy_versions(strategy_id, strategy_version_id)
         ON DELETE CASCADE
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'strategy_factors_factor_id_fkey'
+    ) THEN
+        ALTER TABLE strategy_factors
+            ADD CONSTRAINT strategy_factors_factor_id_fkey
+            FOREIGN KEY (factor_id)
+            REFERENCES factors(factor_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    END IF;
+END
+$$;
 
 -- BEGIN INNER-RING PRODUCT SHELLS
 
