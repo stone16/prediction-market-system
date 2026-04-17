@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 from pms.core.enums import MarketStatus
 from pms.core.models import (
@@ -27,6 +28,7 @@ from pms.storage.market_data_store import PostgresMarketDataStore
 
 
 logger = logging.getLogger(__name__)
+_POLYMARKET_MILLISECONDS_EPOCH_THRESHOLD = 10_000_000_000
 
 
 @dataclass
@@ -124,7 +126,7 @@ class MarketDataSensor:
                             self._reset_book_state()
                 except asyncio.CancelledError:
                     raise
-                except Exception as error:
+                except (ConnectionClosed, ConnectionError, OSError, TimeoutError) as error:
                     logger.error("market data sensor receive loop failed: %s", error)
                     await self._sleep(backoff)
                     backoff = min(backoff * 2.0, self._max_reconnect_interval_s)
@@ -536,7 +538,7 @@ def _message_timestamp(value: object) -> datetime:
 
 
 def _timestamp_number(value: float) -> datetime:
-    if value > 10_000_000_000:
+    if value > _POLYMARKET_MILLISECONDS_EPOCH_THRESHOLD:
         return datetime.fromtimestamp(value / 1000.0, tz=UTC)
     return datetime.fromtimestamp(value, tz=UTC)
 

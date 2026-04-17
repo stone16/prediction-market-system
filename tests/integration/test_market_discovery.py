@@ -36,6 +36,7 @@ def _gamma_market(condition_id: str) -> dict[str, Any]:
         "endDateIso": "2026-07-31",
         "createdAt": "2025-05-02T15:03:10.397014Z",
         "clobTokenIds": json.dumps([f"yes-{condition_id}", f"no-{condition_id}"]),
+        "outcomes": json.dumps(["Yes", "No"]),
         "active": True,
         "closed": False,
     }

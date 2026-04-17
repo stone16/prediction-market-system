@@ -31,6 +31,7 @@ export function useLiveData<T>(path: string | null, intervalMs = 5000): LiveData
 
     const activePath = path;
     let cancelled = false;
+    let timer: number | null = null;
     async function load() {
       try {
         const result = await apiGet<T>(activePath);
@@ -48,11 +49,41 @@ export function useLiveData<T>(path: string | null, intervalMs = 5000): LiveData
         }
       }
     }
+
+    function stopPolling() {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    }
+
+    function startPolling() {
+      if (timer !== null) {
+        return;
+      }
+      timer = window.setInterval(() => {
+        if (document.visibilityState === 'visible') {
+          void load();
+        }
+      }, intervalMs);
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'hidden') {
+        stopPolling();
+        return;
+      }
+      void load();
+      startPolling();
+    }
+
     void load();
-    const timer = window.setInterval(load, intervalMs);
+    startPolling();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopPolling();
     };
   }, [path, intervalMs]);
 

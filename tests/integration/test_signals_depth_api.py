@@ -128,7 +128,7 @@ async def _seed_delta(
 
 def _app_client(pg_pool: asyncpg.Pool) -> httpx.AsyncClient:
     runner = Runner(config=_settings())
-    runner._pg_pool = pg_pool
+    runner.bind_pg_pool(pg_pool)
     app = create_app(runner)
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -362,3 +362,29 @@ async def test_signals_depth_route_handles_empty_and_stale_regimes(
 
     assert stale.status_code == 200
     assert stale.json()["stale"] is True
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("limit", [0, 201])
+async def test_signals_depth_route_rejects_out_of_range_limits(
+    pg_pool: asyncpg.Pool,
+    limit: int,
+) -> None:
+    now = datetime.now(tz=UTC)
+    store = PostgresMarketDataStore(pg_pool)
+    market_id = "depth-invalid-limit"
+    token_id = "depth-invalid-limit-yes"
+    await _seed_market(store, market_id=market_id, token_id=token_id, now=now)
+    await _seed_snapshot(
+        store,
+        market_id=market_id,
+        token_id=token_id,
+        ts=now - timedelta(seconds=5),
+        bid_levels=[(0.51, 50.0)],
+        ask_levels=[(0.53, 45.0)],
+    )
+
+    async with _app_client(pg_pool) as client:
+        response = await client.get(f"/signals/{market_id}/depth?limit={limit}")
+
+    assert response.status_code == 422

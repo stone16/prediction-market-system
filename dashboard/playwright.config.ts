@@ -16,7 +16,12 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: `bash -lc 'cd .. && DATABASE_URL="${databaseUrl}" psql "${databaseUrl}" --set ON_ERROR_STOP=1 --file schema.sql && DATABASE_URL="${databaseUrl}" uv run pms-api'`,
+      command:
+        'bash -lc \'cd .. && psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --file schema.sql && uv run pms-api\'',
+      env: {
+        ...process.env,
+        DATABASE_URL: databaseUrl
+      },
       url: 'http://127.0.0.1:8000/status',
       reuseExistingServer: false,
       timeout: 120_000

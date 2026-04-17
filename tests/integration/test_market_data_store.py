@@ -257,16 +257,19 @@ async def test_write_market_upsert_updates_existing_row(
     pg_pool: asyncpg.Pool,
 ) -> None:
     store = _store(pg_pool)
+    created_at = datetime(2026, 4, 19, tzinfo=UTC)
     original = _market(
         condition_id="market-upsert",
         slug="before",
         question="before",
+        created_at=created_at,
         last_seen_at=datetime(2026, 4, 20, tzinfo=UTC),
     )
     updated = _market(
         condition_id="market-upsert",
         slug="after",
         question="after",
+        created_at=datetime(2026, 4, 25, tzinfo=UTC),
         last_seen_at=datetime(2026, 4, 21, tzinfo=UTC),
     )
 
@@ -276,7 +279,7 @@ async def test_write_market_upsert_updates_existing_row(
     async with pg_pool.acquire() as connection:
         row = await connection.fetchrow(
             """
-            SELECT slug, question, last_seen_at
+            SELECT slug, question, created_at, last_seen_at
             FROM markets
             WHERE condition_id = $1
             """,
@@ -286,6 +289,7 @@ async def test_write_market_upsert_updates_existing_row(
     assert row is not None
     assert row["slug"] == "after"
     assert row["question"] == "after"
+    assert row["created_at"] == created_at
     assert row["last_seen_at"] == updated.last_seen_at
 
 
@@ -387,18 +391,32 @@ async def test_write_price_change_persists_zero_size_delta_and_reads_since(
 ) -> None:
     store = _store(pg_pool)
     await _seed_market_and_token(store)
+    await store.write_token(_token(token_id="token-no", outcome="NO"))
     delta = _price_change(
         ts=datetime(2026, 4, 21, 0, 4, tzinfo=UTC),
         size=0.0,
     )
+    other_token_delta = _price_change(
+        token_id="token-no",
+        ts=delta.ts,
+        side="SELL",
+        price=0.59,
+        size=4.0,
+        best_bid=0.41,
+        best_ask=0.59,
+        hash_value="delta-hash-no",
+    )
 
     await store.write_price_change(delta)
+    await store.write_price_change(other_token_delta)
     changes = await store.read_price_changes_since(
         delta.market_id,
+        delta.token_id,
         delta.ts - timedelta(seconds=1),
     )
 
     assert len(changes) == 1
+    assert changes[0].token_id == delta.token_id
     assert changes[0].size == 0.0
     assert changes[0].price == delta.price
 

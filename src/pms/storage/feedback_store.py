@@ -35,7 +35,7 @@ class FeedbackStore:
 
     async def append(self, feedback: Feedback) -> None:
         async with self._pool().acquire() as connection:
-            await _insert_feedback(connection, feedback)
+            await insert_feedback_row(connection, feedback)
 
     async def all(self) -> list[Feedback]:
         return await self.list()
@@ -87,7 +87,7 @@ class FeedbackStore:
         return self.pool
 
 
-async def _insert_feedback(connection: asyncpg.Connection, feedback: Feedback) -> None:
+async def insert_feedback_row(connection: asyncpg.Connection, feedback: Feedback) -> None:
     await connection.execute(
         """
         INSERT INTO feedback (

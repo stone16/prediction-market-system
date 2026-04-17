@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Any, TypeVar, cast
 
 import asyncpg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from pms.api.routes.feedback import list_feedback as list_feedback_items
@@ -93,7 +93,10 @@ def create_app(
         ]
 
     @app.get("/signals/{market_id}/depth")
-    async def signal_depth(market_id: str, limit: int = 20) -> dict[str, Any]:
+    async def signal_depth(
+        market_id: str,
+        limit: int = Query(default=20, ge=1, le=200),
+    ) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         try:
@@ -208,29 +211,11 @@ def _is_runner_running(runner: Runner) -> bool:
 
 
 async def _ensure_runner_pool(runner: Runner) -> None:
-    if runner.pg_pool is not None:
-        return
-
-    pool = await asyncpg.create_pool(
-        dsn=runner.config.database.dsn,
-        min_size=runner.config.database.pool_min_size,
-        max_size=runner.config.database.pool_max_size,
-    )
-    runner._pg_pool = pool
-    bind_eval_pool = getattr(runner.eval_store, "bind_pool", None)
-    if callable(bind_eval_pool):
-        bind_eval_pool(pool)
-    bind_feedback_pool = getattr(runner.feedback_store, "bind_pool", None)
-    if callable(bind_feedback_pool):
-        bind_feedback_pool(pool)
+    await runner.ensure_pg_pool()
 
 
 async def _close_runner_pool(runner: Runner) -> None:
-    pool = runner.pg_pool
-    if pool is None:
-        return
-    await pool.close()
-    runner._pg_pool = None
+    await runner.close_pg_pool()
 
 
 def _sensor_statuses(runner: Runner) -> list[dict[str, Any]]:

@@ -121,8 +121,7 @@ async def _read_relevant_deltas(
     snapshot: BookSnapshot | None,
 ) -> list[PriceChange]:
     since_ts = snapshot.ts if snapshot is not None else datetime.min.replace(tzinfo=UTC)
-    all_deltas = await store.read_price_changes_since(market_id, since_ts)
-    return [delta for delta in all_deltas if delta.token_id == token_id]
+    return await store.read_price_changes_since(market_id, token_id, since_ts)
 
 
 def _preferred_token(tokens: list[Token]) -> Token | None:

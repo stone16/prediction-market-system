@@ -42,11 +42,42 @@ export function DashboardClient() {
 
   useEffect(() => {
     cancelledRef.current = false;
+    let timer: number | null = null;
+
+    function stopPolling() {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    }
+
+    function startPolling() {
+      if (timer !== null) {
+        return;
+      }
+      timer = window.setInterval(() => {
+        if (document.visibilityState === 'visible') {
+          void load();
+        }
+      }, 5000);
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'hidden') {
+        stopPolling();
+        return;
+      }
+      void load();
+      startPolling();
+    }
+
     void load();
-    const timer = window.setInterval(() => void load(), 5000);
+    startPolling();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelledRef.current = true;
-      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopPolling();
     };
   }, [load]);
 

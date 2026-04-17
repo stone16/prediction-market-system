@@ -7,34 +7,43 @@ const evidenceDir = path.resolve(process.cwd(), 'e2e', 'evidence');
 const marketId = 'pm-depth-e2e';
 const tokenId = 'pm-depth-e2e-yes';
 
+function sqlLiteral(value: string) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
 function seedDepthFixture() {
-  applySchema();
   resetOuterRing();
+  const marketIdSql = sqlLiteral(marketId);
+  const tokenIdSql = sqlLiteral(tokenId);
   executeSql(`
     INSERT INTO markets (condition_id, slug, question, venue, resolves_at, created_at, last_seen_at)
-    VALUES ('${marketId}', '${marketId}', 'Will the depth ladder render real rows?', 'polymarket', NULL, NOW(), NOW());
+    VALUES (${marketIdSql}, ${marketIdSql}, 'Will the depth ladder render real rows?', 'polymarket', NULL, NOW(), NOW());
 
     INSERT INTO tokens (token_id, condition_id, outcome)
-    VALUES ('${tokenId}', '${marketId}', 'YES');
+    VALUES (${tokenIdSql}, ${marketIdSql}, 'YES');
 
     WITH inserted_snapshot AS (
       INSERT INTO book_snapshots (market_id, token_id, ts, hash, source)
-      VALUES ('${marketId}', '${tokenId}', NOW(), 'playwright-snapshot', 'subscribe')
+      VALUES (${marketIdSql}, ${tokenIdSql}, NOW(), 'playwright-snapshot', 'subscribe')
       RETURNING id
     )
     INSERT INTO book_levels (snapshot_id, market_id, side, price, size)
-    SELECT id, '${marketId}', 'BUY', 0.58, 140.0 FROM inserted_snapshot
+    SELECT id, ${marketIdSql}, 'BUY', 0.58, 140.0 FROM inserted_snapshot
     UNION ALL
-    SELECT id, '${marketId}', 'BUY', 0.56, 95.0 FROM inserted_snapshot
+    SELECT id, ${marketIdSql}, 'BUY', 0.56, 95.0 FROM inserted_snapshot
     UNION ALL
-    SELECT id, '${marketId}', 'SELL', 0.62, 110.0 FROM inserted_snapshot
+    SELECT id, ${marketIdSql}, 'SELL', 0.62, 110.0 FROM inserted_snapshot
     UNION ALL
-    SELECT id, '${marketId}', 'SELL', 0.64, 155.0 FROM inserted_snapshot;
+    SELECT id, ${marketIdSql}, 'SELL', 0.64, 155.0 FROM inserted_snapshot;
   `);
 }
 
-test.beforeEach(() => {
+test.beforeAll(() => {
   fs.mkdirSync(evidenceDir, { recursive: true });
+  applySchema();
+});
+
+test.beforeEach(() => {
   seedDepthFixture();
 });
 

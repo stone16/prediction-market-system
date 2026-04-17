@@ -257,6 +257,22 @@ async def test_runner_stop_completes_with_outstanding_pool_acquires(
 
 
 @pytest.mark.asyncio
+async def test_runner_bind_pg_pool_publicly_without_taking_ownership(
+    tmp_path: Path,
+) -> None:
+    fake_pool = FakePool()
+    runner = _runner(tmp_path, sensors=[HoldingSensor()])
+
+    runner.bind_pg_pool(cast(Any, fake_pool))
+
+    assert runner.pg_pool is fake_pool
+    await runner.close_pg_pool()
+
+    assert runner.pg_pool is None
+    assert fake_pool.close_calls == 0  # type: ignore[unreachable]
+
+
+@pytest.mark.asyncio
 async def test_runner_start_rejects_legacy_jsonl_store_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

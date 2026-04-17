@@ -12,8 +12,8 @@ from typing import Any, Callable, TypeVar
 import asyncpg
 
 from pms.core.models import EvalRecord, Feedback
-from pms.storage.eval_store import _insert_eval_record
-from pms.storage.feedback_store import _insert_feedback
+from pms.storage.eval_store import insert_eval_record_row
+from pms.storage.feedback_store import insert_feedback_row
 
 
 T = TypeVar("T")
@@ -56,9 +56,9 @@ async def _run(args: argparse.Namespace) -> None:
     try:
         async with connection.transaction():
             for feedback in feedback_rows:
-                await _insert_feedback(connection, feedback)
+                await insert_feedback_row(connection, feedback)
             for record in eval_rows:
-                await _insert_eval_record(connection, record)
+                await insert_eval_record_row(connection, record)
             await _assert_row_counts(connection, feedback_rows, eval_rows)
     finally:
         await connection.close()

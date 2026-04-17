@@ -87,6 +87,7 @@ class Runner:
     _actuator_task: asyncio.Task[None] | None = field(init=False, default=None)
     _task: asyncio.Task[None] | None = field(init=False, default=None)
     _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
+    _owns_pg_pool: bool = field(init=False, default=False)
     _active_sensors: tuple[ISensor, ...] = field(init=False, default=())
 
     def __post_init__(self) -> None:
@@ -112,6 +113,32 @@ class Runner:
     @property
     def pg_pool(self) -> asyncpg.Pool | None:
         return self._pg_pool
+
+    async def ensure_pg_pool(self) -> None:
+        if self._pg_pool is not None:
+            return
+        self._pg_pool = await asyncpg.create_pool(
+            dsn=self.config.database.dsn,
+            min_size=self.config.database.pool_min_size,
+            max_size=self.config.database.pool_max_size,
+        )
+        self._owns_pg_pool = True
+        self._bind_runtime_stores()
+
+    def bind_pg_pool(self, pool: asyncpg.Pool) -> None:
+        self._pg_pool = pool
+        self._owns_pg_pool = False
+        self._bind_runtime_stores()
+
+    async def close_pg_pool(self) -> None:
+        if self._pg_pool is None:
+            return
+        pool = self._pg_pool
+        owns_pool = self._owns_pg_pool
+        self._pg_pool = None
+        self._owns_pg_pool = False
+        if owns_pool:
+            await pool.close()
 
     @property
     def evaluator_task(self) -> asyncio.Task[None] | None:
@@ -140,15 +167,10 @@ class Runner:
 
         self._stop_event.clear()
         self.state.runner_started_at = datetime.now(tz=UTC)
-        self._pg_pool = await asyncpg.create_pool(
-            dsn=self.config.database.dsn,
-            min_size=self.config.database.pool_min_size,
-            max_size=self.config.database.pool_max_size,
-        )
 
         try:
+            await self.ensure_pg_pool()
             self._assert_no_legacy_jsonl_paths()
-            self._bind_runtime_stores()
             self._active_sensors = self._build_sensors()
             await self.sensor_stream.start(self._active_sensors)
             await self._evaluator_spool.start()
@@ -360,11 +382,7 @@ class Runner:
         self._active_sensors = ()
 
     async def _close_pg_pool(self) -> None:
-        if self._pg_pool is None:
-            return
-        pool = self._pg_pool
-        self._pg_pool = None
-        await pool.close()
+        await self.close_pg_pool()
 
     async def _cleanup_after_start_failure(self) -> None:
         stop_error: BaseException | None = None

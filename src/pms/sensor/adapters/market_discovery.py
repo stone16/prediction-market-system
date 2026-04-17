@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -81,9 +81,7 @@ class MarketDiscoverySensor:
 
 
 def _gamma_market_to_market(row: dict[str, Any], fetched_at: datetime) -> Market:
-    condition_id = str(
-        row.get("conditionId") or row.get("condition_id") or row.get("id") or ""
-    )
+    condition_id = str(row.get("conditionId") or row.get("condition_id") or "")
     if condition_id == "":
         msg = "Gamma market row is missing conditionId"
         raise KeyError(msg)
@@ -113,12 +111,13 @@ def _gamma_market_to_tokens(
         msg = "clobTokenIds must decode to a list"
         raise ValueError(msg)
 
+    outcomes = _gamma_market_outcomes(row)
+    if len(loaded) != len(outcomes):
+        msg = "Gamma market row has mismatched clobTokenIds/outcomes lengths"
+        raise ValueError(msg)
+
     tokens: list[Token] = []
-    outcomes: tuple[Outcome, Outcome] = ("YES", "NO")
-    for index, outcome in enumerate(outcomes):
-        if index >= len(loaded):
-            continue
-        token_id = loaded[index]
+    for token_id, outcome in zip(loaded, outcomes, strict=True):
         if token_id in {None, ""}:
             continue
         tokens.append(
@@ -129,6 +128,22 @@ def _gamma_market_to_tokens(
             )
         )
     return tokens
+
+
+def _gamma_market_outcomes(row: dict[str, Any]) -> tuple[Outcome, Outcome]:
+    raw_outcomes = row.get("outcomes")
+    if raw_outcomes in {None, ""}:
+        msg = "Gamma market row is missing outcomes"
+        raise ValueError(msg)
+    loaded = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+    if not isinstance(loaded, list):
+        msg = "outcomes must decode to a list"
+        raise ValueError(msg)
+    normalized = tuple(str(outcome).strip().upper() for outcome in loaded)
+    if set(normalized) != {"YES", "NO"} or len(normalized) != 2:
+        msg = "Gamma market row must expose exactly YES/NO outcomes"
+        raise ValueError(msg)
+    return cast(tuple[Outcome, Outcome], normalized)
 
 
 def _optional_datetime(value: object) -> datetime | None:

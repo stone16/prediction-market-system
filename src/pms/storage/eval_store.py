@@ -19,7 +19,7 @@ class EvalStore:
 
     async def append(self, record: EvalRecord) -> None:
         async with self._pool().acquire() as connection:
-            await _insert_eval_record(connection, record)
+            await insert_eval_record_row(connection, record)
 
     async def all(self) -> list[EvalRecord]:
         if self.pool is None:
@@ -55,7 +55,7 @@ class EvalStore:
         return self.pool
 
 
-async def _insert_eval_record(
+async def insert_eval_record_row(
     connection: asyncpg.Connection,
     record: EvalRecord,
 ) -> None:

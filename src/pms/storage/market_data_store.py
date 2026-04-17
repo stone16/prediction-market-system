@@ -74,7 +74,6 @@ class PostgresMarketDataStore:
             question = EXCLUDED.question,
             venue = EXCLUDED.venue,
             resolves_at = EXCLUDED.resolves_at,
-            created_at = EXCLUDED.created_at,
             last_seen_at = EXCLUDED.last_seen_at
         """
         async with self._pool.acquire() as connection:
@@ -252,16 +251,17 @@ class PostgresMarketDataStore:
     async def read_price_changes_since(
         self,
         market_id: str,
+        token_id: str,
         since_ts: object,
     ) -> list[PriceChange]:
         query = """
         SELECT id, market_id, token_id, ts, side, price, size, best_bid, best_ask, hash
         FROM price_changes
-        WHERE market_id = $1 AND ts >= $2
+        WHERE market_id = $1 AND token_id = $2 AND ts >= $3
         ORDER BY ts ASC, id ASC
         """
         async with self._pool.acquire() as connection:
-            rows = await connection.fetch(query, market_id, since_ts)
+            rows = await connection.fetch(query, market_id, token_id, since_ts)
         return [
             PriceChange(
                 id=row["id"],

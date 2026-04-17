@@ -5,6 +5,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -13,7 +14,7 @@ import pytest
 
 from pms.config import PMSSettings, SensorSettings
 from pms.core.enums import RunMode
-from pms.sensor.adapters.market_data import MarketDataSensor
+from pms.sensor.adapters.market_data import MarketDataSensor, _message_timestamp
 from pms.storage.market_data_store import PostgresMarketDataStore
 
 
@@ -176,6 +177,20 @@ def _replay_messages() -> list[str]:
     return [line for line in REPLAY_FIXTURE.read_text().splitlines() if line.strip()]
 
 
+@pytest.mark.parametrize(
+    ("raw_timestamp", "expected"),
+    [
+        (1_757_908_892_351, datetime.fromtimestamp(1_757_908_892_351 / 1000.0, tz=UTC)),
+        (1_757_908_892, datetime.fromtimestamp(1_757_908_892, tz=UTC)),
+    ],
+)
+def test_message_timestamp_supports_millisecond_and_second_epoch_values(
+    raw_timestamp: int,
+    expected: datetime,
+) -> None:
+    assert _message_timestamp(raw_timestamp) == expected
+
+
 @pytest.mark.asyncio
 async def test_market_data_sensor_replays_fixture_losslessly_and_persists_piecewise_deltas(
     monkeypatch: pytest.MonkeyPatch,
@@ -320,6 +335,47 @@ async def test_market_data_sensor_update_subscription_warns_and_retries_on_slow_
             "level": 2,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_propagates_programming_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.side_effect = TypeError("boom")
+    fake_websocket = FakeWebSocket(
+        [
+            json.dumps(
+                {
+                    "event_type": "book",
+                    "market": "m-broken",
+                    "asset_id": "asset-broken",
+                    "timestamp": "1757908892351",
+                    "hash": "book-broken",
+                    "bids": [{"price": "0.48", "size": "30"}],
+                    "asks": [{"price": "0.52", "size": "25"}],
+                    "last_trade_price": "0.50",
+                }
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.connect",
+        lambda url: FakeConnect(fake_websocket),
+    )
+    sensor = MarketDataSensor(
+        store=store,
+        ws_url="ws://market-data.example.test",
+        asset_ids=["asset-broken"],
+    )
+    sensor._heartbeat_interval_s = 1.0
+    iterator = cast(Any, sensor.__aiter__())
+
+    with pytest.raises(TypeError, match="boom"):
+        await asyncio.wait_for(anext(iterator), timeout=0.5)
+
+    await sensor.aclose()
 
 
 @pytest.mark.asyncio
@@ -642,9 +698,9 @@ async def test_market_data_sensor_reconnect_backoff_caps_and_resets_after_succes
         "pms.sensor.adapters.market_data.connect",
         ConnectSequence(
             [
-                RuntimeError("boom-1"),
-                RuntimeError("boom-2"),
-                RuntimeError("boom-3"),
+                OSError("boom-1"),
+                OSError("boom-2"),
+                OSError("boom-3"),
                 FakeWebSocket(
                     [
                         json.dumps(
@@ -661,7 +717,7 @@ async def test_market_data_sensor_reconnect_backoff_caps_and_resets_after_succes
                         )
                     ]
                 ),
-                RuntimeError("boom-4"),
+                OSError("boom-4"),
                 FakeWebSocket(
                     [
                         json.dumps(
@@ -717,7 +773,7 @@ async def test_runner_builds_market_discovery_and_market_data_sensors_for_non_ba
             ),
         )
     )
-    runner._pg_pool = cast(Any, object())
+    runner.bind_pg_pool(cast(Any, object()))
 
     sensors = runner._build_sensors()
 
