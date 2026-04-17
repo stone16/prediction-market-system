@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import asyncpg
 import httpx
 
 from pms.core.models import Market, MarketSignal, Outcome, Token
@@ -42,7 +43,17 @@ class MarketDiscoverySensor:
                 await asyncio.sleep(self.poll_interval_s)
             except httpx.HTTPStatusError as error:
                 if error.response.status_code != 429:
-                    raise
+                    logger.warning("discovery poll HTTP error: %s", error)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)
+            except (
+                httpx.HTTPError,
+                OSError,
+                asyncio.TimeoutError,
+                json.JSONDecodeError,
+                asyncpg.PostgresError,
+            ) as error:
+                logger.warning("discovery poll transient error: %s", error)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)
 
@@ -65,6 +76,13 @@ class MarketDiscoverySensor:
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
                 logger.warning("skipping malformed Gamma market row: %s", error)
                 continue
+            except asyncpg.PostgresError as error:
+                logger.warning(
+                    "discovery write_market failed for %s: %s",
+                    row.get("conditionId") or row.get("condition_id"),
+                    error,
+                )
+                continue
 
             if not tokens:
                 logger.info(
@@ -74,7 +92,15 @@ class MarketDiscoverySensor:
                 continue
 
             for token in tokens:
-                await self.store.write_token(token)
+                try:
+                    await self.store.write_token(token)
+                except asyncpg.PostgresError as error:
+                    logger.warning(
+                        "discovery write_token failed for %s: %s",
+                        token.token_id,
+                        error,
+                    )
+                    continue
 
     async def aclose(self) -> None:
         await self.http_client.aclose()

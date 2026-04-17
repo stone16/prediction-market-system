@@ -268,6 +268,125 @@ async def test_market_discovery_sensor_backoff_on_http_429(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        httpx.ConnectError("connection refused"),
+        httpx.ReadTimeout("read timeout"),
+        httpx.RemoteProtocolError("server hung up"),
+    ],
+)
+async def test_market_discovery_sensor_recovers_from_transient_transport_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    transport_error: httpx.HTTPError,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    attempts = 0
+    sleeps: list[float] = []
+    wrote_market = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise transport_error
+        return httpx.Response(
+            200,
+            json=[
+                _gamma_market(
+                    "pm-live-after-transient",
+                    token_ids=["yes-token", "no-token"],
+                    outcomes=["Yes", "No"],
+                )
+            ],
+        )
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    async def tracked_write_market(*args: Any, **kwargs: Any) -> None:
+        wrote_market.set()
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    store_mock.write_market_mock.side_effect = tracked_write_market
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    async def consume() -> None:
+        async for _ in cast(AsyncGenerator[object, None], sensor.__aiter__()):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(wrote_market.wait(), timeout=2.0)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        await sensor.aclose()
+
+    assert attempts >= 2
+    assert sleeps[0] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_continues_when_token_write_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    payload = [
+        _gamma_market(
+            "pm-live-write-fail",
+            token_ids=["yes-token", "no-token"],
+            outcomes=["Yes", "No"],
+        )
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    import asyncpg as _asyncpg
+
+    write_token_calls = 0
+
+    async def flaky_write_token(*args: Any, **kwargs: Any) -> None:
+        nonlocal write_token_calls
+        write_token_calls += 1
+        if write_token_calls == 1:
+            raise _asyncpg.PostgresError("transient db error")
+
+    store_mock.write_token_mock.side_effect = flaky_write_token
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await sensor.poll_once()
+    await sensor.aclose()
+
+    assert store_mock.write_market_mock.await_count == 1
+    assert write_token_calls == 2
+    assert "write_token failed" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_sensor_stream_accepts_market_discovery_sensor() -> None:
     store = _store_mock()
 
