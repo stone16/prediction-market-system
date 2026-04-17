@@ -112,6 +112,22 @@ BEGIN
 END
 $$;
 
+-- strategy_factors: link table (empty in S2; populated by S3). Columns declared so S3 inserts do not require a schema change (Invariants 2, 4, 8)
+-- Invariant 4: raw factor rows are stored in factor_values (S3); composite factors belong in StrategyConfig.factor_composition, not as first-class rows here.
+-- S3 will add: FOREIGN KEY (factor_id) REFERENCES factors(factor_id)
+CREATE TABLE IF NOT EXISTS strategy_factors (
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL,
+    factor_id TEXT NOT NULL,
+    param JSONB NOT NULL DEFAULT '{}'::jsonb,
+    weight DOUBLE PRECISION NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('long', 'short')),
+    PRIMARY KEY (strategy_id, strategy_version_id, factor_id),
+    FOREIGN KEY (strategy_id, strategy_version_id)
+        REFERENCES strategy_versions(strategy_id, strategy_version_id)
+        ON DELETE CASCADE
+);
+
 -- BEGIN INNER-RING PRODUCT SHELLS
 
 CREATE TABLE IF NOT EXISTS feedback (
