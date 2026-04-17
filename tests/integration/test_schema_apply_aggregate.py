@@ -25,6 +25,14 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("config_json", "jsonb"),
         ("created_at", "timestamp with time zone"),
     ],
+    "strategy_factors": [
+        ("strategy_id", "text"),
+        ("strategy_version_id", "text"),
+        ("factor_id", "text"),
+        ("param", "jsonb"),
+        ("weight", "double precision"),
+        ("direction", "text"),
+    ],
 }
 
 pytestmark = [
@@ -73,6 +81,11 @@ def test_schema_sql_applies_strategy_identity_tables() -> None:
     schema_text = SCHEMA_PATH.read_text()
     assert "-- strategies: inner-ring identity table (Invariants 3, 8)" in schema_text
     assert "-- strategy_versions: immutable hash-keyed version rows (Invariant 3)" in schema_text
+    assert (
+        "-- strategy_factors: link table (empty in S2; populated by S3). Columns "
+        "declared so S3 inserts do not require a schema change (Invariants 2, 4, 8)"
+        in schema_text
+    )
 
     admin_database_url = _replace_database(PMS_TEST_DATABASE_URL, "postgres")
     temp_database = f"pms_cp02_{uuid.uuid4().hex[:12]}"
@@ -92,7 +105,7 @@ def test_schema_sql_applies_strategy_identity_tables() -> None:
             SELECT table_name, column_name, data_type
             FROM information_schema.columns
             WHERE table_schema = 'public'
-              AND table_name IN ('strategies', 'strategy_versions')
+              AND table_name IN ('strategies', 'strategy_versions', 'strategy_factors')
             ORDER BY table_name, ordinal_position
             """,
         )
@@ -142,6 +155,8 @@ def test_schema_sql_applies_strategy_identity_tables() -> None:
             SELECT 'strategies', COUNT(*) FROM strategies
             UNION ALL
             SELECT 'strategy_versions', COUNT(*) FROM strategy_versions
+            UNION ALL
+            SELECT 'strategy_factors', COUNT(*) FROM strategy_factors
             ORDER BY 1
             """,
         )
@@ -154,6 +169,7 @@ def test_schema_sql_applies_strategy_identity_tables() -> None:
         )
 
         assert actual_counts == {
+            "strategy_factors": 0,
             "strategies": 1,
             "strategy_versions": 1,
         }
