@@ -36,6 +36,10 @@ class MarketSignal:
     fetched_at: datetime
     market_status: str
 
+    @property
+    def timestamp(self) -> datetime:
+        return self.fetched_at
+
 
 @dataclass(frozen=True)
 class TradeDecision:

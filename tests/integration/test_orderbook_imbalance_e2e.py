@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -12,6 +14,8 @@ from pms.factors.definitions.orderbook_imbalance import OrderbookImbalance
 from pms.factors.service import persist_factor_value
 from pms.storage.market_data_store import PostgresMarketDataStore
 
+
+SCHEMA_PATH = Path("schema.sql")
 
 pytestmark = [
     pytest.mark.integration,
@@ -24,6 +28,15 @@ pytestmark = [
         reason="set PMS_TEST_DATABASE_URL to the compose-backed PostgreSQL URI",
     ),
 ]
+
+
+def _apply_schema(database_url: str) -> None:
+    subprocess.run(
+        ["psql", database_url, "--set", "ON_ERROR_STOP=1", "-f", str(SCHEMA_PATH)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
 
 
 def _signal(*, ts: datetime) -> MarketSignal:
@@ -55,6 +68,10 @@ def _signal(*, ts: datetime) -> MarketSignal:
 async def test_orderbook_imbalance_compute_and_persist(
     pg_pool: asyncpg.Pool,
 ) -> None:
+    database_url = os.environ.get("PMS_TEST_DATABASE_URL")
+    assert database_url is not None
+    _apply_schema(database_url)
+
     store = PostgresMarketDataStore(pg_pool)
     ts = datetime(2026, 4, 18, 1, 10, tzinfo=UTC)
 

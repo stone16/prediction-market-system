@@ -242,4 +242,23 @@ INSERT INTO strategy_versions (
 )
 ON CONFLICT (strategy_version_id) DO NOTHING;
 
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'orderbook_imbalance',
+    'Orderbook Imbalance',
+    'Normalized bid-versus-ask depth imbalance from the current orderbook signal.',
+    '97e885bf8b2edd8ce9fff149334dbe1706358eb4fb8b8c51a4b42561878c5963',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
 COMMIT;

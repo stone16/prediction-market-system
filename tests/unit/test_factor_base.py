@@ -48,9 +48,12 @@ def test_factor_value_row_is_frozen() -> None:
         ts=datetime(2026, 4, 18, 1, 0, tzinfo=UTC),
         value=0.25,
     )
+    mutable_row = row
 
     with pytest.raises(FrozenInstanceError):
-        row.value = 0.5
+        cast_row = mutable_row
+        cast_any = cast_row  # keep the failing mutation runtime-visible for the test
+        setattr(cast_any, "value", 0.5)
 
 
 @pytest.mark.asyncio
