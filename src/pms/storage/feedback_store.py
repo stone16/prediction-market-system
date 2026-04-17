@@ -8,6 +8,7 @@ from typing import Any, cast
 import asyncpg
 
 from pms.core.models import Feedback
+from pms.storage.strategy_tags import resolve_strategy_tags
 
 
 _SELECT_FEEDBACK_COLUMNS = """
@@ -38,7 +39,7 @@ class FeedbackStore:
         feedback: Feedback,
         *,
         strategy_id: str = "default",
-        strategy_version_id: str = "default-v1",
+        strategy_version_id: str | None = None,
     ) -> None:
         async with self._pool().acquire() as connection:
             await insert_feedback_row(
@@ -103,8 +104,13 @@ async def insert_feedback_row(
     feedback: Feedback,
     *,
     strategy_id: str = "default",
-    strategy_version_id: str = "default-v1",
+    strategy_version_id: str | None = None,
 ) -> None:
+    resolved_strategy_id, resolved_strategy_version_id = await resolve_strategy_tags(
+        connection,
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
+    )
     await connection.execute(
         """
         INSERT INTO feedback (
@@ -134,8 +140,8 @@ async def insert_feedback_row(
         feedback.resolved_at,
         feedback.category,
         json.dumps(feedback.metadata),
-        strategy_id,
-        strategy_version_id,
+        resolved_strategy_id,
+        resolved_strategy_version_id,
     )
 
 

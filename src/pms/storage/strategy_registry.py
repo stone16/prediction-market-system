@@ -311,7 +311,7 @@ def _json_optional_int(value: object, field_name: str) -> int | None:
 
 
 def _json_float(value: object, field_name: str) -> float:
-    if not isinstance(value, (int, float, str)):
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         msg = f"{field_name} must decode to a float-compatible value"
         raise TypeError(msg)
     return float(value)

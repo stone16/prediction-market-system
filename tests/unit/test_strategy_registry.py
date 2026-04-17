@@ -300,6 +300,8 @@ def test_json_optional_int_and_float_validate_types() -> None:
     with pytest.raises(TypeError, match="must decode to an int or null"):
         _json_optional_int(True, "market_selection.resolution_time_max_horizon_days")
     with pytest.raises(TypeError, match="float-compatible"):
+        _json_float(True, "risk.min_order_size_usdc")
+    with pytest.raises(TypeError, match="float-compatible"):
         _json_float(object(), "risk.min_order_size_usdc")
 
 
@@ -317,5 +319,14 @@ def test_strategy_from_config_json_validates_nested_fields() -> None:
     with pytest.raises(
         TypeError,
         match="market_selection.resolution_time_max_horizon_days must decode to an int or null",
+    ):
+        _strategy_from_config_json(payload)
+
+    payload = json.loads(serialize_strategy_config_json(*strategy.snapshot()))
+    payload["risk"]["max_daily_drawdown_pct"] = True
+
+    with pytest.raises(
+        TypeError,
+        match="risk.max_daily_drawdown_pct must decode to a float-compatible value",
     ):
         _strategy_from_config_json(payload)

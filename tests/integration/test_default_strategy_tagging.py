@@ -11,6 +11,7 @@ from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode
 from pms.core.models import MarketSignal
 from pms.runner import Runner
+from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
     EvalSpec,
     ForecasterSpec,
@@ -21,6 +22,7 @@ from pms.strategies.projections import (
 from pms.strategies.versioning import serialize_strategy_config_json
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.strategy_registry import PostgresStrategyRegistry
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
@@ -114,6 +116,33 @@ def _default_strategy_config_json() -> str:
     )
 
 
+def _strategy(*, drawdown_pct: float) -> Strategy:
+    return Strategy(
+        config=StrategyConfig(
+            strategy_id="default",
+            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            metadata=(("owner", "system"), ("tier", "default")),
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=drawdown_pct,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier", "pnl", "fill_rate")),
+        forecaster=ForecasterSpec(
+            forecasters=(
+                ("rules", (("threshold", "0.55"),)),
+                ("stats", (("window", "15m"),)),
+            )
+        ),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+        ),
+    )
+
+
 async def _count_null_strategy_tags(connection: asyncpg.Connection, table: str) -> int:
     query = f"""
     SELECT COUNT(*)
@@ -145,31 +174,9 @@ async def _strategy_pairs(
 async def test_runner_tags_inner_ring_rows_with_default_strategy(
     pg_pool: asyncpg.Pool,
 ) -> None:
-    async with pg_pool.acquire() as connection:
-        async with connection.transaction():
-            await connection.execute("SET CONSTRAINTS ALL DEFERRED")
-            await connection.execute(
-                """
-                INSERT INTO strategies (strategy_id, active_version_id)
-                VALUES ('default', 'default-v1')
-                ON CONFLICT (strategy_id) DO NOTHING
-                """
-            )
-            await connection.execute(
-                """
-                INSERT INTO strategy_versions (
-                    strategy_version_id,
-                    strategy_id,
-                    config_json
-                ) VALUES (
-                    'default-v1',
-                    'default',
-                    $1::jsonb
-                )
-                ON CONFLICT (strategy_version_id) DO NOTHING
-                """,
-                _default_strategy_config_json(),
-            )
+    active_version = await PostgresStrategyRegistry(pg_pool).create_version(
+        _strategy(drawdown_pct=3.5)
+    )
 
     runner = Runner(
         config=_settings(),
@@ -210,8 +217,10 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
             """
             SELECT COUNT(*)
             FROM strategy_versions
-            WHERE strategy_id = 'default' AND strategy_version_id = 'default-v1'
+            WHERE strategy_id = 'default' AND strategy_version_id = $1
             """
+            ,
+            active_version.strategy_version_id,
         )
         feedback_count = await connection.fetchval("SELECT COUNT(*) FROM feedback")
         eval_count = await connection.fetchval("SELECT COUNT(*) FROM eval_records")
@@ -233,8 +242,10 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
                 f"""
                 SELECT COUNT(*)
                 FROM {table}
-                WHERE strategy_id = 'default' AND strategy_version_id = 'default-v1'
+                WHERE strategy_id = 'default' AND strategy_version_id = $1
                 """
+                ,
+                active_version.strategy_version_id,
             )
             for table in counts
         }
@@ -255,7 +266,7 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
     }
     assert tagged_counts["feedback"] > 0
     assert tagged_counts["eval_records"] > 0
-    assert strategy_pairs["feedback"] == {("default", "default-v1")}
-    assert strategy_pairs["eval_records"] == {("default", "default-v1")}
+    assert strategy_pairs["feedback"] == {("default", active_version.strategy_version_id)}
+    assert strategy_pairs["eval_records"] == {("default", active_version.strategy_version_id)}
     assert strategy_pairs["orders"] == set()
     assert strategy_pairs["fills"] == set()

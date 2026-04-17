@@ -8,6 +8,7 @@ from typing import cast
 import asyncpg
 
 from pms.core.models import EvalRecord
+from pms.storage.strategy_tags import resolve_strategy_tags
 
 
 @dataclass
@@ -22,7 +23,7 @@ class EvalStore:
         record: EvalRecord,
         *,
         strategy_id: str = "default",
-        strategy_version_id: str = "default-v1",
+        strategy_version_id: str | None = None,
     ) -> None:
         async with self._pool().acquire() as connection:
             await insert_eval_record_row(
@@ -71,8 +72,13 @@ async def insert_eval_record_row(
     record: EvalRecord,
     *,
     strategy_id: str = "default",
-    strategy_version_id: str = "default-v1",
+    strategy_version_id: str | None = None,
 ) -> None:
+    resolved_strategy_id, resolved_strategy_version_id = await resolve_strategy_tags(
+        connection,
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
+    )
     await connection.execute(
         """
         INSERT INTO eval_records (
@@ -108,8 +114,8 @@ async def insert_eval_record_row(
         record.pnl,
         record.slippage_bps,
         record.filled,
-        strategy_id,
-        strategy_version_id,
+        resolved_strategy_id,
+        resolved_strategy_version_id,
     )
 
 
