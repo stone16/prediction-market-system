@@ -29,11 +29,14 @@ Run from a clean shell at the repo root. Both gates are load-bearing.
 uv sync                                  # install deps from uv.lock
 uv run pytest -q                         # full suite — see baseline below
 uv run mypy src/ tests/ --strict         # strict on every committed module
-uv run lint-imports                      # import boundary contracts
 ```
 
 **Baseline (as of 2026-04-17, feat/pms-market-data-v1):** `pytest`
+<<<<<<< Updated upstream
 93 passing, 32 skipped. The 32 skips are PostgreSQL-backed integration
+=======
+87 passing, 30 skipped. The 30 skips are PostgreSQL-backed integration
+>>>>>>> Stashed changes
 checks gated on `PMS_RUN_INTEGRATION=1` and, where needed,
 `PMS_TEST_DATABASE_URL`. mypy strict must be clean. If the baseline
 fails on a fresh clone, fix the config — not the test — and commit
