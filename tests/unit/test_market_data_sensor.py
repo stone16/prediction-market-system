@@ -483,6 +483,65 @@ async def test_market_data_sensor_reconnects_and_marks_next_snapshot_as_reconnec
 
 
 @pytest.mark.asyncio
+async def test_market_data_sensor_retries_after_websocket_handshake_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from websockets.exceptions import InvalidHandshake
+
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    sleeps: list[float] = []
+
+    async def instant_sleep(self: MarketDataSensor, seconds: float) -> None:
+        del self
+        sleeps.append(seconds)
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.MarketDataSensor._sleep",
+        instant_sleep,
+    )
+
+    handshake_error = InvalidHandshake("server returned 503")
+    second_websocket = HeartbeatWebSocket(
+        [
+            json.dumps(
+                {
+                    "event_type": "book",
+                    "market": "m-handshake",
+                    "asset_id": "asset-handshake",
+                    "timestamp": "1757908892351",
+                    "hash": "book-after-handshake",
+                    "bids": [{"price": "0.40", "size": "5"}],
+                    "asks": [{"price": "0.60", "size": "5"}],
+                    "last_trade_price": "0.50",
+                }
+            )
+        ],
+        ping_outcomes=[0.0],
+    )
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.connect",
+        ConnectSequence([handshake_error, second_websocket]),
+    )
+    sensor = MarketDataSensor(
+        store=store,
+        ws_url="ws://market-data.example.test",
+        asset_ids=["asset-handshake"],
+    )
+    iterator = cast(Any, sensor.__aiter__())
+
+    signal = await asyncio.wait_for(anext(iterator), timeout=2.0)
+    await iterator.aclose()
+    await sensor.aclose()
+
+    assert signal.market_id == "m-handshake"
+    assert sleeps and sleeps[0] == 1.0
+    assert store_mock.write_book_snapshot_mock.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_market_data_sensor_reconnects_when_pong_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

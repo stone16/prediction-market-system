@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from pms.core.enums import MarketStatus
 from pms.core.models import (
@@ -126,7 +126,13 @@ class MarketDataSensor:
                             self._reset_book_state()
                 except asyncio.CancelledError:
                     raise
-                except (ConnectionClosed, ConnectionError, OSError, TimeoutError) as error:
+                except (
+                    ConnectionClosed,
+                    ConnectionError,
+                    OSError,
+                    TimeoutError,
+                    InvalidHandshake,
+                ) as error:
                     logger.error("market data sensor receive loop failed: %s", error)
                     await self._sleep(backoff)
                     backoff = min(backoff * 2.0, self._max_reconnect_interval_s)
