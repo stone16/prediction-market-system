@@ -3,8 +3,21 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
+
+
+class _TestAsyncpgConnectionContext:
+    def __init__(self, pool: "_TestAsyncpgPool") -> None:
+        self._pool = pool
+
+    async def __aenter__(self) -> object:
+        await self._pool._release_acquires.wait()
+        return object()
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
 
 
 @dataclass
@@ -18,9 +31,8 @@ class _TestAsyncpgPool:
         self.closed = True
         self._release_acquires.set()
 
-    async def acquire(self) -> object:
-        await self._release_acquires.wait()
-        return object()
+    def acquire(self) -> _TestAsyncpgConnectionContext:
+        return _TestAsyncpgConnectionContext(self)
 
 
 @pytest.fixture(autouse=True)
