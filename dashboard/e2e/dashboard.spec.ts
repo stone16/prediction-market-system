@@ -1,53 +1,29 @@
 import { expect, test } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
+import { applySchema, executeSql, resetInnerRing } from './support/pg';
 
 const evidenceDir = path.resolve(process.cwd(), '..', '.harness', 'pms-v2', 'checkpoints', '10', 'iter-1', 'evidence');
-const dataDir = path.resolve(process.cwd(), '..', '.data');
-const feedbackPath = path.join(dataDir, 'feedback.jsonl');
 
 function seedFeedback() {
-  fs.mkdirSync(dataDir, { recursive: true });
+  applySchema();
+  resetInnerRing();
   const now = '2026-04-14T00:00:00+00:00';
-  const rows = [
-    {
-      feedback_id: 'fb-open-1',
-      target: 'controller',
-      source: 'evaluator',
-      message: 'Brier score crossed the review threshold for model-a.',
-      severity: 'warning',
-      created_at: now,
-      resolved: false,
-      resolved_at: null,
-      category: 'brier:model-a',
-      metadata: { market_id: 'pm-synthetic-010' }
-    },
-    {
-      feedback_id: 'fb-open-2',
-      target: 'controller',
-      source: 'actuator',
-      message: 'Paper fill slippage exceeded the configured limit.',
-      severity: 'warning',
-      created_at: now,
-      resolved: false,
-      resolved_at: null,
-      category: 'slippage',
-      metadata: { market_id: 'pm-synthetic-011' }
-    },
-    {
-      feedback_id: 'fb-resolved',
-      target: 'controller',
-      source: 'evaluator',
-      message: 'Win-rate feedback already handled.',
-      severity: 'info',
-      created_at: now,
-      resolved: true,
-      resolved_at: now,
-      category: 'win_rate',
-      metadata: { market_id: 'pm-synthetic-012' }
-    }
-  ];
-  fs.writeFileSync(feedbackPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`);
+  executeSql(`
+    INSERT INTO feedback (feedback_id, target, source, message, severity, created_at, resolved, resolved_at, category, metadata, strategy_id, strategy_version_id)
+    VALUES
+      ('fb-open-1', 'controller', 'evaluator', 'Brier score crossed the review threshold for model-a.', 'warning', '${now}', FALSE, NULL, 'brier:model-a', '{"market_id":"pm-synthetic-010"}', NULL, NULL),
+      ('fb-open-2', 'controller', 'actuator', 'Paper fill slippage exceeded the configured limit.', 'warning', '${now}', FALSE, NULL, 'slippage', '{"market_id":"pm-synthetic-011"}', NULL, NULL),
+      ('fb-resolved', 'controller', 'evaluator', 'Win-rate feedback already handled.', 'info', '${now}', TRUE, '${now}', 'win_rate', '{"market_id":"pm-synthetic-012"}', NULL, NULL);
+
+    INSERT INTO eval_records (
+      decision_id, market_id, prob_estimate, resolved_outcome, brier_score, fill_status,
+      recorded_at, citations, category, model_id, pnl, slippage_bps, filled, strategy_id, strategy_version_id
+    ) VALUES
+      ('eval-1', 'pm-synthetic-010', 0.61, 1.0, 0.1521, 'matched', '${now}', '["trade-1"]', 'model-a', 'model-a', 12.5, 8.0, TRUE, NULL, NULL),
+      ('eval-2', 'pm-synthetic-011', 0.44, 0.0, 0.1936, 'matched', '2026-04-14T00:05:00+00:00', '["trade-2"]', 'model-b', 'model-b', -4.0, 11.5, TRUE, NULL, NULL),
+      ('eval-3', 'pm-synthetic-012', 0.71, 1.0, 0.0841, 'matched', '2026-04-14T00:10:00+00:00', '["trade-3"]', 'model-a', 'model-a', 7.0, 5.5, TRUE, NULL, NULL);
+  `);
 }
 
 test.beforeEach(() => {
