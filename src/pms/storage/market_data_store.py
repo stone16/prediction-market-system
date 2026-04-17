@@ -20,6 +20,44 @@ class PostgresMarketDataStore:
     def pool(self) -> asyncpg.Pool:
         return self._pool
 
+    async def read_market(self, market_id: str) -> Market | None:
+        query = """
+        SELECT condition_id, slug, question, venue, resolves_at, created_at, last_seen_at
+        FROM markets
+        WHERE condition_id = $1
+        """
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(query, market_id)
+        if row is None:
+            return None
+        return Market(
+            condition_id=row["condition_id"],
+            slug=row["slug"],
+            question=row["question"],
+            venue=row["venue"],
+            resolves_at=row["resolves_at"],
+            created_at=row["created_at"],
+            last_seen_at=row["last_seen_at"],
+        )
+
+    async def read_tokens_for_market(self, market_id: str) -> list[Token]:
+        query = """
+        SELECT token_id, condition_id, outcome
+        FROM tokens
+        WHERE condition_id = $1
+        ORDER BY CASE outcome WHEN 'YES' THEN 0 ELSE 1 END, token_id ASC
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query, market_id)
+        return [
+            Token(
+                token_id=row["token_id"],
+                condition_id=row["condition_id"],
+                outcome=row["outcome"],
+            )
+            for row in rows
+        ]
+
     async def write_market(self, market: Market) -> None:
         query = """
         INSERT INTO markets (

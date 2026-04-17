@@ -10,7 +10,7 @@ export type LiveData<T> = {
   error: string | null;
 };
 
-export function useLiveData<T>(path: string, intervalMs = 5000): LiveData<T> {
+export function useLiveData<T>(path: string | null, intervalMs = 5000): LiveData<T> {
   const [state, setState] = useState<LiveData<T>>({
     data: null,
     loading: true,
@@ -19,10 +19,21 @@ export function useLiveData<T>(path: string, intervalMs = 5000): LiveData<T> {
   });
 
   useEffect(() => {
+    if (path === null) {
+      setState({
+        data: null,
+        loading: false,
+        disconnected: false,
+        error: null
+      });
+      return undefined;
+    }
+
+    const activePath = path;
     let cancelled = false;
     async function load() {
       try {
-        const result = await apiGet<T>(path);
+        const result = await apiGet<T>(activePath);
         if (!cancelled) {
           setState({ data: result, loading: false, disconnected: false, error: null });
         }

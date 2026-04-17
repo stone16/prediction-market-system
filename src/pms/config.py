@@ -54,6 +54,10 @@ class SensorSettings(BaseModel):
     max_reconnect_interval_s: float = 60.0
 
 
+class DashboardSettings(BaseModel):
+    stale_snapshot_threshold_s: float = 300.0
+
+
 def _default_database_dsn() -> str:
     override = os.environ.get("DATABASE_URL")
     if override:
@@ -82,6 +86,7 @@ class PMSSettings(BaseSettings):
     sensor: SensorSettings = Field(default_factory=SensorSettings)
     controller: ControllerSettings = Field(default_factory=ControllerSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    dashboard: DashboardSettings = Field(default_factory=DashboardSettings)
 
     @classmethod
     def load(cls, config_path: str | Path | None = "config.yaml") -> Self:
