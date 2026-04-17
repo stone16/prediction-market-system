@@ -24,17 +24,21 @@ const initialData: DashboardData = {
 export function DashboardClient() {
   const [data, setData] = useState<DashboardData>(initialData);
   const cancelledRef = useRef(false);
+  const loadGenerationRef = useRef(0);
 
   const load = useCallback(async () => {
+    const generation = ++loadGenerationRef.current;
     try {
       const [status, metrics, feedback] = await Promise.all([
         apiGet<StatusResponse>('/status'),
         apiGet<MetricsResponse>('/metrics'),
         apiGet<Feedback[]>('/feedback?resolved=false')
       ]);
-      if (!cancelledRef.current) setData({ status, metrics, feedback, disconnected: false });
+      if (!cancelledRef.current && generation === loadGenerationRef.current) {
+        setData({ status, metrics, feedback, disconnected: false });
+      }
     } catch {
-      if (!cancelledRef.current) {
+      if (!cancelledRef.current && generation === loadGenerationRef.current) {
         setData((current) => ({ ...current, disconnected: true }));
       }
     }
@@ -64,6 +68,7 @@ export function DashboardClient() {
 
     function handleVisibilityChange() {
       if (document.visibilityState === 'hidden') {
+        loadGenerationRef.current += 1;
         stopPolling();
         return;
       }
@@ -76,6 +81,7 @@ export function DashboardClient() {
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelledRef.current = true;
+      loadGenerationRef.current += 1;
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       stopPolling();
     };
