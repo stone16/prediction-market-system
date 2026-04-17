@@ -72,6 +72,9 @@ class PreMigrationStatistical:
         return probability, 0.0, "statistical"
 
 
+PreMigrationForecaster = PreMigrationRules | PreMigrationStatistical
+
+
 def _signal(
     *,
     yes_price: float = 0.5,
@@ -92,7 +95,10 @@ def _signal(
     )
 
 
-def _pre_probability(forecaster: object, signal: MarketSignal) -> float:
+def _pre_probability(
+    forecaster: PreMigrationForecaster,
+    signal: MarketSignal,
+) -> float:
     result = forecaster.predict(signal)
     if result is None:
         return signal.yes_price
@@ -207,7 +213,7 @@ def _factor_values(signal: MarketSignal) -> dict[tuple[str, str], float]:
 )
 def test_forecaster_migration_matrix_matches_pre_migration_output(
     case_name: str,
-    forecaster: object,
+    forecaster: PreMigrationForecaster,
     signal: MarketSignal,
 ) -> None:
     del case_name

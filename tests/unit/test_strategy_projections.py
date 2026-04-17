@@ -8,6 +8,7 @@ import pytest
 
 
 PROJECTION_NAMES = [
+    "FactorCompositionStep",
     "StrategyConfig",
     "RiskParams",
     "EvalSpec",
@@ -15,10 +16,17 @@ PROJECTION_NAMES = [
     "MarketSelectionSpec",
 ]
 
-EXPECTED_FIELD_TYPES: dict[str, dict[str, object]] = {
+EXPECTED_FIELD_TYPES: dict[str, dict[str, Any]] = {
+    "FactorCompositionStep": {
+        "factor_id": str,
+        "role": str,
+        "param": str,
+        "weight": float,
+        "threshold": float | None,
+    },
     "StrategyConfig": {
         "strategy_id": str,
-        "factor_composition": tuple[tuple[str, float], ...],
+        "factor_composition": "factor_composition_step_tuple",
         "metadata": tuple[tuple[str, str], ...],
     },
     "RiskParams": {
@@ -50,9 +58,31 @@ def _load_projections_module() -> Any:
 def _sample_projection_values() -> dict[str, Any]:
     module = _load_projections_module()
     return {
+        "FactorCompositionStep": module.FactorCompositionStep(
+            factor_id="factor-a",
+            role="weighted",
+            param="",
+            weight=0.6,
+            threshold=None,
+        ),
         "StrategyConfig": module.StrategyConfig(
             strategy_id="default",
-            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            factor_composition=(
+                module.FactorCompositionStep(
+                    factor_id="factor-a",
+                    role="weighted",
+                    param="",
+                    weight=0.6,
+                    threshold=None,
+                ),
+                module.FactorCompositionStep(
+                    factor_id="factor-b",
+                    role="weighted",
+                    param="",
+                    weight=0.4,
+                    threshold=None,
+                ),
+            ),
             metadata=(("owner", "system"), ("tier", "default")),
         ),
         "RiskParams": module.RiskParams(
@@ -115,7 +145,14 @@ def test_strategy_projection_field_types_match_checkpoint_spec() -> None:
 
         assert [field.name for field in fields(projection)] == list(expected_fields)
         for field_name, expected_type in expected_fields.items():
+            if field_name == "factor_composition":
+                continue
             assert hints[field_name] == expected_type
+    strategy_config_hints = get_type_hints(module.StrategyConfig)
+    factor_composition_hint = strategy_config_hints["factor_composition"]
+    assert get_origin(factor_composition_hint) is tuple
+    factor_type = get_args(factor_composition_hint)[0]
+    assert factor_type is module.FactorCompositionStep
 
 
 def test_strategy_projection_field_types_exclude_mutable_collections() -> None:

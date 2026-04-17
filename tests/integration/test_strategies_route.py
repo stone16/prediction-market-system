@@ -13,6 +13,7 @@ from pms.config import DatabaseSettings, PMSSettings
 from pms.runner import Runner
 from pms.strategies.projections import (
     EvalSpec,
+    FactorCompositionStep,
     ForecasterSpec,
     MarketSelectionSpec,
     RiskParams,
@@ -46,7 +47,22 @@ def _default_strategy_config_json() -> str:
     return serialize_strategy_config_json(
         StrategyConfig(
             strategy_id="default",
-            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            factor_composition=(
+                FactorCompositionStep(
+                    factor_id="factor-a",
+                    role="weighted",
+                    param="",
+                    weight=0.6,
+                    threshold=None,
+                ),
+                FactorCompositionStep(
+                    factor_id="factor-b",
+                    role="weighted",
+                    param="",
+                    weight=0.4,
+                    threshold=None,
+                ),
+            ),
             metadata=(("owner", "system"), ("tier", "default")),
         ),
         RiskParams(

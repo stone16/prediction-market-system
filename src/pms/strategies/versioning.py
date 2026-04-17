@@ -64,6 +64,13 @@ def _is_pair_record(item: Any) -> bool:
     return isinstance(item, (tuple, list)) and len(item) == 2
 
 
+def _is_factor_composition_step_record(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    required_keys = {"factor_id", "role", "param", "weight", "threshold"}
+    return required_keys.issubset(item)
+
+
 def _normalize_value(value: Any) -> Any:
     # Version ids intentionally normalize sequence ordering so semantically
     # equivalent projection payloads hash identically across processes.
@@ -73,6 +80,8 @@ def _normalize_value(value: Any) -> Any:
             for key in sorted(value)
         }
     if isinstance(value, (tuple, list)):
+        if value and all(_is_factor_composition_step_record(item) for item in value):
+            return [_normalize_value(item) for item in value]
         if value and all(_is_pair_record(item) for item in value):
             normalized_pairs = [
                 [_normalize_value(item[0]), _normalize_value(item[1])]

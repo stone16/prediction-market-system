@@ -10,7 +10,7 @@ import pytest
 
 
 EXPECTED_DEFAULT_VERSION_ID = (
-    "d50c4db65699c222620c85f0cf84c0324c148a34b212c5f69903dbf4b950757c"
+    "71f8052a4625465492965fa351193c2cb3aed26b9d3f9532fcbb122f874b7f5e"
 )
 
 
@@ -29,6 +29,7 @@ def _build_projection_inputs(
     max_daily_drawdown_pct: float = 2.5,
 ) -> dict[str, Any]:
     strategy_config = _load_symbol("pms.strategies.projections", "StrategyConfig")
+    factor_composition_step = _load_symbol("pms.strategies.projections", "FactorCompositionStep")
     risk_params = _load_symbol("pms.strategies.projections", "RiskParams")
     eval_spec = _load_symbol("pms.strategies.projections", "EvalSpec")
     forecaster_spec = _load_symbol("pms.strategies.projections", "ForecasterSpec")
@@ -40,7 +41,22 @@ def _build_projection_inputs(
     return {
         "config": strategy_config(
             strategy_id="default",
-            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            factor_composition=(
+                factor_composition_step(
+                    factor_id="factor-a",
+                    role="weighted",
+                    param="",
+                    weight=0.6,
+                    threshold=None,
+                ),
+                factor_composition_step(
+                    factor_id="factor-b",
+                    role="weighted",
+                    param="",
+                    weight=0.4,
+                    threshold=None,
+                ),
+            ),
             metadata=metadata,
         ),
         "risk": risk_params(
@@ -171,6 +187,7 @@ def test_strategy_version_id_is_stable_across_subprocesses() -> None:
     script = """
 from pms.strategies.projections import (
     EvalSpec,
+    FactorCompositionStep,
     ForecasterSpec,
     MarketSelectionSpec,
     RiskParams,
@@ -182,7 +199,22 @@ print(
     compute_strategy_version_id(
         config=StrategyConfig(
             strategy_id="default",
-            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            factor_composition=(
+                FactorCompositionStep(
+                    factor_id="factor-a",
+                    role="weighted",
+                    param="",
+                    weight=0.6,
+                    threshold=None,
+                ),
+                FactorCompositionStep(
+                    factor_id="factor-b",
+                    role="weighted",
+                    param="",
+                    weight=0.4,
+                    threshold=None,
+                ),
+            ),
             metadata=(("owner", "system"), ("tier", "default")),
         ),
         risk=RiskParams(
