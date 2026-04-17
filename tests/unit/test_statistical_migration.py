@@ -7,6 +7,10 @@ import pytest
 from pms.core.enums import MarketStatus
 from pms.core.models import MarketSignal
 from pms.controller.forecasters.statistical import StatisticalForecaster
+from pms.factors.base import EMPTY_OUTER_RING
+from pms.factors.composition import apply_composition
+from pms.factors.defaults import DEFAULT_STRATEGY_COMPOSITION
+from pms.factors.definitions import REGISTERED
 
 
 def _signal() -> MarketSignal:
@@ -25,13 +29,16 @@ def _signal() -> MarketSignal:
     )
 
 
-@pytest.mark.skip(reason="unblocked by CP05 composition emulator")
 def test_statistical_composition_emulator_matches_today() -> None:
     signal = _signal()
     reference_probability = StatisticalForecaster().predict(signal)[0]
+    factor_values: dict[tuple[str, str], float] = {
+        ("yes_price", ""): signal.yes_price,
+    }
+    for factor_cls in REGISTERED:
+        row = factor_cls().compute(signal, EMPTY_OUTER_RING)
+        if row is not None:
+            factor_values[(row.factor_id, row.param)] = row.value
+    composed_probability = apply_composition(DEFAULT_STRATEGY_COMPOSITION, factor_values)
 
-    pytest.fail(
-        "CP05 should replace this placeholder by comparing "
-        f"the composition emulator to today's StatisticalForecaster output; "
-        f"reference_probability={reference_probability}"
-    )
+    assert composed_probability == pytest.approx(reference_probability, abs=1e-9)
