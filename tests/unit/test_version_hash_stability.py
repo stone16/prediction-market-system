@@ -10,7 +10,7 @@ import pytest
 
 
 EXPECTED_DEFAULT_VERSION_ID = (
-    "b538f4d37ffedb2d22c29bcd13579763ed392a830530d3e9d5848af98f010757"
+    "d50c4db65699c222620c85f0cf84c0324c148a34b212c5f69903dbf4b950757c"
 )
 
 
@@ -125,6 +125,25 @@ def test_forecaster_ordering_does_not_change_strategy_version_id() -> None:
     )
 
     assert reordered_hash == canonical_hash
+
+
+def test_pair_element_swap_produces_distinct_strategy_version_id() -> None:
+    # Pair records carry (key, value) semantics — swapping their elements
+    # must produce a distinct hash, even though the outer tuple is treated
+    # as an unordered collection.
+    compute_strategy_version_id = _load_symbol(
+        "pms.strategies.versioning",
+        "compute_strategy_version_id",
+    )
+
+    baseline_hash = compute_strategy_version_id(
+        **_build_projection_inputs(metadata=(("owner", "alice"),))
+    )
+    swapped_hash = compute_strategy_version_id(
+        **_build_projection_inputs(metadata=(("alice", "owner"),))
+    )
+
+    assert swapped_hash != baseline_hash
 
 
 def test_risk_param_changes_produce_a_new_strategy_version_id() -> None:

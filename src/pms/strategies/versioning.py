@@ -55,6 +55,15 @@ def _payload_value(value: Any) -> Any:
     return value
 
 
+def _is_pair_record(item: Any) -> bool:
+    # Pair records — 2-element (tuple|list) — model ordered (key, value)
+    # structure throughout the projection layer (metadata entries,
+    # factor composition weights, forecaster specs). Their element order
+    # carries meaning and must not be sorted, or swapping key/value
+    # produces a hash collision (Invariant 3 violation).
+    return isinstance(item, (tuple, list)) and len(item) == 2
+
+
 def _normalize_value(value: Any) -> Any:
     # Version ids intentionally normalize sequence ordering so semantically
     # equivalent projection payloads hash identically across processes.
@@ -64,6 +73,12 @@ def _normalize_value(value: Any) -> Any:
             for key in sorted(value)
         }
     if isinstance(value, (tuple, list)):
+        if value and all(_is_pair_record(item) for item in value):
+            normalized_pairs = [
+                [_normalize_value(item[0]), _normalize_value(item[1])]
+                for item in value
+            ]
+            return sorted(normalized_pairs, key=_json_sort_key)
         normalized_items = [_normalize_value(item) for item in value]
         return sorted(normalized_items, key=_json_sort_key)
     if isinstance(value, frozenset):
