@@ -47,7 +47,7 @@ def _load_projections_module() -> Any:
         pytest.fail(f"pms.strategies.projections is missing: {exc}")
 
 
-def _sample_projection_values() -> dict[str, object]:
+def _sample_projection_values() -> dict[str, Any]:
     module = _load_projections_module()
     return {
         "StrategyConfig": module.StrategyConfig(

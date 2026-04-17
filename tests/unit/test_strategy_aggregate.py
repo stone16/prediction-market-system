@@ -16,7 +16,7 @@ def _load_symbol(module_name: str, symbol_name: str) -> Any:
     return getattr(module, symbol_name)
 
 
-def _build_projections() -> dict[str, object]:
+def _build_projections() -> dict[str, Any]:
     strategy_config = _load_symbol("pms.strategies.projections", "StrategyConfig")
     risk_params = _load_symbol("pms.strategies.projections", "RiskParams")
     eval_spec = _load_symbol("pms.strategies.projections", "EvalSpec")
