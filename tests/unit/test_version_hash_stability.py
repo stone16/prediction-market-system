@@ -9,7 +9,9 @@ from typing import Any
 import pytest
 
 
-EXPECTED_DEFAULT_VERSION_ID = "REPLACE_ME_CP02_DEFAULT_HASH"
+EXPECTED_DEFAULT_VERSION_ID = (
+    "b538f4d37ffedb2d22c29bcd13579763ed392a830530d3e9d5848af98f010757"
+)
 
 
 def _load_symbol(module_name: str, symbol_name: str) -> Any:

@@ -77,6 +77,41 @@ CREATE INDEX IF NOT EXISTS idx_trades_market_token_ts
 
 -- END OUTER RING
 
+-- strategies: inner-ring identity table (Invariants 3, 8)
+
+CREATE TABLE IF NOT EXISTS strategies (
+    strategy_id TEXT PRIMARY KEY,
+    active_version_id TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+-- strategy_versions: immutable hash-keyed version rows (Invariant 3)
+
+CREATE TABLE IF NOT EXISTS strategy_versions (
+    strategy_version_id TEXT PRIMARY KEY,
+    strategy_id TEXT NOT NULL REFERENCES strategies(strategy_id) ON DELETE CASCADE,
+    config_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (strategy_id, strategy_version_id)
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'strategies_active_version_id_fkey'
+    ) THEN
+        ALTER TABLE strategies
+            ADD CONSTRAINT strategies_active_version_id_fkey
+            FOREIGN KEY (active_version_id)
+            REFERENCES strategy_versions(strategy_version_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    END IF;
+END
+$$;
+
 -- BEGIN INNER-RING PRODUCT SHELLS
 
 CREATE TABLE IF NOT EXISTS feedback (
