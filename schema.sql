@@ -299,4 +299,61 @@ INSERT INTO factors (
 )
 ON CONFLICT (factor_id) DO NOTHING;
 
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'metaculus_prior',
+    'Metaculus Prior',
+    'Raw Metaculus probability from the external signal payload.',
+    '4f62fec15fd5abaf2ff76810596268d1e14b46d346ff6e9f38b259c370a3ed71',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'yes_count',
+    'Yes Count',
+    'Raw external yes_count observation count from the signal payload.',
+    'afbc921285acc81f1289beca8dd64114c18f49068a8904c651a887c5ba8c178f',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'no_count',
+    'No Count',
+    'Raw external no_count observation count from the signal payload.',
+    '2871d6bf945e3ed4407b8b1f1beeb484cd8bd455a156e939094fbcc6a455c317',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
 COMMIT;
