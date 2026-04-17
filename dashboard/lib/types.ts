@@ -65,3 +65,13 @@ export type SignalDepth = {
   last_update_ts: string | null;
   stale: boolean;
 };
+
+export type StrategyRow = {
+  strategy_id: string;
+  active_version_id: string | null;
+  created_at: string;
+};
+
+export type StrategiesResponse = {
+  strategies: StrategyRow[];
+};
