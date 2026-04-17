@@ -88,3 +88,11 @@ class Strategy:
             self._forecaster,
             self._market_selection,
         )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Strategy):
+            return NotImplemented
+        return self.snapshot() == other.snapshot()
+
+    def __hash__(self) -> int:
+        return hash(self.snapshot())

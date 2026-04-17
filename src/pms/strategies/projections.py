@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,3 +35,17 @@ class MarketSelectionSpec:
     venue: str
     resolution_time_max_horizon_days: int | None
     volume_min_usdc: float
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyRow:
+    strategy_id: str
+    active_version_id: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyVersion:
+    strategy_id: str
+    strategy_version_id: str
+    created_at: datetime
