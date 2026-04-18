@@ -104,7 +104,7 @@ async def test_read_eligible_markets_groups_joined_tokens_and_keeps_zero_token_m
             ]
         ]
     )
-    store = PostgresMarketDataStore(FakePool(connection))  # type: ignore[arg-type]
+    store = PostgresMarketDataStore(FakePool(connection))
 
     markets = await store.read_eligible_markets("polymarket", 30)
 
@@ -121,7 +121,7 @@ async def test_read_eligible_markets_groups_joined_tokens_and_keeps_zero_token_m
 @pytest.mark.asyncio
 async def test_read_eligible_markets_returns_empty_list_and_uses_null_upper_bound_for_open_horizon() -> None:
     connection = FakeConnection(fetch_results=[[]])
-    store = PostgresMarketDataStore(FakePool(connection))  # type: ignore[arg-type]
+    store = PostgresMarketDataStore(FakePool(connection))
 
     markets = await store.read_eligible_markets("kalshi", None)
 
