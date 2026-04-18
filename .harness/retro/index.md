@@ -28,16 +28,18 @@ CLAUDE.md, contributors expected to follow) → `retired` (resolved).
 | domain-math-piecewise                | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 2 |
 | lifecycle-cleanup-exit-paths         | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 3 |
 | document-instead-of-fix              | 1           | medium   | active     | pms-v1     | pms-v1      | Proposal 4 |
-| cross-checkpoint-integration         | 3           | medium   | proposed   | pms-v1     | pms-strategy-aggregate-v1 | Proposal 5 |
-| magnitude-overrun-tests              | 1           | low      | monitoring | pms-v1     | pms-v1      | Proposal 6 |
+| cross-checkpoint-integration         | 4           | medium   | proposed   | pms-v1     | pms-factor-panel-v1 | Proposal 5 |
+| magnitude-overrun-tests              | 2           | low      | monitoring | pms-v1     | pms-factor-panel-v1 | Proposal 6 |
 | rule-conflict-precedence             | 1           | low      | active     | pms-v1     | pms-v1      | Proposal 7 |
 | runtime-behaviour-vs-design-intent   | 1           | high     | active     | pms-v1     | pms-v1      | Principle |
 | project-ide-tooling-drift            | 2           | low      | monitoring | pms-v1     | pms-strategy-aggregate-v1 | Skill defect |
 | tool-env-assumption                  | 1           | medium   | active     | pms-phase2 | pms-phase2  | phase2-P1 |
-| stale-baseline                       | 2           | medium   | active     | pms-phase2 | pms-market-data-v1 | phase2-P2 |
+| stale-baseline                       | 3           | medium   | active     | pms-phase2 | pms-factor-panel-v1 | phase2-P2 |
 | pytest-marker-no-auto-deselect       | 1           | low      | active     | pms-phase2 | pms-phase2  | phase2-P3 |
 | lockfile-drift-on-optional-dep       | 1           | low      | observation| pms-phase3 | pms-phase3  | phase3-P1 |
 | private-helper-boundary-drift        | 1           | medium   | observation| pms-market-data-v1 | pms-market-data-v1 | Observation |
+| skipped-full-verify-pre-merge        | 1           | medium   | observation| pms-factor-panel-v1 | pms-factor-panel-v1 | Observation |
+| empty-harness-phase-artifacts        | 1           | low      | observation| pms-factor-panel-v1 | pms-factor-panel-v1 | Observation |
 
 Active rules are codified in `/CLAUDE.md` at the repo root (Phase 3D).
 Cross-checkpoint integration remains `proposed` because the harness-side
@@ -78,6 +80,13 @@ These are ready for the Orchestrator to auto-create GitHub issues.
   template defect
 - `private-helper-boundary-drift` — temporary reach-through to private
   helpers or fields until review pressure forces a public seam
+- `skipped-full-verify-pre-merge` — feature branch merged to `main`
+  without a formal `full-verify/` artefact; environmental drift
+  (e.g. stale `pms_test` schema) surfaces post-merge instead of
+  pre-merge
+- `empty-harness-phase-artifacts` — `spec-review/` and `e2e/`
+  directories created but not populated during the task; harness
+  flow was compressed relative to S1 / S2
 
 ## Skill Defect Log
 
@@ -95,3 +104,4 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 | pms-phase3  | 2026-04-09 | 4   | 4          | 4     | 0       | [2026-04-09-pms-phase3.md](./2026-04-09-pms-phase3.md) |
 | pms-market-data-v1 | 2026-04-17 | 12  | 11         | 14    | 0       | [2026-04-17-pms-market-data-v1.md](./2026-04-17-pms-market-data-v1.md) |
 | pms-strategy-aggregate-v1 | 2026-04-17 | 7   | 7          | 7     | 0       | [2026-04-17-pms-strategy-aggregate-v1.md](./2026-04-17-pms-strategy-aggregate-v1.md) |
+| pms-factor-panel-v1 | 2026-04-18 | 8   | 7          | 9     | 0       | [2026-04-18-pms-factor-panel-v1.md](./2026-04-18-pms-factor-panel-v1.md) |
