@@ -7,6 +7,7 @@ from .merge import (
     StrategyMarketSet,
     UnionMergePolicy,
 )
+from .subscription_controller import SensorSubscriptionController, SubscriptionSink
 from .selector import MarketSelector
 
 __all__ = [
@@ -14,6 +15,8 @@ __all__ = [
     "MergeConflict",
     "MergePolicy",
     "MergeResult",
+    "SensorSubscriptionController",
     "StrategyMarketSet",
+    "SubscriptionSink",
     "UnionMergePolicy",
 ]
