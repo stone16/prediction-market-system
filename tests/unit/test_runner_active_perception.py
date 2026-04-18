@@ -272,6 +272,8 @@ async def test_runner_active_perception_boot_order_and_first_poll_subscription_u
         assert market_data.updates == []
 
         subscription_controller.call_release.set()
+        await asyncio.wait_for(market_data.update_started.wait(), timeout=2.0)
+        assert market_data.asset_ids == ["no-10d", "yes-10d"]
         market_data.update_release.set()
         await asyncio.wait_for(start_task, timeout=2.0)
     finally:
