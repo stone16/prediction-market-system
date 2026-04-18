@@ -100,3 +100,15 @@ name = "Sensor: no market_selection import"
 type = "forbidden"
 source_modules = ["pms.sensor"]
 forbidden_modules = ["pms.market_selection"]
+
+[[tool.importlinter.contracts]]
+name = "Actuator: no market_selection import"
+type = "forbidden"
+source_modules = ["pms.actuator"]
+forbidden_modules = ["pms.market_selection"]
+
+[[tool.importlinter.contracts]]
+name = "Market selection: no aggregate import"
+type = "forbidden"
+source_modules = ["pms.market_selection"]
+forbidden_modules = ["pms.strategies.aggregate"]
