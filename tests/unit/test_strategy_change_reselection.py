@@ -332,15 +332,24 @@ async def test_strategy_change_callback_error_is_logged_without_breaking_write(
 
 
 @pytest.mark.asyncio
-async def test_runner_strategy_change_callback_triggers_reselection(
+@pytest.mark.parametrize(
+    ("trigger_name", "trigger_args"),
+    [
+        ("create_version", (_strategy(),)),
+        ("set_active", ("default", "default-v2")),
+    ],
+)
+async def test_runner_strategy_change_trigger_triggers_reselection(
     monkeypatch: pytest.MonkeyPatch,
+    trigger_name: str,
+    trigger_args: tuple[object, ...],
 ) -> None:
     runtime_pool = RuntimePool()
     discovery = IdleDiscoverySensor()
     market_data = RecordingMarketDataSensor()
     selector = RecordingSelector(returned_asset_ids=["near-no", "near-yes"])
     subscription_controller = RecordingSubscriptionController(sink=market_data)
-    callback_box: dict[str, Callable[[], Awaitable[None]] | None] = {"value": None}
+    registry_box: dict[str, object] = {}
 
     async def fake_create_pool(*, dsn: str, min_size: int, max_size: int) -> RuntimePool:
         del dsn, min_size, max_size
@@ -353,7 +362,21 @@ async def test_runner_strategy_change_callback_triggers_reselection(
             on_strategy_change: Callable[[], Awaitable[None]] | None = None,
         ) -> None:
             del pool
-            callback_box["value"] = on_strategy_change
+            self.on_strategy_change = on_strategy_change
+            registry_box["instance"] = self
+
+        async def create_version(self, *_: object) -> object:
+            if self.on_strategy_change is None:
+                msg = "strategy change callback was not wired"
+                raise AssertionError(msg)
+            await self.on_strategy_change()
+            return object()
+
+        async def set_active(self, *_: object) -> None:
+            if self.on_strategy_change is None:
+                msg = "strategy change callback was not wired"
+                raise AssertionError(msg)
+            await self.on_strategy_change()
 
     monkeypatch.setattr("pms.runner.asyncpg.create_pool", fake_create_pool)
     monkeypatch.setattr("pms.runner.MarketDiscoverySensor", lambda **kwargs: discovery)
@@ -371,10 +394,11 @@ async def test_runner_strategy_change_callback_triggers_reselection(
     )
     await runner.start()
 
-    strategy_change_callback = callback_box["value"]
-    assert strategy_change_callback is not None
+    registry = registry_box["instance"]
+    assert isinstance(registry, CapturingRegistry)
+    trigger = getattr(registry, trigger_name)
+    await trigger(*trigger_args)
 
-    await strategy_change_callback()
     await asyncio.wait_for(selector.call_started.wait(), timeout=2.0)
     assert selector.calls == 1
     assert subscription_controller.calls == 0

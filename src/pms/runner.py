@@ -417,7 +417,10 @@ class Runner:
 
         self._market_selector = MarketSelector(
             self._pg_pool,
-            PostgresStrategyRegistry(self._pg_pool),
+            PostgresStrategyRegistry(
+                self._pg_pool,
+                on_strategy_change=self._request_reselection,
+            ),
             UnionMergePolicy(),
         )
         self._subscription_controller = SensorSubscriptionController(subscription_sink)

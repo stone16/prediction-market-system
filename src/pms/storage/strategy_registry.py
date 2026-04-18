@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
+import logging
 from typing import Any, cast
 
 import asyncpg
@@ -24,9 +25,17 @@ from pms.strategies.versioning import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class PostgresStrategyRegistry:
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        on_strategy_change: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self._pool = pool
+        self._on_strategy_change = on_strategy_change
 
     async def create_strategy(
         self,
@@ -117,6 +126,7 @@ class PostgresStrategyRegistry:
                     strategy_id,
                     strategy_version_id,
                 )
+        await self._notify_strategy_change()
         return StrategyVersion(
             strategy_id=strategy_id,
             strategy_version_id=strategy_version_id,
@@ -216,6 +226,7 @@ class PostgresStrategyRegistry:
         """
         async with self._pool.acquire() as connection:
             await connection.execute(query, strategy_id, strategy_version_id)
+        await self._notify_strategy_change()
 
     async def populate_strategy_factors(
         self,
@@ -246,6 +257,14 @@ class PostgresStrategyRegistry:
                         step.weight,
                         "long",
                     )
+
+    async def _notify_strategy_change(self) -> None:
+        if self._on_strategy_change is None:
+            return
+        try:
+            await self._on_strategy_change()
+        except Exception as error:  # noqa: BLE001
+            logger.warning("strategy change callback failed: %s", error)
 
 
 def _ensure_utc(value: object) -> datetime:
