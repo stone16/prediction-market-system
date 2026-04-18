@@ -143,6 +143,10 @@ class Runner:
         init=False,
         default=None,
     )
+    _strategy_registry: PostgresStrategyRegistry | None = field(
+        init=False,
+        default=None,
+    )
     _reselection_task: asyncio.Task[None] | None = field(init=False, default=None)
     _reselection_lock: asyncio.Lock = field(init=False)
     _reselection_requested: asyncio.Event = field(init=False)
@@ -224,6 +228,10 @@ class Runner:
         return cast(SensorSubscriptionController, controller)
 
     @property
+    def strategy_registry(self) -> PostgresStrategyRegistry | None:
+        return self._strategy_registry
+
+    @property
     def tasks(self) -> tuple[asyncio.Task[None], ...]:
         tasks: list[asyncio.Task[None]] = []
         tasks.extend(self.sensor_stream.tasks)
@@ -254,6 +262,10 @@ class Runner:
                 if self._pg_pool is None:
                     msg = "Runner PostgreSQL pool is not initialized"
                     raise RuntimeError(msg)
+                self._strategy_registry = PostgresStrategyRegistry(
+                    self._pg_pool,
+                    on_strategy_change=self._request_reselection,
+                )
                 await ensure_factor_catalog(self._pg_pool)
                 await self._ensure_default_v2_version()
                 if self._pg_pool is None:
@@ -341,6 +353,7 @@ class Runner:
         self._actuator_task = None
         self._market_selector = None
         self._subscription_controller = None
+        self._strategy_registry = None
         self._reselection_task = None
 
         try:
@@ -428,12 +441,12 @@ class Runner:
         if discovery_sensor is None or subscription_sink is None:
             return
 
+        if self._strategy_registry is None:
+            msg = "Runner strategy registry is not initialized"
+            raise RuntimeError(msg)
         self._market_selector = MarketSelector(
             self._pg_pool,
-            PostgresStrategyRegistry(
-                self._pg_pool,
-                on_strategy_change=self._request_reselection,
-            ),
+            self._strategy_registry,
             UnionMergePolicy(),
         )
         self._subscription_controller = SensorSubscriptionController(subscription_sink)
@@ -471,7 +484,10 @@ class Runner:
         if active_version_id != "default-v1":
             return
 
-        registry = PostgresStrategyRegistry(self._pg_pool)
+        registry = self._strategy_registry
+        if registry is None:
+            msg = "Runner strategy registry is not initialized"
+            raise RuntimeError(msg)
         strategy = await registry.get_by_id("default")
         if strategy is None:
             return
@@ -649,6 +665,7 @@ class Runner:
         self._actuator_task = None
         self._market_selector = None
         self._subscription_controller = None
+        self._strategy_registry = None
         self._reselection_task = None
         await self._close_pg_pool()
 
@@ -674,7 +691,10 @@ class Runner:
                 self._reselection_requested.clear()
                 if self._stop_event.is_set():
                     return
-                await self._reselect()
+                try:
+                    await self._reselect()
+                except Exception as error:  # noqa: BLE001
+                    logger.warning("periodic reselection failed: %s", error)
             except TimeoutError:
                 if self._stop_event.is_set():
                     return

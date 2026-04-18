@@ -414,3 +414,107 @@ async def test_runner_strategy_change_trigger_triggers_reselection(
     assert market_data.asset_ids == ["near-no", "near-yes"]
 
     await runner.stop()
+
+
+@dataclass
+class _AcquirableClosablePool:
+    connection: FakeConnection
+    close_calls: int = 0
+
+    def acquire(self) -> FakeAcquire:
+        return FakeAcquire(self.connection)
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_runner_constructs_single_strategy_registry_with_callback_for_bootstrap_and_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = FakeConnection(fetchval_results=["default-v1"])
+    fake_pool = _AcquirableClosablePool(connection=connection)
+    discovery = IdleDiscoverySensor()
+    market_data = RecordingMarketDataSensor()
+    selector = RecordingSelector(returned_asset_ids=[])
+    subscription_controller = RecordingSubscriptionController(sink=market_data)
+
+    constructed: list[dict[str, object]] = []
+
+    class TrackingRegistry:
+        def __init__(
+            self,
+            pool: object,
+            on_strategy_change: Callable[[], Awaitable[None]] | None = None,
+        ) -> None:
+            constructed.append(
+                {"pool_id": id(pool), "on_strategy_change": on_strategy_change}
+            )
+            self._pool = pool
+            self._on_strategy_change = on_strategy_change
+
+        async def get_by_id(self, strategy_id: str) -> None:
+            del strategy_id
+            return None
+
+        async def list_market_selections(self) -> list[object]:
+            return []
+
+        async def set_active(self, strategy_id: str, version_id: str) -> None:
+            del strategy_id, version_id
+            if self._on_strategy_change is not None:
+                await self._on_strategy_change()
+
+    async def fake_create_pool(
+        *, dsn: str, min_size: int, max_size: int
+    ) -> _AcquirableClosablePool:
+        del dsn, min_size, max_size
+        return fake_pool
+
+    monkeypatch.setattr("pms.runner.asyncpg.create_pool", fake_create_pool)
+    monkeypatch.setattr("pms.runner.MarketDiscoverySensor", lambda **kwargs: discovery)
+    monkeypatch.setattr("pms.runner.MarketDataSensor", lambda **kwargs: market_data)
+    monkeypatch.setattr("pms.runner.PostgresStrategyRegistry", TrackingRegistry)
+    monkeypatch.setattr("pms.runner.MarketSelector", lambda *args, **kwargs: selector)
+    monkeypatch.setattr(
+        "pms.runner.SensorSubscriptionController",
+        lambda sink: subscription_controller,
+    )
+
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        auto_migrate_default_v2=True,
+        database=DatabaseSettings(
+            dsn="postgresql://localhost/pms_test_runner",
+            pool_min_size=2,
+            pool_max_size=10,
+        ),
+        risk=RiskSettings(
+            max_position_per_market=1000.0,
+            max_total_exposure=10_000.0,
+        ),
+    )
+
+    runner = Runner(config=settings, historical_data_path=FIXTURE_PATH)
+    await runner.start()
+    try:
+        registry: Any = runner.strategy_registry
+        assert registry is not None
+        assert isinstance(registry, TrackingRegistry)
+
+        assert len(constructed) == 1, (
+            f"Expected a single PostgresStrategyRegistry construction, "
+            f"got {len(constructed)}. Bootstrap migration and "
+            "active-perception wiring must share one registry instance so "
+            "on_strategy_change fires from every mutation site."
+        )
+        assert constructed[0]["on_strategy_change"] == runner._request_reselection
+
+        runner._reselection_requested.clear()
+        await registry.set_active("default", "default-v2")
+        assert runner._reselection_requested.is_set(), (
+            "Mutation through the Runner-owned registry failed to set "
+            "_reselection_requested; callback is not wired."
+        )
+    finally:
+        await runner.stop()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -376,3 +377,51 @@ async def test_runner_active_perception_reselection_is_serialized(
 
     discovery.poll_released.set()
     await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_event_triggered_reselection_failure_does_not_kill_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    events: list[str] = []
+    _, discovery, _, _, _ = _install_live_doubles(
+        monkeypatch,
+        events=events,
+        returned_asset_ids=["no-10d", "yes-10d"],
+    )
+
+    runner = _runner(RunMode.LIVE)
+    await runner.start()
+    try:
+        reselection_task = runner._reselection_task
+        assert reselection_task is not None
+        assert not reselection_task.done()
+
+        raising_selector_called = asyncio.Event()
+
+        class RaisingSelector:
+            calls = 0
+
+            async def select(self) -> Any:
+                RaisingSelector.calls += 1
+                raising_selector_called.set()
+                raise RuntimeError("transient postgres error")
+
+        runner._market_selector = RaisingSelector()
+
+        caplog.set_level(logging.WARNING, logger="pms.runner")
+        await runner._request_reselection()
+        await asyncio.wait_for(raising_selector_called.wait(), timeout=2.0)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert not reselection_task.done(), (
+            "reselection task died when event-triggered _reselect raised; "
+            f"task state: done={reselection_task.done()}"
+        )
+        assert RaisingSelector.calls == 1
+        assert "periodic reselection failed" in caplog.text
+    finally:
+        discovery.poll_released.set()
+        await runner.stop()
