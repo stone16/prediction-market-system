@@ -387,6 +387,111 @@ async def test_market_discovery_sensor_continues_when_token_write_fails(
 
 
 @pytest.mark.asyncio
+async def test_market_discovery_sensor_invokes_poll_complete_hook() -> None:
+    store = _store_mock()
+    callback_called = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(
+            200,
+            json=[
+                _gamma_market(
+                    "pm-live-complete-hook",
+                    token_ids=["yes-token", "no-token"],
+                    outcomes=["Yes", "No"],
+                )
+            ],
+        )
+
+    async def on_poll_complete() -> None:
+        callback_called.set()
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+        on_poll_complete=on_poll_complete,
+    )
+
+    async def consume() -> None:
+        async for _ in cast(AsyncGenerator[object, None], sensor.__aiter__()):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(callback_called.wait(), timeout=2.0)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        await sensor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_logs_poll_complete_hook_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    poll_complete = asyncio.Event()
+    write_market_called = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(
+            200,
+            json=[
+                _gamma_market(
+                    "pm-live-hook-error",
+                    token_ids=["yes-token", "no-token"],
+                    outcomes=["Yes", "No"],
+                )
+            ],
+        )
+
+    async def on_poll_complete() -> None:
+        msg = "completion hook failed"
+        poll_complete.set()
+        raise RuntimeError(msg)
+
+    async def tracked_write_market(*args: Any, **kwargs: Any) -> None:
+        write_market_called.set()
+        return None
+
+    store_mock.write_market_mock.side_effect = tracked_write_market
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+        on_poll_complete=on_poll_complete,
+    )
+
+    async def consume() -> None:
+        async for _ in cast(AsyncGenerator[object, None], sensor.__aiter__()):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        with caplog.at_level(logging.WARNING):
+            await asyncio.wait_for(write_market_called.wait(), timeout=2.0)
+            await asyncio.wait_for(poll_complete.wait(), timeout=2.0)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        await sensor.aclose()
+
+    assert "discovery poll completion hook failed" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_sensor_stream_accepts_market_discovery_sensor() -> None:
     store = _store_mock()
 
