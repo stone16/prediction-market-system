@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pms.factors.composition import apply_composition
+from pms.factors.composition import apply_composition, evaluate_branch_probabilities
 from pms.strategies.projections import FactorCompositionStep
 
 
@@ -20,6 +20,22 @@ def _step(
         param=param,
         weight=weight,
         threshold=threshold,
+    )
+
+
+def _branching_composition() -> tuple[FactorCompositionStep, ...]:
+    return (
+        _step("fair_value_spread", role="precedence_rank", weight=1.0),
+        _step("subset_pricing_violation", role="precedence_rank", weight=2.0),
+        _step("fair_value_spread", role="threshold_edge", weight=1.0, threshold=0.02),
+        _step("subset_pricing_violation", role="threshold_edge", weight=1.0, threshold=0.02),
+        _step("metaculus_prior", role="posterior_prior", weight=2.0),
+        _step("yes_count", role="posterior_success", weight=1.0),
+        _step("no_count", role="posterior_failure", weight=1.0),
+        _step("llm", role="runtime_probability", weight=1.0),
+        _step("rules", role="blend_weighted", weight=1.0),
+        _step("statistical", role="blend_weighted", weight=1.0),
+        _step("llm", role="blend_weighted", weight=1.0),
     )
 
 
@@ -77,3 +93,60 @@ def test_apply_composition_uses_rules_precedence_before_statistical_fallback() -
     )
 
     assert result == pytest.approx(0.55)
+
+
+def test_evaluate_branch_probabilities_exposes_rules_statistical_and_llm_inputs() -> None:
+    branch_probabilities = evaluate_branch_probabilities(
+        _branching_composition(),
+        {
+            ("fair_value_spread", ""): 0.15,
+            ("subset_pricing_violation", ""): 0.20,
+            ("yes_price", ""): 0.40,
+            ("subset_price", ""): 0.80,
+            ("metaculus_prior", ""): 0.70,
+            ("yes_count", ""): 3.0,
+            ("no_count", ""): 7.0,
+            ("llm", ""): 0.80,
+        },
+    )
+
+    assert branch_probabilities == {
+        "rules": pytest.approx(0.55),
+        "statistical": pytest.approx(4.4 / 12.0),
+        "llm": pytest.approx(0.80),
+    }
+
+
+def test_apply_composition_averages_present_branches_when_blend_steps_exist() -> None:
+    result = apply_composition(
+        _branching_composition(),
+        {
+            ("fair_value_spread", ""): 0.15,
+            ("subset_pricing_violation", ""): 0.20,
+            ("yes_price", ""): 0.40,
+            ("subset_price", ""): 0.80,
+            ("metaculus_prior", ""): 0.70,
+            ("yes_count", ""): 3.0,
+            ("no_count", ""): 7.0,
+            ("llm", ""): 0.80,
+        },
+    )
+
+    assert result == pytest.approx((0.55 + (4.4 / 12.0) + 0.80) / 3.0)
+
+
+def test_apply_composition_blend_skips_missing_llm_branch() -> None:
+    result = apply_composition(
+        _branching_composition(),
+        {
+            ("fair_value_spread", ""): 0.15,
+            ("subset_pricing_violation", ""): 0.20,
+            ("yes_price", ""): 0.40,
+            ("subset_price", ""): 0.80,
+            ("metaculus_prior", ""): 0.70,
+            ("yes_count", ""): 3.0,
+            ("no_count", ""): 7.0,
+        },
+    )
+
+    assert result == pytest.approx((0.55 + (4.4 / 12.0)) / 2.0)

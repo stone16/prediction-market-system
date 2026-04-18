@@ -9,7 +9,7 @@ from pms.core.enums import MarketStatus
 from pms.core.models import MarketSignal
 from pms.factors.base import EMPTY_OUTER_RING
 from pms.factors.defaults import DEFAULT_STRATEGY_COMPOSITION
-from pms.factors.composition import apply_composition
+from pms.factors.composition import apply_composition, evaluate_branch_probabilities
 from pms.factors.definitions import REGISTERED
 
 
@@ -95,13 +95,13 @@ def _signal(
     )
 
 
-def _pre_probability(
+def _pre_branch_probability(
     forecaster: PreMigrationForecaster,
     signal: MarketSignal,
-) -> float:
+) -> float | None:
     result = forecaster.predict(signal)
     if result is None:
-        return signal.yes_price
+        return None
     return result[0]
 
 
@@ -117,6 +117,12 @@ def _factor_values(signal: MarketSignal) -> dict[tuple[str, str], float]:
         if row is not None:
             values[(row.factor_id, row.param)] = row.value
     return values
+
+
+def _branch_name(forecaster: PreMigrationForecaster) -> str:
+    if isinstance(forecaster, PreMigrationRules):
+        return "rules"
+    return "statistical"
 
 
 @pytest.mark.parametrize(
@@ -211,17 +217,69 @@ def _factor_values(signal: MarketSignal) -> dict[tuple[str, str], float]:
         ),
     ],
 )
-def test_forecaster_migration_matrix_matches_pre_migration_output(
+def test_forecaster_migration_matrix_matches_pre_migration_branch_output(
     case_name: str,
     forecaster: PreMigrationForecaster,
     signal: MarketSignal,
 ) -> None:
     del case_name
 
-    pre_probability = _pre_probability(forecaster, signal)
-    post_probability = apply_composition(
+    expected_probability = _pre_branch_probability(forecaster, signal)
+    branch_probabilities = evaluate_branch_probabilities(
         DEFAULT_STRATEGY_COMPOSITION,
         _factor_values(signal),
     )
 
-    assert post_probability == pytest.approx(pre_probability, abs=1e-9)
+    observed_probability = branch_probabilities.get(_branch_name(forecaster))
+    if expected_probability is None:
+        assert observed_probability is None
+        return
+    assert observed_probability == pytest.approx(expected_probability, abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("case_name", "signal", "llm_probability"),
+    [
+        (
+            "rules_and_statistical_average_without_llm",
+            _signal(yes_price=0.40, external_signal={"fair_value": 0.55}),
+            None,
+        ),
+        (
+            "rules_statistical_and_llm_average",
+            _signal(yes_price=0.40, external_signal={"fair_value": 0.55}),
+            0.80,
+        ),
+        (
+            "statistical_and_llm_average_without_rules",
+            _signal(external_signal={"metaculus_prob": 0.70, "yes_count": 3, "no_count": 7}),
+            0.80,
+        ),
+    ],
+)
+def test_default_strategy_composition_matches_present_branch_average(
+    case_name: str,
+    signal: MarketSignal,
+    llm_probability: float | None,
+) -> None:
+    del case_name
+
+    expected_probabilities: list[float] = []
+    rules_result = PreMigrationRules().predict(signal)
+    if rules_result is not None:
+        expected_probabilities.append(rules_result[0])
+    expected_probabilities.append(PreMigrationStatistical().predict(signal)[0])
+    factor_values = _factor_values(signal)
+    if llm_probability is not None:
+        expected_probabilities.append(llm_probability)
+        factor_values[("llm", "")] = llm_probability
+
+    observed_probability = apply_composition(
+        DEFAULT_STRATEGY_COMPOSITION,
+        factor_values,
+    )
+
+    assert observed_probability == pytest.approx(
+        sum(expected_probabilities) / len(expected_probabilities),
+        abs=1e-9,
+    )
