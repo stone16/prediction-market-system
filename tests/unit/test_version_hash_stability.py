@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import os
 import subprocess
 from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
@@ -238,12 +240,20 @@ print(
 )
 """.strip()
 
+    env = os.environ.copy()
+    pythonpath_entries = [str(repo_root / "src"), str(repo_root)]
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+
     result = subprocess.run(
-        ["uv", "run", "python", "-c", script],
+        [sys.executable, "-c", script],
         cwd=repo_root,
         capture_output=True,
         text=True,
         check=True,
+        env=env,
     )
 
     assert result.stdout.strip() == expected_hash

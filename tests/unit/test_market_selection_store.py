@@ -48,6 +48,7 @@ def _row(
     resolves_at: datetime | None,
     created_at: datetime,
     last_seen_at: datetime,
+    volume_24h: float | None = 1000.0,
     token_id: str | None,
     outcome: str | None,
 ) -> dict[str, object]:
@@ -59,6 +60,7 @@ def _row(
         "resolves_at": resolves_at,
         "created_at": created_at,
         "last_seen_at": last_seen_at,
+        "volume_24h": volume_24h,
         "token_id": token_id,
         "outcome": outcome,
     }
@@ -106,16 +108,18 @@ async def test_read_eligible_markets_groups_joined_tokens_and_keeps_zero_token_m
     )
     store = PostgresMarketDataStore(FakePool(connection))
 
-    markets = await store.read_eligible_markets("polymarket", 30)
+    markets = await store.read_eligible_markets("polymarket", 30, 500.0)
 
     assert [market.condition_id for market, _ in markets] == ["market-1", "market-2"]
     assert [token.token_id for token in markets[0][1]] == ["token-yes", "token-no"]
     assert markets[1][1] == []
+    assert markets[0][0].volume_24h == 1000.0
     assert len(connection.fetch_calls) == 1
     _, args = connection.fetch_calls[0]
     assert args[0] == "polymarket"
     assert isinstance(args[1], datetime)
     assert isinstance(args[2], datetime)
+    assert args[3] == 500.0
 
 
 @pytest.mark.asyncio
@@ -123,7 +127,7 @@ async def test_read_eligible_markets_returns_empty_list_and_uses_null_upper_boun
     connection = FakeConnection(fetch_results=[[]])
     store = PostgresMarketDataStore(FakePool(connection))
 
-    markets = await store.read_eligible_markets("kalshi", None)
+    markets = await store.read_eligible_markets("kalshi", None, 0.0)
 
     assert markets == []
     assert len(connection.fetch_calls) == 1
@@ -131,3 +135,4 @@ async def test_read_eligible_markets_returns_empty_list_and_uses_null_upper_boun
     assert args[0] == "kalshi"
     assert isinstance(args[1], datetime)
     assert args[2] is None
+    assert args[3] == 0.0

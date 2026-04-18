@@ -9,8 +9,12 @@ CREATE TABLE IF NOT EXISTS markets (
     venue TEXT NOT NULL CHECK (venue IN ('polymarket', 'kalshi')),
     resolves_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL,
-    last_seen_at TIMESTAMPTZ NOT NULL
+    last_seen_at TIMESTAMPTZ NOT NULL,
+    volume_24h DOUBLE PRECISION
 );
+
+ALTER TABLE markets
+    ADD COLUMN IF NOT EXISTS volume_24h DOUBLE PRECISION;
 
 CREATE TABLE IF NOT EXISTS tokens (
     token_id TEXT PRIMARY KEY,

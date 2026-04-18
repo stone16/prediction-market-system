@@ -69,6 +69,7 @@ def _strategy(
     *,
     venue: str,
     resolution_time_max_horizon_days: int | None,
+    volume_min_usdc: float = 500.0,
 ) -> Strategy:
     return Strategy(
         config=StrategyConfig(
@@ -94,7 +95,7 @@ def _strategy(
         market_selection=MarketSelectionSpec(
             venue=venue,
             resolution_time_max_horizon_days=resolution_time_max_horizon_days,
-            volume_min_usdc=500.0,
+            volume_min_usdc=volume_min_usdc,
         ),
     )
 
@@ -105,6 +106,7 @@ async def _seed_market(
     market_id: str,
     venue: Venue,
     resolves_at: datetime | None,
+    volume_24h: float,
 ) -> None:
     created_at = datetime(2026, 4, 18, 9, 0, tzinfo=UTC)
     await store.write_market(
@@ -116,6 +118,7 @@ async def _seed_market(
             resolves_at=resolves_at,
             created_at=created_at,
             last_seen_at=created_at,
+            volume_24h=volume_24h,
         )
     )
     await store.write_token(
@@ -157,6 +160,7 @@ async def test_market_selector_returns_merged_asset_ids_from_active_strategies(
             "kalshi-near",
             venue="kalshi",
             resolution_time_max_horizon_days=10,
+            volume_min_usdc=1_000.0,
         )
     )
     await registry.create_strategy("inactive", metadata={"owner": "system"})
@@ -166,34 +170,53 @@ async def test_market_selector_returns_merged_asset_ids_from_active_strategies(
         market_id="pm-fast",
         venue="polymarket",
         resolves_at=now + timedelta(days=5),
+        volume_24h=800.0,
     )
     await _seed_market(
         store,
         market_id="pm-slow",
         venue="polymarket",
         resolves_at=now + timedelta(days=45),
+        volume_24h=800.0,
     )
     await _seed_market(
         store,
         market_id="pm-past",
         venue="polymarket",
         resolves_at=now - timedelta(days=1),
+        volume_24h=800.0,
+    )
+    await _seed_market(
+        store,
+        market_id="pm-low-volume",
+        venue="polymarket",
+        resolves_at=now + timedelta(days=2),
+        volume_24h=100.0,
     )
     await _seed_market(
         store,
         market_id="ka-near",
         venue="kalshi",
         resolves_at=now + timedelta(days=4),
+        volume_24h=1_500.0,
     )
     await _seed_market(
         store,
         market_id="ka-far",
         venue="kalshi",
         resolves_at=now + timedelta(days=20),
+        volume_24h=1_500.0,
+    )
+    await _seed_market(
+        store,
+        market_id="ka-low-volume",
+        venue="kalshi",
+        resolves_at=now + timedelta(days=3),
+        volume_24h=200.0,
     )
 
     selector = market_selector_cls(
-        pool=pool,
+        store=store,
         registry=registry,
         merge_policy=union_merge_policy_cls(),
     )

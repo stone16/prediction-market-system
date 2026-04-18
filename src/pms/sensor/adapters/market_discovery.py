@@ -127,6 +127,9 @@ def _gamma_market_to_market(row: dict[str, Any], fetched_at: datetime) -> Market
         resolves_at=_optional_datetime(row.get("endDateIso")),
         created_at=created_at,
         last_seen_at=fetched_at,
+        volume_24h=_optional_float(
+            _first_non_empty_value(row.get("volume24hr"), row.get("volume_24h"))
+        ),
     )
 
 
@@ -185,3 +188,19 @@ def _optional_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed
+
+
+def _first_non_empty_value(*values: object) -> object | None:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        msg = "expected a float-compatible value"
+        raise TypeError(msg)
+    return float(value)

@@ -25,6 +25,7 @@ def _gamma_market(
     token_ids: list[str] | None = None,
     outcomes: list[str] | None = None,
     include_condition_id: bool = True,
+    volume_24hr: float | None = 1234.0,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": condition_id,
@@ -37,6 +38,8 @@ def _gamma_market(
     }
     if include_condition_id:
         payload["conditionId"] = condition_id
+    if volume_24hr is not None:
+        payload["volume24hr"] = volume_24hr
     if token_ids is not None:
         payload["clobTokenIds"] = json.dumps(token_ids)
     if outcomes is not None:
@@ -94,9 +97,43 @@ async def test_market_discovery_sensor_polls_gamma_once_and_writes_markets_and_t
     first_market = store_mock.write_market_mock.await_args_list[0].args[0]
     assert first_market.condition_id == "pm-live-0"
     assert first_market.venue == "polymarket"
+    assert first_market.volume_24h == 1234.0
     first_token = store_mock.write_token_mock.await_args_list[0].args[0]
     assert first_token.condition_id == "pm-live-0"
     assert first_token.outcome == "YES"
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_preserves_zero_volume_rows() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    payload = [
+        _gamma_market(
+            "pm-zero-volume",
+            token_ids=["yes-token", "no-token"],
+            outcomes=["Yes", "No"],
+            volume_24hr=0.0,
+        )
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    written_market = store_mock.write_market_mock.await_args_list[0].args[0]
+    assert written_market.volume_24h == 0.0
 
 
 @pytest.mark.asyncio

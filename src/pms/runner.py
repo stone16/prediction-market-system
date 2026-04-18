@@ -7,7 +7,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Awaitable, Protocol, TypeVar, cast, runtime_checkable
+from typing import Any, Protocol, TypeVar, cast, runtime_checkable
 
 import asyncpg
 import httpx
@@ -20,7 +20,13 @@ from pms.actuator.risk import RiskManager
 from pms.config import PMSSettings
 from pms.controller.pipeline import ControllerPipeline
 from pms.core.enums import OrderStatus, RunMode
-from pms.core.interfaces import ISensor
+from pms.core.interfaces import (
+    DiscoveryPollCompleteSensor,
+    ISensor,
+    MarketSelectorLike,
+    SubscriptionControllerLike,
+    SubscriptionManagedSensor,
+)
 from pms.core.models import (
     FillRecord,
     MarketSignal,
@@ -75,28 +81,6 @@ T = TypeVar("T")
 @runtime_checkable
 class AsyncCloseable(Protocol):
     async def aclose(self) -> None: ...
-
-
-class DiscoveryPollCompleteSensor(Protocol):
-    on_poll_complete: Callable[[], Awaitable[None]] | None
-
-
-class SubscriptionManagedSensor(Protocol):
-    async def update_subscription(self, asset_ids: list[str]) -> None: ...
-
-
-class MarketSelectorLike(Protocol):
-    async def select(self) -> Any: ...
-
-
-class SubscriptionControllerLike(Protocol):
-    async def update(self, asset_ids: list[str]) -> bool: ...
-
-    @property
-    def current_asset_ids(self) -> frozenset[str]: ...
-
-    @property
-    def last_updated_at(self) -> datetime | None: ...
 
 
 @dataclass
@@ -221,11 +205,8 @@ class Runner:
         return self._active_sensors
 
     @property
-    def subscription_controller(self) -> SensorSubscriptionController | None:
-        controller = self._subscription_controller
-        if controller is None:
-            return None
-        return cast(SensorSubscriptionController, controller)
+    def subscription_controller(self) -> SubscriptionControllerLike | None:
+        return self._subscription_controller
 
     @property
     def strategy_registry(self) -> PostgresStrategyRegistry | None:
@@ -445,7 +426,7 @@ class Runner:
             msg = "Runner strategy registry is not initialized"
             raise RuntimeError(msg)
         self._market_selector = MarketSelector(
-            self._pg_pool,
+            PostgresMarketDataStore(self._pg_pool),
             self._strategy_registry,
             UnionMergePolicy(),
         )

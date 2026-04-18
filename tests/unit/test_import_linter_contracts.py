@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -61,6 +63,21 @@ forbidden_modules = ["pms.strategies.aggregate"]
 """.strip()
 
 
+def _lint_imports_command() -> list[str]:
+    executable = REPO_ROOT / ".venv" / "bin" / "lint-imports"
+    if executable.exists():
+        return [str(executable)]
+
+    executable = Path(sys.executable).resolve().with_name("lint-imports")
+    if executable.exists():
+        return [str(executable)]
+
+    resolved = shutil.which("lint-imports")
+    if resolved is None:
+        pytest.fail("lint-imports executable is not available in the active environment")
+    return [resolved]
+
+
 @pytest.mark.parametrize(
     ("violating_module", "source_text", "expected_contract"),
     [
@@ -112,11 +129,7 @@ def test_import_linter_rejects_forbidden_dependencies(
 
     result = subprocess.run(
         [
-            "uv",
-            "run",
-            "--project",
-            str(REPO_ROOT),
-            "lint-imports",
+            *_lint_imports_command(),
             "--config",
             str(tmp_path / "pyproject.toml"),
         ],
@@ -132,7 +145,7 @@ def test_import_linter_rejects_forbidden_dependencies(
 
 def test_current_tree_lints_clean() -> None:
     result = subprocess.run(
-        ["uv", "run", "lint-imports"],
+        _lint_imports_command(),
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

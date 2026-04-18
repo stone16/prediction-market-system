@@ -110,7 +110,6 @@ def test_merge_dataclasses_are_frozen() -> None:
 
 @pytest.mark.asyncio
 async def test_market_selector_builds_strategy_sets_before_merging(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     selector_module = importlib.import_module("pms.market_selection.selector")
     market_selector_cls = getattr(selector_module, "MarketSelector")
@@ -146,16 +145,16 @@ async def test_market_selector_builds_strategy_sets_before_merging(
             ]
 
     class FakeStore:
-        def __init__(self, pool: object) -> None:
-            self.pool = pool
-            self.calls: list[tuple[str, int | None]] = []
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int | None, float]] = []
 
         async def read_eligible_markets(
             self,
             venue: str,
             max_horizon_days: int | None,
+            min_volume_usdc: float,
         ) -> list[tuple[Market, list[Token]]]:
-            self.calls.append((venue, max_horizon_days))
+            self.calls.append((venue, max_horizon_days, min_volume_usdc))
             if venue == "polymarket":
                 return [
                     _eligible_market(
@@ -183,22 +182,20 @@ async def test_market_selector_builds_strategy_sets_before_merging(
                 conflicts=[],
             )
 
-    fake_store = FakeStore(pool=object())
-    monkeypatch.setattr(
-        selector_module,
-        "PostgresMarketDataStore",
-        lambda pool: fake_store,
-    )
+    fake_store = FakeStore()
     merge_policy = RecordingMergePolicy()
     selector = market_selector_cls(
-        pool=object(),
+        store=fake_store,
         registry=FakeRegistry(),
         merge_policy=merge_policy,
     )
 
     result = await selector.select()
 
-    assert fake_store.calls == [("polymarket", 7), ("kalshi", 30)]
+    assert fake_store.calls == [
+        ("polymarket", 7, 500.0),
+        ("kalshi", 30, 1000.0),
+    ]
     assert merge_policy.selections == [
         strategy_market_set_cls(
             strategy_id="alpha",
@@ -218,7 +215,6 @@ async def test_market_selector_builds_strategy_sets_before_merging(
 @pytest.mark.asyncio
 async def test_market_selector_logs_count_and_warns_when_no_active_strategies(
     caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     selector_module = importlib.import_module("pms.market_selection.selector")
     market_selector_cls = getattr(selector_module, "MarketSelector")
@@ -231,13 +227,11 @@ async def test_market_selector_logs_count_and_warns_when_no_active_strategies(
             return []
 
     class UnusedStore:
-        def __init__(self, pool: object) -> None:
-            self.pool = pool
-
         async def read_eligible_markets(
             self,
             venue: str,
             max_horizon_days: int | None,
+            min_volume_usdc: float,
         ) -> list[tuple[Market, list[Token]]]:
             raise AssertionError("read_eligible_markets should not be called")
 
@@ -249,10 +243,9 @@ async def test_market_selector_logs_count_and_warns_when_no_active_strategies(
             self.calls.append(selections)
             return merge_result_cls(asset_ids=[], conflicts=[])
 
-    monkeypatch.setattr(selector_module, "PostgresMarketDataStore", UnusedStore)
     merge_policy = RecordingMergePolicy()
     selector = market_selector_cls(
-        pool=object(),
+        store=UnusedStore(),
         registry=EmptyRegistry(),
         merge_policy=merge_policy,
     )
