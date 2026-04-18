@@ -25,6 +25,7 @@ from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
+from tests.support.strategy_catalog import seed_factor_catalog
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
@@ -230,6 +231,8 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
     active_version = await PostgresStrategyRegistry(pg_pool).create_version(
         _strategy(drawdown_pct=3.5)
     )
+    async with pg_pool.acquire() as connection:
+        await seed_factor_catalog(connection)
     await _seed_market_shells(
         pg_pool,
         market_ids=("paper-empty-book", "paper-with-depth"),

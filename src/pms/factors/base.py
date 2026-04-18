@@ -8,10 +8,10 @@ from typing import ClassVar, Protocol
 from pms.core.models import BookSnapshot, MarketSignal
 
 __all__ = (
+    "EMPTY_OUTER_RING",
     "FactorDefinition",
     "FactorValueRow",
     "OuterRingReader",
-    "EMPTY_OUTER_RING",
 )
 
 

@@ -8,8 +8,8 @@ from typing import Any, cast
 import pytest
 
 from pms.core.enums import MarketStatus
-from pms.core.models import MarketSignal
-from pms.factors.base import EMPTY_OUTER_RING, FactorDefinition, FactorValueRow
+from pms.core.models import Market, MarketSignal
+from pms.factors.base import FactorDefinition, FactorValueRow
 from pms.factors.service import FactorService
 from pms.sensor.stream import SensorStream
 
@@ -43,6 +43,17 @@ class SequenceSignalStream:
     async def _iterate(self) -> AsyncIterator[MarketSignal]:
         for signal in self._signals:
             yield signal
+
+
+class FakeStore:
+    def __init__(self) -> None:
+        self.markets: dict[str, Market] = {}
+
+    async def read_market(self, market_id: str) -> Market | None:
+        return self.markets.get(market_id)
+
+    async def write_market(self, market: Market) -> None:
+        self.markets[market.condition_id] = market
 
 
 class PersistedFactor(FactorDefinition):
@@ -88,9 +99,10 @@ async def test_factor_service_compute_once_persists_non_none_rows(
         persisted.append(row)
 
     monkeypatch.setattr("pms.factors.service.persist_factor_value", fake_persist)
+    store = FakeStore()
     service = FactorService(
         pool=cast(Any, object()),
-        store=cast(Any, EMPTY_OUTER_RING),
+        store=cast(Any, store),
         cadence_s=0.1,
         factors=(PersistedFactor, MissingFactor),
         signal_stream=SequenceSignalStream([]),
@@ -108,6 +120,7 @@ async def test_factor_service_compute_once_persists_non_none_rows(
             value=0.4,
         )
     ]
+    assert "factor-service-market" in store.markets
 
 
 @pytest.mark.asyncio
@@ -123,7 +136,7 @@ async def test_factor_service_run_exits_when_signal_stream_finishes(
     monkeypatch.setattr("pms.factors.service.persist_factor_value", fake_persist)
     service = FactorService(
         pool=cast(Any, object()),
-        store=cast(Any, EMPTY_OUTER_RING),
+        store=cast(Any, FakeStore()),
         cadence_s=0.01,
         factors=(PersistedFactor,),
         signal_stream=SequenceSignalStream([_signal(market_id="run-exit-market")]),
@@ -132,6 +145,42 @@ async def test_factor_service_run_exits_when_signal_stream_finishes(
     await asyncio.wait_for(service.run(), timeout=1.0)
 
     assert [row.market_id for row in persisted] == ["run-exit-market"]
+
+
+@pytest.mark.asyncio
+async def test_factor_service_skips_repersisting_the_same_factor_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[FactorValueRow] = []
+
+    async def fake_persist(pool: object, row: FactorValueRow) -> None:
+        del pool
+        persisted.append(row)
+
+    monkeypatch.setattr("pms.factors.service.persist_factor_value", fake_persist)
+    service = FactorService(
+        pool=cast(Any, object()),
+        store=cast(Any, FakeStore()),
+        cadence_s=0.1,
+        factors=(PersistedFactor,),
+        signal_stream=SequenceSignalStream([]),
+    )
+    signal = _signal()
+
+    first = await service.compute_once([signal])
+    second = await service.compute_once([signal])
+
+    assert first == 1
+    assert second == 0
+    assert persisted == [
+        FactorValueRow(
+            factor_id="persisted_factor",
+            param="",
+            market_id="factor-service-market",
+            ts=datetime(2026, 4, 18, tzinfo=UTC),
+            value=0.4,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -157,3 +206,26 @@ async def test_sensor_stream_subscription_receives_signals_without_consuming_mai
     assert main_signal == tee_signal
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(anext(subscription), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_sensor_stream_closes_late_subscriptions_after_consumers_finish() -> None:
+    class OneShotSensor:
+        def __aiter__(self) -> AsyncIterator[MarketSignal]:
+            return self._iterate()
+
+        async def _iterate(self) -> AsyncIterator[MarketSignal]:
+            yield _signal(market_id="late-subscription-market")
+
+    stream = SensorStream()
+    await stream.start([OneShotSensor()])
+    signal = await asyncio.wait_for(stream.queue.get(), timeout=1.0)
+    stream.queue.task_done()
+    await asyncio.gather(*stream.tasks, return_exceptions=True)
+
+    late_subscription = stream.subscribe()
+
+    assert signal.market_id == "late-subscription-market"
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(late_subscription), timeout=1.0)
+    await asyncio.wait_for(stream.stop(), timeout=5.0)

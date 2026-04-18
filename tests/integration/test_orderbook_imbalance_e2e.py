@@ -31,11 +31,15 @@ pytestmark = [
 
 
 def _apply_schema(database_url: str) -> None:
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["SCHEMA_PATH"] = str(SCHEMA_PATH)
     subprocess.run(
-        ["psql", database_url, "--set", "ON_ERROR_STOP=1", "-f", str(SCHEMA_PATH)],
+        ["bash", "-lc", 'psql "$DATABASE_URL" --set ON_ERROR_STOP=1 -f "$SCHEMA_PATH"'],
         text=True,
         capture_output=True,
         check=True,
+        env=env,
     )
 
 
@@ -144,6 +148,7 @@ async def test_orderbook_imbalance_compute_and_persist(
     assert row is not None
 
     await persist_factor_value(pg_pool, row)
+    await persist_factor_value(pg_pool, row)
 
     async with pg_pool.acquire() as connection:
         factor_name = await connection.fetchval(
@@ -158,9 +163,18 @@ async def test_orderbook_imbalance_compute_and_persist(
             """,
             "orderbook_imbalance",
         )
+        stored_count = await connection.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM factor_values
+            WHERE factor_id = $1
+            """,
+            "orderbook_imbalance",
+        )
 
     assert factor_name == "Orderbook Imbalance"
     assert stored_row is not None
+    assert stored_count == 1
     assert stored_row["factor_id"] == row.factor_id
     assert stored_row["param"] == row.param
     assert stored_row["market_id"] == row.market_id

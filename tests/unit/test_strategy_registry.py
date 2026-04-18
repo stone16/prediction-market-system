@@ -326,7 +326,7 @@ def test_strategy_from_config_json_validates_nested_fields() -> None:
     payload = json.loads(serialize_strategy_config_json(*strategy.snapshot()))
     payload["config"]["factor_composition"] = [{"factor_id": "factor-a"}]
 
-    with pytest.raises(TypeError, match="config.factor_composition.step.role"):
+    with pytest.raises(TypeError, match=r"config\.factor_composition\.step\.role"):
         _strategy_from_config_json(payload)
 
     payload = json.loads(serialize_strategy_config_json(*strategy.snapshot()))

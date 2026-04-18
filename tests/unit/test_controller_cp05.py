@@ -110,8 +110,9 @@ def test_llm_forecaster_returns_neutral_tuple_without_calling_client() -> None:
 
     result = forecaster.predict(_signal())
 
+    assert result is not None
     assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
-    assert getattr(result, "model_id") == "neutral"
+    assert result.model_id == "neutral"
     assert client.messages.calls == []
 
 

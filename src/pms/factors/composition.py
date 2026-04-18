@@ -86,10 +86,18 @@ def _apply_weighted(
     steps: tuple[FactorCompositionStep, ...],
     factor_values: Mapping[tuple[str, str], float],
 ) -> float:
-    return sum(
-        step.weight * factor_values.get((step.factor_id, step.param), 0.0)
-        for step in steps
-    )
+    weighted_total = 0.0
+    realized_weight = 0.0
+    for step in steps:
+        value = factor_values.get((step.factor_id, step.param))
+        if value is None:
+            continue
+        weighted_total += step.weight * value
+        realized_weight += step.weight
+    if realized_weight == 0.0:
+        msg = "weighted composition is missing all factor inputs"
+        raise ValueError(msg)
+    return weighted_total / realized_weight
 
 
 def _apply_blend_weighted(

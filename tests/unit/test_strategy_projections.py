@@ -151,8 +151,7 @@ def test_strategy_projection_field_types_match_checkpoint_spec() -> None:
     strategy_config_hints = get_type_hints(module.StrategyConfig)
     factor_composition_hint = strategy_config_hints["factor_composition"]
     assert get_origin(factor_composition_hint) is tuple
-    factor_type = get_args(factor_composition_hint)[0]
-    assert factor_type is module.FactorCompositionStep
+    assert get_args(factor_composition_hint) == (module.FactorCompositionStep, Ellipsis)
 
 
 def test_strategy_projection_field_types_exclude_mutable_collections() -> None:

@@ -7,9 +7,9 @@ import pytest
 
 from pms.config import DatabaseSettings, PMSSettings
 from pms.core.enums import RunMode
-from pms.factors.defaults import DEFAULT_STRATEGY_COMPOSITION
 from pms.runner import Runner
 from pms.strategies.aggregate import Strategy
+from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
 from pms.strategies.projections import (
     EvalSpec,
     FactorCompositionStep,

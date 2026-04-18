@@ -77,7 +77,7 @@ def test_rules_forecaster_detects_subset_pricing_violation() -> None:
     assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
 
 
-def test_rules_forecaster_returns_none_without_opportunity() -> None:
+def test_rules_forecaster_returns_neutral_without_opportunity() -> None:
     assert RulesForecaster(min_edge=0.1).predict(_signal(yes_price=0.5)) == pytest.approx(
         (0.5, 0.0, "pre-s5-neutral")
     )

@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS factor_values (
     value DOUBLE PRECISION NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_factor_values_factor_param_market_ts
+CREATE UNIQUE INDEX IF NOT EXISTS idx_factor_values_factor_param_market_ts
     ON factor_values(factor_id, param, market_id, ts DESC);
 
 -- END MIDDLE RING
@@ -312,7 +312,7 @@ INSERT INTO factors (
     'Metaculus Prior',
     'Raw Metaculus probability from the external signal payload.',
     '4f62fec15fd5abaf2ff76810596268d1e14b46d346ff6e9f38b259c370a3ed71',
-    'scalar',
+    'probability',
     'neutral',
     'system'
 )

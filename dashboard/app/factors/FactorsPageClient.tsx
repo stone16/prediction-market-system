@@ -201,8 +201,8 @@ export function FactorsPageClient({
                   </tr>
                 </thead>
                 <tbody>
-                  {points.map((point) => (
-                    <tr data-testid="factor-row" key={`${point.ts}-${point.value}`}>
+                  {points.map((point, index) => (
+                    <tr data-testid="factor-row" key={`${point.ts}-${point.value}-${index}`}>
                       <td>{point.ts}</td>
                       <td>{point.value.toFixed(4)}</td>
                     </tr>

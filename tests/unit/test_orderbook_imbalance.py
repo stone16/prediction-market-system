@@ -56,12 +56,26 @@ def test_orderbook_imbalance_compute_returns_factor_value_row() -> None:
     assert row.value == pytest.approx(0.5)
 
 
-def test_orderbook_imbalance_returns_none_when_book_side_missing() -> None:
-    signal = _signal(
+def test_orderbook_imbalance_break_points_cover_one_sided_and_empty_books() -> None:
+    bid_only_signal = _signal(
         orderbook={
             "bids": [{"price": 0.46, "size": 100.0}],
             "asks": [],
         }
     )
+    ask_only_signal = _signal(
+        orderbook={
+            "bids": [],
+            "asks": [{"price": 0.48, "size": 100.0}],
+        }
+    )
+    empty_signal = _signal(orderbook={"bids": [], "asks": []})
 
-    assert OrderbookImbalance().compute(signal, EMPTY_OUTER_RING) is None
+    bid_only_row = OrderbookImbalance().compute(bid_only_signal, EMPTY_OUTER_RING)
+    ask_only_row = OrderbookImbalance().compute(ask_only_signal, EMPTY_OUTER_RING)
+
+    assert bid_only_row is not None
+    assert bid_only_row.value == pytest.approx(1.0)
+    assert ask_only_row is not None
+    assert ask_only_row.value == pytest.approx(-1.0)
+    assert OrderbookImbalance().compute(empty_signal, EMPTY_OUTER_RING) is None

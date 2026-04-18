@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, cast, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 import asyncpg
 import httpx
@@ -30,7 +30,6 @@ from pms.core.models import (
 )
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.spool import EvalSpool
-from pms.factors.defaults import DEFAULT_STRATEGY_COMPOSITION
 from pms.factors.catalog import ensure_factor_catalog
 from pms.factors.definitions import REGISTERED
 from pms.factors.service import FactorService
@@ -43,6 +42,7 @@ from pms.storage.feedback_store import FeedbackStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
+from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
 from pms.strategies.projections import FactorCompositionStep
 
 
@@ -61,10 +61,7 @@ RAW_FACTOR_COMPOSITION_ROLES = frozenset(
     }
 )
 REGISTERED_FACTOR_IDS = frozenset(factor_cls.factor_id for factor_cls in REGISTERED)
-DEFAULT_V2_FACTOR_COMPOSITION = cast(
-    tuple[FactorCompositionStep, ...],
-    DEFAULT_STRATEGY_COMPOSITION,
-)
+DEFAULT_V2_FACTOR_COMPOSITION = DEFAULT_STRATEGY_COMPOSITION
 T = TypeVar("T")
 
 
@@ -312,8 +309,6 @@ class Runner:
         if self.sensor_stream.tasks:
             await asyncio.gather(*self.sensor_stream.tasks, return_exceptions=True)
         await self.sensor_stream.queue.join()
-        if self._controller_task is not None and self._controller_task.done():
-            await self._controller_task
         if self._factor_service_task is not None:
             await self._factor_service_task
         if self._controller_task is not None:
@@ -364,8 +359,6 @@ class Runner:
             return True
         if self.config.mode != RunMode.BACKTEST:
             return True
-        if self.config.auto_migrate_default_v2:
-            return True
         return "database" in self.config.model_fields_set
 
     async def _ensure_default_v2_version(self) -> None:
@@ -375,9 +368,22 @@ class Runner:
             msg = "Runner PostgreSQL pool is not initialized"
             raise RuntimeError(msg)
 
+        async with self._pg_pool.acquire() as connection:
+            active_version_id = await connection.fetchval(
+                """
+                SELECT active_version_id
+                FROM strategies
+                WHERE strategy_id = 'default'
+                """
+            )
+        if active_version_id != "default-v1":
+            return
+
         registry = PostgresStrategyRegistry(self._pg_pool)
         strategy = await registry.get_by_id("default")
         if strategy is None:
+            return
+        if strategy.config.factor_composition == DEFAULT_V2_FACTOR_COMPOSITION:
             return
 
         migrated_strategy = Strategy(

@@ -145,8 +145,15 @@ export function mockFactorSeries({
   const normalizedParam = param ?? '';
   const key = `${factorId}::${marketId}::${normalizedParam}`;
   const fallbackKey = `${factorId}::factor-depth::${normalizedParam}`;
+  const sinceTime = since ? Date.parse(since) : Number.NaN;
   const points = (mockFactorSeriesIndex[key] ?? mockFactorSeriesIndex[fallbackKey] ?? []).filter(
-    (point) => !since || point.ts >= since
+    (point) => {
+      if (!since || Number.isNaN(sinceTime)) {
+        return true;
+      }
+      const pointTime = Date.parse(point.ts);
+      return !Number.isNaN(pointTime) && pointTime >= sinceTime;
+    }
   );
   return {
     factor_id: factorId,

@@ -55,7 +55,7 @@ class SensorStream:
 
     def subscribe(self) -> SignalSubscription:
         subscription = SignalSubscription()
-        if self._started and self._tasks == () and self._active_consumers == 0:
+        if self._is_exhausted():
             subscription.close()
         self._subscriptions.append(subscription)
         return subscription
@@ -104,3 +104,10 @@ class SensorStream:
     def _close_subscriptions(self) -> None:
         for subscription in self._subscriptions:
             subscription.close()
+
+    def _is_exhausted(self) -> bool:
+        return (
+            self._started
+            and self._active_consumers == 0
+            and all(task.done() for task in self._tasks)
+        )

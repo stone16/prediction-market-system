@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from pms.core.models import MarketSignal
 from pms.factors.base import FactorDefinition, FactorValueRow, OuterRingReader
 
@@ -19,11 +21,12 @@ class FairValueSpread(FactorDefinition):
         if raw_fair_value is None:
             return None
 
-        fair_value = float(raw_fair_value)
+        fair_value = Decimal(str(raw_fair_value))
+        yes_price = Decimal(str(signal.yes_price))
         return FactorValueRow(
             factor_id=self.factor_id,
             param="",
             market_id=signal.market_id,
             ts=signal.timestamp,
-            value=fair_value - signal.yes_price,
+            value=float(fair_value - yes_price),
         )

@@ -2,17 +2,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 import os
-from typing import cast
 
 import asyncpg
 import pytest
 
 from pms.config import DatabaseSettings, PMSSettings
 from pms.core.enums import RunMode
-from pms.factors.defaults import DEFAULT_STRATEGY_COMPOSITION
 from pms.runner import Runner
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
+from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
 from pms.strategies.projections import (
     EvalSpec,
     FactorCompositionStep,
@@ -156,10 +155,7 @@ async def _expected_default_v2_version_id(pg_pool: asyncpg.Pool) -> str:
     migrated = Strategy(
         config=replace(
             strategy.config,
-            factor_composition=cast(
-                tuple[FactorCompositionStep, ...],
-                DEFAULT_STRATEGY_COMPOSITION,
-            ),
+            factor_composition=DEFAULT_STRATEGY_COMPOSITION,
         ),
         risk=strategy.risk,
         eval_spec=strategy.eval_spec,

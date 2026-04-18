@@ -10,20 +10,20 @@ from .subset_pricing_violation import SubsetPricingViolation
 from .yes_count import YesCount
 
 REGISTERED: tuple[type[FactorDefinition], ...] = (
-    OrderbookImbalance,
     FairValueSpread,
     SubsetPricingViolation,
     MetaculusPrior,
-    YesCount,
     NoCount,
+    OrderbookImbalance,
+    YesCount,
 )
 
 __all__ = (
     "REGISTERED",
-    "OrderbookImbalance",
     "FairValueSpread",
-    "SubsetPricingViolation",
     "MetaculusPrior",
-    "YesCount",
     "NoCount",
+    "OrderbookImbalance",
+    "SubsetPricingViolation",
+    "YesCount",
 )

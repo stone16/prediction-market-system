@@ -8,9 +8,9 @@ import pytest
 from pms.core.enums import MarketStatus
 from pms.core.models import MarketSignal
 from pms.factors.base import EMPTY_OUTER_RING
-from pms.factors.defaults import DEFAULT_STRATEGY_COMPOSITION
 from pms.factors.composition import apply_composition, evaluate_branch_probabilities
 from pms.factors.definitions import REGISTERED
+from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
 
 
 ForecastResult = tuple[float, float, str]
