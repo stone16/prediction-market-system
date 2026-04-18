@@ -53,10 +53,11 @@ class SequenceSensor:
             yield signal
 
 
-def _settings() -> PMSSettings:
+def _settings(*, auto_migrate_default_v2: bool = True) -> PMSSettings:
     assert PMS_TEST_DATABASE_URL is not None
     return PMSSettings(
         mode=RunMode.PAPER,
+        auto_migrate_default_v2=auto_migrate_default_v2,
         database=DatabaseSettings(
             dsn=PMS_TEST_DATABASE_URL,
             pool_min_size=1,
@@ -210,7 +211,7 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
     )
 
     runner = Runner(
-        config=_settings(),
+        config=_settings(auto_migrate_default_v2=False),
         sensors=[
             SequenceSensor(
                 [

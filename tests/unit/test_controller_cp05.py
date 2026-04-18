@@ -94,7 +94,7 @@ class FailingForecaster:
         raise RuntimeError("forecast failed")
 
 
-def test_llm_forecaster_calls_claude_with_market_context() -> None:
+def test_llm_forecaster_returns_neutral_tuple_without_calling_client() -> None:
     client = FakeClaudeClient()
     forecaster = LLMForecaster(
         config=LLMSettings(enabled=True, api_key="test-key", model="claude-test"),
@@ -103,42 +103,28 @@ def test_llm_forecaster_calls_claude_with_market_context() -> None:
 
     result = forecaster.predict(_signal())
 
-    assert result == pytest.approx((0.8, 0.6, "orderbook and external context support yes"))
-    assert getattr(result, "model_id") == "claude-test"
-    assert len(client.messages.calls) == 1
-    call = client.messages.calls[0]
-    assert call["model"] == "claude-test"
-    prompt = call["messages"][0]["content"]
-    assert "Will CP05 pass?" in prompt
-    assert "yes_price: 0.4" in prompt
-    assert "metaculus_prob" in prompt
-    assert "0.35" in prompt
-    assert "0.34" not in prompt
-    assert "0.45" in prompt
-    assert "0.46" not in prompt
+    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
+    assert getattr(result, "model_id") == "neutral"
+    assert client.messages.calls == []
 
 
-def test_llm_forecaster_returns_none_when_disabled_or_missing_key(
+def test_llm_forecaster_returns_neutral_tuple_regardless_of_enablement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    assert (
-        LLMForecaster(config=LLMSettings(enabled=False), client=FakeClaudeClient()).predict(
-            _signal()
-        )
-        is None
-    )
-    assert (
-        LLMForecaster(config=LLMSettings(enabled=True), client=FakeClaudeClient()).predict(
-            _signal()
-        )
-        is None
-    )
+    assert LLMForecaster(
+        config=LLMSettings(enabled=False),
+        client=FakeClaudeClient(),
+    ).predict(_signal()) == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
+    assert LLMForecaster(
+        config=LLMSettings(enabled=True),
+        client=FakeClaudeClient(),
+    ).predict(_signal()) == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
 
 
 @pytest.mark.asyncio
-async def test_controller_pipeline_averages_three_forecasters_with_stubbed_llm() -> None:
+async def test_controller_pipeline_averages_three_neutralized_forecasters_to_yes_price() -> None:
     llm_client = FakeClaudeClient()
     pipeline = ControllerPipeline(
         forecasters=[
@@ -159,10 +145,10 @@ async def test_controller_pipeline_averages_three_forecasters_with_stubbed_llm()
     assert decision is not None
     assert decision.market_id == "m-cp05"
     assert decision.side == "BUY"
-    assert decision.prob_estimate == pytest.approx((0.65 + 0.7 + 0.8) / 3)
-    assert decision.expected_edge == pytest.approx(decision.prob_estimate - 0.4)
+    assert decision.prob_estimate == pytest.approx(0.4)
+    assert decision.expected_edge == pytest.approx(0.0)
     assert decision.price == 0.4
-    assert decision.size > 0.0
+    assert decision.size == 0.0
     assert decision.stop_conditions
 
 
@@ -184,7 +170,7 @@ async def test_controller_pipeline_excludes_disabled_llm_and_failed_forecasters(
     decision = await pipeline.on_signal(_signal(), portfolio=_portfolio())
 
     assert decision is not None
-    assert decision.prob_estimate == pytest.approx(0.7)
+    assert decision.prob_estimate == pytest.approx(0.4)
     assert "forecaster failed" in caplog.text
 
 

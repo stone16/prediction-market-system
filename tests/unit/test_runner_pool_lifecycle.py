@@ -67,6 +67,7 @@ class ExplodingController:
 def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.BACKTEST,
+        auto_migrate_default_v2=False,
         database=DatabaseSettings(
             dsn="postgresql://localhost/pms_test_runner",
             pool_min_size=2,
