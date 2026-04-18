@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Awaitable, Callable, cast
 
 import asyncpg
 import httpx
@@ -23,6 +23,7 @@ class MarketDiscoverySensor:
     store: PostgresMarketDataStore
     http_client: httpx.AsyncClient
     poll_interval_s: float = 60.0
+    on_poll_complete: Callable[[], Awaitable[None]] | None = None
 
     _INITIAL_BACKOFF_S = 1.0
     _MAX_BACKOFF_S = 30.0
@@ -39,6 +40,11 @@ class MarketDiscoverySensor:
         while True:
             try:
                 await self.poll_once()
+                if self.on_poll_complete is not None:
+                    try:
+                        await self.on_poll_complete()
+                    except Exception as error:  # noqa: BLE001
+                        logger.warning("discovery poll completion hook failed: %s", error)
                 backoff = self._INITIAL_BACKOFF_S
                 await asyncio.sleep(self.poll_interval_s)
             except httpx.HTTPStatusError as error:
