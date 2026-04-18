@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Awaitable, Callable, cast
 
 import asyncpg
 import httpx
@@ -23,6 +23,7 @@ class MarketDiscoverySensor:
     store: PostgresMarketDataStore
     http_client: httpx.AsyncClient
     poll_interval_s: float = 60.0
+    on_poll_complete: Callable[[], Awaitable[None]] | None = None
 
     _INITIAL_BACKOFF_S = 1.0
     _MAX_BACKOFF_S = 30.0
@@ -39,6 +40,11 @@ class MarketDiscoverySensor:
         while True:
             try:
                 await self.poll_once()
+                if self.on_poll_complete is not None:
+                    try:
+                        await self.on_poll_complete()
+                    except Exception as error:  # noqa: BLE001
+                        logger.warning("discovery poll completion hook failed: %s", error)
                 backoff = self._INITIAL_BACKOFF_S
                 await asyncio.sleep(self.poll_interval_s)
             except httpx.HTTPStatusError as error:
@@ -121,6 +127,9 @@ def _gamma_market_to_market(row: dict[str, Any], fetched_at: datetime) -> Market
         resolves_at=_optional_datetime(row.get("endDateIso")),
         created_at=created_at,
         last_seen_at=fetched_at,
+        volume_24h=_optional_float(
+            _first_non_empty_value(row.get("volume24hr"), row.get("volume_24h"))
+        ),
     )
 
 
@@ -179,3 +188,19 @@ def _optional_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed
+
+
+def _first_non_empty_value(*values: object) -> object | None:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        msg = "expected a float-compatible value"
+        raise TypeError(msg)
+    return float(value)

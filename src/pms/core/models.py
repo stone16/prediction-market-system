@@ -145,6 +145,7 @@ class Market:
     resolves_at: datetime | None
     created_at: datetime
     last_seen_at: datetime
+    volume_24h: float | None = None
 
 
 @dataclass(frozen=True)

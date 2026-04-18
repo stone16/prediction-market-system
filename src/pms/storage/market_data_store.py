@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from typing import cast
+
 import asyncpg
 
 from pms.core.models import (
     BookLevel,
     BookSnapshot,
     Market,
+    Outcome,
     PriceChange,
     Token,
     Trade,
+    Venue,
 )
 
 
@@ -22,7 +27,7 @@ class PostgresMarketDataStore:
 
     async def read_market(self, market_id: str) -> Market | None:
         query = """
-        SELECT condition_id, slug, question, venue, resolves_at, created_at, last_seen_at
+        SELECT condition_id, slug, question, venue, resolves_at, created_at, last_seen_at, volume_24h
         FROM markets
         WHERE condition_id = $1
         """
@@ -38,6 +43,7 @@ class PostgresMarketDataStore:
             resolves_at=row["resolves_at"],
             created_at=row["created_at"],
             last_seen_at=row["last_seen_at"],
+            volume_24h=row["volume_24h"],
         )
 
     async def read_tokens_for_market(self, market_id: str) -> list[Token]:
@@ -58,6 +64,106 @@ class PostgresMarketDataStore:
             for row in rows
         ]
 
+    async def read_eligible_markets(
+        self,
+        venue: str,
+        max_horizon_days: int | None,
+        min_volume_usdc: float,
+    ) -> list[tuple[Market, list[Token]]]:
+        now = datetime.now(tz=UTC)
+        upper_bound = (
+            None
+            if max_horizon_days is None
+            else now + timedelta(days=max_horizon_days)
+        )
+        query = """
+        SELECT
+            markets.condition_id,
+            markets.slug,
+            markets.question,
+            markets.venue,
+            markets.resolves_at,
+            markets.created_at,
+            markets.last_seen_at,
+            markets.volume_24h,
+            tokens.token_id,
+            tokens.outcome
+        FROM markets
+        LEFT JOIN tokens
+            ON tokens.condition_id = markets.condition_id
+        WHERE markets.venue = $1
+          AND (
+                $4::double precision <= 0
+                OR (
+                    markets.volume_24h IS NOT NULL
+                    AND markets.volume_24h >= $4
+                )
+          )
+          AND (
+                (
+                    $3::timestamptz IS NULL
+                    AND (
+                        markets.resolves_at IS NULL
+                        OR markets.resolves_at > $2
+                    )
+                )
+                OR (
+                    $3::timestamptz IS NOT NULL
+                    AND markets.resolves_at IS NOT NULL
+                    AND markets.resolves_at > $2
+                    AND markets.resolves_at <= $3
+                )
+          )
+        ORDER BY
+            markets.condition_id ASC,
+            CASE tokens.outcome WHEN 'YES' THEN 0 WHEN 'NO' THEN 1 ELSE 2 END,
+            tokens.token_id ASC
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query, venue, now, upper_bound, min_volume_usdc)
+
+        eligible_markets: list[tuple[Market, list[Token]]] = []
+        current_market_id: str | None = None
+        current_tokens: list[Token] | None = None
+
+        for row in rows:
+            market_id = cast(str, row["condition_id"])
+            if market_id != current_market_id:
+                current_market_id = market_id
+                current_tokens = []
+                eligible_markets.append(
+                    (
+                        Market(
+                            condition_id=market_id,
+                            slug=cast(str, row["slug"]),
+                            question=cast(str, row["question"]),
+                            venue=cast(Venue, row["venue"]),
+                            resolves_at=cast(datetime | None, row["resolves_at"]),
+                            created_at=cast(datetime, row["created_at"]),
+                            last_seen_at=cast(datetime, row["last_seen_at"]),
+                            volume_24h=cast(float | None, row["volume_24h"]),
+                        ),
+                        current_tokens,
+                    )
+                )
+
+            token_id = row["token_id"]
+            outcome = row["outcome"]
+            if (
+                current_tokens is not None
+                and token_id is not None
+                and outcome is not None
+            ):
+                current_tokens.append(
+                    Token(
+                        token_id=cast(str, token_id),
+                        condition_id=market_id,
+                        outcome=cast(Outcome, outcome),
+                    )
+                )
+
+        return eligible_markets
+
     async def write_market(self, market: Market) -> None:
         query = """
         INSERT INTO markets (
@@ -67,14 +173,16 @@ class PostgresMarketDataStore:
             venue,
             resolves_at,
             created_at,
-            last_seen_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            last_seen_at,
+            volume_24h
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (condition_id) DO UPDATE
         SET slug = EXCLUDED.slug,
             question = EXCLUDED.question,
             venue = EXCLUDED.venue,
             resolves_at = EXCLUDED.resolves_at,
-            last_seen_at = EXCLUDED.last_seen_at
+            last_seen_at = EXCLUDED.last_seen_at,
+            volume_24h = EXCLUDED.volume_24h
         """
         async with self._pool.acquire() as connection:
             await connection.execute(
@@ -86,6 +194,7 @@ class PostgresMarketDataStore:
                 market.resolves_at,
                 market.created_at,
                 market.last_seen_at,
+                market.volume_24h,
             )
 
     async def write_token(self, token: Token) -> None:

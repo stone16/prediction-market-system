@@ -267,6 +267,36 @@ async def test_list_strategies_and_versions_return_utc_projection_rows() -> None
     assert versions[0].created_at == created_at.astimezone(UTC)
 
 
+@pytest.mark.asyncio
+async def test_list_market_selections_returns_projection_rows_for_active_versions() -> None:
+    active_strategy = _strategy("alpha", owner="system", drawdown_pct=2.5)
+    active_version_id = compute_strategy_version_id(*active_strategy.snapshot())
+    connection = FakeConnection(
+        fetch_results=[
+            [
+                {
+                    "strategy_id": "alpha",
+                    "strategy_version_id": active_version_id,
+                    "config_json": serialize_strategy_config_json(*active_strategy.snapshot()),
+                }
+            ]
+        ]
+    )
+    registry = PostgresStrategyRegistry(FakePool(connection))
+
+    selections = await registry.list_market_selections()
+
+    assert selections == [
+        (
+            "alpha",
+            active_version_id,
+            active_strategy.market_selection,
+        )
+    ]
+    assert len(connection.fetch_calls) == 1
+    assert "active_version_id IS NOT NULL" in connection.fetch_calls[0][0]
+
+
 def test_ensure_utc_rejects_non_datetime_values() -> None:
     with pytest.raises(TypeError, match="expected datetime"):
         _ensure_utc("2026-04-17")

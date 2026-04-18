@@ -37,6 +37,12 @@ class ConfigUpdate(BaseModel):
     mode: RunMode
 
 
+class SubscriptionStateResponse(BaseModel):
+    asset_ids: list[str]
+    count: int
+    last_updated_at: str | None
+
+
 def create_app(
     runner: Runner | None = None,
     *,
@@ -163,6 +169,29 @@ def create_app(
             cast(dict[str, Any], _jsonable(item))
             for item in await list_feedback_items(active_runner.feedback_store, resolved=resolved)
         ]
+
+    @app.get("/subscriptions")
+    async def subscriptions() -> dict[str, Any]:
+        subscription_controller = active_runner.subscription_controller
+        if (
+            active_runner.state.runner_started_at is None
+            or active_runner.state.mode == RunMode.BACKTEST
+            or subscription_controller is None
+        ):
+            response = SubscriptionStateResponse(
+                asset_ids=[],
+                count=0,
+                last_updated_at=None,
+            )
+            return response.model_dump(mode="json")
+
+        asset_ids = sorted(subscription_controller.current_asset_ids)
+        response = SubscriptionStateResponse(
+            asset_ids=asset_ids,
+            count=len(asset_ids),
+            last_updated_at=_jsonable(subscription_controller.last_updated_at),
+        )
+        return response.model_dump(mode="json")
 
     @app.get("/strategies")
     async def strategies() -> dict[str, Any]:
