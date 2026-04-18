@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, Awaitable, Protocol, TypeVar, cast, runtime_checkable
 
 import asyncpg
 import httpx
@@ -33,6 +34,11 @@ from pms.evaluation.spool import EvalSpool
 from pms.factors.catalog import ensure_factor_catalog
 from pms.factors.definitions import REGISTERED
 from pms.factors.service import FactorService
+from pms.market_selection import (
+    MarketSelector,
+    SensorSubscriptionController,
+    UnionMergePolicy,
+)
 from pms.sensor.adapters.historical import HistoricalSensor
 from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
@@ -50,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BACKTEST_FIXTURE = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
 RUNNER_STATE_LIMIT = 1000
+RESELECTION_INTERVAL_S = 300.0
 RAW_FACTOR_COMPOSITION_ROLES = frozenset(
     {
         "weighted",
@@ -68,6 +75,22 @@ T = TypeVar("T")
 @runtime_checkable
 class AsyncCloseable(Protocol):
     async def aclose(self) -> None: ...
+
+
+class DiscoveryPollCompleteSensor(Protocol):
+    on_poll_complete: Callable[[], Awaitable[None]] | None
+
+
+class SubscriptionManagedSensor(Protocol):
+    async def update_subscription(self, asset_ids: list[str]) -> None: ...
+
+
+class MarketSelectorLike(Protocol):
+    async def select(self) -> Any: ...
+
+
+class SubscriptionControllerLike(Protocol):
+    async def update(self, asset_ids: list[str]) -> bool: ...
 
 
 @dataclass
@@ -109,6 +132,14 @@ class Runner:
     _task: asyncio.Task[None] | None = field(init=False, default=None)
     _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
     _owns_pg_pool: bool = field(init=False, default=False)
+    _market_selector: MarketSelectorLike | None = field(init=False, default=None)
+    _subscription_controller: SubscriptionControllerLike | None = field(
+        init=False,
+        default=None,
+    )
+    _reselection_task: asyncio.Task[None] | None = field(init=False, default=None)
+    _reselection_lock: asyncio.Lock = field(init=False)
+    _reselection_requested: asyncio.Event = field(init=False)
     _active_sensors: tuple[ISensor, ...] = field(init=False, default=())
     _paper_orderbooks: dict[str, dict[str, Any]] = field(
         init=False, default_factory=dict
@@ -120,6 +151,8 @@ class Runner:
         self._evaluator_spool = EvalSpool(store=self.eval_store, scorer=Scorer())
         self._decision_queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
+        self._reselection_lock = asyncio.Lock()
+        self._reselection_requested = asyncio.Event()
         self.actuator_executor = self._build_executor(self.config.mode)
 
     @property
@@ -187,6 +220,8 @@ class Runner:
             tasks.append(self._controller_task)
         if self._actuator_task is not None:
             tasks.append(self._actuator_task)
+        if self._reselection_task is not None:
+            tasks.append(self._reselection_task)
         if self.evaluator_task is not None:
             tasks.append(self.evaluator_task)
         return tuple(tasks)
@@ -221,6 +256,7 @@ class Runner:
                 )
                 self._factor_service_task = asyncio.create_task(self._factor_service.run())
             self._active_sensors = self._build_sensors()
+            self._wire_active_perception(self._active_sensors)
             await self.sensor_stream.start(self._active_sensors)
             await self._evaluator_spool.start()
             self._controller_task = asyncio.create_task(self._controller_loop())
@@ -236,6 +272,11 @@ class Runner:
         factor_task = self._factor_service_task
         if factor_task is not None and not factor_task.done():
             factor_task.cancel()
+        reselection_task = self._reselection_task
+        self._reselection_requested.set()
+        self._clear_discovery_poll_complete_hook()
+        if reselection_task is not None and not reselection_task.done():
+            reselection_task.cancel()
 
         try:
             await self.sensor_stream.stop()
@@ -275,10 +316,19 @@ class Runner:
             if error is None:
                 error = exc
 
+        try:
+            await self._await_cancelled_task(reselection_task)
+        except BaseException as exc:  # pragma: no cover - defensive
+            if error is None:
+                error = exc
+
         self._factor_service = None
         self._factor_service_task = None
         self._controller_task = None
         self._actuator_task = None
+        self._market_selector = None
+        self._subscription_controller = None
+        self._reselection_task = None
 
         try:
             await self._close_pg_pool()
@@ -347,6 +397,32 @@ class Runner:
             ),
             market_data_sensor,
         )
+
+    def _wire_active_perception(self, sensors: tuple[ISensor, ...]) -> None:
+        self._clear_discovery_poll_complete_hook()
+        self._market_selector = None
+        self._subscription_controller = None
+        self._reselection_task = None
+        self._reselection_requested.clear()
+        if self.config.mode == RunMode.BACKTEST:
+            return
+        if self._pg_pool is None:
+            msg = "Runner PostgreSQL pool is not initialized"
+            raise RuntimeError(msg)
+
+        discovery_sensor = _find_discovery_sensor(sensors)
+        subscription_sink = _find_subscription_sink(sensors)
+        if discovery_sensor is None or subscription_sink is None:
+            return
+
+        self._market_selector = MarketSelector(
+            self._pg_pool,
+            PostgresStrategyRegistry(self._pg_pool),
+            UnionMergePolicy(),
+        )
+        self._subscription_controller = SensorSubscriptionController(subscription_sink)
+        discovery_sensor.on_poll_complete = self._request_reselection
+        self._reselection_task = asyncio.create_task(self._periodic_reselection_loop())
 
     def _assert_no_legacy_jsonl_paths(self) -> None:
         for store in (self.eval_store, self.feedback_store):
@@ -499,6 +575,7 @@ class Runner:
         )
 
     async def _close_active_sensors(self) -> None:
+        self._clear_discovery_poll_complete_hook()
         for sensor in self._active_sensors:
             if isinstance(sensor, AsyncCloseable):
                 await sensor.aclose()
@@ -511,11 +588,27 @@ class Runner:
         stop_error: BaseException | None = None
         if self._factor_service_task is not None and not self._factor_service_task.done():
             self._factor_service_task.cancel()
+        reselection_task = self._reselection_task
+        self._reselection_requested.set()
+        self._clear_discovery_poll_complete_hook()
+        if reselection_task is not None and not reselection_task.done():
+            reselection_task.cancel()
         try:
-            if self._factor_service_task is not None:
-                await asyncio.gather(self._factor_service_task, return_exceptions=True)
+            await asyncio.gather(
+                *(
+                    task
+                    for task in (self._factor_service_task,)
+                    if task is not None
+                ),
+                return_exceptions=True,
+            )
         except BaseException as exc:  # pragma: no cover - defensive
             stop_error = exc
+        try:
+            await self._await_cancelled_task(reselection_task)
+        except BaseException as exc:  # pragma: no cover - defensive
+            if stop_error is None:
+                stop_error = exc
         try:
             await self.sensor_stream.stop()
         except BaseException as exc:  # pragma: no cover - defensive
@@ -538,10 +631,58 @@ class Runner:
         self._factor_service_task = None
         self._controller_task = None
         self._actuator_task = None
+        self._market_selector = None
+        self._subscription_controller = None
+        self._reselection_task = None
         await self._close_pg_pool()
 
         if stop_error is not None:
             raise stop_error
+
+    async def _reselect(self) -> None:
+        selector = self._market_selector
+        subscription_controller = self._subscription_controller
+        if selector is None or subscription_controller is None:
+            return
+        async with self._reselection_lock:
+            result = await selector.select()
+            await subscription_controller.update(list(result.asset_ids))
+
+    async def _periodic_reselection_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.wait_for(
+                    self._reselection_requested.wait(),
+                    timeout=RESELECTION_INTERVAL_S,
+                )
+                self._reselection_requested.clear()
+                if self._stop_event.is_set():
+                    return
+                await self._reselect()
+            except TimeoutError:
+                if self._stop_event.is_set():
+                    return
+                try:
+                    await self._reselect()
+                except Exception as error:  # noqa: BLE001
+                    logger.warning("periodic reselection failed: %s", error)
+
+    def _clear_discovery_poll_complete_hook(self) -> None:
+        discovery_sensor = _find_discovery_sensor(self._active_sensors)
+        if discovery_sensor is not None:
+            discovery_sensor.on_poll_complete = None
+
+    async def _request_reselection(self) -> None:
+        self._reselection_requested.set()
+
+    async def _await_cancelled_task(
+        self,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        if task is None:
+            return
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 def _append_bounded(items: list[T], item: T) -> None:
@@ -549,6 +690,25 @@ def _append_bounded(items: list[T], item: T) -> None:
     overflow = len(items) - RUNNER_STATE_LIMIT
     if overflow > 0:
         del items[:overflow]
+
+
+def _find_discovery_sensor(
+    sensors: Sequence[ISensor],
+) -> DiscoveryPollCompleteSensor | None:
+    for sensor in sensors:
+        if hasattr(sensor, "on_poll_complete"):
+            return cast(DiscoveryPollCompleteSensor, sensor)
+    return None
+
+
+def _find_subscription_sink(
+    sensors: Sequence[ISensor],
+) -> SubscriptionManagedSensor | None:
+    for sensor in sensors:
+        update_subscription = getattr(sensor, "update_subscription", None)
+        if callable(update_subscription):
+            return cast(SubscriptionManagedSensor, sensor)
+    return None
 
 
 def _fill_from_order(
