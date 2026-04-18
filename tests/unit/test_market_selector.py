@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from pms.core.models import Market, Token
+from pms.core.models import Market, Token, Venue
 from pms.strategies.projections import MarketSelectionSpec
 
 
@@ -23,7 +23,7 @@ def _load_symbol(module_name: str, symbol_name: str) -> Any:
 def _eligible_market(
     market_id: str,
     *,
-    venue: str = "polymarket",
+    venue: Venue = "polymarket",
     token_ids: tuple[str, ...] = ("yes", "no"),
 ) -> tuple[Market, list[Token]]:
     now = datetime(2026, 4, 18, 9, 0, tzinfo=UTC)
@@ -32,7 +32,7 @@ def _eligible_market(
             condition_id=market_id,
             slug=f"slug-{market_id}",
             question=f"Question {market_id}",
-            venue=venue,  # type: ignore[arg-type]
+            venue=venue,
             resolves_at=now + timedelta(days=3),
             created_at=now - timedelta(days=2),
             last_seen_at=now,
@@ -41,7 +41,7 @@ def _eligible_market(
             Token(
                 token_id=token_id,
                 condition_id=market_id,
-                outcome="YES" if index == 0 else "NO",  # type: ignore[arg-type]
+                outcome=("YES" if index == 0 else "NO"),
             )
             for index, token_id in enumerate(token_ids)
         ],
@@ -157,8 +157,20 @@ async def test_market_selector_builds_strategy_sets_before_merging(
         ) -> list[tuple[Market, list[Token]]]:
             self.calls.append((venue, max_horizon_days))
             if venue == "polymarket":
-                return [_eligible_market("market-a", venue=venue, token_ids=("pm-yes", "pm-no"))]
-            return [_eligible_market("market-b", venue=venue, token_ids=("ka-yes", "ka-no"))]
+                return [
+                    _eligible_market(
+                        "market-a",
+                        venue="polymarket",
+                        token_ids=("pm-yes", "pm-no"),
+                    )
+                ]
+            return [
+                _eligible_market(
+                    "market-b",
+                    venue="kalshi",
+                    token_ids=("ka-yes", "ka-no"),
+                )
+            ]
 
     class RecordingMergePolicy:
         def __init__(self) -> None:

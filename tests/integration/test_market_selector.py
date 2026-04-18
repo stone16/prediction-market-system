@@ -8,7 +8,7 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
-from pms.core.models import Market, Outcome, Token, Venue
+from pms.core.models import Market, Token, Venue
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
@@ -122,14 +122,14 @@ async def _seed_market(
         Token(
             token_id=f"{market_id}-yes",
             condition_id=market_id,
-            outcome=cast(Outcome, "YES"),
+            outcome="YES",
         )
     )
     await store.write_token(
         Token(
             token_id=f"{market_id}-no",
             condition_id=market_id,
-            outcome=cast(Outcome, "NO"),
+            outcome="NO",
         )
     )
 
@@ -164,31 +164,31 @@ async def test_market_selector_returns_merged_asset_ids_from_active_strategies(
     await _seed_market(
         store,
         market_id="pm-fast",
-        venue=cast(Venue, "polymarket"),
+        venue="polymarket",
         resolves_at=now + timedelta(days=5),
     )
     await _seed_market(
         store,
         market_id="pm-slow",
-        venue=cast(Venue, "polymarket"),
+        venue="polymarket",
         resolves_at=now + timedelta(days=45),
     )
     await _seed_market(
         store,
         market_id="pm-past",
-        venue=cast(Venue, "polymarket"),
+        venue="polymarket",
         resolves_at=now - timedelta(days=1),
     )
     await _seed_market(
         store,
         market_id="ka-near",
-        venue=cast(Venue, "kalshi"),
+        venue="kalshi",
         resolves_at=now + timedelta(days=4),
     )
     await _seed_market(
         store,
         market_id="ka-far",
-        venue=cast(Venue, "kalshi"),
+        venue="kalshi",
         resolves_at=now + timedelta(days=20),
     )
 

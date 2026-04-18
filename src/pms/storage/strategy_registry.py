@@ -172,6 +172,38 @@ class PostgresStrategyRegistry:
             for row in rows
         ]
 
+    async def list_market_selections(
+        self,
+    ) -> list[tuple[str, str, MarketSelectionSpec]]:
+        query = """
+        SELECT
+            strategies.strategy_id,
+            strategies.active_version_id AS strategy_version_id,
+            versions.config_json
+        FROM strategies
+        JOIN strategy_versions AS versions
+            ON versions.strategy_id = strategies.strategy_id
+           AND versions.strategy_version_id = strategies.active_version_id
+        WHERE strategies.active_version_id IS NOT NULL
+        ORDER BY strategies.strategy_id ASC
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query)
+        selections: list[tuple[str, str, MarketSelectionSpec]] = []
+        for row in rows:
+            strategy_version_id = row["strategy_version_id"]
+            if not isinstance(strategy_version_id, str):
+                msg = "strategies.active_version_id did not return a string"
+                raise TypeError(msg)
+            selections.append(
+                (
+                    _json_string(row["strategy_id"], "strategy_id"),
+                    strategy_version_id,
+                    _market_selection_from_config_json(row["config_json"]),
+                )
+            )
+        return selections
+
     async def set_active(
         self,
         strategy_id: str,
@@ -291,6 +323,25 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
                 market_selection_payload["volume_min_usdc"],
                 "market_selection.volume_min_usdc",
             ),
+        ),
+    )
+
+
+def _market_selection_from_config_json(raw_value: object) -> MarketSelectionSpec:
+    payload = _load_json_object(raw_value)
+    market_selection_payload = _json_object(
+        payload["market_selection"],
+        "market_selection",
+    )
+    return MarketSelectionSpec(
+        venue=_json_string(market_selection_payload["venue"], "market_selection.venue"),
+        resolution_time_max_horizon_days=_json_optional_int(
+            market_selection_payload["resolution_time_max_horizon_days"],
+            "market_selection.resolution_time_max_horizon_days",
+        ),
+        volume_min_usdc=_json_float(
+            market_selection_payload["volume_min_usdc"],
+            "market_selection.volume_min_usdc",
         ),
     )
 
