@@ -12,6 +12,17 @@ class _TestAsyncpgConnection:
         del query, args
         return "INSERT 0 1"
 
+    def transaction(self) -> "_TestAsyncpgTransactionContext":
+        return _TestAsyncpgTransactionContext()
+
+
+class _TestAsyncpgTransactionContext:
+    async def __aenter__(self) -> "_TestAsyncpgTransactionContext":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
 
 class _TestAsyncpgConnectionContext:
     def __init__(self, pool: "_TestAsyncpgPool") -> None:

@@ -88,6 +88,14 @@ def _runner(tmp_path: Path, **kwargs: Any) -> Runner:
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_factor_catalog_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _noop_ensure_factor_catalog(pool: object, *, factor_ids: object = None) -> None:
+        del pool, factor_ids
+
+    monkeypatch.setattr("pms.runner.ensure_factor_catalog", _noop_ensure_factor_catalog)
+
+
 def _signal() -> MarketSignal:
     return MarketSignal(
         market_id="runner-pool-market",

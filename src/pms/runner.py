@@ -31,6 +31,7 @@ from pms.core.models import (
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.spool import EvalSpool
 from pms.factors.defaults import DEFAULT_STRATEGY_COMPOSITION
+from pms.factors.catalog import ensure_factor_catalog
 from pms.factors.definitions import REGISTERED
 from pms.factors.service import FactorService
 from pms.sensor.adapters.historical import HistoricalSensor
@@ -205,6 +206,10 @@ class Runner:
             self._assert_no_legacy_jsonl_paths()
             if self._should_boot_postgres_runtime():
                 await self.ensure_pg_pool()
+                if self._pg_pool is None:
+                    msg = "Runner PostgreSQL pool is not initialized"
+                    raise RuntimeError(msg)
+                await ensure_factor_catalog(self._pg_pool)
                 await self._ensure_default_v2_version()
                 if self._pg_pool is None:
                     msg = "Runner PostgreSQL pool is not initialized"

@@ -9,7 +9,7 @@ import pytest
 
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode
-from pms.core.models import MarketSignal
+from pms.core.models import Market, MarketSignal
 from pms.runner import Runner
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
@@ -23,6 +23,7 @@ from pms.strategies.projections import (
 from pms.strategies.versioning import serialize_strategy_config_json
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 
 
@@ -202,12 +203,36 @@ async def _strategy_pairs(
     }
 
 
+async def _seed_market_shells(
+    pg_pool: asyncpg.Pool,
+    *,
+    market_ids: tuple[str, ...],
+) -> None:
+    store = PostgresMarketDataStore(pg_pool)
+    for market_id in market_ids:
+        await store.write_market(
+            Market(
+                condition_id=market_id,
+                slug=market_id,
+                question=f"Will {market_id} persist runtime rows?",
+                venue="polymarket",
+                resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
+                created_at=datetime(2026, 4, 17, tzinfo=UTC),
+                last_seen_at=datetime(2026, 4, 17, tzinfo=UTC),
+            )
+        )
+
+
 @pytest.mark.asyncio(loop_scope="session")
 async def test_runner_tags_inner_ring_rows_with_default_strategy(
     pg_pool: asyncpg.Pool,
 ) -> None:
     active_version = await PostgresStrategyRegistry(pg_pool).create_version(
         _strategy(drawdown_pct=3.5)
+    )
+    await _seed_market_shells(
+        pg_pool,
+        market_ids=("paper-empty-book", "paper-with-depth"),
     )
 
     runner = Runner(
