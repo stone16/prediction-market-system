@@ -92,6 +92,12 @@ class MarketSelectorLike(Protocol):
 class SubscriptionControllerLike(Protocol):
     async def update(self, asset_ids: list[str]) -> bool: ...
 
+    @property
+    def current_asset_ids(self) -> frozenset[str]: ...
+
+    @property
+    def last_updated_at(self) -> datetime | None: ...
+
 
 @dataclass
 class RunnerState:
@@ -209,6 +215,13 @@ class Runner:
     @property
     def active_sensors(self) -> tuple[ISensor, ...]:
         return self._active_sensors
+
+    @property
+    def subscription_controller(self) -> SensorSubscriptionController | None:
+        controller = self._subscription_controller
+        if controller is None:
+            return None
+        return cast(SensorSubscriptionController, controller)
 
     @property
     def tasks(self) -> tuple[asyncio.Task[None], ...]:
