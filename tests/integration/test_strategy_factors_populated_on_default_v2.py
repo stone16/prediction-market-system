@@ -19,6 +19,7 @@ from pms.strategies.projections import (
     StrategyConfig,
 )
 from pms.strategies.versioning import serialize_strategy_config_json
+from tests.support.strategy_catalog import seed_factor_catalog
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
@@ -95,6 +96,10 @@ async def _seed_default_v1(connection: asyncpg.Connection) -> None:
     strategy = _default_v1_strategy()
     async with connection.transaction():
         await connection.execute("SET CONSTRAINTS ALL DEFERRED")
+        await seed_factor_catalog(
+            connection,
+            factor_ids=tuple(sorted(_raw_factor_ids())),
+        )
         await connection.execute(
             """
             INSERT INTO strategies (strategy_id, active_version_id)

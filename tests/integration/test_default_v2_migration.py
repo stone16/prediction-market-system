@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import os
+from typing import cast
 
 import asyncpg
 import pytest
@@ -24,6 +25,7 @@ from pms.strategies.versioning import (
     compute_strategy_version_id,
     serialize_strategy_config_json,
 )
+from tests.support.strategy_catalog import seed_factor_catalog
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
@@ -100,6 +102,16 @@ async def _seed_default_v1(connection: asyncpg.Connection) -> None:
     strategy = _default_v1_strategy()
     async with connection.transaction():
         await connection.execute("SET CONSTRAINTS ALL DEFERRED")
+        await seed_factor_catalog(
+            connection,
+            factor_ids=(
+                "fair_value_spread",
+                "subset_pricing_violation",
+                "metaculus_prior",
+                "yes_count",
+                "no_count",
+            ),
+        )
         await connection.execute(
             """
             INSERT INTO strategies (strategy_id, active_version_id)
@@ -144,7 +156,10 @@ async def _expected_default_v2_version_id(pg_pool: asyncpg.Pool) -> str:
     migrated = Strategy(
         config=replace(
             strategy.config,
-            factor_composition=DEFAULT_STRATEGY_COMPOSITION,
+            factor_composition=cast(
+                tuple[FactorCompositionStep, ...],
+                DEFAULT_STRATEGY_COMPOSITION,
+            ),
         ),
         risk=strategy.risk,
         eval_spec=strategy.eval_spec,

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import asyncpg
@@ -171,12 +172,61 @@ class PostgresStrategyRegistry:
             for row in rows
         ]
 
+    async def set_active(
+        self,
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> None:
+        query = """
+        UPDATE strategies
+        SET active_version_id = $2
+        WHERE strategy_id = $1
+        """
+        async with self._pool.acquire() as connection:
+            await connection.execute(query, strategy_id, strategy_version_id)
+
+    async def populate_strategy_factors(
+        self,
+        strategy_id: str,
+        strategy_version_id: str,
+        steps: Sequence[FactorCompositionStep],
+    ) -> None:
+        query = """
+        INSERT INTO strategy_factors (
+            strategy_id,
+            strategy_version_id,
+            factor_id,
+            param,
+            weight,
+            direction
+        ) VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+        ON CONFLICT (strategy_id, strategy_version_id, factor_id) DO NOTHING
+        """
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                for step in steps:
+                    await connection.execute(
+                        query,
+                        strategy_id,
+                        strategy_version_id,
+                        step.factor_id,
+                        _strategy_factor_param_json(step.param),
+                        step.weight,
+                        "long",
+                    )
+
 
 def _ensure_utc(value: object) -> datetime:
     if not isinstance(value, datetime):
         msg = f"expected datetime, got {type(value).__name__}"
         raise TypeError(msg)
     return value.astimezone(UTC)
+
+
+def _strategy_factor_param_json(param: str) -> str:
+    if param == "":
+        return "{}"
+    return json.dumps(param, separators=(",", ":"), ensure_ascii=True)
 
 
 def _strategy_from_config_json(raw_value: object) -> Strategy:

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, TypeVar, cast, runtime_checkable
 
 import asyncpg
 import httpx
@@ -30,6 +30,8 @@ from pms.core.models import (
 )
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.spool import EvalSpool
+from pms.factors.defaults import DEFAULT_STRATEGY_COMPOSITION
+from pms.factors.definitions import REGISTERED
 from pms.sensor.adapters.historical import HistoricalSensor
 from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
@@ -37,12 +39,30 @@ from pms.sensor.stream import SensorStream
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 from pms.storage.market_data_store import PostgresMarketDataStore
+from pms.storage.strategy_registry import PostgresStrategyRegistry
+from pms.strategies.aggregate import Strategy
+from pms.strategies.projections import FactorCompositionStep
 
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BACKTEST_FIXTURE = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
 RUNNER_STATE_LIMIT = 1000
+RAW_FACTOR_COMPOSITION_ROLES = frozenset(
+    {
+        "weighted",
+        "precedence_rank",
+        "threshold_edge",
+        "posterior_prior",
+        "posterior_success",
+        "posterior_failure",
+    }
+)
+REGISTERED_FACTOR_IDS = frozenset(factor_cls.factor_id for factor_cls in REGISTERED)
+DEFAULT_V2_FACTOR_COMPOSITION = cast(
+    tuple[FactorCompositionStep, ...],
+    DEFAULT_STRATEGY_COMPOSITION,
+)
 T = TypeVar("T")
 
 
@@ -174,6 +194,7 @@ class Runner:
 
         try:
             await self.ensure_pg_pool()
+            await self._ensure_default_v2_version()
             self._assert_no_legacy_jsonl_paths()
             self._active_sensors = self._build_sensors()
             await self.sensor_stream.start(self._active_sensors)
@@ -292,6 +313,36 @@ class Runner:
             if isinstance(getattr(store, "path", None), Path):
                 msg = "legacy JSONL path referenced"
                 raise RuntimeError(msg)
+
+    async def _ensure_default_v2_version(self) -> None:
+        if not self.config.auto_migrate_default_v2:
+            return
+        if self._pg_pool is None:
+            msg = "Runner PostgreSQL pool is not initialized"
+            raise RuntimeError(msg)
+
+        registry = PostgresStrategyRegistry(self._pg_pool)
+        strategy = await registry.get_by_id("default")
+        if strategy is None:
+            return
+
+        migrated_strategy = Strategy(
+            config=replace(
+                strategy.config,
+                factor_composition=DEFAULT_V2_FACTOR_COMPOSITION,
+            ),
+            risk=strategy.risk,
+            eval_spec=strategy.eval_spec,
+            forecaster=strategy.forecaster,
+            market_selection=strategy.market_selection,
+        )
+        version = await registry.create_version(migrated_strategy)
+        await registry.set_active("default", version.strategy_version_id)
+        await registry.populate_strategy_factors(
+            "default",
+            version.strategy_version_id,
+            _raw_factor_steps(migrated_strategy.config.factor_composition),
+        )
 
     def _bind_runtime_stores(self) -> None:
         if self._pg_pool is None:
@@ -520,3 +571,18 @@ def _resolved_outcome(signal: MarketSignal) -> float | None:
     if raw_outcome is not None:
         return min(max(float(raw_outcome), 0.0), 1.0)
     return None
+
+
+def _raw_factor_steps(
+    steps: Sequence[FactorCompositionStep],
+) -> tuple[FactorCompositionStep, ...]:
+    raw_steps: list[FactorCompositionStep] = []
+    for step in steps:
+        role = getattr(step, "role", None)
+        factor_id = getattr(step, "factor_id", None)
+        if role not in RAW_FACTOR_COMPOSITION_ROLES:
+            continue
+        if factor_id not in REGISTERED_FACTOR_IDS:
+            continue
+        raw_steps.append(step)
+    return tuple(raw_steps)

@@ -8,7 +8,7 @@ from pms.core.enums import MarketStatus
 from pms.core.models import MarketSignal
 from pms.controller.forecasters.statistical import StatisticalForecaster
 from pms.factors.base import EMPTY_OUTER_RING
-from pms.factors.composition import apply_composition
+from pms.factors.composition import apply_composition, evaluate_branch_probabilities
 from pms.factors.defaults import DEFAULT_STRATEGY_COMPOSITION
 from pms.factors.definitions import REGISTERED
 
@@ -29,7 +29,7 @@ def _signal() -> MarketSignal:
     )
 
 
-def test_statistical_composition_emulator_matches_today() -> None:
+def test_statistical_forecaster_is_neutral_while_default_v2_keeps_posterior_branch() -> None:
     signal = _signal()
     reference_probability = StatisticalForecaster().predict(signal)[0]
     factor_values: dict[tuple[str, str], float] = {
@@ -39,6 +39,12 @@ def test_statistical_composition_emulator_matches_today() -> None:
         row = factor_cls().compute(signal, EMPTY_OUTER_RING)
         if row is not None:
             factor_values[(row.factor_id, row.param)] = row.value
+    branch_probabilities = evaluate_branch_probabilities(
+        DEFAULT_STRATEGY_COMPOSITION,
+        factor_values,
+    )
     composed_probability = apply_composition(DEFAULT_STRATEGY_COMPOSITION, factor_values)
 
-    assert composed_probability == pytest.approx(reference_probability, abs=1e-9)
+    assert reference_probability == pytest.approx(signal.yes_price, abs=1e-9)
+    assert branch_probabilities["statistical"] == pytest.approx(11.0 / 30.0, abs=1e-9)
+    assert composed_probability == pytest.approx(11.0 / 30.0, abs=1e-9)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
@@ -44,37 +43,11 @@ class LLMForecaster:
             self.config = LLMSettings()
 
     def predict(self, signal: MarketSignal) -> LLMForecastResult | None:
-        config = self.config
-        if config is None:
-            msg = "LLMForecaster config is not initialized"
-            raise RuntimeError(msg)
-        if not config.enabled:
-            return None
-
-        api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            return None
-
-        client = self._client(api_key)
-        if client is None:
-            return None
-
-        response = client.messages.create(
-            model=config.model,
-            max_tokens=512,
-            temperature=0,
-            system=(
-                "Estimate the probability that the YES outcome resolves true. "
-                "Return only JSON with prob_estimate, confidence, and rationale."
-            ),
-            messages=[{"role": "user", "content": _prompt(signal)}],
-        )
-        payload = _parse_response(response)
         return LLMForecastResult(
-            prob_estimate=_clamp(_as_float(payload["prob_estimate"])),
-            confidence=_clamp(_as_float(payload["confidence"])),
-            rationale=str(payload["rationale"]),
-            model_id=config.model,
+            prob_estimate=signal.yes_price,
+            confidence=0.0,
+            rationale="pre-s5-neutral",
+            model_id="neutral",
         )
 
     async def forecast(self, signal: MarketSignal) -> float:
