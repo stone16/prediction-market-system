@@ -58,24 +58,25 @@ def build_default_v1_strategy() -> Strategy:
 
 async def seed_default_v1_strategy(connection: asyncpg.Connection) -> None:
     strategy = build_default_v1_strategy()
-    await connection.execute("SET CONSTRAINTS ALL DEFERRED")
-    await connection.execute(
-        """
-        INSERT INTO strategies (strategy_id, active_version_id)
-        VALUES ('default', 'default-v1')
-        """
-    )
-    await connection.execute(
-        """
-        INSERT INTO strategy_versions (
-            strategy_version_id,
-            strategy_id,
-            config_json
-        ) VALUES (
-            'default-v1',
-            'default',
-            $1::jsonb
+    async with connection.transaction():
+        await connection.execute("SET CONSTRAINTS ALL DEFERRED")
+        await connection.execute(
+            """
+            INSERT INTO strategies (strategy_id, active_version_id)
+            VALUES ('default', 'default-v1')
+            """
         )
-        """,
-        serialize_strategy_config_json(*strategy.snapshot()),
-    )
+        await connection.execute(
+            """
+            INSERT INTO strategy_versions (
+                strategy_version_id,
+                strategy_id,
+                config_json
+            ) VALUES (
+                'default-v1',
+                'default',
+                $1::jsonb
+            )
+            """,
+            serialize_strategy_config_json(*strategy.snapshot()),
+        )

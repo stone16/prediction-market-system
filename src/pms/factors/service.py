@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
+from datetime import datetime
 import logging
 
 import asyncpg
 
-from pms.core.models import MarketSignal
+from pms.core.models import Market, MarketSignal
 from pms.factors.base import FactorDefinition, FactorValueRow
 from pms.storage.market_data_store import PostgresMarketDataStore
 
@@ -24,6 +25,8 @@ async def persist_factor_value(pool: asyncpg.Pool, row: FactorValueRow) -> None:
         ts,
         value
     ) VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (factor_id, param, market_id, ts) DO UPDATE
+    SET value = EXCLUDED.value
     """
     async with pool.acquire() as connection:
         await connection.execute(
@@ -47,6 +50,10 @@ class FactorService:
     _signal_queue: asyncio.Queue[MarketSignal | None] = field(
         init=False,
         default_factory=asyncio.Queue,
+    )
+    _last_persisted_ts: dict[tuple[str, str, str], datetime] = field(
+        init=False,
+        default_factory=dict,
     )
     _stream_exhausted: bool = field(init=False, default=False)
 
@@ -80,11 +87,16 @@ class FactorService:
     async def compute_once(self, signals: list[MarketSignal]) -> int:
         persisted = 0
         for signal in signals:
+            await self._ensure_market_shell(signal)
             for factor_cls in self.factors:
                 row = factor_cls().compute(signal, self.store)
                 if row is None:
                     continue
+                dedupe_key = (row.factor_id, row.market_id, row.param)
+                if self._last_persisted_ts.get(dedupe_key) == row.ts:
+                    continue
                 await persist_factor_value(self.pool, row)
+                self._last_persisted_ts[dedupe_key] = row.ts
                 persisted += 1
         return persisted
 
@@ -103,6 +115,9 @@ class FactorService:
                 item = self._signal_queue.get_nowait()
             except asyncio.QueueEmpty:
                 return signals
+            # None is the terminal FIFO sentinel from _forward_signals().
+            # Producers must never enqueue more items after it, or they will
+            # be orphaned once the service marks the stream exhausted here.
             if item is None:
                 self._stream_exhausted = True
                 return signals
@@ -114,3 +129,18 @@ class FactorService:
         exception = stream_task.exception()
         if exception is not None:
             raise exception
+
+    async def _ensure_market_shell(self, signal: MarketSignal) -> None:
+        if await self.store.read_market(signal.market_id) is not None:
+            return
+        await self.store.write_market(
+            Market(
+                condition_id=signal.market_id,
+                slug=signal.market_id,
+                question=signal.title,
+                venue=signal.venue,
+                resolves_at=signal.resolves_at,
+                created_at=signal.timestamp,
+                last_seen_at=signal.timestamp,
+            )
+        )

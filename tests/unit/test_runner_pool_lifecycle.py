@@ -27,15 +27,40 @@ class FakePool:
 
     def __post_init__(self) -> None:
         self._release_acquires = asyncio.Event()
+        self._release_acquires.set()
 
     async def close(self) -> None:
         self.close_calls += 1
         self.closed = True
         self._release_acquires.set()
 
-    async def acquire(self) -> object:
-        await self._release_acquires.wait()
-        return object()
+    def acquire(self) -> "_FakeAcquireContext":
+        return _FakeAcquireContext(self)
+
+
+class _FakeAcquireContext:
+    def __init__(self, pool: FakePool) -> None:
+        self._pool = pool
+        self._connection = object()
+
+    async def _wait(self) -> object:
+        await self._pool._release_acquires.wait()
+        return self._connection
+
+    def __await__(self) -> Any:
+        return self._wait().__await__()
+
+    async def __aenter__(self) -> object:
+        return await self._wait()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: object,
+    ) -> bool:
+        del exc_type, exc, tb
+        return False
 
 
 class HoldingSensor:
@@ -94,6 +119,18 @@ def _stub_factor_catalog_sync(monkeypatch: pytest.MonkeyPatch) -> None:
         del pool, factor_ids
 
     monkeypatch.setattr("pms.runner.ensure_factor_catalog", _noop_ensure_factor_catalog)
+
+
+@pytest.fixture(autouse=True)
+def _stub_factor_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _NoopFactorService:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr("pms.runner.FactorService", _NoopFactorService)
 
 
 def _signal() -> MarketSignal:
@@ -257,7 +294,11 @@ async def test_runner_stop_completes_with_outstanding_pool_acquires(
     runner = _runner(tmp_path, sensors=[HoldingSensor()])
 
     await runner.start()
-    acquires = [asyncio.create_task(fake_pool.acquire()) for _ in range(3)]
+    fake_pool._release_acquires.clear()
+    async def _acquire() -> object:
+        return await fake_pool.acquire()
+
+    acquires = [asyncio.create_task(_acquire()) for _ in range(3)]
     await asyncio.wait_for(runner.stop(), timeout=5.0)
     await asyncio.wait_for(asyncio.gather(*acquires), timeout=5.0)
 
@@ -314,10 +355,13 @@ async def test_runner_start_rejects_legacy_jsonl_store_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_pool = FakePool()
+    create_pool_called = False
 
     async def fake_create_pool(*, dsn: str, min_size: int, max_size: int) -> FakePool:
-        return fake_pool
+        nonlocal create_pool_called
+        del dsn, min_size, max_size
+        create_pool_called = True
+        raise AssertionError("create_pool should not be called")
 
     monkeypatch.setattr("pms.runner.asyncpg.create_pool", fake_create_pool)
     runner = _runner(
@@ -329,5 +373,11 @@ async def test_runner_start_rejects_legacy_jsonl_store_paths(
     with pytest.raises(RuntimeError, match="legacy JSONL path referenced"):
         await runner.start()
 
-    assert fake_pool.closed is False
+    assert create_pool_called is False
     assert runner.pg_pool is None
+
+
+def test_backtest_runtime_ignores_auto_migrate_without_explicit_database() -> None:
+    runner = Runner(config=PMSSettings(mode=RunMode.BACKTEST, auto_migrate_default_v2=True))
+
+    assert runner._should_boot_postgres_runtime() is False

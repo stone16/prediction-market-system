@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from pms.core.models import MarketSignal
 from pms.factors.base import FactorDefinition, FactorValueRow, OuterRingReader
 
@@ -23,12 +25,12 @@ class SubsetPricingViolation(FactorDefinition):
         if raw_subset is None or raw_superset is None:
             return None
 
-        subset_price = float(raw_subset)
-        superset_price = float(raw_superset)
+        subset_price = Decimal(str(raw_subset))
+        superset_price = Decimal(str(raw_superset))
         return FactorValueRow(
             factor_id=self.factor_id,
             param="",
             market_id=signal.market_id,
             ts=signal.timestamp,
-            value=subset_price - superset_price,
+            value=float(subset_price - superset_price),
         )

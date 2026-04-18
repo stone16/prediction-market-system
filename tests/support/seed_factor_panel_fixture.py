@@ -24,8 +24,8 @@ class EmptySignalStream:
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[MarketSignal]:
-        for _ in ():
-            yield _signal(ts=datetime(2026, 4, 18, 12, 0, tzinfo=UTC), bids=[], asks=[])
+        return
+        yield  # pragma: no cover
 
 
 def _signal(

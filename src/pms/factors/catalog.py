@@ -53,7 +53,7 @@ FACTOR_CATALOG_ROWS: tuple[FactorCatalogEntry, ...] = (
         name="Metaculus Prior",
         description="Raw Metaculus probability from the external signal payload.",
         input_schema_hash="4f62fec15fd5abaf2ff76810596268d1e14b46d346ff6e9f38b259c370a3ed71",
-        output_type="scalar",
+        output_type="probability",
         direction="neutral",
         owner="system",
     ),

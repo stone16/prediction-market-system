@@ -143,6 +143,20 @@ async def test_schema_sql_applies_middle_ring_tables() -> None:
             """,
         )
         assert "idx_factor_values_factor_param_market_ts" in indexes_result.stdout.splitlines()
+        unique_index_result = _run_psql(
+            temp_database_url,
+            "-At",
+            "-F",
+            "|",
+            "-c",
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND indexname = 'idx_factor_values_factor_param_market_ts'
+            """,
+        )
+        assert "CREATE UNIQUE INDEX" in unique_index_result.stdout
 
         connection = await asyncpg.connect(temp_database_url)
         try:

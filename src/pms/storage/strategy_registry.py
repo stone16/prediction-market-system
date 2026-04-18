@@ -224,8 +224,6 @@ def _ensure_utc(value: object) -> datetime:
 
 
 def _strategy_factor_param_json(param: str) -> str:
-    if param == "":
-        return "{}"
     return json.dumps(param, separators=(",", ":"), ensure_ascii=True)
 
 

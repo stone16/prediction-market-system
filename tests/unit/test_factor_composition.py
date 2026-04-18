@@ -54,6 +54,31 @@ def test_apply_composition_supports_weighted_legacy_shape() -> None:
     assert result == pytest.approx(0.45)
 
 
+def test_apply_composition_renormalizes_present_weighted_inputs() -> None:
+    result = apply_composition(
+        (
+            _step("factor-a", role="weighted", weight=0.6),
+            _step("factor-b", role="weighted", weight=0.4),
+        ),
+        {
+            ("factor-a", ""): 0.25,
+        },
+    )
+
+    assert result == pytest.approx(0.25)
+
+
+def test_apply_composition_weighted_legacy_shape_raises_when_all_inputs_missing() -> None:
+    with pytest.raises(ValueError, match="weighted composition is missing all factor inputs"):
+        apply_composition(
+            (
+                _step("factor-a", role="weighted", weight=0.6),
+                _step("factor-b", role="weighted", weight=0.4),
+            ),
+            {},
+        )
+
+
 def test_apply_composition_matches_statistical_posterior_with_metaculus_prior() -> None:
     result = apply_composition(
         (

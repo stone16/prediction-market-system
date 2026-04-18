@@ -11,7 +11,7 @@ from pms.factors.base import EMPTY_OUTER_RING
 from pms.factors.definitions import MetaculusPrior, REGISTERED
 
 
-SCHEMA_PATH = Path("schema.sql")
+SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schema.sql"
 
 
 def _signal(*, metaculus_prob: float | None = None) -> MarketSignal:

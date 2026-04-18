@@ -35,6 +35,9 @@ class FactorSeriesResponse(BaseModel):
     points: list[FactorPointResponse]
 
 
+MAX_FACTOR_SERIES_LIMIT = 2000
+
+
 async def list_factor_catalog(pg_pool: asyncpg.Pool) -> dict[str, Any]:
     query = """
     SELECT factor_id, name, description, output_type, direction
@@ -67,18 +70,34 @@ async def list_factor_series(
     since: datetime | None = None,
     limit: int = 500,
 ) -> dict[str, Any]:
+    if limit <= 0:
+        msg = "limit must be positive"
+        raise ValueError(msg)
+    effective_limit = min(limit, MAX_FACTOR_SERIES_LIMIT)
     query = """
+    WITH limited AS (
+        SELECT factor_id, param, market_id, ts, value
+        FROM factor_values
+        WHERE factor_id = $1
+          AND param = $2
+          AND market_id = $3
+          AND ($4::timestamptz IS NULL OR ts >= $4)
+        ORDER BY ts DESC
+        LIMIT $5
+    )
     SELECT factor_id, param, market_id, ts, value
-    FROM factor_values
-    WHERE factor_id = $1
-      AND param = $2
-      AND market_id = $3
-      AND ($4::timestamptz IS NULL OR ts >= $4)
+    FROM limited
     ORDER BY ts ASC
-    LIMIT $5
     """
     async with pg_pool.acquire() as connection:
-        rows = await connection.fetch(query, factor_id, param, market_id, since, limit)
+        rows = await connection.fetch(
+            query,
+            factor_id,
+            param,
+            market_id,
+            since,
+            effective_limit,
+        )
     payload = FactorSeriesResponse(
         factor_id=factor_id,
         param=param,

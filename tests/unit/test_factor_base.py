@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
-from typing import get_type_hints
+from typing import Any, cast, get_type_hints
 
 import pytest
 
@@ -31,10 +31,10 @@ def _signal() -> MarketSignal:
 
 def test_factor_base_exports_expected_symbols() -> None:
     assert base.__all__ == (
+        "EMPTY_OUTER_RING",
         "FactorDefinition",
         "FactorValueRow",
         "OuterRingReader",
-        "EMPTY_OUTER_RING",
     )
     assert getattr(FactorDefinition.compute, "__isabstractmethod__", False)
     assert inspect.iscoroutinefunction(OuterRingReader.read_latest_book_snapshot)
@@ -51,9 +51,8 @@ def test_factor_value_row_is_frozen() -> None:
     mutable_row = row
 
     with pytest.raises(FrozenInstanceError):
-        cast_row = mutable_row
-        cast_any = cast_row  # keep the failing mutation runtime-visible for the test
-        setattr(cast_any, "value", 0.5)
+        cast_any = mutable_row  # keep the failing mutation runtime-visible for the test
+        cast(Any, cast_any).value = 0.5
 
 
 @pytest.mark.asyncio
