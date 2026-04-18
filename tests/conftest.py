@@ -12,6 +12,14 @@ class _TestAsyncpgConnection:
         del query, args
         return "INSERT 0 1"
 
+    async def fetchrow(self, query: str, *args: object) -> None:
+        del query, args
+        return None
+
+    async def fetchval(self, query: str, *args: object) -> None:
+        del query, args
+        return None
+
     def transaction(self) -> "_TestAsyncpgTransactionContext":
         return _TestAsyncpgTransactionContext()
 

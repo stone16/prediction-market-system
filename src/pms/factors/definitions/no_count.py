@@ -15,7 +15,10 @@ class NoCount(FactorDefinition):
     ) -> FactorValueRow | None:
         del outer_ring
 
-        raw_no_count = signal.external_signal.get("no_count", 0.0)
+        raw_no_count = signal.external_signal.get("no_count")
+        if raw_no_count is None:
+            return None
+
         return FactorValueRow(
             factor_id=self.factor_id,
             param="",

@@ -44,8 +44,7 @@ def test_no_count_returns_raw_value_when_present() -> None:
     assert row.value == pytest.approx(4.0)
 
 
-def test_no_count_defaults_to_zero_when_input_missing() -> None:
+def test_no_count_returns_none_when_input_missing() -> None:
     row = NoCount().compute(_signal(), EMPTY_OUTER_RING)
 
-    assert row is not None
-    assert row.value == 0.0
+    assert row is None

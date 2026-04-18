@@ -15,7 +15,10 @@ class YesCount(FactorDefinition):
     ) -> FactorValueRow | None:
         del outer_ring
 
-        raw_yes_count = signal.external_signal.get("yes_count", 0.0)
+        raw_yes_count = signal.external_signal.get("yes_count")
+        if raw_yes_count is None:
+            return None
+
         return FactorValueRow(
             factor_id=self.factor_id,
             param="",
