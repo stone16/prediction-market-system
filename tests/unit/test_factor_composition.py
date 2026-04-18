@@ -150,3 +150,73 @@ def test_apply_composition_blend_skips_missing_llm_branch() -> None:
     )
 
     assert result == pytest.approx((0.55 + (4.4 / 12.0)) / 2.0)
+
+
+def test_apply_composition_returns_runtime_probability_without_rules_or_posterior() -> None:
+    result = apply_composition(
+        (
+            _step("llm", role="runtime_probability", weight=1.0),
+        ),
+        {
+            ("llm", ""): 0.80,
+        },
+    )
+
+    assert result == pytest.approx(0.80)
+
+
+def test_apply_composition_falls_back_to_yes_price_when_blend_has_no_present_branches() -> None:
+    result = apply_composition(
+        (
+            _step("rules", role="blend_weighted", weight=1.0),
+            _step("llm", role="blend_weighted", weight=1.0),
+        ),
+        {
+            ("yes_price", ""): 0.41,
+        },
+    )
+
+    assert result == pytest.approx(0.41)
+
+
+def test_apply_composition_supports_generic_threshold_edge_steps() -> None:
+    result = apply_composition(
+        (
+            _step("generic_signal", role="threshold_edge", weight=1.0, threshold=0.02),
+        ),
+        {
+            ("generic_signal", ""): 0.07,
+        },
+    )
+
+    assert result == pytest.approx(0.07)
+
+
+def test_apply_composition_raises_when_required_rule_inputs_are_missing() -> None:
+    with pytest.raises(KeyError, match="missing required factor input 'yes_price':''"):
+        apply_composition(
+            (
+                _step("fair_value_spread", role="threshold_edge", weight=1.0, threshold=0.02),
+            ),
+            {
+                ("fair_value_spread", ""): 0.10,
+            },
+        )
+
+
+def test_apply_composition_raises_when_no_probability_can_be_resolved() -> None:
+    with pytest.raises(KeyError, match="composition could not resolve a probability"):
+        apply_composition((), {})
+
+
+def test_posterior_branch_can_fall_back_to_yes_price_when_total_is_zero() -> None:
+    result = apply_composition(
+        (
+            _step("metaculus_prior", role="posterior_prior", weight=0.0),
+        ),
+        {
+            ("yes_price", ""): 0.63,
+        },
+    )
+
+    assert result == pytest.approx(0.63)

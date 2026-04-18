@@ -30,13 +30,22 @@ def apply_composition(
     if weighted_steps and not non_weighted_steps:
         return _apply_weighted(weighted_steps, factor_values)
 
-    precedence_probability = _apply_threshold_precedence(composition, factor_values)
+    branch_probabilities = evaluate_branch_probabilities(composition, factor_values)
+    blended_probability = _apply_blend_weighted(composition, branch_probabilities)
+    if blended_probability is not None:
+        return blended_probability
+
+    precedence_probability = branch_probabilities.get("rules")
     if precedence_probability is not None:
         return precedence_probability
 
-    posterior_probability = _apply_posterior(composition, factor_values)
+    posterior_probability = branch_probabilities.get("statistical")
     if posterior_probability is not None:
         return posterior_probability
+
+    runtime_probability = _first_runtime_probability(composition, branch_probabilities)
+    if runtime_probability is not None:
+        return runtime_probability
 
     if weighted_steps:
         return _apply_weighted(weighted_steps, factor_values)
@@ -49,6 +58,30 @@ def apply_composition(
     raise KeyError(msg)
 
 
+def evaluate_branch_probabilities(
+    composition: Sequence[FactorCompositionStep],
+    factor_values: Mapping[tuple[str, str], float],
+) -> dict[str, float]:
+    branch_probabilities: dict[str, float] = {}
+
+    rules_probability = _apply_threshold_precedence(composition, factor_values)
+    if rules_probability is not None:
+        branch_probabilities["rules"] = rules_probability
+
+    posterior_probability = _apply_posterior(composition, factor_values)
+    if posterior_probability is not None:
+        branch_probabilities["statistical"] = posterior_probability
+
+    for step in composition:
+        if step.role != "runtime_probability":
+            continue
+        runtime_probability = factor_values.get((step.factor_id, step.param))
+        if runtime_probability is not None:
+            branch_probabilities[step.factor_id] = runtime_probability
+
+    return branch_probabilities
+
+
 def _apply_weighted(
     steps: tuple[FactorCompositionStep, ...],
     factor_values: Mapping[tuple[str, str], float],
@@ -57,6 +90,28 @@ def _apply_weighted(
         step.weight * factor_values.get((step.factor_id, step.param), 0.0)
         for step in steps
     )
+
+
+def _apply_blend_weighted(
+    composition: Sequence[FactorCompositionStep],
+    branch_probabilities: Mapping[str, float],
+) -> float | None:
+    blend_steps = tuple(step for step in composition if step.role == "blend_weighted")
+    if not blend_steps:
+        return None
+
+    total_weight = 0.0
+    weighted_probability = 0.0
+    for step in blend_steps:
+        branch_probability = branch_probabilities.get(step.factor_id)
+        if branch_probability is None:
+            continue
+        total_weight += step.weight
+        weighted_probability += step.weight * branch_probability
+
+    if total_weight == 0.0:
+        return None
+    return weighted_probability / total_weight
 
 
 def _apply_threshold_precedence(
@@ -91,6 +146,19 @@ def _apply_threshold_precedence(
             continue
         return edge
 
+    return None
+
+
+def _first_runtime_probability(
+    composition: Sequence[FactorCompositionStep],
+    branch_probabilities: Mapping[str, float],
+) -> float | None:
+    for step in composition:
+        if step.role != "runtime_probability":
+            continue
+        runtime_probability = branch_probabilities.get(step.factor_id)
+        if runtime_probability is not None:
+            return runtime_probability
     return None
 
 

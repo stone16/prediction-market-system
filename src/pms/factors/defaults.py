@@ -36,4 +36,8 @@ DEFAULT_STRATEGY_COMPOSITION: tuple[FactorCompositionStep, ...] = (
     _step("metaculus_prior", role="posterior_prior", weight=2.0),
     _step("yes_count", role="posterior_success", weight=1.0),
     _step("no_count", role="posterior_failure", weight=1.0),
+    _step("llm", role="runtime_probability", weight=1.0),
+    _step("rules", role="blend_weighted", weight=1.0),
+    _step("statistical", role="blend_weighted", weight=1.0),
+    _step("llm", role="blend_weighted", weight=1.0),
 )
