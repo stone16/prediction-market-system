@@ -13,8 +13,8 @@ Cybernetic trading platform — Sensor → Controller → Actuator →
 Evaluator, with active-perception feedback.
 
 **Stack:** Python 3.13 (asyncio), FastAPI + uvicorn, Next.js 16
-(Turbopack) dashboard on :3100, PostgreSQL (being introduced in S1),
-`uv` for Python deps.
+(Turbopack) dashboard on :3100, PostgreSQL (load-bearing since S1;
+outer + middle + inner rings all persisted), `uv` for Python deps.
 
 **Branches:** feature branches only (`feat/…`, `fix/…`, `docs/…`).
 Never commit to `main` directly; changes land via PR.
@@ -183,7 +183,8 @@ cd dashboard && npx playwright test
 - Never add `Co-Authored-By` lines.
 - Never describe runtime as a phased pipeline (violates Invariant 1).
 - Never import `pms.strategies.aggregate` from Sensor or Actuator
-  modules (violates Invariant 5 — once the module lands in S2).
+  modules (violates Invariant 5). Contract enforced by import-linter
+  rules landed in S2.
 - Never add `strategy_id` to outer-ring tables (`markets`, `tokens`,
   `book_*`, `price_changes`, `trades`) — violates Invariant 8.
 - Never bypass a promoted rule without first opening a new retro
