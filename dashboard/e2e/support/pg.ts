@@ -28,6 +28,12 @@ export function resetOuterRing() {
   `);
 }
 
+export function resetMiddleRing() {
+  executeSql(`
+    TRUNCATE TABLE factor_values RESTART IDENTITY CASCADE;
+  `);
+}
+
 export function resetInnerRing() {
   executeSql(`
     TRUNCATE TABLE feedback, eval_records RESTART IDENTITY CASCADE;

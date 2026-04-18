@@ -77,6 +77,33 @@ CREATE INDEX IF NOT EXISTS idx_trades_market_token_ts
 
 -- END OUTER RING
 
+-- BEGIN MIDDLE RING
+
+CREATE TABLE IF NOT EXISTS factors (
+    factor_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    input_schema_hash TEXT NOT NULL,
+    default_params JSONB NOT NULL DEFAULT '{}'::jsonb,
+    output_type TEXT NOT NULL CHECK (output_type IN ('scalar', 'probability')),
+    direction TEXT NOT NULL CHECK (direction IN ('long', 'short', 'neutral')),
+    owner TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS factor_values (
+    id BIGSERIAL PRIMARY KEY,
+    factor_id TEXT NOT NULL REFERENCES factors(factor_id) ON DELETE CASCADE,
+    param TEXT NOT NULL DEFAULT '',
+    market_id TEXT NOT NULL REFERENCES markets(condition_id) ON DELETE CASCADE,
+    ts TIMESTAMPTZ NOT NULL,
+    value DOUBLE PRECISION NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_factor_values_factor_param_market_ts
+    ON factor_values(factor_id, param, market_id, ts DESC);
+
+-- END MIDDLE RING
+
 -- strategies: inner-ring identity table (Invariants 3, 8)
 
 CREATE TABLE IF NOT EXISTS strategies (
@@ -114,7 +141,6 @@ $$;
 
 -- strategy_factors: link table (empty in S2; populated by S3). Columns declared so S3 inserts do not require a schema change (Invariants 2, 4, 8)
 -- Invariant 4: raw factor rows are stored in factor_values (S3); composite factors belong in StrategyConfig.factor_composition, not as first-class rows here.
--- S3 will add: FOREIGN KEY (factor_id) REFERENCES factors(factor_id)
 CREATE TABLE IF NOT EXISTS strategy_factors (
     strategy_id TEXT NOT NULL,
     strategy_version_id TEXT NOT NULL,
@@ -127,6 +153,22 @@ CREATE TABLE IF NOT EXISTS strategy_factors (
         REFERENCES strategy_versions(strategy_id, strategy_version_id)
         ON DELETE CASCADE
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'strategy_factors_factor_id_fkey'
+    ) THEN
+        ALTER TABLE strategy_factors
+            ADD CONSTRAINT strategy_factors_factor_id_fkey
+            FOREIGN KEY (factor_id)
+            REFERENCES factors(factor_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    END IF;
+END
+$$;
 
 -- BEGIN INNER-RING PRODUCT SHELLS
 
@@ -199,5 +241,119 @@ INSERT INTO strategy_versions (
     '{"config":{"factor_composition":[["factor-a",0.6],["factor-b",0.4]],"metadata":[["owner","system"],["tier","default"]],"strategy_id":"default"},"eval_spec":{"metrics":["brier","pnl","fill_rate"]},"forecaster":{"forecasters":[["rules",[["threshold","0.55"]]],["stats",[["window","15m"]]]]},"market_selection":{"resolution_time_max_horizon_days":7,"venue":"polymarket","volume_min_usdc":500.0},"risk":{"max_daily_drawdown_pct":2.5,"max_position_notional_usdc":100.0,"min_order_size_usdc":1.0}}'::jsonb
 )
 ON CONFLICT (strategy_version_id) DO NOTHING;
+
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'orderbook_imbalance',
+    'Orderbook Imbalance',
+    'Normalized bid-versus-ask depth imbalance from the current orderbook signal.',
+    '97e885bf8b2edd8ce9fff149334dbe1706358eb4fb8b8c51a4b42561878c5963',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'fair_value_spread',
+    'Fair Value Spread',
+    'Signed difference between external fair value and the current YES price.',
+    'adb923abb80bbd30efa4db61ba846660317f138ef12c3ae521891df2831d64f9',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'subset_pricing_violation',
+    'Subset Pricing Violation',
+    'Signed difference between subset and superset prices from external signals.',
+    'c9e66b836e6fe6a9981ee6419aa38acb39de607e84fb1ff643b46bb9ac446891',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'metaculus_prior',
+    'Metaculus Prior',
+    'Raw Metaculus probability from the external signal payload.',
+    '4f62fec15fd5abaf2ff76810596268d1e14b46d346ff6e9f38b259c370a3ed71',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'yes_count',
+    'Yes Count',
+    'Raw external yes_count observation count from the signal payload.',
+    'afbc921285acc81f1289beca8dd64114c18f49068a8904c651a887c5ba8c178f',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
+
+INSERT INTO factors (
+    factor_id,
+    name,
+    description,
+    input_schema_hash,
+    output_type,
+    direction,
+    owner
+) VALUES (
+    'no_count',
+    'No Count',
+    'Raw external no_count observation count from the signal payload.',
+    '2871d6bf945e3ed4407b8b1f1beeb484cd8bd455a156e939094fbcc6a455c317',
+    'scalar',
+    'neutral',
+    'system'
+)
+ON CONFLICT (factor_id) DO NOTHING;
 
 COMMIT;

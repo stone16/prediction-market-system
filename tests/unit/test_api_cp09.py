@@ -30,6 +30,7 @@ FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
 def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.BACKTEST,
+        auto_migrate_default_v2=False,
         risk=RiskSettings(
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
@@ -195,6 +196,7 @@ async def test_api_run_start_stop_cycle(tmp_path: Path) -> None:
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.BACKTEST,
+            auto_migrate_default_v2=False,
             risk=RiskSettings(
                 max_position_per_market=1000.0,
                 max_total_exposure=10_000.0,
@@ -238,6 +240,7 @@ async def test_api_auto_start_lifespan(tmp_path: Path) -> None:
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.BACKTEST,
+            auto_migrate_default_v2=False,
             risk=RiskSettings(
                 max_position_per_market=1000.0,
                 max_total_exposure=10_000.0,
@@ -259,7 +262,7 @@ async def test_api_auto_start_lifespan(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_api_auto_start_disabled_keeps_runner_idle(tmp_path: Path) -> None:
     runner = Runner(
-        config=PMSSettings(mode=RunMode.BACKTEST),
+        config=PMSSettings(mode=RunMode.BACKTEST, auto_migrate_default_v2=False),
         historical_data_path=FIXTURE_PATH,
         eval_store=cast(EvalStore, InMemoryEvalStore()),
         feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
@@ -276,6 +279,7 @@ async def test_api_lifespan_stops_runner_started_via_api(tmp_path: Path) -> None
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.BACKTEST,
+            auto_migrate_default_v2=False,
             risk=RiskSettings(
                 max_position_per_market=1000.0,
                 max_total_exposure=10_000.0,

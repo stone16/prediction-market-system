@@ -22,6 +22,7 @@ from pms.storage.strategy_registry import (
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
     EvalSpec,
+    FactorCompositionStep,
     ForecasterSpec,
     MarketSelectionSpec,
     RiskParams,
@@ -113,7 +114,22 @@ def _strategy(
     return Strategy(
         config=StrategyConfig(
             strategy_id=strategy_id,
-            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            factor_composition=(
+                FactorCompositionStep(
+                    factor_id="factor-a",
+                    role="weighted",
+                    param="",
+                    weight=0.6,
+                    threshold=None,
+                ),
+                FactorCompositionStep(
+                    factor_id="factor-b",
+                    role="weighted",
+                    param="",
+                    weight=0.4,
+                    threshold=None,
+                ),
+            ),
             metadata=(("owner", owner), ("tier", "default")),
         ),
         risk=RiskParams(
@@ -308,9 +324,9 @@ def test_json_optional_int_and_float_validate_types() -> None:
 def test_strategy_from_config_json_validates_nested_fields() -> None:
     strategy = _strategy()
     payload = json.loads(serialize_strategy_config_json(*strategy.snapshot()))
-    payload["config"]["factor_composition"] = [["factor-a", 0.6], ["factor-b"]]
+    payload["config"]["factor_composition"] = [{"factor_id": "factor-a"}]
 
-    with pytest.raises(TypeError, match="JSON array pair"):
+    with pytest.raises(TypeError, match="config.factor_composition.step.role"):
         _strategy_from_config_json(payload)
 
     payload = json.loads(serialize_strategy_config_json(*strategy.snapshot()))

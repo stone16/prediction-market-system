@@ -80,6 +80,8 @@ class PMSSettings(BaseSettings):
 
     mode: RunMode = RunMode.BACKTEST
     live_trading_enabled: bool = False
+    auto_migrate_default_v2: bool = True
+    factor_cadence_s: float = 1.0
     polymarket: PolymarketSettings = Field(default_factory=PolymarketSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)

@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type {
   Decision,
+  FactorCatalogEntry,
+  FactorCatalogResponse,
+  FactorSeriesResponse,
   Feedback,
   MetricsResponse,
   Signal,
@@ -82,6 +85,74 @@ export function mockStrategies(): StrategiesResponse {
         created_at: '2026-04-14T00:00:00+00:00'
       }
     ]
+  };
+}
+
+const mockFactorCatalog: FactorCatalogEntry[] = [
+  {
+    factor_id: 'fair_value_spread',
+    name: 'Fair Value Spread',
+    description: 'Signed difference between external fair value and the current YES price.',
+    output_type: 'scalar',
+    direction: 'neutral'
+  },
+  {
+    factor_id: 'metaculus_prior',
+    name: 'Metaculus Prior',
+    description: 'Raw Metaculus probability from the external signal payload.',
+    output_type: 'scalar',
+    direction: 'neutral'
+  },
+  {
+    factor_id: 'orderbook_imbalance',
+    name: 'Orderbook Imbalance',
+    description: 'Normalized bid-versus-ask depth imbalance from the current orderbook signal.',
+    output_type: 'scalar',
+    direction: 'neutral'
+  }
+];
+
+const mockFactorSeriesIndex: Record<string, FactorSeriesResponse['points']> = {
+  'orderbook_imbalance::factor-depth::': [
+    { ts: '2026-04-18T09:00:00+00:00', value: 0.3333 },
+    { ts: '2026-04-18T09:01:00+00:00', value: 0.25 },
+    { ts: '2026-04-18T09:02:00+00:00', value: 0.1667 },
+    { ts: '2026-04-18T09:03:00+00:00', value: 0.1 }
+  ],
+  'metaculus_prior::factor-depth::': [
+    { ts: '2026-04-18T09:00:00+00:00', value: 0.62 },
+    { ts: '2026-04-18T09:03:00+00:00', value: 0.64 }
+  ]
+};
+
+export function mockFactorsCatalog(): FactorCatalogResponse {
+  return { catalog: mockFactorCatalog };
+}
+
+export function mockFactorSeries({
+  factorId,
+  marketId,
+  param,
+  since,
+  limit
+}: {
+  factorId: string;
+  marketId: string;
+  param?: string;
+  since?: string | null;
+  limit?: number;
+}): FactorSeriesResponse {
+  const normalizedParam = param ?? '';
+  const key = `${factorId}::${marketId}::${normalizedParam}`;
+  const fallbackKey = `${factorId}::factor-depth::${normalizedParam}`;
+  const points = (mockFactorSeriesIndex[key] ?? mockFactorSeriesIndex[fallbackKey] ?? []).filter(
+    (point) => !since || point.ts >= since
+  );
+  return {
+    factor_id: factorId,
+    param: normalizedParam,
+    market_id: marketId,
+    points: points.slice(0, limit ?? 500)
   };
 }
 

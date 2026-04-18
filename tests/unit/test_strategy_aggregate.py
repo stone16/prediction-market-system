@@ -17,6 +17,7 @@ def _load_symbol(module_name: str, symbol_name: str) -> Any:
 
 
 def _build_projections() -> dict[str, Any]:
+    factor_composition_step = _load_symbol("pms.strategies.projections", "FactorCompositionStep")
     strategy_config = _load_symbol("pms.strategies.projections", "StrategyConfig")
     risk_params = _load_symbol("pms.strategies.projections", "RiskParams")
     eval_spec = _load_symbol("pms.strategies.projections", "EvalSpec")
@@ -29,7 +30,15 @@ def _build_projections() -> dict[str, Any]:
     return {
         "config": strategy_config(
             strategy_id="default",
-            factor_composition=(("factor-a", 1.0),),
+            factor_composition=(
+                factor_composition_step(
+                    factor_id="factor-a",
+                    role="weighted",
+                    param="",
+                    weight=1.0,
+                    threshold=None,
+                ),
+            ),
             metadata=(("owner", "system"),),
         ),
         "risk": risk_params(

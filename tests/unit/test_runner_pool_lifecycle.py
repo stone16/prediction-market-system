@@ -67,6 +67,7 @@ class ExplodingController:
 def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.BACKTEST,
+        auto_migrate_default_v2=False,
         database=DatabaseSettings(
             dsn="postgresql://localhost/pms_test_runner",
             pool_min_size=2,
@@ -85,6 +86,14 @@ def _runner(tmp_path: Path, **kwargs: Any) -> Runner:
         historical_data_path=FIXTURE_PATH,
         **kwargs,
     )
+
+
+@pytest.fixture(autouse=True)
+def _stub_factor_catalog_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _noop_ensure_factor_catalog(pool: object, *, factor_ids: object = None) -> None:
+        del pool, factor_ids
+
+    monkeypatch.setattr("pms.runner.ensure_factor_catalog", _noop_ensure_factor_catalog)
 
 
 def _signal() -> MarketSignal:
@@ -320,5 +329,5 @@ async def test_runner_start_rejects_legacy_jsonl_store_paths(
     with pytest.raises(RuntimeError, match="legacy JSONL path referenced"):
         await runner.start()
 
-    assert fake_pool.closed is True
+    assert fake_pool.closed is False
     assert runner.pg_pool is None

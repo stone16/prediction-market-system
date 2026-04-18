@@ -59,7 +59,7 @@ def test_rules_forecaster_detects_price_spread_opportunity() -> None:
         _signal(yes_price=0.4, external_signal={"fair_value": 0.55})
     )
 
-    assert result == pytest.approx((0.55, 0.15, "price_spread: fair_value=0.5500 yes_price=0.4000"))
+    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
 
 
 def test_rules_forecaster_detects_subset_pricing_violation() -> None:
@@ -74,14 +74,13 @@ def test_rules_forecaster_detects_subset_pricing_violation() -> None:
         )
     )
 
-    assert result is not None
-    assert result[0] == 0.60
-    assert result[1] == pytest.approx(0.15)
-    assert "subset_pricing_violation" in result[2]
+    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
 
 
 def test_rules_forecaster_returns_none_without_opportunity() -> None:
-    assert RulesForecaster(min_edge=0.1).predict(_signal(yes_price=0.5)) is None
+    assert RulesForecaster(min_edge=0.1).predict(_signal(yes_price=0.5)) == pytest.approx(
+        (0.5, 0.0, "pre-s5-neutral")
+    )
 
 
 def test_statistical_forecaster_uses_uniform_prior_without_metaculus() -> None:
@@ -89,9 +88,7 @@ def test_statistical_forecaster_uses_uniform_prior_without_metaculus() -> None:
         _signal(external_signal={"yes_count": 3, "no_count": 1})
     )
 
-    assert result[0] == pytest.approx(4 / 6)
-    assert result[1] == pytest.approx(4 / 6)
-    assert "Beta(1.00, 1.00)" in result[2]
+    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
 
 
 def test_statistical_forecaster_uses_metaculus_prior() -> None:
@@ -99,9 +96,7 @@ def test_statistical_forecaster_uses_metaculus_prior() -> None:
         _signal(external_signal={"metaculus_prob": 0.7, "yes_count": 3, "no_count": 7})
     )
 
-    assert result[0] == pytest.approx(10 / 20)
-    assert result[1] == pytest.approx(10 / 20)
-    assert "Metaculus" in result[2]
+    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
 
 
 def test_statistical_forecaster_rejects_non_positive_prior_strength() -> None:

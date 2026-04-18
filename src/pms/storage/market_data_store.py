@@ -226,6 +226,27 @@ class PostgresMarketDataStore:
             source=row["source"],
         )
 
+    async def read_latest_book_snapshot(self, market_id: str) -> BookSnapshot | None:
+        query = """
+        SELECT id, market_id, token_id, ts, hash, source
+        FROM book_snapshots
+        WHERE market_id = $1
+        ORDER BY ts DESC, id DESC
+        LIMIT 1
+        """
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(query, market_id)
+        if row is None:
+            return None
+        return BookSnapshot(
+            id=row["id"],
+            market_id=row["market_id"],
+            token_id=row["token_id"],
+            ts=row["ts"],
+            hash=row["hash"],
+            source=row["source"],
+        )
+
     async def read_levels_for_snapshot(self, snapshot_id: int) -> list[BookLevel]:
         query = """
         SELECT snapshot_id, market_id, side, price, size

@@ -9,11 +9,12 @@ import pytest
 
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode
-from pms.core.models import MarketSignal
+from pms.core.models import Market, MarketSignal
 from pms.runner import Runner
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
     EvalSpec,
+    FactorCompositionStep,
     ForecasterSpec,
     MarketSelectionSpec,
     RiskParams,
@@ -22,6 +23,7 @@ from pms.strategies.projections import (
 from pms.strategies.versioning import serialize_strategy_config_json
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 
 
@@ -52,10 +54,11 @@ class SequenceSensor:
             yield signal
 
 
-def _settings() -> PMSSettings:
+def _settings(*, auto_migrate_default_v2: bool = True) -> PMSSettings:
     assert PMS_TEST_DATABASE_URL is not None
     return PMSSettings(
         mode=RunMode.PAPER,
+        auto_migrate_default_v2=auto_migrate_default_v2,
         database=DatabaseSettings(
             dsn=PMS_TEST_DATABASE_URL,
             pool_min_size=1,
@@ -93,7 +96,22 @@ def _default_strategy_config_json() -> str:
     return serialize_strategy_config_json(
         StrategyConfig(
             strategy_id="default",
-            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            factor_composition=(
+                FactorCompositionStep(
+                    factor_id="factor-a",
+                    role="weighted",
+                    param="",
+                    weight=0.6,
+                    threshold=None,
+                ),
+                FactorCompositionStep(
+                    factor_id="factor-b",
+                    role="weighted",
+                    param="",
+                    weight=0.4,
+                    threshold=None,
+                ),
+            ),
             metadata=(("owner", "system"), ("tier", "default")),
         ),
         RiskParams(
@@ -120,7 +138,22 @@ def _strategy(*, drawdown_pct: float) -> Strategy:
     return Strategy(
         config=StrategyConfig(
             strategy_id="default",
-            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            factor_composition=(
+                FactorCompositionStep(
+                    factor_id="factor-a",
+                    role="weighted",
+                    param="",
+                    weight=0.6,
+                    threshold=None,
+                ),
+                FactorCompositionStep(
+                    factor_id="factor-b",
+                    role="weighted",
+                    param="",
+                    weight=0.4,
+                    threshold=None,
+                ),
+            ),
             metadata=(("owner", "system"), ("tier", "default")),
         ),
         risk=RiskParams(
@@ -170,6 +203,26 @@ async def _strategy_pairs(
     }
 
 
+async def _seed_market_shells(
+    pg_pool: asyncpg.Pool,
+    *,
+    market_ids: tuple[str, ...],
+) -> None:
+    store = PostgresMarketDataStore(pg_pool)
+    for market_id in market_ids:
+        await store.write_market(
+            Market(
+                condition_id=market_id,
+                slug=market_id,
+                question=f"Will {market_id} persist runtime rows?",
+                venue="polymarket",
+                resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
+                created_at=datetime(2026, 4, 17, tzinfo=UTC),
+                last_seen_at=datetime(2026, 4, 17, tzinfo=UTC),
+            )
+        )
+
+
 @pytest.mark.asyncio(loop_scope="session")
 async def test_runner_tags_inner_ring_rows_with_default_strategy(
     pg_pool: asyncpg.Pool,
@@ -177,9 +230,13 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
     active_version = await PostgresStrategyRegistry(pg_pool).create_version(
         _strategy(drawdown_pct=3.5)
     )
+    await _seed_market_shells(
+        pg_pool,
+        market_ids=("paper-empty-book", "paper-with-depth"),
+    )
 
     runner = Runner(
-        config=_settings(),
+        config=_settings(auto_migrate_default_v2=False),
         sensors=[
             SequenceSensor(
                 [

@@ -11,6 +11,7 @@ import pytest
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
     EvalSpec,
+    FactorCompositionStep,
     ForecasterSpec,
     MarketSelectionSpec,
     RiskParams,
@@ -70,7 +71,22 @@ def _strategy(
     return Strategy(
         config=StrategyConfig(
             strategy_id=strategy_id,
-            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
+            factor_composition=(
+                FactorCompositionStep(
+                    factor_id="factor-a",
+                    role="weighted",
+                    param="",
+                    weight=0.6,
+                    threshold=None,
+                ),
+                FactorCompositionStep(
+                    factor_id="factor-b",
+                    role="weighted",
+                    param="",
+                    weight=0.4,
+                    threshold=None,
+                ),
+            ),
             metadata=(("owner", owner), ("tier", "default")),
         ),
         risk=RiskParams(

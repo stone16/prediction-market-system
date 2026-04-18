@@ -9,16 +9,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 
-from pms.strategies.projections import (
-    EvalSpec,
-    ForecasterSpec,
-    MarketSelectionSpec,
-    RiskParams,
-    StrategyConfig,
-)
-from pms.strategies.versioning import serialize_strategy_config_json
-
-
 SCHEMA_PATH = Path("schema.sql")
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
 
@@ -86,29 +76,16 @@ def _run_psql(
 
 
 def _default_strategy_config_json() -> str:
-    return serialize_strategy_config_json(
-        StrategyConfig(
-            strategy_id="default",
-            factor_composition=(("factor-a", 0.6), ("factor-b", 0.4)),
-            metadata=(("owner", "system"), ("tier", "default")),
-        ),
-        RiskParams(
-            max_position_notional_usdc=100.0,
-            max_daily_drawdown_pct=2.5,
-            min_order_size_usdc=1.0,
-        ),
-        EvalSpec(metrics=("brier", "pnl", "fill_rate")),
-        ForecasterSpec(
-            forecasters=(
-                ("rules", (("threshold", "0.55"),)),
-                ("stats", (("window", "15m"),)),
-            )
-        ),
-        MarketSelectionSpec(
-            venue="polymarket",
-            resolution_time_max_horizon_days=7,
-            volume_min_usdc=500.0,
-        ),
+    return (
+        '{"config":{"factor_composition":[["factor-a",0.6],["factor-b",0.4]],'
+        '"metadata":[["owner","system"],["tier","default"]],"strategy_id":"default"},'
+        '"eval_spec":{"metrics":["brier","pnl","fill_rate"]},'
+        '"forecaster":{"forecasters":[["rules",[["threshold","0.55"]]],'
+        '["stats",[["window","15m"]]]]},'
+        '"market_selection":{"resolution_time_max_horizon_days":7,'
+        '"venue":"polymarket","volume_min_usdc":500.0},'
+        '"risk":{"max_daily_drawdown_pct":2.5,'
+        '"max_position_notional_usdc":100.0,"min_order_size_usdc":1.0}}'
     )
 
 

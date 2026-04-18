@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import asyncpg
@@ -9,6 +10,7 @@ import asyncpg
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
     EvalSpec,
+    FactorCompositionStep,
     ForecasterSpec,
     MarketSelectionSpec,
     RiskParams,
@@ -56,7 +58,7 @@ class PostgresStrategyRegistry:
         """
         strategy_id = strategy.config.strategy_id
         strategy_version_id = compute_strategy_version_id(*strategy.snapshot())
-        config_json = serialize_strategy_config_json(*strategy.snapshot())
+        config_json = _strategy_to_config_json(strategy)
         metadata_json = json.dumps(
             dict(strategy.config.metadata),
             sort_keys=True,
@@ -170,12 +172,61 @@ class PostgresStrategyRegistry:
             for row in rows
         ]
 
+    async def set_active(
+        self,
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> None:
+        query = """
+        UPDATE strategies
+        SET active_version_id = $2
+        WHERE strategy_id = $1
+        """
+        async with self._pool.acquire() as connection:
+            await connection.execute(query, strategy_id, strategy_version_id)
+
+    async def populate_strategy_factors(
+        self,
+        strategy_id: str,
+        strategy_version_id: str,
+        steps: Sequence[FactorCompositionStep],
+    ) -> None:
+        query = """
+        INSERT INTO strategy_factors (
+            strategy_id,
+            strategy_version_id,
+            factor_id,
+            param,
+            weight,
+            direction
+        ) VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+        ON CONFLICT (strategy_id, strategy_version_id, factor_id) DO NOTHING
+        """
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                for step in steps:
+                    await connection.execute(
+                        query,
+                        strategy_id,
+                        strategy_version_id,
+                        step.factor_id,
+                        _strategy_factor_param_json(step.param),
+                        step.weight,
+                        "long",
+                    )
+
 
 def _ensure_utc(value: object) -> datetime:
     if not isinstance(value, datetime):
         msg = f"expected datetime, got {type(value).__name__}"
         raise TypeError(msg)
     return value.astimezone(UTC)
+
+
+def _strategy_factor_param_json(param: str) -> str:
+    if param == "":
+        return "{}"
+    return json.dumps(param, separators=(",", ":"), ensure_ascii=True)
 
 
 def _strategy_from_config_json(raw_value: object) -> Strategy:
@@ -191,13 +242,7 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
     return Strategy(
         config=StrategyConfig(
             strategy_id=_json_string(config_payload["strategy_id"], "config.strategy_id"),
-            factor_composition=tuple(
-                (
-                    _json_string(item[0], "config.factor_composition.key"),
-                    _json_float(item[1], "config.factor_composition"),
-                )
-                for item in _json_pairs(config_payload["factor_composition"])
-            ),
+            factor_composition=_json_factor_composition(config_payload["factor_composition"]),
             metadata=tuple(
                 (
                     _json_string(item[0], "config.metadata.key"),
@@ -252,6 +297,10 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
     )
 
 
+def _strategy_to_config_json(strategy: Strategy) -> str:
+    return serialize_strategy_config_json(*strategy.snapshot())
+
+
 def _load_json_object(raw_value: object) -> dict[str, object]:
     if isinstance(raw_value, str):
         loaded = json.loads(raw_value)
@@ -284,11 +333,91 @@ def _json_pairs(value: object) -> list[list[object]]:
     return decoded_pairs
 
 
+def _json_factor_composition(value: object) -> tuple[FactorCompositionStep, ...]:
+    if not isinstance(value, list):
+        msg = "config.factor_composition must decode to a JSON array"
+        raise TypeError(msg)
+    items = cast(list[object], value)
+    if not items:
+        return ()
+    if all(isinstance(item, list) for item in items):
+        return tuple(
+            FactorCompositionStep(
+                factor_id=_json_string(item[0], "config.factor_composition.key"),
+                role="weighted",
+                param="",
+                weight=_json_float(item[1], "config.factor_composition"),
+                threshold=None,
+            )
+            for item in _json_pairs(value)
+        )
+
+    steps: list[FactorCompositionStep] = []
+    for raw_step in items:
+        step_payload = _json_object(raw_step, "config.factor_composition.step")
+        steps.append(
+            FactorCompositionStep(
+                factor_id=_json_string(
+                    _json_required_field(
+                        step_payload,
+                        "factor_id",
+                        "config.factor_composition.step.factor_id",
+                    ),
+                    "config.factor_composition.step.factor_id",
+                ),
+                role=_json_string(
+                    _json_required_field(
+                        step_payload,
+                        "role",
+                        "config.factor_composition.step.role",
+                    ),
+                    "config.factor_composition.step.role",
+                ),
+                param=_json_string(
+                    _json_required_field(
+                        step_payload,
+                        "param",
+                        "config.factor_composition.step.param",
+                    ),
+                    "config.factor_composition.step.param",
+                ),
+                weight=_json_float(
+                    _json_required_field(
+                        step_payload,
+                        "weight",
+                        "config.factor_composition.step.weight",
+                    ),
+                    "config.factor_composition.step.weight",
+                ),
+                threshold=_json_optional_float(
+                    _json_required_field(
+                        step_payload,
+                        "threshold",
+                        "config.factor_composition.step.threshold",
+                    ),
+                    "config.factor_composition.step.threshold",
+                ),
+            )
+        )
+    return tuple(steps)
+
+
 def _json_string(value: object, field_name: str) -> str:
     if not isinstance(value, str):
         msg = f"{field_name} must decode to a string"
         raise TypeError(msg)
     return value
+
+
+def _json_required_field(
+    payload: dict[str, object],
+    key: str,
+    field_name: str,
+) -> object:
+    if key not in payload:
+        msg = f"{field_name} is required"
+        raise TypeError(msg)
+    return payload[key]
 
 
 def _json_string_list(value: object, field_name: str) -> list[str]:
@@ -308,6 +437,12 @@ def _json_optional_int(value: object, field_name: str) -> int | None:
         msg = f"{field_name} must decode to an int or null"
         raise TypeError(msg)
     return value
+
+
+def _json_optional_float(value: object, field_name: str) -> float | None:
+    if value is None:
+        return None
+    return _json_float(value, field_name)
 
 
 def _json_float(value: object, field_name: str) -> float:

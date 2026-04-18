@@ -23,6 +23,7 @@ async def test_api_backtest_runner_get_routes(tmp_path: Path) -> None:
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.BACKTEST,
+            auto_migrate_default_v2=False,
             risk=RiskSettings(
                 max_position_per_market=1000.0,
                 max_total_exposure=10_000.0,

@@ -75,3 +75,27 @@ export type StrategyRow = {
 export type StrategiesResponse = {
   strategies: StrategyRow[];
 };
+
+export type FactorCatalogEntry = {
+  factor_id: string;
+  name: string;
+  description: string;
+  output_type: string;
+  direction: string;
+};
+
+export type FactorCatalogResponse = {
+  catalog: FactorCatalogEntry[];
+};
+
+export type FactorPoint = {
+  ts: string;
+  value: number;
+};
+
+export type FactorSeriesResponse = {
+  factor_id: string;
+  param: string;
+  market_id: string;
+  points: FactorPoint[];
+};

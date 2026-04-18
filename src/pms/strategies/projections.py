@@ -7,9 +7,18 @@ from datetime import datetime
 
 
 @dataclass(frozen=True, slots=True)
+class FactorCompositionStep:
+    factor_id: str
+    role: str
+    param: str
+    weight: float
+    threshold: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class StrategyConfig:
     strategy_id: str
-    factor_composition: tuple[tuple[str, float], ...]
+    factor_composition: tuple[FactorCompositionStep, ...]
     metadata: tuple[tuple[str, str], ...]
 
 
