@@ -38,10 +38,10 @@ that governs this layer:
   `pms.market_selection.*`. This is the designed responsibility
   boundary.
 - **Invariant 6 — MarketSelector home.** The market selection
-  logic (Strategy's `select_markets(universe)`) is invoked from
-  within Controller (or from a sibling module `pms.market_selection`
-  that Controller depends on — S4 decides which placement is
-  cleaner). The output feeds `SensorSubscriptionController`.
+  logic is implemented in the sibling `pms.market_selection` module.
+  It reads `MarketSelectionSpec` projections from the strategy
+  registry, filters the discovered universe, and feeds the result
+  into `SensorSubscriptionController`.
 - **Invariant 8 — Reads middle, writes inner.** Controller reads
   `factor_values` (middle ring); writes `TradeDecision` records to
   the inner ring (via Actuator for order products, via Evaluator
@@ -73,9 +73,10 @@ that governs this layer:
   fields on `TradeDecision`.
 - Never write outside the inner ring (Invariant 8).
 - Never compute per-market subscription lists inside sensor code.
-  The flow is: Strategy.select_markets → MarketSelector →
-  SensorSubscriptionController → Sensor. Controller owns the first
-  two steps.
+  The flow is: `MarketSelectionSpec` projection →
+  `MarketSelector` → `SensorSubscriptionController` → Sensor.
+  Controller owns the strategy side of that handoff; Sensor remains
+  strategy-agnostic.
 
 ## When adding a new forecaster / calibrator / sizer
 

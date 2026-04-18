@@ -29,7 +29,7 @@ that governs this layer:
   `MarketSignal` with no knowledge of which strategy consumes it.
 - **Invariant 6 — Subscription sink.** The `MarketDataSensor`
   accepts subscription updates *from outside* (pushed by
-  `SensorSubscriptionController`, lands in S4). It never pulls the
+  `SensorSubscriptionController`, landed in S4). It never pulls the
   subscription list itself; it receives it.
 - **Invariant 7 — Two-layer structure.** There are exactly two
   sensor types per venue:

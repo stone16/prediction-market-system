@@ -262,13 +262,13 @@ or execution.
 
 **Statement.** The Sensor's subscription list is not static
 configuration; it is derived at runtime from the union of all
-active strategies' market selection output. A `MarketSelector`
-component reads the market universe (from the outer ring), applies
-each strategy's `select_markets(universe)` method, and produces a
-merged `market_ids: list[str]` that a `SensorSubscriptionController`
-pushes to the Market Data Sensor. On strategy change, the
-subscription updates; on Sensor disconnect, the subscription is
-replayed.
+active strategies' market-selection projections. A `MarketSelector`
+component reads the market universe (from the outer ring), reads each
+active strategy's `MarketSelectionSpec` projection from the strategy
+registry, applies the projection filters, and produces a merged
+`market_ids: list[str]` that a `SensorSubscriptionController` pushes
+to the Market Data Sensor. On strategy change, the subscription
+updates; on Sensor disconnect, the subscription is replayed.
 
 **Rationale.** Static subscription lists waste bandwidth and miss
 markets that become relevant only after a strategy is deployed. More
@@ -282,13 +282,17 @@ while still achieving this requires a dedicated orchestration layer
 (the `MarketSelector` + `SensorSubscriptionController` pair) that
 lives above Sensor and below Strategy.
 
-**Runtime evidence (forward-looking).** Implemented in S4.
+**Runtime evidence.** Landed in S4.
 - `src/pms/market_selection/selector.py` — reads universe, applies
-  strategy specs, returns merged market-id list.
+  `MarketSelectionSpec` projections, returns merged market-id list.
 - `src/pms/market_selection/subscription_controller.py` —
   propagates updates to Sensor.
-- `src/pms/strategies/aggregate.py::Strategy.select_markets(universe)`
-  — the hook each strategy implements.
+- `src/pms/storage/strategy_registry.py::list_market_selections()` —
+  yields `(strategy_id, strategy_version_id, MarketSelectionSpec)` for
+  the selector.
+- `src/pms/runner.py::_wire_active_perception()` — wires
+  `MarketSelector` + `SensorSubscriptionController` into the live
+  runtime.
 
 **Anti-patterns.**
 - Sensor module reading Strategy directly (violates Invariant 5).
@@ -307,10 +311,11 @@ lives above Sensor and below Strategy.
 market universe, and the universe comes from Sensor. This is
 resolved by Invariant 7: the outer ring is filled by the
 `MarketDiscoverySensor` (which runs unconditionally with no strategy
-input) before any strategy runs its `select_markets`. Boot order:
+input) before market-selection projections are applied. Boot order:
 
 1. `MarketDiscoverySensor` populates `markets` / `tokens` tables.
-2. `MarketSelector` reads the tables, applies strategy specs.
+2. `MarketSelector` reads the tables, reads active
+   `MarketSelectionSpec` projections, and applies the filters.
 3. `SensorSubscriptionController` subscribes `MarketDataSensor` to
    the resulting market ids.
 4. Subsequent strategy config changes trigger steps 2–3 again

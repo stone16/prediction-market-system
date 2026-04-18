@@ -18,6 +18,7 @@ src/pms/               # Python package
   controller/          # decision pipeline
   core/                # frozen dataclasses, enums, Protocol interfaces
   evaluation/          # metrics collector + eval spool + feedback engine
+  market_selection/    # active-perception selector + subscription controller
   sensor/              # HistoricalSensor + MarketDiscoverySensor + stream
   storage/             # JSONL stores + Postgres market-data persistence
   runner.py            # orchestrator wiring all four layers
@@ -64,13 +65,13 @@ panel that calls these endpoints directly.
 
 ```bash
 uv sync
-uv run pytest -q                              # full suite (79 pass, 17 skip)
+uv run pytest -q                              # full suite (246 pass, 54 skip)
 uv run mypy src/ tests/ --strict              # strict type check
 PMS_RUN_INTEGRATION=1 uv run pytest -m integration   # PostgreSQL + live-network tests
 ```
 
 Baseline invariants enforced by CI:
-- pytest 145 passing, 42 skipped (integration gated on `PMS_RUN_INTEGRATION=1`).
+- pytest 246 passing, 54 skipped (integration gated on `PMS_RUN_INTEGRATION=1`).
 - mypy strict must be clean on every committed source file.
 
 ### Isolating dev state
