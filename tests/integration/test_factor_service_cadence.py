@@ -5,6 +5,7 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Literal, cast
 
 import asyncpg
 import pytest
@@ -13,6 +14,8 @@ from pms.config import DatabaseSettings, PMSSettings
 from pms.core.enums import MarketStatus, RunMode
 from pms.core.models import BookLevel, BookSnapshot, Market, MarketSignal, Token
 from pms.runner import Runner
+from pms.storage.eval_store import EvalStore
+from pms.storage.feedback_store import FeedbackStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 from tests.support.default_strategy_seed import seed_default_v1_strategy
 from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
@@ -69,7 +72,7 @@ def _signal(
     *,
     market_id: str,
     token_id: str,
-    orderbook: dict[str, object],
+    orderbook: dict[str, list[dict[str, float]]],
     fetched_at: datetime,
 ) -> MarketSignal:
     return MarketSignal(
@@ -114,6 +117,7 @@ async def _seed_market(
         )
     )
     levels: list[BookLevel] = []
+    side: Literal["BUY", "SELL"]
     for side, entries in (("BUY", orderbook.get("bids", [])), ("SELL", orderbook.get("asks", []))):
         for entry in entries:
             levels.append(
@@ -178,10 +182,12 @@ async def test_factor_service_persists_orderbook_imbalance_on_cadence(
     await _seed_boot_prereqs(pg_pool)
     store = PostgresMarketDataStore(pg_pool)
     ts = datetime(2026, 4, 18, 9, 0, tzinfo=UTC)
+    depth_orderbook: dict[str, list[dict[str, float]]]
     depth_orderbook = {
         "bids": [{"price": 0.39, "size": 100.0}],
         "asks": [{"price": 0.41, "size": 50.0}],
     }
+    empty_orderbook: dict[str, list[dict[str, float]]]
     empty_orderbook = {"bids": [], "asks": []}
 
     await _seed_market(
@@ -219,8 +225,8 @@ async def test_factor_service_persists_orderbook_imbalance_on_cadence(
                 ]
             )
         ],
-        eval_store=InMemoryEvalStore(),
-        feedback_store=InMemoryFeedbackStore(),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
 
     try:

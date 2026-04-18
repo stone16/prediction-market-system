@@ -321,5 +321,5 @@ async def test_runner_start_rejects_legacy_jsonl_store_paths(
     with pytest.raises(RuntimeError, match="legacy JSONL path referenced"):
         await runner.start()
 
-    assert fake_pool.closed is True
+    assert fake_pool.closed is False
     assert runner.pg_pool is None

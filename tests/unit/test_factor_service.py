@@ -33,15 +33,6 @@ def _signal(*, market_id: str = "factor-service-market") -> MarketSignal:
     )
 
 
-class EmptySignalStream:
-    def __aiter__(self) -> AsyncIterator[MarketSignal]:
-        return self._iterate()
-
-    async def _iterate(self) -> AsyncIterator[MarketSignal]:
-        if False:
-            yield _signal()
-
-
 class SequenceSignalStream:
     def __init__(self, signals: list[MarketSignal]) -> None:
         self._signals = list(signals)
@@ -102,7 +93,7 @@ async def test_factor_service_compute_once_persists_non_none_rows(
         store=cast(Any, EMPTY_OUTER_RING),
         cadence_s=0.1,
         factors=(PersistedFactor, MissingFactor),
-        signal_stream=EmptySignalStream(),
+        signal_stream=SequenceSignalStream([]),
     )
 
     count = await service.compute_once([_signal()])

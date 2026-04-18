@@ -5,7 +5,7 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import cast
 
 import asyncpg
 import pytest
@@ -15,6 +15,8 @@ from pms.core.enums import MarketStatus, RunMode
 from pms.core.models import Market, MarketSignal, Token
 from pms.factors.base import FactorDefinition, FactorValueRow
 from pms.runner import Runner
+from pms.storage.eval_store import EvalStore
+from pms.storage.feedback_store import FeedbackStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 from tests.support.default_strategy_seed import seed_default_v1_strategy
 from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
@@ -148,8 +150,8 @@ async def test_factor_service_task_cancels_on_normal_stop(
     runner = Runner(
         config=_settings(),
         sensors=[RepeatingSensor(_signal())],
-        eval_store=InMemoryEvalStore(),
-        feedback_store=InMemoryFeedbackStore(),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
 
     try:
@@ -184,8 +186,8 @@ async def test_factor_service_task_cancels_during_compute(
     runner = Runner(
         config=_settings(),
         sensors=[RepeatingSensor(_signal())],
-        eval_store=InMemoryEvalStore(),
-        feedback_store=InMemoryFeedbackStore(),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
 
     try:
@@ -218,8 +220,8 @@ async def test_factor_service_stop_succeeds_after_compute_exception(
     runner = Runner(
         config=_settings(),
         sensors=[RepeatingSensor(_signal())],
-        eval_store=InMemoryEvalStore(),
-        feedback_store=InMemoryFeedbackStore(),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
     )
 
     try:

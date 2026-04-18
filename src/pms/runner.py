@@ -32,6 +32,7 @@ from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.spool import EvalSpool
 from pms.factors.defaults import DEFAULT_STRATEGY_COMPOSITION
 from pms.factors.definitions import REGISTERED
+from pms.factors.service import FactorService
 from pms.sensor.adapters.historical import HistoricalSensor
 from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
@@ -105,6 +106,8 @@ class Runner:
     _stop_event: asyncio.Event = field(init=False)
     _controller_task: asyncio.Task[None] | None = field(init=False, default=None)
     _actuator_task: asyncio.Task[None] | None = field(init=False, default=None)
+    _factor_service: FactorService | None = field(init=False, default=None)
+    _factor_service_task: asyncio.Task[None] | None = field(init=False, default=None)
     _task: asyncio.Task[None] | None = field(init=False, default=None)
     _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
     _owns_pg_pool: bool = field(init=False, default=False)
@@ -128,6 +131,10 @@ class Runner:
     @property
     def actuator_task(self) -> asyncio.Task[None] | None:
         return self._actuator_task
+
+    @property
+    def factor_service_task(self) -> asyncio.Task[None] | None:
+        return self._factor_service_task
 
     @property
     def task(self) -> asyncio.Task[None] | None:
@@ -176,6 +183,8 @@ class Runner:
     def tasks(self) -> tuple[asyncio.Task[None], ...]:
         tasks: list[asyncio.Task[None]] = []
         tasks.extend(self.sensor_stream.tasks)
+        if self._factor_service_task is not None:
+            tasks.append(self._factor_service_task)
         if self._controller_task is not None:
             tasks.append(self._controller_task)
         if self._actuator_task is not None:
@@ -193,9 +202,22 @@ class Runner:
         self.state.runner_started_at = datetime.now(tz=UTC)
 
         try:
-            await self.ensure_pg_pool()
-            await self._ensure_default_v2_version()
             self._assert_no_legacy_jsonl_paths()
+            if self._should_boot_postgres_runtime():
+                await self.ensure_pg_pool()
+                await self._ensure_default_v2_version()
+                if self._pg_pool is None:
+                    msg = "Runner PostgreSQL pool is not initialized"
+                    raise RuntimeError(msg)
+                factor_signal_stream = self.sensor_stream.subscribe()
+                self._factor_service = FactorService(
+                    pool=self._pg_pool,
+                    store=PostgresMarketDataStore(self._pg_pool),
+                    cadence_s=self.config.factor_cadence_s,
+                    factors=REGISTERED,
+                    signal_stream=factor_signal_stream,
+                )
+                self._factor_service_task = asyncio.create_task(self._factor_service.run())
             self._active_sensors = self._build_sensors()
             await self.sensor_stream.start(self._active_sensors)
             await self._evaluator_spool.start()
@@ -209,6 +231,10 @@ class Runner:
         self._stop_event.set()
         error: BaseException | None = None
 
+        factor_task = self._factor_service_task
+        if factor_task is not None and not factor_task.done():
+            factor_task.cancel()
+
         try:
             await self.sensor_stream.stop()
         except BaseException as exc:  # pragma: no cover - exercised via unit tests
@@ -220,7 +246,15 @@ class Runner:
 
         try:
             await asyncio.gather(
-                *(task for task in (self._controller_task, self._actuator_task) if task),
+                *(
+                    task
+                    for task in (
+                        factor_task,
+                        self._controller_task,
+                        self._actuator_task,
+                    )
+                    if task
+                ),
                 return_exceptions=True,
             )
         except BaseException as exc:  # pragma: no cover - defensive
@@ -239,6 +273,8 @@ class Runner:
             if error is None:
                 error = exc
 
+        self._factor_service = None
+        self._factor_service_task = None
         self._controller_task = None
         self._actuator_task = None
 
@@ -271,6 +307,10 @@ class Runner:
         if self.sensor_stream.tasks:
             await asyncio.gather(*self.sensor_stream.tasks, return_exceptions=True)
         await self.sensor_stream.queue.join()
+        if self._controller_task is not None and self._controller_task.done():
+            await self._controller_task
+        if self._factor_service_task is not None:
+            await self._factor_service_task
         if self._controller_task is not None:
             await self._controller_task
         await self._decision_queue.join()
@@ -313,6 +353,15 @@ class Runner:
             if isinstance(getattr(store, "path", None), Path):
                 msg = "legacy JSONL path referenced"
                 raise RuntimeError(msg)
+
+    def _should_boot_postgres_runtime(self) -> bool:
+        if self._pg_pool is not None:
+            return True
+        if self.config.mode != RunMode.BACKTEST:
+            return True
+        if self.config.auto_migrate_default_v2:
+            return True
+        return "database" in self.config.model_fields_set
 
     async def _ensure_default_v2_version(self) -> None:
         if not self.config.auto_migrate_default_v2:
@@ -449,10 +498,18 @@ class Runner:
 
     async def _cleanup_after_start_failure(self) -> None:
         stop_error: BaseException | None = None
+        if self._factor_service_task is not None and not self._factor_service_task.done():
+            self._factor_service_task.cancel()
+        try:
+            if self._factor_service_task is not None:
+                await asyncio.gather(self._factor_service_task, return_exceptions=True)
+        except BaseException as exc:  # pragma: no cover - defensive
+            stop_error = exc
         try:
             await self.sensor_stream.stop()
         except BaseException as exc:  # pragma: no cover - defensive
-            stop_error = exc
+            if stop_error is None:
+                stop_error = exc
 
         try:
             await self._evaluator_spool.stop()
@@ -466,6 +523,8 @@ class Runner:
             if stop_error is None:
                 stop_error = exc
 
+        self._factor_service = None
+        self._factor_service_task = None
         self._controller_task = None
         self._actuator_task = None
         await self._close_pg_pool()
