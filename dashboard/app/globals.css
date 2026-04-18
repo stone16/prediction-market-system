@@ -440,6 +440,90 @@ th {
   padding: 18px;
 }
 
+.metric.compact {
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.mono {
+  font-family: "Courier New", monospace;
+}
+
+.controls-panel {
+  margin-bottom: 18px;
+  padding: 20px;
+}
+
+.controls-topline {
+  align-items: start;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+}
+
+.factor-chip {
+  background: linear-gradient(180deg, rgb(255 255 255 / 96%), rgb(244 248 242 / 90%));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-width: 120px;
+  padding: 14px 16px;
+}
+
+.factor-chip span {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+
+.factor-chip strong {
+  display: block;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 26px;
+}
+
+.control-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 18px;
+}
+
+.field-group {
+  display: grid;
+  gap: 8px;
+}
+
+.field-group span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.field-group input,
+.field-group select {
+  background: rgb(255 255 255 / 94%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font: inherit;
+  min-width: 0;
+  padding: 11px 12px;
+}
+
+.factor-meta {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.factor-table {
+  margin-top: 18px;
+}
+
 .run-controls {
   align-items: center;
   display: flex;
@@ -485,7 +569,8 @@ th {
   .hero,
   .section-grid,
   .depth-grid,
-  .depth-stats {
+  .depth-stats,
+  .control-grid {
     grid-template-columns: 1fr;
   }
 
@@ -499,6 +584,10 @@ th {
   }
 
   .depth-topline {
+    flex-direction: column;
+  }
+
+  .controls-topline {
     flex-direction: column;
   }
 }

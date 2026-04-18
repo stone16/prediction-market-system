@@ -13,6 +13,7 @@ import asyncpg
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
+from pms.api.routes.factors import list_factor_catalog, list_factor_series
 from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
 from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
@@ -168,6 +169,31 @@ def create_app(
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_strategies_items(active_runner.pg_pool)
+
+    @app.get("/factors/catalog")
+    async def factors_catalog() -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        return await list_factor_catalog(active_runner.pg_pool)
+
+    @app.get("/factors")
+    async def factors(
+        factor_id: str,
+        market_id: str,
+        param: str = "",
+        since: datetime | None = None,
+        limit: int = Query(default=500, ge=1, le=2000),
+    ) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        return await list_factor_series(
+            active_runner.pg_pool,
+            factor_id=factor_id,
+            market_id=market_id,
+            param=param,
+            since=since,
+            limit=limit,
+        )
 
     @app.post("/feedback/{feedback_id}/resolve")
     async def resolve_feedback(feedback_id: str) -> dict[str, Any]:
