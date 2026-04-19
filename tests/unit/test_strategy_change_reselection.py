@@ -631,7 +631,8 @@ async def test_runner_start_stop_cycles_unregister_strategy_change_callbacks(
         return tuple(
             task
             for task in asyncio.all_tasks()
-            if "Runner._periodic_reselection_loop" in task.get_coro().__qualname__
+            if "Runner._periodic_reselection_loop"
+            in getattr(task.get_coro(), "__qualname__", "")
             or task.get_name().startswith("controller-pipeline:")
         )
 

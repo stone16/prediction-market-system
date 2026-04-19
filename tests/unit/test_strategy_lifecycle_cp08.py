@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -15,7 +15,7 @@ from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
 from pms.market_selection.merge import StrategyMarketSet
-from pms.runner import Runner
+from pms.runner import ControllerReleaseCancelPoint, Runner
 from pms.strategies.projections import (
     ActiveStrategy,
     EvalSpec,
@@ -386,6 +386,8 @@ async def test_runner_unregisters_strategy_mid_dispatch_and_releases_resources(
         "strat-b": beta,
         "strat-c": ImmediateOpportunityController("strat-c"),
     }
+    alpha = cast(ImmediateOpportunityController, controllers["strat-a"])
+    gamma = cast(ImmediateOpportunityController, controllers["strat-c"])
 
     _install_cp08_runtime(
         monkeypatch,
@@ -396,7 +398,7 @@ async def test_runner_unregisters_strategy_mid_dispatch_and_releases_resources(
     )
 
     runner = Runner(config=_settings(), historical_data_path=FIXTURE_PATH)
-    runner._controller_factory = FakeControllerFactory(controllers)
+    runner._controller_factory = cast(Any, FakeControllerFactory(controllers))
 
     await runner.start()
     try:
@@ -432,8 +434,8 @@ async def test_runner_unregisters_strategy_mid_dispatch_and_releases_resources(
 
         await runner.sensor_stream.queue.put(_signal("asset-a"))
         await runner.sensor_stream.queue.put(_signal("asset-c"))
-        await _wait_for(lambda: controllers["strat-a"].calls >= 1)
-        await _wait_for(lambda: controllers["strat-c"].calls >= 1)
+        await _wait_for(lambda: alpha.calls >= 1)
+        await _wait_for(lambda: gamma.calls >= 1)
         assert beta.calls == 1
     finally:
         await runner.stop()
@@ -458,8 +460,11 @@ async def test_controller_pipeline_runtime_error_triggers_cleanup(
     )
 
     runner = Runner(config=_settings(), historical_data_path=FIXTURE_PATH)
-    runner._controller_factory = FakeControllerFactory(
+    runner._controller_factory = cast(
+        Any,
+        FakeControllerFactory(
         {"strat-b": FailingOpportunityController("strat-b")}
+        ),
     )
 
     await runner.start()
@@ -488,7 +493,7 @@ async def test_controller_pipeline_runtime_error_triggers_cleanup(
 )
 async def test_release_controller_runtime_cancel_injection_still_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
-    cancel_point: str,
+    cancel_point: ControllerReleaseCancelPoint,
 ) -> None:
     registry = MutableRegistry(
         active_strategies=[
@@ -515,11 +520,14 @@ async def test_release_controller_runtime_cancel_injection_still_cleans_up(
     )
 
     runner = Runner(config=_settings(), historical_data_path=FIXTURE_PATH)
-    runner._controller_factory = FakeControllerFactory(
+    runner._controller_factory = cast(
+        Any,
+        FakeControllerFactory(
         {
             "strat-a": ImmediateOpportunityController("strat-a"),
             "strat-b": beta,
         }
+        ),
     )
 
     await runner.start()
