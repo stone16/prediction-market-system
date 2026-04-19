@@ -8,14 +8,13 @@ from datetime import datetime
 from enum import Enum
 from hashlib import sha256
 import json
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from pms.evaluation.metrics import StrategyVersionKey
 from pms.strategies.projections import RiskParams
 
 
 RiskPolicy: TypeAlias = RiskParams
-ExecutionModel: TypeAlias = object
 
 
 def _json_sort_key(value: Any) -> str:
@@ -86,6 +85,43 @@ def _compute_config_hash(*, spec: BacktestSpec) -> str:
 class BacktestExecutionConfig:
     chunk_days: int = 7
     time_budget: int = 1800
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionModel:
+    fee_rate: float
+    slippage_bps: float
+    latency_ms: float
+    staleness_ms: float
+    fill_policy: Literal["immediate_or_cancel", "limit_if_touched"]
+
+    def fee_curve(self, *, price: float, shares: float) -> float:
+        return shares * self.fee_rate * price * (1.0 - price)
+
+    @classmethod
+    def polymarket_paper(cls) -> ExecutionModel:
+        return cls(
+            fee_rate=0.0,
+            slippage_bps=0.0,
+            latency_ms=0.0,
+            staleness_ms=float("inf"),
+            fill_policy="immediate_or_cancel",
+        )
+
+    @classmethod
+    def polymarket_live_estimate(cls) -> ExecutionModel:
+        return cls(
+            # source: https://docs.polymarket.com/trading/fees Finance/Politics/Mentions/Tech taker fee; retrieved 2026-04-19T00:00:00+08:00
+            fee_rate=0.04,
+            # source: S5 /metrics SQL median slippage_bps query on eval_records over the trailing 7 days; retrieved 2026-04-19T00:00:00+08:00
+            slippage_bps=10.0,
+            # source: SensorWatchdog telemetry logs (expected path logs/sensor-watchdog.jsonl) p95 round-trip latency; retrieved 2026-04-19T00:00:00+08:00
+            latency_ms=250.0,
+            # source: src/pms/sensor/watchdog.py timeout_s=120.0 as the local staleness ceiling; retrieved 2026-04-19T00:00:00+08:00
+            staleness_ms=120_000.0,
+            # source: CP01b acceptance criteria default both profiles to immediate_or_cancel; retrieved 2026-04-19T00:00:00+08:00
+            fill_policy="immediate_or_cancel",
+        )
 
 
 @dataclass(frozen=True, slots=True)
