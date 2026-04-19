@@ -308,9 +308,8 @@ def test_schema_sql_applies_research_backtest_tables() -> None:
             WHERE run_id = '11111111-1111-1111-1111-111111111111'::uuid;
             """,
         )
-        assert "Index Scan using idx_strategy_runs_run_id on strategy_runs" in (
-            explain_result.stdout
-        )
+        assert "idx_strategy_runs_run_id" in explain_result.stdout
+        assert "Seq Scan on strategy_runs" not in explain_result.stdout
     finally:
         _run_psql(
             admin_database_url,
