@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
+DEFAULT_MAX_BRIER_SCORE = 0.30
+DEFAULT_SLIPPAGE_THRESHOLD_BPS = 50.0
+DEFAULT_MIN_WIN_RATE = 0.50
+
+
 @dataclass(frozen=True, slots=True)
 class FactorCompositionStep:
     factor_id: str
@@ -32,6 +37,9 @@ class RiskParams:
 @dataclass(frozen=True, slots=True)
 class EvalSpec:
     metrics: tuple[str, ...]
+    max_brier_score: float = DEFAULT_MAX_BRIER_SCORE
+    slippage_threshold_bps: float = DEFAULT_SLIPPAGE_THRESHOLD_BPS
+    min_win_rate: float = DEFAULT_MIN_WIN_RATE
 
 
 @dataclass(frozen=True, slots=True)

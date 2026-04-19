@@ -36,6 +36,9 @@ EXPECTED_FIELD_TYPES: dict[str, dict[str, Any]] = {
     },
     "EvalSpec": {
         "metrics": tuple[str, ...],
+        "max_brier_score": float,
+        "slippage_threshold_bps": float,
+        "min_win_rate": float,
     },
     "ForecasterSpec": {
         "forecasters": tuple[tuple[str, tuple[tuple[str, str], ...]], ...],

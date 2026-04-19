@@ -44,9 +44,10 @@ that governs this layer:
   from scoring.
 - `adapters/scoring.py` — `Scorer`: produces `EvalRecord` from
   `FillRecord` + `TradeDecision`.
-- `metrics.py` — `MetricsCollector.snapshot()`: Brier, P&L,
-  slippage, fill rate, calibration samples. **Currently global;
-  S5 makes per-strategy.**
+- `metrics.py` — `MetricsCollector.global_ops_snapshot()` for the
+  cross-strategy ops view and `snapshot_by_strategy()` for
+  per-strategy Brier, P&L, slippage, fill rate, and calibration
+  samples.
 - `feedback.py` — `EvaluatorFeedback` emits `Feedback` items when
   thresholds breach.
 
@@ -76,8 +77,8 @@ level). Register the threshold configuration in
 
 ## When adding a new metric threshold that fires `Feedback`
 
-Define the threshold in config; add the check inside
+Define the threshold in `EvalSpec`; add the check inside
 `EvaluatorFeedback.generate`; include enough context in the
 `Feedback.metadata` JSONB for a human reviewer to act on it
-(strategy_id, strategy_version_id, affected market cohort,
+(`strategy_id`, `strategy_version_id`, affected market cohort,
 sample size).

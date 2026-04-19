@@ -76,7 +76,7 @@ def create_app(
     @app.get("/status")
     async def status() -> dict[str, Any]:
         records = await active_runner.eval_store.all()
-        metrics_snapshot = MetricsCollector(records).snapshot()
+        metrics_snapshot = MetricsCollector(records).global_ops_snapshot()
         return {
             "mode": active_runner.state.mode.value,
             "runner_started_at": _jsonable(active_runner.state.runner_started_at),
@@ -265,7 +265,7 @@ def _latest(items: Sequence[T], limit: int) -> list[T]:
 
 
 async def _metrics(runner: Runner) -> MetricsSnapshot:
-    return MetricsCollector(await runner.eval_store.all()).snapshot()
+    return MetricsCollector(await runner.eval_store.all()).global_ops_snapshot()
 
 
 def _is_runner_running(runner: Runner) -> bool:

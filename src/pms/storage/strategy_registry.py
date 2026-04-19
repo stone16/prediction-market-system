@@ -11,6 +11,9 @@ import asyncpg
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
     ActiveStrategy,
+    DEFAULT_MAX_BRIER_SCORE,
+    DEFAULT_MIN_WIN_RATE,
+    DEFAULT_SLIPPAGE_THRESHOLD_BPS,
     EvalSpec,
     FactorCompositionStep,
     ForecasterSpec,
@@ -351,7 +354,22 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
             ),
         ),
         eval_spec=EvalSpec(
-            metrics=tuple(_json_string_list(eval_spec_payload["metrics"], "eval_spec.metrics"))
+            metrics=tuple(_json_string_list(eval_spec_payload["metrics"], "eval_spec.metrics")),
+            max_brier_score=_json_float(
+                eval_spec_payload.get("max_brier_score", DEFAULT_MAX_BRIER_SCORE),
+                "eval_spec.max_brier_score",
+            ),
+            slippage_threshold_bps=_json_float(
+                eval_spec_payload.get(
+                    "slippage_threshold_bps",
+                    DEFAULT_SLIPPAGE_THRESHOLD_BPS,
+                ),
+                "eval_spec.slippage_threshold_bps",
+            ),
+            min_win_rate=_json_float(
+                eval_spec_payload.get("min_win_rate", DEFAULT_MIN_WIN_RATE),
+                "eval_spec.min_win_rate",
+            ),
         ),
         forecaster=ForecasterSpec(
             forecasters=tuple(

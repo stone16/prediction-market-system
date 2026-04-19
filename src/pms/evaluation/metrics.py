@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from pms.core.models import EvalRecord
+
+
+StrategyVersionKey = tuple[str, str]
 
 
 @dataclass(frozen=True)
@@ -20,11 +23,40 @@ class MetricsSnapshot:
 
 
 @dataclass(frozen=True)
-class MetricsCollector:
-    records: Iterable[EvalRecord]
+class StrategyMetricsSnapshot:
+    strategy_id: str
+    strategy_version_id: str
+    brier_overall: float | None
+    brier_by_category: dict[str, float]
+    brier_samples: dict[str, int]
+    pnl: float
+    slippage_bps: float
+    fill_rate: float
+    win_rate: float
+    calibration_samples: dict[str, int]
 
-    def snapshot(self) -> MetricsSnapshot:
-        records = list(self.records)
+
+@dataclass(frozen=True, init=False)
+class MetricsCollector:
+    records: tuple[EvalRecord, ...]
+
+    def __init__(self, records: Iterable[EvalRecord]) -> None:
+        object.__setattr__(self, "records", tuple(records))
+
+    def global_ops_snapshot(self) -> MetricsSnapshot:
+        return _build_metrics_snapshot(self.records)
+
+    def snapshot_by_strategy(self) -> Mapping[StrategyVersionKey, StrategyMetricsSnapshot]:
+        grouped_records: dict[StrategyVersionKey, list[EvalRecord]] = defaultdict(list)
+        for record in self.records:
+            grouped_records[(record.strategy_id, record.strategy_version_id)].append(record)
+        return {
+            key: _build_strategy_metrics_snapshot(key, records)
+            for key, records in grouped_records.items()
+        }
+
+
+def _build_metrics_snapshot(records: tuple[EvalRecord, ...] | list[EvalRecord]) -> MetricsSnapshot:
         if not records:
             return MetricsSnapshot(
                 brier_overall=None,
@@ -61,3 +93,22 @@ class MetricsCollector:
             win_rate=winning_count / len(records),
             calibration_samples=dict(calibration_samples),
         )
+
+
+def _build_strategy_metrics_snapshot(
+    key: StrategyVersionKey,
+    records: list[EvalRecord],
+) -> StrategyMetricsSnapshot:
+    metrics = _build_metrics_snapshot(records)
+    return StrategyMetricsSnapshot(
+        strategy_id=key[0],
+        strategy_version_id=key[1],
+        brier_overall=metrics.brier_overall,
+        brier_by_category=dict(metrics.brier_by_category),
+        brier_samples=dict(metrics.brier_samples),
+        pnl=metrics.pnl,
+        slippage_bps=metrics.slippage_bps,
+        fill_rate=metrics.fill_rate,
+        win_rate=metrics.win_rate,
+        calibration_samples=dict(metrics.calibration_samples),
+    )
