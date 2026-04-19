@@ -52,10 +52,11 @@ that governs this layer:
 - `pipeline.py` — composes forecaster → calibrator → sizer → router.
   Currently single-global pipeline. **S5 makes this per-strategy.**
 - `router.py` — gating (volume / liquidity thresholds), venue
-  selection, stop-condition assembly. Stringly-typed
-  `stop_conditions` on `TradeDecision` is a **known violation of
-  Invariant 2** (it carries routing + model-id mixed in). S5 fixes
-  this by moving strategy provenance into explicit fields.
+  selection, stop-condition assembly. `stop_conditions` on
+  `TradeDecision` is the gate-threshold list only
+  (`min_volume:...`, `near_resolution_price_band:...`,
+  `resolves_at:...`). Strategy / model provenance must live in
+  explicit typed fields, not in `stop_conditions`.
 - `forecasters/rules.py`, `forecasters/statistical.py`,
   `forecasters/llm.py` — the three forecasters.
 - `calibrators/netcal.py` — isotonic calibration per model_id.
