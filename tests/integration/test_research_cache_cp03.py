@@ -37,7 +37,7 @@ class _CountingConnection:
 
     async def fetch(self, *args: object) -> list[asyncpg.Record]:
         self._counters["fetch"] += 1
-        return await self._connection.fetch(*args)
+        return cast(list[asyncpg.Record], await self._connection.fetch(*args))
 
 
 class _CountingAcquireContext:
@@ -72,6 +72,8 @@ async def test_factor_panel_cache_wraps_factor_service_with_single_pg_round_trip
     ts_mid = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
     ts_end = datetime(2026, 4, 30, 23, 59, tzinfo=UTC)
     store = PostgresMarketDataStore(pg_pool)
+    await store.write_market(_md_market(condition_id="factor-cache-a", slug="factor-cache-a"))
+    await store.write_market(_md_market(condition_id="factor-cache-b", slug="factor-cache-b"))
 
     async with pg_pool.acquire() as connection:
         await seed_factor_catalog(connection, factor_ids=("orderbook_imbalance",))
@@ -85,8 +87,6 @@ async def test_factor_panel_cache_wraps_factor_service_with_single_pg_round_trip
             ts_mid,
             ts_mid,
         )
-    await store.write_market(_md_market(condition_id="factor-cache-a", slug="factor-cache-a"))
-    await store.write_market(_md_market(condition_id="factor-cache-b", slug="factor-cache-b"))
 
     counting_pool = _CountingPool(pg_pool)
     service = FactorService(

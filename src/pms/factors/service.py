@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
+from typing import Any, cast
 
 import asyncpg
 
 from pms.core.models import Market, MarketSignal
 from pms.factors.base import FactorDefinition, FactorValueRow
+from pms.research.cache import FactorPanel
 from pms.storage.market_data_store import PostgresMarketDataStore
 
 
@@ -100,6 +102,56 @@ class FactorService:
                 persisted += 1
         return persisted
 
+    async def get_panel(
+        self,
+        factor_id: str,
+        param: str | Mapping[str, Any] | None,
+        market_ids: Sequence[str],
+        ts_start: datetime,
+        ts_end: datetime,
+    ) -> FactorPanel:
+        ordered_market_ids = tuple(dict.fromkeys(str(market_id) for market_id in market_ids))
+        if not ordered_market_ids:
+            return {}
+
+        query = """
+        SELECT factor_id, param, market_id, ts, value
+        FROM factor_values
+        WHERE factor_id = $1
+          AND param = $2
+          AND market_id = ANY($3::text[])
+          AND ts >= $4
+          AND ts <= $5
+        ORDER BY ts ASC, id ASC
+        """
+        async with self.pool.acquire() as connection:
+            rows = await connection.fetch(
+                query,
+                factor_id,
+                _panel_param_text(param),
+                list(ordered_market_ids),
+                ts_start,
+                ts_end,
+            )
+
+        grouped: dict[str, list[FactorValueRow]] = {
+            market_id: [] for market_id in ordered_market_ids
+        }
+        for row in rows:
+            market_id = cast(str, row["market_id"])
+            grouped.setdefault(market_id, []).append(
+                FactorValueRow(
+                    factor_id=cast(str, row["factor_id"]),
+                    param=cast(str, row["param"]),
+                    market_id=market_id,
+                    ts=cast(datetime, row["ts"]),
+                    value=cast(float, row["value"]),
+                )
+            )
+        return {
+            market_id: tuple(grouped[market_id]) for market_id in ordered_market_ids
+        }
+
     async def _forward_signals(self) -> None:
         try:
             async for signal in self.signal_stream:
@@ -144,3 +196,12 @@ class FactorService:
                 last_seen_at=signal.timestamp,
             )
         )
+
+
+def _panel_param_text(param: str | Mapping[str, Any] | None) -> str:
+    if param is None or param == "":
+        return ""
+    if isinstance(param, str):
+        return param
+    items = sorted((str(key), param[key]) for key in param)
+    return "&".join(f"{key}={value}" for key, value in items)
