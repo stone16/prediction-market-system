@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis
 } from 'recharts';
-import type { MetricsResponse } from '@/lib/types';
+import type { MetricsAggregate } from '@/lib/types';
 
 type ChartProps = {
   title: string;
@@ -30,7 +30,7 @@ function ChartPanel({ title, children, empty }: ChartProps) {
   );
 }
 
-export function MetricCharts({ metrics }: { metrics: MetricsResponse }) {
+export function MetricCharts({ metrics }: { metrics: MetricsAggregate }) {
   const brier = metrics.brier_series ?? [];
   const calibration = metrics.calibration_curve ?? [];
   const pnl = metrics.pnl_series ?? [];

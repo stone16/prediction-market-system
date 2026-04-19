@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import defaultdict
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
@@ -20,7 +21,7 @@ from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
 from pms.api.routes.strategies import list_strategy_metrics as list_strategy_metrics_items
 from pms.api.routes.strategies import list_strategies as list_strategies_items
 from pms.core.enums import RunMode
-from pms.core.models import MarketSignal, TradeDecision
+from pms.core.models import EvalRecord, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
 from pms.runner import Runner
 from pms.storage.market_data_store import PostgresMarketDataStore
@@ -131,38 +132,11 @@ def create_app(
 
     @app.get("/metrics")
     async def metrics() -> dict[str, Any]:
-        snapshot = await _metrics(active_runner)
         records = sorted(
             await active_runner.eval_store.all(),
-            key=lambda record: record.recorded_at,
+            key=lambda record: (record.recorded_at, record.decision_id),
         )
-        payload = cast(dict[str, Any], _jsonable(snapshot))
-        payload["brier_series"] = [
-            {
-                "recorded_at": record.recorded_at.isoformat(),
-                "brier_score": record.brier_score,
-            }
-            for record in records
-        ]
-        payload["calibration_curve"] = [
-            {
-                "prob_estimate": record.prob_estimate,
-                "resolved_outcome": record.resolved_outcome,
-            }
-            for record in records
-        ]
-        cumulative_pnl = 0.0
-        pnl_series: list[dict[str, Any]] = []
-        for record in records:
-            cumulative_pnl += record.pnl
-            pnl_series.append(
-                {
-                    "recorded_at": record.recorded_at.isoformat(),
-                    "pnl": cumulative_pnl,
-                }
-            )
-        payload["pnl_series"] = pnl_series
-        return payload
+        return _metrics_payload(records)
 
     @app.get("/feedback")
     async def feedback(resolved: bool | None = None) -> list[dict[str, Any]]:
@@ -273,6 +247,82 @@ def _latest(items: Sequence[T], limit: int) -> list[T]:
 
 async def _metrics(runner: Runner) -> MetricsSnapshot:
     return MetricsCollector(await runner.eval_store.all()).global_ops_snapshot()
+
+
+def _metrics_payload(records: list[EvalRecord]) -> dict[str, Any]:
+    collector = MetricsCollector(records)
+    ops_view = _metrics_aggregate_payload(records, collector.global_ops_snapshot())
+    strategy_snapshots = collector.snapshot_by_strategy()
+    grouped_records: dict[tuple[str, str], list[EvalRecord]] = defaultdict(list)
+    for record in records:
+        grouped_records[(record.strategy_id, record.strategy_version_id)].append(record)
+
+    per_strategy = []
+    for key in sorted(strategy_snapshots):
+        snapshot = strategy_snapshots[key]
+        strategy_records = grouped_records[key]
+        per_strategy.append(
+            {
+                "strategy_id": key[0],
+                "strategy_version_id": key[1],
+                "record_count": len(strategy_records),
+                "insufficient_samples": len(strategy_records) == 0,
+                "brier_overall": snapshot.brier_overall,
+                "pnl": snapshot.pnl,
+                "fill_rate": snapshot.fill_rate,
+                "slippage_bps": snapshot.slippage_bps,
+                "drawdown": _max_drawdown(strategy_records),
+            }
+        )
+
+    payload = dict(ops_view)
+    payload["per_strategy"] = per_strategy
+    payload["ops_view"] = ops_view
+    return payload
+
+
+def _metrics_aggregate_payload(
+    records: list[EvalRecord],
+    snapshot: MetricsSnapshot,
+) -> dict[str, Any]:
+    payload = cast(dict[str, Any], _jsonable(snapshot))
+    payload["brier_series"] = [
+        {
+            "recorded_at": record.recorded_at.isoformat(),
+            "brier_score": record.brier_score,
+        }
+        for record in records
+    ]
+    payload["calibration_curve"] = [
+        {
+            "prob_estimate": record.prob_estimate,
+            "resolved_outcome": record.resolved_outcome,
+        }
+        for record in records
+    ]
+    cumulative_pnl = 0.0
+    pnl_series: list[dict[str, Any]] = []
+    for record in records:
+        cumulative_pnl += record.pnl
+        pnl_series.append(
+            {
+                "recorded_at": record.recorded_at.isoformat(),
+                "pnl": cumulative_pnl,
+            }
+        )
+    payload["pnl_series"] = pnl_series
+    return payload
+
+
+def _max_drawdown(records: list[EvalRecord]) -> float:
+    cumulative_pnl = 0.0
+    peak_equity = 0.0
+    max_drawdown = 0.0
+    for record in records:
+        cumulative_pnl += record.pnl
+        peak_equity = max(peak_equity, cumulative_pnl)
+        max_drawdown = max(max_drawdown, peak_equity - cumulative_pnl)
+    return max_drawdown
 
 
 def _is_runner_running(runner: Runner) -> bool:

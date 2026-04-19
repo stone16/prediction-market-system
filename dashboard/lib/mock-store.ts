@@ -55,7 +55,7 @@ export function mockDecisions(): Decision[] {
 
 export function mockMetrics(): MetricsResponse {
   const decisions = mockDecisions();
-  return {
+  const opsView = {
     brier_overall: 0.18,
     brier_by_category: { StatisticalForecaster: 0.16, RulesForecaster: 0.21 },
     pnl: 42.75,
@@ -74,6 +74,34 @@ export function mockMetrics(): MetricsResponse {
       recorded_at: `2026-04-${String(1 + index).padStart(2, '0')}T00:00:00+00:00`,
       pnl: -8 + index * 3.1
     }))
+  };
+  return {
+    ...opsView,
+    per_strategy: [
+      {
+        strategy_id: 'alpha',
+        strategy_version_id: 'alpha-v1',
+        record_count: 8,
+        insufficient_samples: false,
+        brier_overall: 0.125,
+        pnl: 14.2,
+        fill_rate: 0.95,
+        slippage_bps: 15.0,
+        drawdown: 3.0
+      },
+      {
+        strategy_id: 'beta',
+        strategy_version_id: 'beta-v1',
+        record_count: 7,
+        insufficient_samples: false,
+        brier_overall: 0.305,
+        pnl: 9.8,
+        fill_rate: 0.89,
+        slippage_bps: 10.0,
+        drawdown: 2.0
+      }
+    ],
+    ops_view: opsView
   };
 }
 
