@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
 import json
 import os
@@ -17,6 +18,13 @@ from pms.storage.feedback_store import insert_feedback_row
 
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class FeedbackMigrationRow:
+    feedback: Feedback
+    strategy_id: str
+    strategy_version_id: str
 
 
 def _parse_args() -> argparse.Namespace:
@@ -55,11 +63,20 @@ async def _run(args: argparse.Namespace) -> None:
     connection = await asyncpg.connect(database_url)
     try:
         async with connection.transaction():
-            for feedback in feedback_rows:
-                await insert_feedback_row(connection, feedback)
+            for row in feedback_rows:
+                await insert_feedback_row(
+                    connection,
+                    row.feedback,
+                    strategy_id=row.strategy_id,
+                    strategy_version_id=row.strategy_version_id,
+                )
             for record in eval_rows:
                 await insert_eval_record_row(connection, record)
-            await _assert_row_counts(connection, feedback_rows, eval_rows)
+            await _assert_row_counts(
+                connection,
+                [row.feedback for row in feedback_rows],
+                eval_rows,
+            )
     finally:
         await connection.close()
 
@@ -95,19 +112,27 @@ def _load_rows(path: Path, parser: Callable[[dict[str, Any]], T]) -> list[T]:
     return rows
 
 
-def _feedback_from_payload(payload: dict[str, Any]) -> Feedback:
+def _feedback_from_payload(payload: dict[str, Any]) -> FeedbackMigrationRow:
     metadata = payload.get("metadata")
-    return Feedback(
-        feedback_id=str(payload["feedback_id"]),
-        target=str(payload["target"]),
-        source=str(payload["source"]),
-        message=str(payload["message"]),
-        severity=str(payload["severity"]),
-        created_at=_parse_datetime(payload["created_at"]),
-        resolved=bool(payload.get("resolved", False)),
-        resolved_at=_optional_datetime(payload.get("resolved_at")),
-        category=_optional_str(payload.get("category")),
-        metadata=metadata if isinstance(metadata, dict) else {},
+    return FeedbackMigrationRow(
+        feedback=Feedback(
+            feedback_id=str(payload["feedback_id"]),
+            target=str(payload["target"]),
+            source=str(payload["source"]),
+            message=str(payload["message"]),
+            severity=str(payload["severity"]),
+            created_at=_parse_datetime(payload["created_at"]),
+            resolved=bool(payload.get("resolved", False)),
+            resolved_at=_optional_datetime(payload.get("resolved_at")),
+            category=_optional_str(payload.get("category")),
+            metadata=metadata if isinstance(metadata, dict) else {},
+        ),
+        strategy_id=_strategy_tag(payload, "strategy_id", "default"),
+        strategy_version_id=_strategy_tag(
+            payload,
+            "strategy_version_id",
+            "default-v1",
+        ),
     )
 
 
@@ -116,6 +141,12 @@ def _eval_record_from_payload(payload: dict[str, Any]) -> EvalRecord:
     return EvalRecord(
         market_id=str(payload["market_id"]),
         decision_id=str(payload["decision_id"]),
+        strategy_id=_strategy_tag(payload, "strategy_id", "default"),
+        strategy_version_id=_strategy_tag(
+            payload,
+            "strategy_version_id",
+            "default-v1",
+        ),
         prob_estimate=float(payload["prob_estimate"]),
         resolved_outcome=float(payload["resolved_outcome"]),
         brier_score=float(payload["brier_score"]),
@@ -148,6 +179,13 @@ def _optional_datetime(value: Any) -> datetime | None:
 def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
+    return str(value)
+
+
+def _strategy_tag(payload: dict[str, Any], key: str, default: str) -> str:
+    value = payload.get(key)
+    if value in (None, ""):
+        return default
     return str(value)
 
 

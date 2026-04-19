@@ -10,6 +10,7 @@ import type {
   Signal,
   SignalDepth,
   StatusResponse,
+  StrategyMetricsResponse,
   StrategiesResponse
 } from './types';
 
@@ -54,7 +55,7 @@ export function mockDecisions(): Decision[] {
 
 export function mockMetrics(): MetricsResponse {
   const decisions = mockDecisions();
-  return {
+  const opsView = {
     brier_overall: 0.18,
     brier_by_category: { StatisticalForecaster: 0.16, RulesForecaster: 0.21 },
     pnl: 42.75,
@@ -74,6 +75,45 @@ export function mockMetrics(): MetricsResponse {
       pnl: -8 + index * 3.1
     }))
   };
+  return {
+    ...opsView,
+    per_strategy: [
+      {
+        strategy_id: 'alpha',
+        strategy_version_id: 'alpha-v1',
+        record_count: 8,
+        insufficient_samples: false,
+        brier_overall: 0.125,
+        pnl: 14.2,
+        fill_rate: 0.95,
+        slippage_bps: 15.0,
+        drawdown: 3.0
+      },
+      {
+        strategy_id: 'beta',
+        strategy_version_id: 'beta-v1',
+        record_count: 7,
+        insufficient_samples: false,
+        brier_overall: 0.305,
+        pnl: 9.8,
+        fill_rate: 0.89,
+        slippage_bps: 10.0,
+        drawdown: 2.0
+      },
+      {
+        strategy_id: 'default',
+        strategy_version_id: 'default-v1',
+        record_count: 0,
+        insufficient_samples: true,
+        brier_overall: null,
+        pnl: 0.0,
+        fill_rate: 0.0,
+        slippage_bps: 0.0,
+        drawdown: 0.0
+      }
+    ],
+    ops_view: opsView
+  };
 }
 
 export function mockStrategies(): StrategiesResponse {
@@ -83,6 +123,49 @@ export function mockStrategies(): StrategiesResponse {
         strategy_id: 'default',
         active_version_id: 'd50c4db65699c222620c85f0cf84c0324c148a34b212c5f69903dbf4b950757c',
         created_at: '2026-04-14T00:00:00+00:00'
+      }
+    ]
+  };
+}
+
+export function mockStrategyMetrics(): StrategyMetricsResponse {
+  return {
+    strategies: [
+      {
+        strategy_id: 'alpha',
+        strategy_version_id: 'alpha-v1',
+        created_at: '2026-04-19T00:00:00+00:00',
+        record_count: 2,
+        insufficient_samples: false,
+        brier_overall: 0.125,
+        pnl: 2.0,
+        fill_rate: 1.0,
+        slippage_bps: 15.0,
+        drawdown: 3.0
+      },
+      {
+        strategy_id: 'beta',
+        strategy_version_id: 'beta-v1',
+        created_at: '2026-04-19T00:00:00+00:00',
+        record_count: 2,
+        insufficient_samples: false,
+        brier_overall: 0.305,
+        pnl: 4.0,
+        fill_rate: 1.0,
+        slippage_bps: 10.0,
+        drawdown: 2.0
+      },
+      {
+        strategy_id: 'default',
+        strategy_version_id: 'default-v1',
+        created_at: '2026-04-14T00:00:00+00:00',
+        record_count: 0,
+        insufficient_samples: true,
+        brier_overall: null,
+        pnl: 0.0,
+        fill_rate: 0.0,
+        slippage_bps: 0.0,
+        drawdown: 0.0
       }
     ]
   };

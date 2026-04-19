@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -44,8 +44,21 @@ class StrategySelectionRegistry(Protocol):
     ) -> list[tuple[str, str, MarketSelectionSpec]]: ...
 
 
+class StrategyMarketSelectionLike(Protocol):
+    @property
+    def strategy_id(self) -> str: ...
+
+    @property
+    def strategy_version_id(self) -> str: ...
+
+    @property
+    def asset_ids(self) -> frozenset[str]: ...
+
+
 class MarketSelectorLike(Protocol):
     async def select(self) -> Any: ...
+
+    async def select_per_strategy(self) -> Sequence[StrategyMarketSelectionLike]: ...
 
 
 class SubscriptionControllerLike(Protocol):

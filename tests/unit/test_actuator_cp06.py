@@ -43,6 +43,9 @@ def _decision(
         prob_estimate=0.6,
         expected_edge=0.2,
         time_in_force="GTC",
+        opportunity_id=f"op-{decision_id}",
+        strategy_id="default",
+        strategy_version_id="default-v1",
     )
 
 
@@ -76,6 +79,8 @@ def _order_state() -> OrderState:
         submitted_at=now,
         last_updated_at=now,
         raw_status="rejected",
+        strategy_id="default",
+        strategy_version_id="default-v1",
     )
 
 

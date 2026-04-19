@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
+DEFAULT_MAX_BRIER_SCORE = 0.30
+DEFAULT_SLIPPAGE_THRESHOLD_BPS = 50.0
+DEFAULT_MIN_WIN_RATE = 0.50
+
+
 @dataclass(frozen=True, slots=True)
 class FactorCompositionStep:
     factor_id: str
@@ -32,6 +37,9 @@ class RiskParams:
 @dataclass(frozen=True, slots=True)
 class EvalSpec:
     metrics: tuple[str, ...]
+    max_brier_score: float = DEFAULT_MAX_BRIER_SCORE
+    slippage_threshold_bps: float = DEFAULT_SLIPPAGE_THRESHOLD_BPS
+    min_win_rate: float = DEFAULT_MIN_WIN_RATE
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,3 +66,25 @@ class StrategyVersion:
     strategy_id: str
     strategy_version_id: str
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveStrategy:
+    strategy_id: str
+    strategy_version_id: str
+    config: StrategyConfig
+    risk: RiskParams
+    eval_spec: EvalSpec
+    forecaster: ForecasterSpec
+    market_selection: MarketSelectionSpec
+
+    def __post_init__(self) -> None:
+        if not self.strategy_id:
+            msg = "ActiveStrategy.strategy_id must be non-empty"
+            raise ValueError(msg)
+        if not self.strategy_version_id:
+            msg = "ActiveStrategy.strategy_version_id must be non-empty"
+            raise ValueError(msg)
+        if self.config.strategy_id != self.strategy_id:
+            msg = "ActiveStrategy.strategy_id must match config.strategy_id"
+            raise ValueError(msg)

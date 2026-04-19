@@ -7,20 +7,29 @@ from typing import cast
 
 import pytest
 
-from pms.config import RiskSettings
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side
 from pms.core.models import EvalRecord, Feedback, FillRecord, TradeDecision
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
-from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
+from pms.evaluation.metrics import (
+    MetricsCollector,
+    MetricsSnapshot,
+    StrategyMetricsSnapshot,
+)
 from pms.evaluation.spool import EvalSpool
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.strategies.projections import EvalSpec
 from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
 
 def _decision(
-    *, decision_id: str = "d-cp07", prob: float = 0.7, price: float = 0.4
+    *,
+    decision_id: str = "d-cp07",
+    prob: float = 0.7,
+    price: float = 0.4,
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v1",
 ) -> TradeDecision:
     return TradeDecision(
         decision_id=decision_id,
@@ -32,10 +41,14 @@ def _decision(
         size=10.0,
         order_type="limit",
         max_slippage_bps=100,
-        stop_conditions=["model_id:model-a"],
+        stop_conditions=["min_volume:100.00"],
         prob_estimate=prob,
         expected_edge=prob - price,
         time_in_force="GTC",
+        opportunity_id=f"op-{decision_id}",
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
+        model_id="model-a",
     )
 
 
@@ -45,6 +58,8 @@ def _fill(
     resolved_outcome: float | None = 1.0,
     fill_price: float = 0.42,
     status: str = OrderStatus.MATCHED.value,
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v1",
 ) -> FillRecord:
     now = datetime(2026, 4, 14, tzinfo=UTC)
     return FillRecord(
@@ -61,6 +76,8 @@ def _fill(
         filled_at=now,
         status=status,
         anomaly_flags=[],
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
         resolved_outcome=resolved_outcome,
     )
 
@@ -68,6 +85,8 @@ def _fill(
 def _eval_record(
     *,
     decision_id: str = "d-cp07",
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v1",
     brier_score: float = 0.09,
     category: str = "model-a",
     model_id: str = "model-a",
@@ -78,6 +97,8 @@ def _eval_record(
     return EvalRecord(
         market_id="m-cp07",
         decision_id=decision_id,
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
         prob_estimate=0.7,
         resolved_outcome=1.0,
         brier_score=brier_score,
@@ -89,6 +110,30 @@ def _eval_record(
         pnl=pnl,
         slippage_bps=slippage_bps,
         filled=filled,
+    )
+
+
+def _strategy_snapshot(
+    *,
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v1",
+    brier_score: float = 0.31,
+    sample_count: int = 20,
+    slippage_bps: float = 51.0,
+    win_rate: float = 0.54,
+) -> StrategyMetricsSnapshot:
+    return StrategyMetricsSnapshot(
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
+        brier_overall=brier_score,
+        brier_by_category={"model-a": brier_score},
+        brier_samples={"model-a": sample_count},
+        record_count=sample_count,
+        pnl=0.0,
+        slippage_bps=slippage_bps,
+        fill_rate=1.0,
+        win_rate=win_rate,
+        calibration_samples={"model-a": sample_count},
     )
 
 
@@ -114,23 +159,34 @@ def test_scorer_brier_known_values() -> None:
     assert second.brier_score == pytest.approx(0.25)
 
 
+def test_scorer_rejects_fill_and_decision_strategy_identity_mismatch() -> None:
+    scorer = Scorer()
+
+    with pytest.raises(ValueError, match="strategy identity must match"):
+        scorer.score(
+            _fill(strategy_id="alpha", strategy_version_id="alpha-v1"),
+            _decision(strategy_id="beta", strategy_version_id="beta-v1"),
+        )
+
+
 @pytest.mark.asyncio
 async def test_eval_spool_enqueue_is_non_blocking_and_scores_in_background(
 ) -> None:
     store = cast(EvalStore, InMemoryEvalStore())
     spool = EvalSpool(store=store, scorer=Scorer())
     await spool.start()
+    try:
+        started_at = time.perf_counter()
+        for index in range(100):
+            spool.enqueue(
+                _fill(decision_id=f"d-{index}", resolved_outcome=1.0),
+                _decision(prob=0.7),
+            )
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
 
-    started_at = time.perf_counter()
-    for index in range(100):
-        spool.enqueue(
-            _fill(decision_id=f"d-{index}", resolved_outcome=1.0),
-            _decision(prob=0.7),
-        )
-    elapsed_ms = (time.perf_counter() - started_at) * 1000
-
-    await spool.join()
-    await spool.stop()
+        await spool.join()
+    finally:
+        await spool.stop()
 
     assert elapsed_ms < 100
     assert len(await cast(InMemoryEvalStore, store).all()) == 100
@@ -142,24 +198,25 @@ async def test_eval_spool_skips_unresolved_fills_and_keeps_running(
     store = cast(EvalStore, InMemoryEvalStore())
     spool = EvalSpool(store=store, scorer=Scorer())
     await spool.start()
+    try:
+        spool.enqueue(
+            _fill(decision_id="d-unresolved", resolved_outcome=None),
+            _decision(decision_id="d-unresolved"),
+        )
+        spool.enqueue(
+            _fill(decision_id="d-resolved", resolved_outcome=1.0),
+            _decision(decision_id="d-resolved"),
+        )
 
-    spool.enqueue(
-        _fill(decision_id="d-unresolved", resolved_outcome=None),
-        _decision(decision_id="d-unresolved"),
-    )
-    spool.enqueue(
-        _fill(decision_id="d-resolved", resolved_outcome=1.0),
-        _decision(decision_id="d-resolved"),
-    )
-
-    await asyncio.wait_for(spool.join(), timeout=1.0)
-    await spool.stop()
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
 
     assert [record.decision_id for record in await cast(InMemoryEvalStore, store).all()] == ["d-resolved"]
 
 
 def test_metrics_snapshot_empty_and_aggregated_records() -> None:
-    empty = MetricsCollector([]).snapshot()
+    empty = MetricsCollector([]).global_ops_snapshot()
 
     assert empty.brier_overall is None
 
@@ -176,7 +233,7 @@ def test_metrics_snapshot_empty_and_aggregated_records() -> None:
                 filled=False,
             ),
         ]
-    ).snapshot()
+    ).global_ops_snapshot()
 
     assert snapshot.brier_overall == pytest.approx(0.17)
     assert snapshot.brier_by_category == {"model-a": 0.09, "model-b": 0.25}
@@ -187,42 +244,159 @@ def test_metrics_snapshot_empty_and_aggregated_records() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evaluator_feedback_threshold_boundaries() -> None:
-    generator = EvaluatorFeedback(
-        cast(FeedbackStore, InMemoryFeedbackStore()),
-        risk=RiskSettings(
-            max_brier_score=0.30,
-            slippage_threshold_bps=50.0,
-            min_win_rate=0.55,
-        ),
-    )
+async def test_evaluator_feedback_uses_per_strategy_eval_thresholds() -> None:
+    generator = EvaluatorFeedback(cast(FeedbackStore, InMemoryFeedbackStore()))
+    alpha_key = ("alpha", "alpha-v1")
+    beta_key = ("beta", "beta-v1")
 
-    below_sample_floor = MetricsSnapshot(
-        brier_overall=0.31,
-        brier_by_category={"model-a": 0.31},
-        brier_samples={"model-a": 19},
-        pnl=0.0,
-        slippage_bps=50.0,
-        fill_rate=1.0,
-        win_rate=0.55,
-        calibration_samples={"model-a": 19},
+    feedback = await generator.generate(
+        {
+            alpha_key: (
+                _strategy_snapshot(
+                    strategy_id=alpha_key[0],
+                    strategy_version_id=alpha_key[1],
+                ),
+                EvalSpec(
+                    metrics=("brier", "pnl", "fill_rate"),
+                    max_brier_score=0.30,
+                    slippage_threshold_bps=50.0,
+                    min_win_rate=0.55,
+                ),
+            ),
+            beta_key: (
+                _strategy_snapshot(
+                    strategy_id=beta_key[0],
+                    strategy_version_id=beta_key[1],
+                ),
+                EvalSpec(
+                    metrics=("brier", "pnl", "fill_rate"),
+                    max_brier_score=0.40,
+                    slippage_threshold_bps=60.0,
+                    min_win_rate=0.50,
+                ),
+            ),
+        }
     )
-    crossed = MetricsSnapshot(
-        brier_overall=0.31,
-        brier_by_category={"model-a": 0.31},
-        brier_samples={"model-a": 20},
-        pnl=0.0,
-        slippage_bps=51.0,
-        fill_rate=1.0,
-        win_rate=0.54,
-        calibration_samples={"model-a": 20},
-    )
-
-    assert await generator.generate(below_sample_floor) == []
-    feedback = await generator.generate(crossed)
 
     assert {item.category for item in feedback} == {
         "brier:model-a",
         "slippage",
         "win_rate",
     }
+    assert all(item.metadata["strategy_id"] == "alpha" for item in feedback)
+    assert all(item.metadata["strategy_version_id"] == "alpha-v1" for item in feedback)
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_generates_deduped_feedback_from_runtime_metrics() -> None:
+    store = cast(EvalStore, InMemoryEvalStore())
+    feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+
+    async def metrics_provider() -> dict[tuple[str, str], tuple[StrategyMetricsSnapshot, EvalSpec]]:
+        snapshots = MetricsCollector(
+            await cast(InMemoryEvalStore, store).all()
+        ).snapshot_by_strategy()
+        return {
+            key: (
+                snapshot,
+                EvalSpec(
+                    metrics=("brier", "pnl", "fill_rate"),
+                    max_brier_score=0.30,
+                    slippage_threshold_bps=50.0,
+                    min_win_rate=0.50,
+                ),
+            )
+            for key, snapshot in snapshots.items()
+        }
+
+    spool = EvalSpool(
+        store=store,
+        scorer=Scorer(),
+        feedback_generator=EvaluatorFeedback(feedback_store),
+        metrics_provider=metrics_provider,
+    )
+    await spool.start()
+    try:
+        spool.enqueue(
+            _fill(decision_id="d-feedback-1", resolved_outcome=1.0, fill_price=0.42),
+            _decision(decision_id="d-feedback-1", price=0.4),
+        )
+        spool.enqueue(
+            _fill(decision_id="d-feedback-2", resolved_outcome=1.0, fill_price=0.42),
+            _decision(decision_id="d-feedback-2", price=0.4),
+        )
+
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    feedback = await cast(InMemoryFeedbackStore, feedback_store).all()
+
+    assert [item.category for item in feedback] == ["slippage"]
+    assert feedback[0].metadata["strategy_id"] == "default"
+    assert feedback[0].metadata["strategy_version_id"] == "default-v1"
+    assert feedback[0].metadata["sample_size"] == 1
+    assert feedback[0].metadata["market_cohort"] == "all_scored_fills"
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_logs_feedback_errors_and_keeps_scoring(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = cast(EvalStore, InMemoryEvalStore())
+
+    async def _failing_metrics_provider() -> dict[tuple[str, str], tuple[StrategyMetricsSnapshot, EvalSpec]]:
+        raise RuntimeError("metrics boom")
+
+    spool = EvalSpool(
+        store=store,
+        scorer=Scorer(),
+        feedback_generator=EvaluatorFeedback(cast(FeedbackStore, InMemoryFeedbackStore())),
+        metrics_provider=_failing_metrics_provider,
+    )
+    await spool.start()
+    try:
+        caplog.set_level("ERROR", logger="pms.evaluation.spool")
+        spool.enqueue(
+            _fill(decision_id="d-feedback-error", resolved_outcome=1.0),
+            _decision(decision_id="d-feedback-error"),
+        )
+        spool.enqueue(
+            _fill(decision_id="d-after-error", resolved_outcome=1.0),
+            _decision(decision_id="d-after-error"),
+        )
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    records = await cast(InMemoryEvalStore, store).all()
+    assert [record.decision_id for record in records] == [
+        "d-feedback-error",
+        "d-after-error",
+    ]
+    assert "feedback generation failed in evaluator spool" in caplog.text
+
+
+def test_metrics_snapshot_by_strategy_returns_only_present_keys() -> None:
+    snapshots = MetricsCollector(
+        [
+            _eval_record(
+                decision_id="alpha-1",
+                strategy_id="alpha",
+                strategy_version_id="alpha-v1",
+                brier_score=0.09,
+            ),
+            _eval_record(
+                decision_id="beta-1",
+                strategy_id="beta",
+                strategy_version_id="beta-v1",
+                brier_score=0.25,
+                category="model-b",
+                model_id="model-b",
+            ),
+        ]
+    ).snapshot_by_strategy()
+
+    assert set(snapshots) == {("alpha", "alpha-v1"), ("beta", "beta-v1")}
+    assert snapshots[("alpha", "alpha-v1")].brier_overall == pytest.approx(0.09)
+    assert snapshots[("beta", "beta-v1")].brier_by_category == {"model-b": 0.25}

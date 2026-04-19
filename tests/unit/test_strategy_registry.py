@@ -21,6 +21,7 @@ from pms.storage.strategy_registry import (
 )
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
+    ActiveStrategy,
     EvalSpec,
     FactorCompositionStep,
     ForecasterSpec,
@@ -264,7 +265,38 @@ async def test_list_strategies_and_versions_return_utc_projection_rows() -> None
     assert strategies[0].active_version_id == "default-v1"
     assert strategies[0].created_at == created_at.astimezone(UTC)
     assert versions[0].strategy_version_id == "default-v1"
-    assert versions[0].created_at == created_at.astimezone(UTC)
+
+
+@pytest.mark.asyncio
+async def test_list_active_strategies_returns_full_projection_rows() -> None:
+    strategy = _strategy(strategy_id="alpha", owner="desk-a")
+    strategy_version_id = compute_strategy_version_id(*strategy.snapshot())
+    connection = FakeConnection(
+        fetch_results=[
+            [
+                {
+                    "strategy_id": "alpha",
+                    "strategy_version_id": strategy_version_id,
+                    "config_json": serialize_strategy_config_json(*strategy.snapshot()),
+                }
+            ]
+        ]
+    )
+    registry = PostgresStrategyRegistry(FakePool(connection))
+
+    active_strategies = await registry.list_active_strategies()
+
+    assert active_strategies == [
+        ActiveStrategy(
+            strategy_id="alpha",
+            strategy_version_id=strategy_version_id,
+            config=strategy.config,
+            risk=strategy.risk,
+            eval_spec=strategy.eval_spec,
+            forecaster=strategy.forecaster,
+            market_selection=strategy.market_selection,
+        )
+    ]
 
 
 @pytest.mark.asyncio

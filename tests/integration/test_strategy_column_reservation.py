@@ -79,7 +79,7 @@ def _strategy(*, drawdown_pct: float) -> Strategy:
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_feedback_and_eval_stores_use_active_strategy_version_by_default(
+async def test_feedback_and_eval_stores_persist_explicit_strategy_tags(
     pg_pool: asyncpg.Pool,
 ) -> None:
     active_version = await PostgresStrategyRegistry(pg_pool).create_version(
@@ -98,12 +98,16 @@ async def test_feedback_and_eval_stores_use_active_strategy_version_by_default(
             severity="warning",
             created_at=created_at,
             category="reservation",
-        )
+        ),
+        strategy_id="default",
+        strategy_version_id=active_version.strategy_version_id,
     )
     await eval_store.append(
         EvalRecord(
             market_id="reservation-market",
             decision_id="reservation-decision",
+            strategy_id="default",
+            strategy_version_id=active_version.strategy_version_id,
             prob_estimate=0.63,
             resolved_outcome=1.0,
             brier_score=0.1369,
@@ -145,65 +149,43 @@ async def test_feedback_and_eval_stores_use_active_strategy_version_by_default(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_orders_and_fills_accept_null_strategy_columns(
+async def test_orders_and_fills_require_non_null_strategy_columns(
     pg_pool: asyncpg.Pool,
 ) -> None:
-    # S5-MIGRATION-MARKER: flip NULL asserts after NOT NULL upgrade lands
     async with pg_pool.acquire() as connection:
-        await connection.execute(
-            """
-            INSERT INTO orders (
-                order_id,
-                market_id,
-                ts,
-                strategy_id,
-                strategy_version_id
-            ) VALUES ($1, $2, $3, $4, $5)
-            """,
-            "reservation-order",
-            "reservation-market",
-            datetime(2026, 4, 17, tzinfo=UTC),
-            None,
-            None,
-        )
-        await connection.execute(
-            """
-            INSERT INTO fills (
-                fill_id,
-                order_id,
-                market_id,
-                ts,
-                strategy_id,
-                strategy_version_id
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-            """,
-            "reservation-fill",
-            "reservation-order",
-            "reservation-market",
-            datetime(2026, 4, 17, 0, 1, tzinfo=UTC),
-            None,
-            None,
-        )
-        order_row = await connection.fetchrow(
-            """
-            SELECT strategy_id, strategy_version_id
-            FROM orders
-            WHERE order_id = $1
-            """,
-            "reservation-order",
-        )
-        fill_row = await connection.fetchrow(
-            """
-            SELECT strategy_id, strategy_version_id
-            FROM fills
-            WHERE fill_id = $1
-            """,
-            "reservation-fill",
-        )
-
-    assert order_row is not None
-    assert order_row["strategy_id"] is None
-    assert order_row["strategy_version_id"] is None
-    assert fill_row is not None
-    assert fill_row["strategy_id"] is None
-    assert fill_row["strategy_version_id"] is None
+        with pytest.raises(asyncpg.NotNullViolationError):
+            await connection.execute(
+                """
+                INSERT INTO orders (
+                    order_id,
+                    market_id,
+                    ts,
+                    strategy_id,
+                    strategy_version_id
+                ) VALUES ($1, $2, $3, $4, $5)
+                """,
+                "reservation-order",
+                "reservation-market",
+                datetime(2026, 4, 17, tzinfo=UTC),
+                None,
+                None,
+            )
+        with pytest.raises(asyncpg.NotNullViolationError):
+            await connection.execute(
+                """
+                INSERT INTO fills (
+                    fill_id,
+                    order_id,
+                    market_id,
+                    ts,
+                    strategy_id,
+                    strategy_version_id
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                "reservation-fill",
+                "reservation-order",
+                "reservation-market",
+                datetime(2026, 4, 17, 0, 1, tzinfo=UTC),
+                None,
+                None,
+            )

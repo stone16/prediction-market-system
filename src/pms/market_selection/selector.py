@@ -23,17 +23,20 @@ class MarketSelector:
         self._merge_policy = merge_policy
 
     async def select(self) -> MergeResult:
-        strategy_specs = await self._registry.list_market_selections()
+        selections = await self.select_per_strategy()
         logger.info(
             "market selector processed %d active strategies",
-            len(strategy_specs),
+            len(selections),
         )
-        if not strategy_specs:
+        if not selections:
             logger.warning(
                 "no active_version_id rows found; data sensor will idle until "
                 "a strategy is activated",
             )
+        return self._merge_policy.merge(selections)
 
+    async def select_per_strategy(self) -> list[StrategyMarketSet]:
+        strategy_specs = await self._registry.list_market_selections()
         selections: list[StrategyMarketSet] = []
         for strategy_id, strategy_version_id, spec in strategy_specs:
             eligible_markets = await self._store.read_eligible_markets(
@@ -48,7 +51,7 @@ class MarketSelector:
                     asset_ids=_asset_ids_from_eligible_markets(eligible_markets),
                 )
             )
-        return self._merge_policy.merge(selections)
+        return selections
 
 
 def _asset_ids_from_eligible_markets(

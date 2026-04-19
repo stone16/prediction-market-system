@@ -91,4 +91,6 @@ def _rejected_order_state(decision: TradeDecision, reason: str) -> OrderState:
         submitted_at=now,
         last_updated_at=now,
         raw_status=reason,
+        strategy_id=decision.strategy_id,
+        strategy_version_id=decision.strategy_version_id,
     )

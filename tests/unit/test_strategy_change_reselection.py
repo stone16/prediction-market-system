@@ -6,13 +6,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal
+from pms.market_selection.merge import StrategyMarketSet
 from pms.runner import Runner
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
@@ -154,6 +155,15 @@ class RecordingSelector:
             {"asset_ids": tuple(self.returned_asset_ids)},
         )()
 
+    async def select_per_strategy(self) -> list[StrategyMarketSet]:
+        return [
+            StrategyMarketSet(
+                strategy_id="default",
+                strategy_version_id="default-v1",
+                asset_ids=frozenset(self.returned_asset_ids),
+            )
+        ]
+
 
 @dataclass
 class RecordingSubscriptionController:
@@ -263,9 +273,8 @@ async def test_create_version_fires_callback_after_write_context_exits() -> None
         observed["transaction_exited"] = connection.transaction_manager.exited
         observed["acquire_exited"] = connection.acquire_exit_calls
 
-    registry = PostgresStrategyRegistry(
-        FakePool(connection), on_strategy_change=on_strategy_change
-    )
+    registry = PostgresStrategyRegistry(FakePool(connection))
+    registry.register_change_callback(on_strategy_change)
 
     version = await registry.create_version(strategy)
 
@@ -288,9 +297,8 @@ async def test_set_active_fires_callback_after_acquire_exit() -> None:
     async def on_strategy_change() -> None:
         observed["acquire_exited"] = connection.acquire_exit_calls
 
-    registry = PostgresStrategyRegistry(
-        FakePool(connection), on_strategy_change=on_strategy_change
-    )
+    registry = PostgresStrategyRegistry(FakePool(connection))
+    registry.register_change_callback(on_strategy_change)
 
     await registry.set_active("default", "default-v2")
 
@@ -317,10 +325,8 @@ async def test_strategy_change_callback_error_is_logged_without_breaking_write(
     async def broken_callback() -> None:
         raise RuntimeError("callback boom")
 
-    registry = PostgresStrategyRegistry(
-        FakePool(connection),
-        on_strategy_change=broken_callback,
-    )
+    registry = PostgresStrategyRegistry(FakePool(connection))
+    registry.register_change_callback(broken_callback)
 
     caplog.set_level(logging.WARNING)
     version = await registry.create_version(_strategy())
@@ -329,6 +335,32 @@ async def test_strategy_change_callback_error_is_logged_without_breaking_write(
     assert "strategy change callback failed: callback boom" in caplog.text
     assert connection.transaction_manager.exited == 1
     assert connection.acquire_exit_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_register_and_unregister_change_callbacks_are_idempotent() -> None:
+    created_at = datetime(2026, 4, 18, 14, 30, tzinfo=UTC)
+    connection = FakeConnection(fetchval_results=[created_at])
+    registry = PostgresStrategyRegistry(FakePool(connection))
+    observed: list[str] = []
+
+    async def first_callback() -> None:
+        observed.append("first")
+
+    async def second_callback() -> None:
+        observed.append("second")
+
+    registry.register_change_callback(first_callback)
+    registry.register_change_callback(first_callback)
+    registry.register_change_callback(second_callback)
+
+    await registry.create_version(_strategy())
+
+    registry.unregister_change_callback(first_callback)
+    registry.unregister_change_callback(first_callback)
+    await registry.set_active("default", "default-v2")
+
+    assert observed == ["first", "second", "second"]
 
 
 @pytest.mark.asyncio
@@ -356,27 +388,39 @@ async def test_runner_strategy_change_trigger_triggers_reselection(
         return runtime_pool
 
     class CapturingRegistry:
-        def __init__(
-            self,
-            pool: object,
-            on_strategy_change: Callable[[], Awaitable[None]] | None = None,
-        ) -> None:
+        def __init__(self, pool: object) -> None:
             del pool
-            self.on_strategy_change = on_strategy_change
+            self.callbacks: list[Callable[[], Awaitable[None]]] = []
             registry_box["instance"] = self
 
+        def register_change_callback(
+            self,
+            callback: Callable[[], Awaitable[None]],
+        ) -> None:
+            if callback not in self.callbacks:
+                self.callbacks.append(callback)
+
+        def unregister_change_callback(
+            self,
+            callback: Callable[[], Awaitable[None]],
+        ) -> None:
+            if callback in self.callbacks:
+                self.callbacks.remove(callback)
+
         async def create_version(self, *_: object) -> object:
-            if self.on_strategy_change is None:
+            if not self.callbacks:
                 msg = "strategy change callback was not wired"
                 raise AssertionError(msg)
-            await self.on_strategy_change()
+            for callback in tuple(self.callbacks):
+                await callback()
             return object()
 
         async def set_active(self, *_: object) -> None:
-            if self.on_strategy_change is None:
+            if not self.callbacks:
                 msg = "strategy change callback was not wired"
                 raise AssertionError(msg)
-            await self.on_strategy_change()
+            for callback in tuple(self.callbacks):
+                await callback()
 
     monkeypatch.setattr("pms.runner.asyncpg.create_pool", fake_create_pool)
     monkeypatch.setattr("pms.runner.MarketDiscoverySensor", lambda **kwargs: discovery)
@@ -442,16 +486,29 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
     constructed: list[dict[str, object]] = []
 
     class TrackingRegistry:
-        def __init__(
-            self,
-            pool: object,
-            on_strategy_change: Callable[[], Awaitable[None]] | None = None,
-        ) -> None:
+        def __init__(self, pool: object) -> None:
             constructed.append(
-                {"pool_id": id(pool), "on_strategy_change": on_strategy_change}
+                {"pool_id": id(pool), "callbacks": []}
             )
             self._pool = pool
-            self._on_strategy_change = on_strategy_change
+            self._callbacks: list[Callable[[], Awaitable[None]]] = []
+
+        def register_change_callback(
+            self,
+            callback: Callable[[], Awaitable[None]],
+        ) -> None:
+            if callback not in self._callbacks:
+                self._callbacks.append(callback)
+            cast(list[Callable[[], Awaitable[None]]], constructed[-1]["callbacks"]).append(
+                callback
+            )
+
+        def unregister_change_callback(
+            self,
+            callback: Callable[[], Awaitable[None]],
+        ) -> None:
+            if callback in self._callbacks:
+                self._callbacks.remove(callback)
 
         async def get_by_id(self, strategy_id: str) -> None:
             del strategy_id
@@ -462,8 +519,8 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
 
         async def set_active(self, strategy_id: str, version_id: str) -> None:
             del strategy_id, version_id
-            if self._on_strategy_change is not None:
-                await self._on_strategy_change()
+            for callback in tuple(self._callbacks):
+                await callback()
 
     async def fake_create_pool(
         *, dsn: str, min_size: int, max_size: int
@@ -506,9 +563,13 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
             f"Expected a single PostgresStrategyRegistry construction, "
             f"got {len(constructed)}. Bootstrap migration and "
             "active-perception wiring must share one registry instance so "
-            "on_strategy_change fires from every mutation site."
+            "change callbacks fire from every mutation site."
         )
-        assert constructed[0]["on_strategy_change"] == runner._request_reselection
+        callbacks = cast(list[Callable[[], Awaitable[None]]], constructed[0]["callbacks"])
+        assert callbacks == [
+            runner._request_reselection,
+            runner._sync_controller_runtimes,
+        ]
 
         runner._reselection_requested.clear()
         await registry.set_active("default", "default-v2")
@@ -518,3 +579,89 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
         )
     finally:
         await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_runner_start_stop_cycles_unregister_strategy_change_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_pool = RuntimePool()
+    discovery = IdleDiscoverySensor()
+    market_data = RecordingMarketDataSensor()
+    selector = RecordingSelector(returned_asset_ids=["near-no", "near-yes"])
+    subscription_controller = RecordingSubscriptionController(sink=market_data)
+    constructed: list["LifecycleRegistry"] = []
+
+    async def fake_create_pool(*, dsn: str, min_size: int, max_size: int) -> RuntimePool:
+        del dsn, min_size, max_size
+        return runtime_pool
+
+    class LifecycleRegistry:
+        def __init__(self, pool: object) -> None:
+            del pool
+            self.callbacks: list[Callable[[], Awaitable[None]]] = []
+            constructed.append(self)
+
+        def register_change_callback(
+            self,
+            callback: Callable[[], Awaitable[None]],
+        ) -> None:
+            if callback not in self.callbacks:
+                self.callbacks.append(callback)
+
+        def unregister_change_callback(
+            self,
+            callback: Callable[[], Awaitable[None]],
+        ) -> None:
+            if callback in self.callbacks:
+                self.callbacks.remove(callback)
+
+        async def get_by_id(self, strategy_id: str) -> None:
+            del strategy_id
+            return None
+
+        async def list_market_selections(self) -> list[object]:
+            return []
+
+        async def list_active_strategies(self) -> list[object]:
+            return []
+
+    monkeypatch.setattr("pms.runner.asyncpg.create_pool", fake_create_pool)
+    monkeypatch.setattr("pms.runner.MarketDiscoverySensor", lambda **kwargs: discovery)
+    monkeypatch.setattr("pms.runner.MarketDataSensor", lambda **kwargs: market_data)
+    monkeypatch.setattr("pms.runner.PostgresStrategyRegistry", LifecycleRegistry)
+    monkeypatch.setattr("pms.runner.MarketSelector", lambda *args, **kwargs: selector)
+    monkeypatch.setattr(
+        "pms.runner.SensorSubscriptionController",
+        lambda sink: subscription_controller,
+    )
+
+    async def _runner_tasks() -> tuple[asyncio.Task[Any], ...]:
+        await asyncio.sleep(0)
+        return tuple(
+            task
+            for task in asyncio.all_tasks()
+            if "Runner._periodic_reselection_loop"
+            in getattr(task.get_coro(), "__qualname__", "")
+            or task.get_name().startswith("controller-pipeline:")
+        )
+
+    baseline_tasks = await _runner_tasks()
+    assert baseline_tasks == ()
+
+    for _ in range(10):
+        runner = Runner(
+            config=_settings(RunMode.LIVE),
+            historical_data_path=FIXTURE_PATH,
+        )
+        await runner.start()
+        try:
+            registry = constructed[-1]
+            assert registry.callbacks == [
+                runner._request_reselection,
+                runner._sync_controller_runtimes,
+            ]
+        finally:
+            await runner.stop()
+        assert registry.callbacks == []
+        assert await _runner_tasks() == ()

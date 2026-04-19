@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +20,20 @@ from pms.storage.market_data_store import PostgresMarketDataStore
 
 REPLAY_FIXTURE = Path("tests/fixtures/polymarket_ws_replay.jsonl")
 _REAL_SLEEP = asyncio.sleep
+
+
+async def _wait_for(
+    predicate: Callable[[], bool],
+    *,
+    timeout_s: float = 0.5,
+    interval_s: float = 0.005,
+) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            msg = "timed out waiting for predicate"
+            raise AssertionError(msg)
+        await asyncio.sleep(interval_s)
 
 
 class _AcquireContext:
@@ -733,7 +747,7 @@ async def test_market_data_sensor_watchdog_warns_after_silence(
     with caplog.at_level(logging.WARN):
         await sensor._watchdog.start()
         try:
-            await asyncio.sleep(0.03)
+            await _wait_for(lambda: sensor.watchdog_timeout_count == 1)
         finally:
             await sensor._watchdog.stop()
 

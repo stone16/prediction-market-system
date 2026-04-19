@@ -6,13 +6,15 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal
+from pms.market_selection.merge import StrategyMarketSet
 from pms.runner import Runner
 
 
@@ -115,6 +117,15 @@ class RecordingSelector:
             (),
             {"asset_ids": tuple(self.returned_asset_ids)},
         )()
+
+    async def select_per_strategy(self) -> list[StrategyMarketSet]:
+        return [
+            StrategyMarketSet(
+                strategy_id="default",
+                strategy_version_id="default-v1",
+                asset_ids=frozenset(self.returned_asset_ids),
+            )
+        ]
 
 
 @dataclass
@@ -222,9 +233,23 @@ def _install_live_doubles(
         events.append("pool-ready")
         return fake_pool
 
+    class EmptyRegistry:
+        def __init__(self, pool: object) -> None:
+            del pool
+
+        def register_change_callback(self, callback: Any) -> None:
+            del callback
+
+        def unregister_change_callback(self, callback: Any) -> None:
+            del callback
+
+        async def list_active_strategies(self) -> list[object]:
+            return []
+
     monkeypatch.setattr("pms.runner.asyncpg.create_pool", fake_create_pool)
     monkeypatch.setattr("pms.runner.MarketDiscoverySensor", lambda **kwargs: discovery)
     monkeypatch.setattr("pms.runner.MarketDataSensor", lambda **kwargs: market_data)
+    monkeypatch.setattr("pms.runner.PostgresStrategyRegistry", EmptyRegistry)
     monkeypatch.setattr("pms.runner.MarketSelector", lambda *args, **kwargs: selector)
     monkeypatch.setattr(
         "pms.runner.SensorSubscriptionController",
@@ -380,6 +405,67 @@ async def test_runner_active_perception_reselection_is_serialized(
 
 
 @pytest.mark.asyncio
+async def test_refresh_subscription_updates_wait_for_reselection_lock() -> None:
+    events: list[list[str]] = []
+
+    @dataclass
+    class SerializingSubscriptionController:
+        active_calls: int = 0
+        max_active_calls: int = 0
+        first_call_started: asyncio.Event = field(default_factory=asyncio.Event)
+        release_first_call: asyncio.Event = field(default_factory=asyncio.Event)
+
+        async def update(self, asset_ids: list[str]) -> bool:
+            self.active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self.active_calls)
+            events.append(list(asset_ids))
+            if not self.first_call_started.is_set():
+                self.first_call_started.set()
+                await self.release_first_call.wait()
+            self.active_calls -= 1
+            return True
+
+    @dataclass
+    class StaticSelector:
+        asset_ids: list[str]
+
+        async def select(self) -> Any:
+            return type("MergeResult", (), {"asset_ids": tuple(self.asset_ids)})()
+
+        async def select_per_strategy(self) -> list[StrategyMarketSet]:
+            return [
+                StrategyMarketSet(
+                    strategy_id="alpha",
+                    strategy_version_id="alpha-v1",
+                    asset_ids=frozenset(self.asset_ids),
+                )
+            ]
+
+    runner = _runner(RunMode.LIVE)
+    subscription_controller = SerializingSubscriptionController()
+    runner._market_selector = cast(Any, StaticSelector(["strategy-token"]))  # noqa: SLF001
+    runner._subscription_controller = cast(Any, subscription_controller)  # noqa: SLF001
+    runner._controller_runtimes = {  # noqa: SLF001
+        "alpha": cast(Any, SimpleNamespace(asset_ids=frozenset({"refresh-token"})))
+    }
+
+    reselect_task = asyncio.create_task(runner._reselect())  # noqa: SLF001
+    await asyncio.wait_for(subscription_controller.first_call_started.wait(), timeout=2.0)
+
+    refresh_task = asyncio.create_task(runner._refresh_subscription_assets_locked())  # noqa: SLF001
+    await asyncio.sleep(0)
+    assert subscription_controller.max_active_calls == 1
+    assert events == [["strategy-token"]]
+
+    subscription_controller.release_first_call.set()
+    await asyncio.wait_for(reselect_task, timeout=2.0)
+    await asyncio.wait_for(refresh_task, timeout=2.0)
+
+    assert subscription_controller.max_active_calls == 1
+    assert events == [["strategy-token"], ["refresh-token"]]
+
+
+@pytest.mark.asyncio
 async def test_event_triggered_reselection_failure_does_not_kill_loop(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -406,6 +492,9 @@ async def test_event_triggered_reselection_failure_does_not_kill_loop(
             async def select(self) -> Any:
                 RaisingSelector.calls += 1
                 raising_selector_called.set()
+                raise RuntimeError("transient postgres error")
+
+            async def select_per_strategy(self) -> list[StrategyMarketSet]:
                 raise RuntimeError("transient postgres error")
 
         runner._market_selector = RaisingSelector()

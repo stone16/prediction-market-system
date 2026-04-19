@@ -8,7 +8,6 @@ from typing import cast
 import asyncpg
 
 from pms.core.models import EvalRecord
-from pms.storage.strategy_tags import resolve_strategy_tags
 
 
 @dataclass
@@ -18,45 +17,31 @@ class EvalStore:
     def bind_pool(self, pool: asyncpg.Pool) -> None:
         self.pool = pool
 
-    async def append(
-        self,
-        record: EvalRecord,
-        *,
-        strategy_id: str = "default",
-        strategy_version_id: str | None = None,
-    ) -> None:
+    async def append(self, record: EvalRecord) -> None:
         async with self._pool().acquire() as connection:
-            await insert_eval_record_row(
-                connection,
-                record,
-                strategy_id=strategy_id,
-                strategy_version_id=strategy_version_id,
-            )
+            await insert_eval_record_row(connection, record)
 
     async def all(self) -> list[EvalRecord]:
         if self.pool is None:
             return []
 
         async with self.pool.acquire() as connection:
+            rows = await connection.fetch(_SELECT_ALL_QUERY)
+        return [_eval_record_from_row(row) for row in rows]
+
+    async def all_for_strategy(
+        self,
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> list[EvalRecord]:
+        if self.pool is None:
+            return []
+
+        async with self.pool.acquire() as connection:
             rows = await connection.fetch(
-                """
-                SELECT
-                    market_id,
-                    decision_id,
-                    prob_estimate,
-                    resolved_outcome,
-                    brier_score,
-                    fill_status,
-                    recorded_at,
-                    citations,
-                    category,
-                    model_id,
-                    pnl,
-                    slippage_bps,
-                    filled
-                FROM eval_records
-                ORDER BY recorded_at ASC, decision_id ASC
-                """
+                _SELECT_BY_STRATEGY_QUERY,
+                strategy_id,
+                strategy_version_id,
             )
         return [_eval_record_from_row(row) for row in rows]
 
@@ -70,15 +55,7 @@ class EvalStore:
 async def insert_eval_record_row(
     connection: asyncpg.Connection,
     record: EvalRecord,
-    *,
-    strategy_id: str = "default",
-    strategy_version_id: str | None = None,
 ) -> None:
-    resolved_strategy_id, resolved_strategy_version_id = await resolve_strategy_tags(
-        connection,
-        strategy_id=strategy_id,
-        strategy_version_id=strategy_version_id,
-    )
     await connection.execute(
         """
         INSERT INTO eval_records (
@@ -114,9 +91,54 @@ async def insert_eval_record_row(
         record.pnl,
         record.slippage_bps,
         record.filled,
-        resolved_strategy_id,
-        resolved_strategy_version_id,
+        record.strategy_id,
+        record.strategy_version_id,
     )
+
+
+_SELECT_ALL_QUERY = """
+SELECT
+    market_id,
+    decision_id,
+    prob_estimate,
+    resolved_outcome,
+    brier_score,
+    fill_status,
+    recorded_at,
+    citations,
+    strategy_id,
+    strategy_version_id,
+    category,
+    model_id,
+    pnl,
+    slippage_bps,
+    filled
+FROM eval_records
+ORDER BY recorded_at ASC, decision_id ASC
+"""
+
+
+_SELECT_BY_STRATEGY_QUERY = """
+SELECT
+    market_id,
+    decision_id,
+    prob_estimate,
+    resolved_outcome,
+    brier_score,
+    fill_status,
+    recorded_at,
+    citations,
+    strategy_id,
+    strategy_version_id,
+    category,
+    model_id,
+    pnl,
+    slippage_bps,
+    filled
+FROM eval_records
+WHERE strategy_id = $1 AND strategy_version_id = $2
+ORDER BY recorded_at ASC, decision_id ASC
+"""
 
 
 def _eval_record_from_row(row: asyncpg.Record) -> EvalRecord:
@@ -133,6 +155,8 @@ def _eval_record_from_row(row: asyncpg.Record) -> EvalRecord:
     return EvalRecord(
         market_id=cast(str, row["market_id"]),
         decision_id=cast(str, row["decision_id"]),
+        strategy_id=cast(str, row["strategy_id"]),
+        strategy_version_id=cast(str, row["strategy_version_id"]),
         prob_estimate=cast(float, row["prob_estimate"]),
         resolved_outcome=cast(float, row["resolved_outcome"]),
         brier_score=cast(float, row["brier_score"]),

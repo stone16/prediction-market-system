@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pms.core.models import EvalRecord, Feedback
+from pms.core.models import EvalRecord, Feedback, Opportunity
 
 
 class InMemoryEvalStore:
@@ -22,7 +22,14 @@ class InMemoryFeedbackStore:
     def __init__(self, items: list[Feedback] | None = None) -> None:
         self._items = list(items or [])
 
-    async def append(self, feedback: Feedback) -> None:
+    async def append(
+        self,
+        feedback: Feedback,
+        *,
+        strategy_id: str | None = None,
+        strategy_version_id: str | None = None,
+    ) -> None:
+        del strategy_id, strategy_version_id
         self._items.append(feedback)
 
     async def all(self) -> list[Feedback]:
@@ -48,6 +55,17 @@ class InMemoryFeedbackStore:
                     resolved_at=datetime.now(tz=UTC),
                 )
                 return
+
+
+class InMemoryOpportunityStore:
+    def __init__(self, items: list[Opportunity] | None = None) -> None:
+        self._items = list(items or [])
+
+    async def insert(self, opportunity: Opportunity) -> None:
+        self._items.append(opportunity)
+
+    async def all(self) -> list[Opportunity]:
+        return list(self._items)
 
 
 class LegacyPathEvalStore(InMemoryEvalStore):

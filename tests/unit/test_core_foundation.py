@@ -27,6 +27,7 @@ def _utcnow() -> datetime:
 def test_all_core_entities_are_frozen_dataclasses() -> None:
     entity_classes = [
         models.MarketSignal,
+        models.Opportunity,
         models.TradeDecision,
         models.OrderState,
         models.FillRecord,
@@ -39,6 +40,7 @@ def test_all_core_entities_are_frozen_dataclasses() -> None:
 
     assert {entity.__name__ for entity in entity_classes} == {
         "MarketSignal",
+        "Opportunity",
         "TradeDecision",
         "OrderState",
         "FillRecord",
@@ -80,6 +82,10 @@ def test_financial_entity_fields_use_float_boundary_types() -> None:
             "size": float,
             "prob_estimate": float,
             "expected_edge": float,
+        },
+        models.Opportunity: {
+            "expected_edge": float,
+            "target_size_usdc": float,
         },
         models.OrderState: {
             "requested_size": float,

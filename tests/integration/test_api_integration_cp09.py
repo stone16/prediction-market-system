@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import cast
 
@@ -18,6 +19,11 @@ from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.environ.get("PMS_RUN_INTEGRATION") != "1",
+    reason="set PMS_RUN_INTEGRATION=1 to run integration tests",
+)
 @pytest.mark.asyncio
 async def test_api_backtest_runner_get_routes(tmp_path: Path) -> None:
     runner = Runner(
@@ -61,4 +67,17 @@ async def test_api_backtest_runner_get_routes(tmp_path: Path) -> None:
     assert len(signals.json()) == 50
     assert len(decisions.json()) >= 10
     assert metrics.json()["brier_overall"] is not None
+    assert metrics.json()["ops_view"]["brier_overall"] == metrics.json()["brier_overall"]
+    assert metrics.json()["per_strategy"]
+    assert {
+        "strategy_id",
+        "strategy_version_id",
+        "record_count",
+        "insufficient_samples",
+        "brier_overall",
+        "pnl",
+        "fill_rate",
+        "slippage_bps",
+        "drawdown",
+    } <= set(metrics.json()["per_strategy"][0].keys())
     assert isinstance(feedback.json(), list)

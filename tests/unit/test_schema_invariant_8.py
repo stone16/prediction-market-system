@@ -52,5 +52,6 @@ def test_inner_ring_product_tables_continue_to_carry_strategy_tags() -> None:
         "-- END INNER-RING PRODUCT SHELLS",
     )
 
-    assert inner_ring.count("strategy_id TEXT NULL") == 4
-    assert inner_ring.count("strategy_version_id TEXT NULL") == 4
+    assert "CREATE TABLE IF NOT EXISTS opportunities" in inner_ring
+    assert inner_ring.count("strategy_id TEXT NOT NULL") == 5
+    assert inner_ring.count("strategy_version_id TEXT NOT NULL") == 5

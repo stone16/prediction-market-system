@@ -12,12 +12,22 @@ class Scorer:
     def score(self, fill: FillRecord, decision: TradeDecision) -> EvalRecord:
         if fill.resolved_outcome is None:
             raise ValueError("FillRecord.resolved_outcome is required for scoring")
+        if (
+            fill.strategy_id != decision.strategy_id
+            or fill.strategy_version_id != decision.strategy_version_id
+        ):
+            msg = (
+                "FillRecord and TradeDecision strategy identity must match for scoring"
+            )
+            raise ValueError(msg)
 
         brier_score = (decision.prob_estimate - fill.resolved_outcome) ** 2
         model_id = _model_id(decision)
         return EvalRecord(
             market_id=fill.market_id,
             decision_id=decision.decision_id,
+            strategy_id=fill.strategy_id,
+            strategy_version_id=fill.strategy_version_id,
             prob_estimate=decision.prob_estimate,
             resolved_outcome=fill.resolved_outcome,
             brier_score=brier_score,
@@ -33,10 +43,7 @@ class Scorer:
 
 
 def _model_id(decision: TradeDecision) -> str:
-    for condition in decision.stop_conditions:
-        if condition.startswith("model_id:"):
-            return condition.removeprefix("model_id:")
-    return "unknown"
+    return "unknown" if decision.model_id is None else decision.model_id
 
 
 def _pnl(fill: FillRecord, decision: TradeDecision) -> float:

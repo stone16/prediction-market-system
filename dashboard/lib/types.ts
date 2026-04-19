@@ -33,7 +33,7 @@ export type Decision = {
   side?: string;
 };
 
-export type MetricsResponse = {
+export type MetricsAggregate = {
   brier_overall: number | null;
   brier_by_category: Record<string, number>;
   pnl: number;
@@ -43,6 +43,23 @@ export type MetricsResponse = {
   brier_series?: Array<{ recorded_at: string; brier_score: number }>;
   calibration_curve?: Array<{ prob_estimate: number; resolved_outcome: number }>;
   pnl_series?: Array<{ recorded_at: string; pnl: number }>;
+};
+
+export type MetricsPerStrategyRow = {
+  strategy_id: string;
+  strategy_version_id: string;
+  record_count: number;
+  insufficient_samples: boolean;
+  brier_overall: number | null;
+  pnl: number;
+  fill_rate: number;
+  slippage_bps: number;
+  drawdown: number;
+};
+
+export type MetricsResponse = MetricsAggregate & {
+  per_strategy: MetricsPerStrategyRow[];
+  ops_view: MetricsAggregate;
 };
 
 export type Signal = {
@@ -74,6 +91,23 @@ export type StrategyRow = {
 
 export type StrategiesResponse = {
   strategies: StrategyRow[];
+};
+
+export type StrategyMetricsRow = {
+  strategy_id: string;
+  strategy_version_id: string;
+  created_at: string;
+  record_count: number;
+  insufficient_samples: boolean;
+  brier_overall: number | null;
+  pnl: number;
+  fill_rate: number;
+  slippage_bps: number;
+  drawdown: number;
+};
+
+export type StrategyMetricsResponse = {
+  strategies: StrategyMetricsRow[];
 };
 
 export type FactorCatalogEntry = {

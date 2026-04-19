@@ -43,6 +43,8 @@ def _records(count: int) -> list[EvalRecord]:
         EvalRecord(
             market_id=f"m{index}",
             decision_id=f"d{index}",
+            strategy_id="default",
+            strategy_version_id="default-v1",
             prob_estimate=0.2 if index < count // 2 else 0.8,
             resolved_outcome=0.0 if index < count // 2 else 1.0,
             brier_score=0.04,

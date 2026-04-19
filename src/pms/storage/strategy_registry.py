@@ -10,6 +10,10 @@ import asyncpg
 
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
+    ActiveStrategy,
+    DEFAULT_MAX_BRIER_SCORE,
+    DEFAULT_MIN_WIN_RATE,
+    DEFAULT_SLIPPAGE_THRESHOLD_BPS,
     EvalSpec,
     FactorCompositionStep,
     ForecasterSpec,
@@ -27,15 +31,21 @@ from pms.strategies.versioning import (
 
 logger = logging.getLogger(__name__)
 
+StrategyChangeCallback = Callable[[], Awaitable[None]]
+
 
 class PostgresStrategyRegistry:
-    def __init__(
-        self,
-        pool: asyncpg.Pool,
-        on_strategy_change: Callable[[], Awaitable[None]] | None = None,
-    ) -> None:
+    def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
-        self._on_strategy_change = on_strategy_change
+        self._strategy_change_callbacks: list[StrategyChangeCallback] = []
+
+    def register_change_callback(self, fn: StrategyChangeCallback) -> None:
+        if fn not in self._strategy_change_callbacks:
+            self._strategy_change_callbacks.append(fn)
+
+    def unregister_change_callback(self, fn: StrategyChangeCallback) -> None:
+        if fn in self._strategy_change_callbacks:
+            self._strategy_change_callbacks.remove(fn)
 
     async def create_strategy(
         self,
@@ -214,6 +224,41 @@ class PostgresStrategyRegistry:
             )
         return selections
 
+    async def list_active_strategies(self) -> list[ActiveStrategy]:
+        query = """
+        SELECT
+            strategies.strategy_id,
+            strategies.active_version_id AS strategy_version_id,
+            versions.config_json
+        FROM strategies
+        JOIN strategy_versions AS versions
+            ON versions.strategy_id = strategies.strategy_id
+           AND versions.strategy_version_id = strategies.active_version_id
+        WHERE strategies.active_version_id IS NOT NULL
+        ORDER BY strategies.strategy_id ASC
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query)
+        active_strategies: list[ActiveStrategy] = []
+        for row in rows:
+            strategy = _strategy_from_config_json(row["config_json"])
+            strategy_version_id = row["strategy_version_id"]
+            if not isinstance(strategy_version_id, str):
+                msg = "strategies.active_version_id did not return a string"
+                raise TypeError(msg)
+            active_strategies.append(
+                ActiveStrategy(
+                    strategy_id=_json_string(row["strategy_id"], "strategy_id"),
+                    strategy_version_id=strategy_version_id,
+                    config=strategy.config,
+                    risk=strategy.risk,
+                    eval_spec=strategy.eval_spec,
+                    forecaster=strategy.forecaster,
+                    market_selection=strategy.market_selection,
+                )
+            )
+        return active_strategies
+
     async def set_active(
         self,
         strategy_id: str,
@@ -259,12 +304,13 @@ class PostgresStrategyRegistry:
                     )
 
     async def _notify_strategy_change(self) -> None:
-        if self._on_strategy_change is None:
+        if not self._strategy_change_callbacks:
             return
-        try:
-            await self._on_strategy_change()
-        except Exception as error:  # noqa: BLE001
-            logger.warning("strategy change callback failed: %s", error)
+        for callback in tuple(self._strategy_change_callbacks):
+            try:
+                await callback()
+            except Exception as error:  # noqa: BLE001
+                logger.warning("strategy change callback failed: %s", error)
 
 
 def _ensure_utc(value: object) -> datetime:
@@ -315,7 +361,22 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
             ),
         ),
         eval_spec=EvalSpec(
-            metrics=tuple(_json_string_list(eval_spec_payload["metrics"], "eval_spec.metrics"))
+            metrics=tuple(_json_string_list(eval_spec_payload["metrics"], "eval_spec.metrics")),
+            max_brier_score=_json_float(
+                eval_spec_payload.get("max_brier_score", DEFAULT_MAX_BRIER_SCORE),
+                "eval_spec.max_brier_score",
+            ),
+            slippage_threshold_bps=_json_float(
+                eval_spec_payload.get(
+                    "slippage_threshold_bps",
+                    DEFAULT_SLIPPAGE_THRESHOLD_BPS,
+                ),
+                "eval_spec.slippage_threshold_bps",
+            ),
+            min_win_rate=_json_float(
+                eval_spec_payload.get("min_win_rate", DEFAULT_MIN_WIN_RATE),
+                "eval_spec.min_win_rate",
+            ),
         ),
         forecaster=ForecasterSpec(
             forecasters=tuple(
@@ -458,11 +519,7 @@ def _json_factor_composition(value: object) -> tuple[FactorCompositionStep, ...]
                     "config.factor_composition.step.weight",
                 ),
                 threshold=_json_optional_float(
-                    _json_required_field(
-                        step_payload,
-                        "threshold",
-                        "config.factor_composition.step.threshold",
-                    ),
+                    step_payload.get("threshold"),
                     "config.factor_composition.step.threshold",
                 ),
             )

@@ -79,9 +79,10 @@ def _default_strategy_config_json() -> str:
     return (
         '{"config":{"factor_composition":[["factor-a",0.6],["factor-b",0.4]],'
         '"metadata":[["owner","system"],["tier","default"]],"strategy_id":"default"},'
-        '"eval_spec":{"metrics":["brier","pnl","fill_rate"]},'
+        '"eval_spec":{"max_brier_score":0.3,"metrics":["brier","pnl","fill_rate"],'
+        '"min_win_rate":0.5,"slippage_threshold_bps":50.0},'
         '"forecaster":{"forecasters":[["rules",[["threshold","0.55"]]],'
-        '["stats",[["window","15m"]]]]},'
+        '["stats",[["window","15m"]]],["llm",[]]]},'
         '"market_selection":{"resolution_time_max_horizon_days":7,'
         '"venue":"polymarket","volume_min_usdc":500.0},'
         '"risk":{"max_daily_drawdown_pct":2.5,'

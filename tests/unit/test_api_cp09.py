@@ -87,10 +87,14 @@ def _decision() -> TradeDecision:
         size=12.5,
         order_type="limit",
         max_slippage_bps=100,
-        stop_conditions=["model_id:model-a"],
+        stop_conditions=["min_volume:100.00"],
         prob_estimate=0.7,
         expected_edge=0.3,
         time_in_force="GTC",
+        opportunity_id="opportunity-api",
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        model_id="model-a",
     )
 
 
@@ -110,6 +114,8 @@ def _fill() -> FillRecord:
         filled_at=now,
         status=OrderStatus.MATCHED.value,
         anomaly_flags=[],
+        strategy_id="default",
+        strategy_version_id="default-v1",
         resolved_outcome=1.0,
     )
 
@@ -118,6 +124,8 @@ def _eval_record() -> EvalRecord:
     return EvalRecord(
         market_id="api-market",
         decision_id="decision-api",
+        strategy_id="default",
+        strategy_version_id="default-v1",
         prob_estimate=0.7,
         resolved_outcome=1.0,
         brier_score=0.09,
@@ -168,6 +176,21 @@ async def test_api_routes_expose_mock_runner_state() -> None:
     assert decisions[0]["expected_edge"] == 0.3
     assert decisions[0]["kelly_size"] == 12.5
     assert metrics["brier_overall"] == 0.09
+    assert metrics["ops_view"]["brier_overall"] == 0.09
+    assert metrics["ops_view"]["pnl"] == 1.0
+    assert metrics["per_strategy"] == [
+        {
+            "strategy_id": "default",
+            "strategy_version_id": "default-v1",
+            "record_count": 1,
+            "insufficient_samples": False,
+            "brier_overall": 0.09,
+            "pnl": 1.0,
+            "fill_rate": 1.0,
+            "slippage_bps": 10.0,
+            "drawdown": 0.0,
+        }
+    ]
     assert [item["feedback_id"] for item in feedback] == ["fb-pending"]
 
 

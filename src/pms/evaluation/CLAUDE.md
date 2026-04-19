@@ -44,11 +44,16 @@ that governs this layer:
   from scoring.
 - `adapters/scoring.py` — `Scorer`: produces `EvalRecord` from
   `FillRecord` + `TradeDecision`.
-- `metrics.py` — `MetricsCollector.snapshot()`: Brier, P&L,
-  slippage, fill rate, calibration samples. **Currently global;
-  S5 makes per-strategy.**
+- `metrics.py` — `MetricsCollector.global_ops_snapshot()` for the
+  cross-strategy ops view and `snapshot_by_strategy()` for
+  per-strategy Brier, P&L, slippage, fill rate, and calibration
+  samples.
 - `feedback.py` — `EvaluatorFeedback` emits `Feedback` items when
   thresholds breach.
+- `/metrics` dashboard page — the per-strategy breakdown is the
+  primary block; the cross-strategy rollup remains below it under
+  the explicit heading `ops view (cross-strategy)` so operators can
+  still find the global view quickly.
 
 ## Do not
 
@@ -71,13 +76,13 @@ Implement it in `metrics.py` against the `FillRecord` +
 `TradeDecision` + `EvalRecord` triple. Define it per-strategy-per-
 category where possible; only fall back to global when the metric
 is inherently cross-strategy (e.g. total realised P&L at portfolio
-level). Register the threshold configuration in
-`config.risk.*` / `config.eval.*` — never hard-code thresholds.
+level). Define threshold fields in `EvalSpec` and consume them from
+`EvaluatorFeedback.generate(...)` — never hard-code thresholds.
 
 ## When adding a new metric threshold that fires `Feedback`
 
-Define the threshold in config; add the check inside
+Define the threshold in `EvalSpec`; add the check inside
 `EvaluatorFeedback.generate`; include enough context in the
 `Feedback.metadata` JSONB for a human reviewer to act on it
-(strategy_id, strategy_version_id, affected market cohort,
+(`strategy_id`, `strategy_version_id`, affected market cohort,
 sample size).
