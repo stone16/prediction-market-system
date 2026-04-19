@@ -213,6 +213,91 @@ async def test_market_selector_builds_strategy_sets_before_merging(
 
 
 @pytest.mark.asyncio
+async def test_market_selector_select_per_strategy_returns_pre_merge_strategy_sets() -> None:
+    selector_module = importlib.import_module("pms.market_selection.selector")
+    market_selector_cls = getattr(selector_module, "MarketSelector")
+    strategy_market_set_cls = _load_symbol(
+        "pms.market_selection.merge",
+        "StrategyMarketSet",
+    )
+
+    class FakeRegistry:
+        async def list_market_selections(
+            self,
+        ) -> list[tuple[str, str, MarketSelectionSpec]]:
+            return [
+                (
+                    "alpha",
+                    "alpha-v1",
+                    MarketSelectionSpec(
+                        venue="polymarket",
+                        resolution_time_max_horizon_days=7,
+                        volume_min_usdc=500.0,
+                    ),
+                ),
+                (
+                    "beta",
+                    "beta-v2",
+                    MarketSelectionSpec(
+                        venue="kalshi",
+                        resolution_time_max_horizon_days=30,
+                        volume_min_usdc=1000.0,
+                    ),
+                ),
+            ]
+
+    class FakeStore:
+        async def read_eligible_markets(
+            self,
+            venue: str,
+            max_horizon_days: int | None,
+            min_volume_usdc: float,
+        ) -> list[tuple[Market, list[Token]]]:
+            del max_horizon_days, min_volume_usdc
+            if venue == "polymarket":
+                return [
+                    _eligible_market(
+                        "market-a",
+                        venue="polymarket",
+                        token_ids=("pm-yes", "pm-no"),
+                    )
+                ]
+            return [
+                _eligible_market(
+                    "market-b",
+                    venue="kalshi",
+                    token_ids=("ka-yes", "ka-no"),
+                )
+            ]
+
+    class FailingMergePolicy:
+        def merge(self, selections: list[object]) -> object:
+            msg = f"select_per_strategy should not merge selections: {selections!r}"
+            raise AssertionError(msg)
+
+    selector = market_selector_cls(
+        store=FakeStore(),
+        registry=FakeRegistry(),
+        merge_policy=FailingMergePolicy(),
+    )
+
+    selections = await selector.select_per_strategy()
+
+    assert selections == [
+        strategy_market_set_cls(
+            strategy_id="alpha",
+            strategy_version_id="alpha-v1",
+            asset_ids=frozenset({"pm-yes", "pm-no"}),
+        ),
+        strategy_market_set_cls(
+            strategy_id="beta",
+            strategy_version_id="beta-v2",
+            asset_ids=frozenset({"ka-yes", "ka-no"}),
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_market_selector_logs_count_and_warns_when_no_active_strategies(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

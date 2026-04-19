@@ -81,7 +81,7 @@ def _default_strategy_config_json() -> str:
         '"metadata":[["owner","system"],["tier","default"]],"strategy_id":"default"},'
         '"eval_spec":{"metrics":["brier","pnl","fill_rate"]},'
         '"forecaster":{"forecasters":[["rules",[["threshold","0.55"]]],'
-        '["stats",[["window","15m"]]]]},'
+        '["stats",[["window","15m"]]],["llm",[]]]},'
         '"market_selection":{"resolution_time_max_horizon_days":7,'
         '"venue":"polymarket","volume_min_usdc":500.0},'
         '"risk":{"max_daily_drawdown_pct":2.5,'
