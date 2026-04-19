@@ -8,7 +8,7 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
-from pms.core.models import BookLevel, BookSnapshot, Market, PriceChange, Trade
+from pms.core.models import BookLevel, BookSnapshot, Market, PriceChange, Token, Trade
 from pms.research.specs import (
     BacktestDataset,
     BacktestExecutionConfig,
@@ -78,7 +78,7 @@ async def _seed_replay_rows(
 ) -> None:
     await store.write_market(_market(market_id=market_id))
     await store.write_token(
-        token_type(
+        _token(
             token_id=token_id,
             condition_id=market_id,
             outcome="YES",
@@ -135,10 +135,12 @@ async def _seed_replay_rows(
     )
 
 
-def token_type(**kwargs: object) -> Any:
-    from pms.core.models import Token
-
-    return Token(**kwargs)
+def _token(*, token_id: str, condition_id: str, outcome: str = "YES") -> Token:
+    return Token(
+        token_id=token_id,
+        condition_id=condition_id,
+        outcome=cast(Any, outcome),
+    )
 
 
 async def _collect_signals(
@@ -227,7 +229,7 @@ async def test_market_universe_replay_engine_preserves_price_change_state_across
     store = PostgresMarketDataStore(pg_pool)
     await store.write_market(_market(market_id=market_id))
     await store.write_token(
-        token_type(token_id=token_id, condition_id=market_id, outcome="YES")
+        _token(token_id=token_id, condition_id=market_id, outcome="YES")
     )
     await store.write_book_snapshot(
         BookSnapshot(
@@ -353,4 +355,5 @@ async def test_market_universe_replay_engine_raises_invariant_error_for_outer_ri
     finally:
         await read_only_pool.close()
         async with pg_pool.acquire() as connection:
+            await connection.execute(f'DROP OWNED BY "{role_name}"')
             await connection.execute(f'DROP ROLE IF EXISTS "{role_name}"')

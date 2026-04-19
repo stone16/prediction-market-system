@@ -1,5 +1,6 @@
 """Research-side backtest specification models."""
 
+from .replay import MarketUniverseReplayEngine, ReplayEngineInvariantError
 from .specs import (
     BacktestDataset,
     BacktestExecutionConfig,
@@ -13,5 +14,7 @@ __all__ = [
     "BacktestExecutionConfig",
     "BacktestSpec",
     "ExecutionModel",
+    "MarketUniverseReplayEngine",
+    "ReplayEngineInvariantError",
     "RiskPolicy",
 ]
