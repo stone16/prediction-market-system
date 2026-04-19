@@ -76,6 +76,23 @@ export type StrategiesResponse = {
   strategies: StrategyRow[];
 };
 
+export type StrategyMetricsRow = {
+  strategy_id: string;
+  strategy_version_id: string;
+  created_at: string;
+  record_count: number;
+  insufficient_samples: boolean;
+  brier_overall: number | null;
+  pnl: number;
+  fill_rate: number;
+  slippage_bps: number;
+  drawdown: number;
+};
+
+export type StrategyMetricsResponse = {
+  strategies: StrategyMetricsRow[];
+};
+
 export type FactorCatalogEntry = {
   factor_id: string;
   name: string;

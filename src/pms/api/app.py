@@ -17,6 +17,7 @@ from pms.api.routes.factors import list_factor_catalog, list_factor_series
 from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
 from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
+from pms.api.routes.strategies import list_strategy_metrics as list_strategy_metrics_items
 from pms.api.routes.strategies import list_strategies as list_strategies_items
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, TradeDecision
@@ -198,6 +199,12 @@ def create_app(
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_strategies_items(active_runner.pg_pool)
+
+    @app.get("/strategies/metrics")
+    async def strategy_metrics() -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        return await list_strategy_metrics_items(active_runner.pg_pool)
 
     @app.get("/factors/catalog")
     async def factors_catalog() -> dict[str, Any]:

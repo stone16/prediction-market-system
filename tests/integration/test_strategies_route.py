@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
 
 import asyncpg
@@ -23,6 +25,7 @@ from pms.strategies.versioning import serialize_strategy_config_json
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
+CP06_EVIDENCE_DIR = Path(".harness/pms-controller-per-strategy-v1/checkpoints/06/iter-1/evidence")
 
 pytestmark = [
     pytest.mark.integration,
@@ -222,6 +225,21 @@ async def _seed_eval_record(
     )
 
 
+def _plan_uses_index(plan: object, *, index_name: str) -> bool:
+    if isinstance(plan, str):
+        stripped = plan.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            return _plan_uses_index(json.loads(plan), index_name=index_name)
+        return False
+    if isinstance(plan, dict):
+        if plan.get("Index Name") == index_name:
+            return True
+        return any(_plan_uses_index(value, index_name=index_name) for value in plan.values())
+    if isinstance(plan, list):
+        return any(_plan_uses_index(item, index_name=index_name) for item in plan)
+    return False
+
+
 def _app_client(pg_pool: asyncpg.Pool) -> httpx.AsyncClient:
     runner = Runner(config=_settings())
     runner.bind_pg_pool(pg_pool)
@@ -358,3 +376,80 @@ async def test_strategy_metrics_route_returns_grouped_comparative_rows(
         "slippage_bps": pytest.approx(0.0),
         "drawdown": pytest.approx(0.0),
     }
+
+    async with pg_pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO eval_records (
+                decision_id,
+                market_id,
+                prob_estimate,
+                resolved_outcome,
+                brier_score,
+                fill_status,
+                recorded_at,
+                citations,
+                category,
+                model_id,
+                pnl,
+                slippage_bps,
+                filled,
+                strategy_id,
+                strategy_version_id
+            )
+            SELECT
+                'bulk-' || series::text,
+                'market-bulk',
+                0.5,
+                0.0,
+                0.25,
+                'matched',
+                TIMESTAMPTZ '2026-04-19T01:00:00+00:00' + (series || ' seconds')::interval,
+                '["bulk"]'::jsonb,
+                'model-bulk',
+                'model-bulk',
+                0.0,
+                1.0,
+                TRUE,
+                'default',
+                'default-v1'
+            FROM generate_series(1, 1200) AS series
+            """
+        )
+        explain_plan = await connection.fetchval(
+            """
+            EXPLAIN (FORMAT JSON)
+            SELECT
+                market_id,
+                decision_id,
+                prob_estimate,
+                resolved_outcome,
+                brier_score,
+                fill_status,
+                recorded_at,
+                citations,
+                strategy_id,
+                strategy_version_id,
+                category,
+                model_id,
+                pnl,
+                slippage_bps,
+                filled
+            FROM eval_records
+            WHERE strategy_id = $1 AND strategy_version_id = $2
+            ORDER BY recorded_at ASC, decision_id ASC
+            """,
+            "alpha",
+            "alpha-v1",
+        )
+
+    CP06_EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    plan_path = CP06_EVIDENCE_DIR / "strategies-metrics-explain.json"
+    plan_path.write_text(
+        json.dumps(explain_plan, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    assert _plan_uses_index(
+        explain_plan,
+        index_name="idx_eval_records_strategy_identity",
+    )

@@ -26,27 +26,22 @@ class EvalStore:
             return []
 
         async with self.pool.acquire() as connection:
+            rows = await connection.fetch(_SELECT_ALL_QUERY)
+        return [_eval_record_from_row(row) for row in rows]
+
+    async def all_for_strategy(
+        self,
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> list[EvalRecord]:
+        if self.pool is None:
+            return []
+
+        async with self.pool.acquire() as connection:
             rows = await connection.fetch(
-                """
-                SELECT
-                    market_id,
-                    decision_id,
-                    prob_estimate,
-                    resolved_outcome,
-                    brier_score,
-                    fill_status,
-                    recorded_at,
-                    citations,
-                    strategy_id,
-                    strategy_version_id,
-                    category,
-                    model_id,
-                    pnl,
-                    slippage_bps,
-                    filled
-                FROM eval_records
-                ORDER BY recorded_at ASC, decision_id ASC
-                """
+                _SELECT_BY_STRATEGY_QUERY,
+                strategy_id,
+                strategy_version_id,
             )
         return [_eval_record_from_row(row) for row in rows]
 
@@ -99,6 +94,51 @@ async def insert_eval_record_row(
         record.strategy_id,
         record.strategy_version_id,
     )
+
+
+_SELECT_ALL_QUERY = """
+SELECT
+    market_id,
+    decision_id,
+    prob_estimate,
+    resolved_outcome,
+    brier_score,
+    fill_status,
+    recorded_at,
+    citations,
+    strategy_id,
+    strategy_version_id,
+    category,
+    model_id,
+    pnl,
+    slippage_bps,
+    filled
+FROM eval_records
+ORDER BY recorded_at ASC, decision_id ASC
+"""
+
+
+_SELECT_BY_STRATEGY_QUERY = """
+SELECT
+    market_id,
+    decision_id,
+    prob_estimate,
+    resolved_outcome,
+    brier_score,
+    fill_status,
+    recorded_at,
+    citations,
+    strategy_id,
+    strategy_version_id,
+    category,
+    model_id,
+    pnl,
+    slippage_bps,
+    filled
+FROM eval_records
+WHERE strategy_id = $1 AND strategy_version_id = $2
+ORDER BY recorded_at ASC, decision_id ASC
+"""
 
 
 def _eval_record_from_row(row: asyncpg.Record) -> EvalRecord:
