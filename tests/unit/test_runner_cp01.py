@@ -94,8 +94,14 @@ class FakeSubscriptionController:
 
 
 class FakeRegistry:
-    def __init__(self, pool: FakePool, on_strategy_change: Any = None) -> None:
-        del pool, on_strategy_change
+    def __init__(self, pool: FakePool) -> None:
+        del pool
+
+    def register_change_callback(self, callback: Any) -> None:
+        del callback
+
+    def unregister_change_callback(self, callback: Any) -> None:
+        del callback
 
     async def list_active_strategies(self) -> list[ActiveStrategy]:
         return [
