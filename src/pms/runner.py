@@ -7,7 +7,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, cast, runtime_checkable
+from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 import asyncpg
 import httpx
@@ -89,6 +89,11 @@ RAW_FACTOR_COMPOSITION_ROLES = frozenset(
 REGISTERED_FACTOR_IDS = frozenset(factor_cls.factor_id for factor_cls in REGISTERED)
 DEFAULT_V2_FACTOR_COMPOSITION = DEFAULT_STRATEGY_COMPOSITION
 T = TypeVar("T")
+ControllerReleaseCancelPoint = Literal[
+    "before_first_cleanup_await",
+    "between_cleanup_awaits",
+    "after_last_cleanup_await",
+]
 
 
 @runtime_checkable
@@ -111,6 +116,14 @@ class StrategyControllerRuntime:
     strategy_version_id: str
     controller: IController
     asset_ids: frozenset[str] | None
+
+
+@dataclass
+class DetachedControllerRuntime:
+    strategy_id: str
+    runtime: StrategyControllerRuntime | None
+    queue: asyncio.Queue[MarketSignal] | None
+    task: asyncio.Task[None] | None
 
 
 @dataclass
@@ -176,6 +189,11 @@ class Runner:
         init=False,
         default_factory=dict,
     )
+    _controller_lifecycle_lock: asyncio.Lock = field(init=False)
+    _controller_release_cancel_point: ControllerReleaseCancelPoint | None = field(
+        init=False,
+        default=None,
+    )
     _reselection_task: asyncio.Task[None] | None = field(init=False, default=None)
     _reselection_lock: asyncio.Lock = field(init=False)
     _reselection_requested: asyncio.Event = field(init=False)
@@ -190,6 +208,7 @@ class Runner:
         self._evaluator_spool = EvalSpool(store=self.eval_store, scorer=Scorer())
         self._decision_queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
+        self._controller_lifecycle_lock = asyncio.Lock()
         self._reselection_lock = asyncio.Lock()
         self._reselection_requested = asyncio.Event()
         self.actuator_executor = self._build_executor(self.config.mode)
@@ -293,10 +312,7 @@ class Runner:
                 if self._pg_pool is None:
                     msg = "Runner PostgreSQL pool is not initialized"
                     raise RuntimeError(msg)
-                self._strategy_registry = PostgresStrategyRegistry(
-                    self._pg_pool,
-                    on_strategy_change=self._request_reselection,
-                )
+                self._strategy_registry = PostgresStrategyRegistry(self._pg_pool)
                 await ensure_factor_catalog(self._pg_pool)
                 await self._ensure_default_v2_version()
                 if self._pg_pool is None:
@@ -332,6 +348,7 @@ class Runner:
         reselection_task = self._reselection_task
         self._reselection_requested.set()
         self._clear_discovery_poll_complete_hook()
+        self._unregister_strategy_change_callbacks()
         if reselection_task is not None and not reselection_task.done():
             reselection_task.cancel()
 
@@ -390,6 +407,7 @@ class Runner:
         self._controller_runtimes = {}
         self._controller_signal_queues = {}
         self._controller_pipeline_tasks = {}
+        self._controller_release_cancel_point = None
         self._reselection_task = None
 
         try:
@@ -490,8 +508,24 @@ class Runner:
             UnionMergePolicy(),
         )
         self._subscription_controller = SensorSubscriptionController(subscription_sink)
+        self._register_strategy_change_callbacks()
         discovery_sensor.on_poll_complete = self._request_reselection
         self._reselection_task = asyncio.create_task(self._periodic_reselection_loop())
+
+    def _register_strategy_change_callbacks(self) -> None:
+        registry = self._strategy_registry
+        if registry is None:
+            msg = "Runner strategy registry is not initialized"
+            raise RuntimeError(msg)
+        registry.register_change_callback(self._request_reselection)
+        registry.register_change_callback(self._sync_controller_runtimes)
+
+    def _unregister_strategy_change_callbacks(self) -> None:
+        registry = self._strategy_registry
+        if registry is None:
+            return
+        registry.unregister_change_callback(self._request_reselection)
+        registry.unregister_change_callback(self._sync_controller_runtimes)
 
     def _assert_no_legacy_jsonl_paths(self) -> None:
         for store in (self.eval_store, self.feedback_store):
@@ -599,46 +633,65 @@ class Runner:
 
             try:
                 _append_bounded(self.state.signals, signal)
-                for strategy_id, runtime in self._controller_runtimes.items():
+                for strategy_id, runtime in tuple(self._controller_runtimes.items()):
                     if not _matches_strategy_scope(runtime.asset_ids, signal):
                         continue
-                    await self._controller_signal_queues[strategy_id].put(signal)
+                    queue = self._controller_signal_queues.get(strategy_id)
+                    if queue is None:
+                        continue
+                    await queue.put(signal)
             finally:
                 self.sensor_stream.queue.task_done()
 
     async def _controller_pipeline_loop(self, strategy_id: str) -> None:
         runtime = self._controller_runtimes[strategy_id]
         queue = self._controller_signal_queues[strategy_id]
-        while True:
-            if self._should_stop_controller_pipeline(strategy_id):
-                return
-            try:
-                signal = await asyncio.wait_for(queue.get(), 0.05)
-            except TimeoutError:
-                continue
+        try:
+            while True:
+                if self._should_stop_controller_pipeline(strategy_id):
+                    return
+                try:
+                    signal = await asyncio.wait_for(queue.get(), 0.05)
+                except TimeoutError:
+                    continue
 
-            try:
-                decision: TradeDecision | None = None
-                if isinstance(runtime.controller, OpportunityAwareController):
-                    emission = await runtime.controller.on_signal(
-                        signal,
-                        portfolio=self.portfolio,
-                    )
-                    if emission is None:
-                        continue
-                    opportunity, decision = emission
-                    await self.opportunity_store.insert(opportunity)
-                    _append_bounded(self.state.opportunities, opportunity)
-                else:
-                    decision = await runtime.controller.decide(
-                        signal,
-                        portfolio=self.portfolio,
-                    )
-                if decision is not None:
-                    _append_bounded(self.state.decisions, decision)
-                    await self._decision_queue.put((decision, signal))
-            finally:
-                queue.task_done()
+                try:
+                    decision: TradeDecision | None = None
+                    if isinstance(runtime.controller, OpportunityAwareController):
+                        emission = await runtime.controller.on_signal(
+                            signal,
+                            portfolio=self.portfolio,
+                        )
+                        if emission is None:
+                            continue
+                        opportunity, decision = emission
+                        await self.opportunity_store.insert(opportunity)
+                        _append_bounded(self.state.opportunities, opportunity)
+                    else:
+                        decision = await runtime.controller.decide(
+                            signal,
+                            portfolio=self.portfolio,
+                        )
+                    if decision is not None:
+                        _append_bounded(self.state.decisions, decision)
+                        await self._decision_queue.put((decision, signal))
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "controller pipeline failed for %s: %s",
+                strategy_id,
+                error,
+            )
+        finally:
+            current_task = asyncio.current_task()
+            if (
+                not self._stop_event.is_set()
+                and self._controller_pipeline_tasks.get(strategy_id) is current_task
+            ):
+                await self._release_controller_runtime(strategy_id)
 
     async def _actuator_loop(self) -> None:
         while True:
@@ -683,7 +736,9 @@ class Runner:
         return controller_done and self._decision_queue.empty()
 
     def _should_stop_controller_pipeline(self, strategy_id: str) -> bool:
-        queue = self._controller_signal_queues[strategy_id]
+        queue = self._controller_signal_queues.get(strategy_id)
+        if queue is None:
+            return True
         if self._stop_event.is_set() and queue.empty():
             return True
         dispatcher_done = self._controller_task is not None and self._controller_task.done()
@@ -714,6 +769,7 @@ class Runner:
         reselection_task = self._reselection_task
         self._reselection_requested.set()
         self._clear_discovery_poll_complete_hook()
+        self._unregister_strategy_change_callbacks()
         if reselection_task is not None and not reselection_task.done():
             reselection_task.cancel()
         try:
@@ -760,6 +816,7 @@ class Runner:
         self._controller_runtimes = {}
         self._controller_signal_queues = {}
         self._controller_pipeline_tasks = {}
+        self._controller_release_cancel_point = None
         self._reselection_task = None
         await self._close_pg_pool()
 
@@ -814,26 +871,166 @@ class Runner:
         with suppress(asyncio.CancelledError):
             await task
 
+    def _attach_controller_runtime(self, runtime: StrategyControllerRuntime) -> None:
+        signal_queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
+        self._controller_runtimes[runtime.strategy_id] = runtime
+        self._controller_signal_queues[runtime.strategy_id] = signal_queue
+        self._controller_pipeline_tasks[runtime.strategy_id] = asyncio.create_task(
+            self._controller_pipeline_loop(runtime.strategy_id),
+            name=f"controller-pipeline:{runtime.strategy_id}",
+        )
+
+    async def _sync_controller_runtimes(self) -> None:
+        if self.controller is not None or self._strategy_registry is None:
+            return
+        async with self._controller_lifecycle_lock:
+            desired_runtimes = await self._build_controller_runtimes()
+            desired_by_strategy = {
+                runtime.strategy_id: runtime
+                for runtime in desired_runtimes
+            }
+            current_strategy_ids = set(self._controller_runtimes)
+            desired_strategy_ids = set(desired_by_strategy)
+
+            for strategy_id in sorted(current_strategy_ids - desired_strategy_ids):
+                await self._release_controller_runtime_locked(strategy_id)
+
+            for strategy_id in sorted(current_strategy_ids & desired_strategy_ids):
+                current_runtime = self._controller_runtimes.get(strategy_id)
+                desired_runtime = desired_by_strategy[strategy_id]
+                if current_runtime is None:
+                    continue
+                if (
+                    current_runtime.strategy_version_id != desired_runtime.strategy_version_id
+                    or current_runtime.asset_ids != desired_runtime.asset_ids
+                ):
+                    await self._release_controller_runtime_locked(strategy_id)
+                    self._attach_controller_runtime(desired_runtime)
+
+            for strategy_id in sorted(desired_strategy_ids - current_strategy_ids):
+                self._attach_controller_runtime(desired_by_strategy[strategy_id])
+
+            await self._refresh_subscription_assets_locked()
+
+    async def _release_controller_runtime(self, strategy_id: str) -> None:
+        async with self._controller_lifecycle_lock:
+            await self._release_controller_runtime_locked(strategy_id)
+
+    async def _release_controller_runtime_locked(self, strategy_id: str) -> None:
+        detached = self._detach_controller_runtime(strategy_id)
+        if detached is None:
+            return
+        try:
+            await self._finalize_controller_runtime_release_locked(
+                detached,
+                allow_cancel_injection=True,
+            )
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self._finalize_controller_runtime_release_locked(
+                    detached,
+                    allow_cancel_injection=False,
+                )
+            )
+            raise
+        except Exception:
+            await asyncio.shield(
+                self._finalize_controller_runtime_release_locked(
+                    detached,
+                    allow_cancel_injection=False,
+                )
+            )
+            raise
+
+    def _detach_controller_runtime(
+        self,
+        strategy_id: str,
+    ) -> DetachedControllerRuntime | None:
+        runtime = self._controller_runtimes.pop(strategy_id, None)
+        queue = self._controller_signal_queues.pop(strategy_id, None)
+        task = self._controller_pipeline_tasks.pop(strategy_id, None)
+        if runtime is None and queue is None and task is None:
+            return None
+        current_task = asyncio.current_task()
+        if task is not None and task is not current_task and not task.done():
+            task.cancel()
+        return DetachedControllerRuntime(
+            strategy_id=strategy_id,
+            runtime=runtime,
+            queue=queue,
+            task=task,
+        )
+
+    async def _finalize_controller_runtime_release_locked(
+        self,
+        detached: DetachedControllerRuntime,
+        *,
+        allow_cancel_injection: bool,
+    ) -> None:
+        if allow_cancel_injection:
+            await self._maybe_inject_controller_release_cancel(
+                "before_first_cleanup_await"
+            )
+        current_task = asyncio.current_task()
+        if detached.task is not None and detached.task is not current_task:
+            await self._await_cancelled_task(detached.task)
+        if allow_cancel_injection:
+            await self._maybe_inject_controller_release_cancel(
+                "between_cleanup_awaits"
+            )
+        self._drain_controller_signal_queue(detached.queue)
+        await self._refresh_subscription_assets_locked()
+        if allow_cancel_injection:
+            await self._maybe_inject_controller_release_cancel(
+                "after_last_cleanup_await"
+            )
+
+    async def _refresh_subscription_assets_locked(self) -> None:
+        subscription_controller = self._subscription_controller
+        if subscription_controller is None:
+            return
+        scoped_asset_ids: list[frozenset[str]] = []
+        for runtime in self._controller_runtimes.values():
+            if runtime.asset_ids is None:
+                return
+            scoped_asset_ids.append(runtime.asset_ids)
+        merged_asset_ids = sorted(
+            {
+                asset_id
+                for asset_ids in scoped_asset_ids
+                for asset_id in asset_ids
+            }
+        )
+        await subscription_controller.update(merged_asset_ids)
+
+    async def _maybe_inject_controller_release_cancel(
+        self,
+        point: ControllerReleaseCancelPoint,
+    ) -> None:
+        if self._controller_release_cancel_point == point:
+            self._controller_release_cancel_point = None
+            raise asyncio.CancelledError
+
+    def _drain_controller_signal_queue(
+        self,
+        queue: asyncio.Queue[MarketSignal] | None,
+    ) -> None:
+        if queue is None:
+            return
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            queue.task_done()
+
     async def _configure_controllers(self) -> None:
         if self._controller_task is not None or self._controller_pipeline_tasks:
             msg = "Runner controllers already configured"
             raise RuntimeError(msg)
         runtimes = await self._build_controller_runtimes()
-        self._controller_runtimes = {
-            runtime.strategy_id: runtime
-            for runtime in runtimes
-        }
-        self._controller_signal_queues = {
-            runtime.strategy_id: asyncio.Queue()
-            for runtime in runtimes
-        }
-        self._controller_pipeline_tasks = {
-            runtime.strategy_id: asyncio.create_task(
-                self._controller_pipeline_loop(runtime.strategy_id),
-                name=f"controller-pipeline:{runtime.strategy_id}",
-            )
-            for runtime in runtimes
-        }
+        for runtime in runtimes:
+            self._attach_controller_runtime(runtime)
 
     async def _build_controller_runtimes(self) -> list[StrategyControllerRuntime]:
         if self.controller is not None:

@@ -31,15 +31,21 @@ from pms.strategies.versioning import (
 
 logger = logging.getLogger(__name__)
 
+StrategyChangeCallback = Callable[[], Awaitable[None]]
+
 
 class PostgresStrategyRegistry:
-    def __init__(
-        self,
-        pool: asyncpg.Pool,
-        on_strategy_change: Callable[[], Awaitable[None]] | None = None,
-    ) -> None:
+    def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
-        self._on_strategy_change = on_strategy_change
+        self._strategy_change_callbacks: list[StrategyChangeCallback] = []
+
+    def register_change_callback(self, fn: StrategyChangeCallback) -> None:
+        if fn not in self._strategy_change_callbacks:
+            self._strategy_change_callbacks.append(fn)
+
+    def unregister_change_callback(self, fn: StrategyChangeCallback) -> None:
+        if fn in self._strategy_change_callbacks:
+            self._strategy_change_callbacks.remove(fn)
 
     async def create_strategy(
         self,
@@ -298,12 +304,13 @@ class PostgresStrategyRegistry:
                     )
 
     async def _notify_strategy_change(self) -> None:
-        if self._on_strategy_change is None:
+        if not self._strategy_change_callbacks:
             return
-        try:
-            await self._on_strategy_change()
-        except Exception as error:  # noqa: BLE001
-            logger.warning("strategy change callback failed: %s", error)
+        for callback in tuple(self._strategy_change_callbacks):
+            try:
+                await callback()
+            except Exception as error:  # noqa: BLE001
+                logger.warning("strategy change callback failed: %s", error)
 
 
 def _ensure_utc(value: object) -> datetime:
