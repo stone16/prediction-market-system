@@ -822,9 +822,10 @@ class Runner:
             and self._strategy_registry is not None
             and hasattr(self._strategy_registry, "list_active_strategies")
             and hasattr(self._market_selector, "select_per_strategy")
+            and self._market_selector is not None
         ):
             active_strategies = await self._strategy_registry.list_active_strategies()
-            selections = await cast(Any, self._market_selector).select_per_strategy()
+            selections = await self._market_selector.select_per_strategy()
             scopes = {
                 selection.strategy_id: selection.asset_ids
                 for selection in selections

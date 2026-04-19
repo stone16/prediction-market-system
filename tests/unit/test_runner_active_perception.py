@@ -13,6 +13,7 @@ import pytest
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal
+from pms.market_selection.merge import StrategyMarketSet
 from pms.runner import Runner
 
 
@@ -406,6 +407,9 @@ async def test_event_triggered_reselection_failure_does_not_kill_loop(
             async def select(self) -> Any:
                 RaisingSelector.calls += 1
                 raising_selector_called.set()
+                raise RuntimeError("transient postgres error")
+
+            async def select_per_strategy(self) -> list[StrategyMarketSet]:
                 raise RuntimeError("transient postgres error")
 
         runner._market_selector = RaisingSelector()
