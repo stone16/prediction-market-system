@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import uuid
 from pathlib import Path
@@ -12,55 +11,34 @@ import pytest
 
 SCHEMA_PATH = Path("schema.sql")
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
-
-EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
-    "feedback": [
-        ("feedback_id", "text"),
-        ("target", "text"),
-        ("source", "text"),
-        ("message", "text"),
-        ("severity", "text"),
-        ("created_at", "timestamp with time zone"),
-        ("resolved", "boolean"),
-        ("resolved_at", "timestamp with time zone"),
-        ("category", "text"),
-        ("metadata", "jsonb"),
-        ("strategy_id", "text"),
-        ("strategy_version_id", "text"),
-    ],
-    "eval_records": [
-        ("decision_id", "text"),
-        ("market_id", "text"),
-        ("prob_estimate", "double precision"),
-        ("resolved_outcome", "double precision"),
-        ("brier_score", "double precision"),
-        ("fill_status", "text"),
-        ("recorded_at", "timestamp with time zone"),
-        ("citations", "jsonb"),
-        ("category", "text"),
-        ("model_id", "text"),
-        ("pnl", "double precision"),
-        ("slippage_bps", "double precision"),
-        ("filled", "boolean"),
-        ("strategy_id", "text"),
-        ("strategy_version_id", "text"),
-    ],
-    "orders": [
-        ("order_id", "text"),
-        ("market_id", "text"),
-        ("ts", "timestamp with time zone"),
-        ("strategy_id", "text"),
-        ("strategy_version_id", "text"),
-    ],
-    "fills": [
-        ("fill_id", "text"),
-        ("order_id", "text"),
-        ("market_id", "text"),
-        ("ts", "timestamp with time zone"),
-        ("strategy_id", "text"),
-        ("strategy_version_id", "text"),
-    ],
-}
+STRATEGY_TABLES = [
+    "eval_records",
+    "feedback",
+    "fills",
+    "opportunities",
+    "orders",
+]
+CHECK_CONSTRAINTS = [
+    "eval_records_strategy_identity_check",
+    "feedback_strategy_identity_check",
+    "fills_strategy_identity_check",
+    "opportunities_strategy_identity_check",
+    "orders_strategy_identity_check",
+]
+STRATEGY_INDEXES = [
+    "idx_eval_records_strategy_identity",
+    "idx_feedback_strategy_identity",
+    "idx_fills_strategy_identity",
+    "idx_opportunities_strategy_identity",
+    "idx_orders_strategy_identity",
+]
+REMEDIATION_MESSAGE = """CP04 remediation required before enforcing strategy identity columns.
+Run:
+UPDATE feedback SET strategy_id = 'default', strategy_version_id = 'default-v1' WHERE strategy_id IS NULL OR strategy_version_id IS NULL;
+UPDATE eval_records SET strategy_id = 'default', strategy_version_id = 'default-v1' WHERE strategy_id IS NULL OR strategy_version_id IS NULL;
+UPDATE orders SET strategy_id = 'default', strategy_version_id = 'default-v1' WHERE strategy_id IS NULL OR strategy_version_id IS NULL;
+UPDATE fills SET strategy_id = 'default', strategy_version_id = 'default-v1' WHERE strategy_id IS NULL OR strategy_version_id IS NULL;
+Then re-run schema.sql."""
 
 pytestmark = [
     pytest.mark.integration,
@@ -102,174 +80,290 @@ def _run_psql(
     )
 
 
-def _extract_block(schema_text: str, begin: str, end: str) -> str:
-    match = re.search(rf"(?s){re.escape(begin)}\s*(.*?)\s*{re.escape(end)}", schema_text)
-    assert match is not None, f"{begin} / {end} block not found"
-    return match.group(1)
+def _legacy_nullable_inner_ring_schema() -> str:
+    return """
+BEGIN;
+CREATE TABLE IF NOT EXISTS strategies (
+    strategy_id TEXT PRIMARY KEY,
+    active_version_id TEXT NULL
+);
+CREATE TABLE IF NOT EXISTS strategy_versions (
+    strategy_version_id TEXT PRIMARY KEY,
+    strategy_id TEXT NOT NULL,
+    config_json JSONB NOT NULL,
+    UNIQUE (strategy_id, strategy_version_id)
+);
+CREATE TABLE IF NOT EXISTS feedback (
+    feedback_id TEXT PRIMARY KEY,
+    target TEXT NOT NULL,
+    source TEXT NOT NULL,
+    message TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    resolved BOOLEAN NOT NULL DEFAULT FALSE,
+    resolved_at TIMESTAMPTZ,
+    category TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    strategy_id TEXT NULL,
+    strategy_version_id TEXT NULL
+);
+CREATE TABLE IF NOT EXISTS eval_records (
+    decision_id TEXT PRIMARY KEY,
+    market_id TEXT NOT NULL,
+    prob_estimate DOUBLE PRECISION NOT NULL,
+    resolved_outcome DOUBLE PRECISION NOT NULL,
+    brier_score DOUBLE PRECISION NOT NULL,
+    fill_status TEXT NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL,
+    citations JSONB NOT NULL DEFAULT '[]'::jsonb,
+    category TEXT,
+    model_id TEXT,
+    pnl DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    slippage_bps DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    filled BOOLEAN NOT NULL DEFAULT TRUE,
+    strategy_id TEXT NULL,
+    strategy_version_id TEXT NULL
+);
+CREATE TABLE IF NOT EXISTS orders (
+    order_id TEXT PRIMARY KEY,
+    market_id TEXT NOT NULL,
+    ts TIMESTAMPTZ NOT NULL,
+    strategy_id TEXT NULL,
+    strategy_version_id TEXT NULL
+);
+CREATE TABLE IF NOT EXISTS fills (
+    fill_id TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    ts TIMESTAMPTZ NOT NULL,
+    strategy_id TEXT NULL,
+    strategy_version_id TEXT NULL
+);
+INSERT INTO strategies (strategy_id, active_version_id)
+VALUES ('default', 'default-v1')
+ON CONFLICT (strategy_id) DO NOTHING;
+INSERT INTO strategy_versions (strategy_version_id, strategy_id, config_json)
+VALUES (
+    'default-v1',
+    'default',
+    '{"config":{"strategy_id":"default","factor_composition":[],"metadata":[]},"risk":{"max_position_notional_usdc":100.0,"max_daily_drawdown_pct":2.5,"min_order_size_usdc":1.0},"eval_spec":{"metrics":["brier"]},"forecaster":{"forecasters":[]},"market_selection":{"venue":"polymarket","resolution_time_max_horizon_days":7,"volume_min_usdc":500.0}}'::jsonb
+)
+ON CONFLICT (strategy_version_id) DO NOTHING;
+INSERT INTO eval_records (
+    decision_id,
+    market_id,
+    prob_estimate,
+    resolved_outcome,
+    brier_score,
+    fill_status,
+    recorded_at,
+    citations,
+    strategy_id,
+    strategy_version_id
+) VALUES (
+    'legacy-null-decision',
+    'market-1',
+    0.6,
+    1.0,
+    0.16,
+    'filled',
+    now(),
+    '["legacy"]'::jsonb,
+    NULL,
+    NULL
+);
+COMMIT;
+"""
 
 
-def test_schema_sql_applies_inner_ring_tables() -> None:
+def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
     assert PMS_TEST_DATABASE_URL is not None
 
     schema_text = SCHEMA_PATH.read_text()
-    outer_ring = _extract_block(
-        schema_text,
-        "-- BEGIN OUTER RING",
-        "-- END OUTER RING",
-    )
-    inner_ring = _extract_block(
-        schema_text,
-        "-- BEGIN INNER-RING PRODUCT SHELLS",
-        "-- END INNER-RING PRODUCT SHELLS",
-    )
-
-    assert "strategy_id" not in outer_ring
-    assert "strategy_version_id" not in outer_ring
-
-    for table_name in EXPECTED_COLUMNS:
-        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in inner_ring
-
-    assert inner_ring.count("strategy_id TEXT NULL") == 4
-    assert inner_ring.count("strategy_version_id TEXT NULL") == 4
+    assert "CREATE TABLE IF NOT EXISTS opportunities" in schema_text
+    assert schema_text.count("strategy_id TEXT NOT NULL") == 5
+    assert schema_text.count("strategy_version_id TEXT NOT NULL") == 5
 
     admin_database_url = _replace_database(PMS_TEST_DATABASE_URL, "postgres")
-    temp_database = f"pms_cp02_{uuid.uuid4().hex[:12]}"
+    temp_database = f"pms_cp04_{uuid.uuid4().hex[:12]}"
     temp_database_url = _replace_database(PMS_TEST_DATABASE_URL, temp_database)
 
     try:
         _run_psql(admin_database_url, "-c", f"CREATE DATABASE {temp_database}")
         _run_psql(temp_database_url, "-f", str(SCHEMA_PATH))
+        _run_psql(temp_database_url, "-f", str(SCHEMA_PATH))
 
-        columns_query = """
-        SELECT table_name, column_name, data_type
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name IN ('feedback', 'eval_records', 'orders', 'fills')
-        ORDER BY table_name, ordinal_position
-        """
         columns_result = _run_psql(
             temp_database_url,
             "-At",
             "-F",
             "|",
             "-c",
-            columns_query,
-        )
-
-        actual_columns: dict[str, list[tuple[str, str]]] = {}
-        for line in columns_result.stdout.splitlines():
-            table_name, column_name, data_type = line.split("|")
-            actual_columns.setdefault(table_name, []).append((column_name, data_type))
-
-        assert actual_columns == EXPECTED_COLUMNS
-
-        insert_sql = """
-        INSERT INTO feedback (
-            feedback_id,
-            target,
-            source,
-            message,
-            severity,
-            created_at,
-            strategy_id,
-            strategy_version_id
-        ) VALUES (
-            'feedback-1',
-            'controller',
-            'evaluator',
-            'needs review',
-            'warning',
-            now(),
-            NULL,
-            NULL
-        );
-
-        INSERT INTO eval_records (
-            decision_id,
-            market_id,
-            prob_estimate,
-            resolved_outcome,
-            brier_score,
-            fill_status,
-            recorded_at,
-            citations,
-            strategy_id,
-            strategy_version_id
-        ) VALUES (
-            'decision-1',
-            'market-1',
-            0.6,
-            1.0,
-            0.16,
-            'filled',
-            now(),
-            '["seed"]'::jsonb,
-            NULL,
-            NULL
-        );
-
-        INSERT INTO orders (
-            order_id,
-            market_id,
-            ts,
-            strategy_id,
-            strategy_version_id
-        ) VALUES (
-            'order-1',
-            'market-1',
-            now(),
-            NULL,
-            NULL
-        );
-
-        INSERT INTO fills (
-            fill_id,
-            order_id,
-            market_id,
-            ts,
-            strategy_id,
-            strategy_version_id
-        ) VALUES (
-            'fill-1',
-            'order-1',
-            'market-1',
-            now(),
-            NULL,
-            NULL
-        );
-        """
-        _run_psql(temp_database_url, "-c", insert_sql)
-
-        counts_result = _run_psql(
-            temp_database_url,
-            "-At",
-            "-F",
-            "|",
-            "-c",
             """
-            SELECT 'feedback', COUNT(*) FROM feedback
-            UNION ALL
-            SELECT 'eval_records', COUNT(*) FROM eval_records
-            UNION ALL
-            SELECT 'orders', COUNT(*) FROM orders
-            UNION ALL
-            SELECT 'fills', COUNT(*) FROM fills
-            ORDER BY 1
+            SELECT table_name, column_name, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name IN ('feedback', 'eval_records', 'orders', 'fills', 'opportunities')
+              AND column_name IN ('strategy_id', 'strategy_version_id')
+            ORDER BY table_name ASC, column_name ASC
             """,
         )
-        actual_counts = dict(
-            (table_name, int(count))
-            for table_name, count in (
-                line.split("|", 1) for line in counts_result.stdout.splitlines()
+        actual_columns = [
+            tuple(line.split("|", 2))
+            for line in columns_result.stdout.splitlines()
+        ]
+
+        assert actual_columns == [
+            ("eval_records", "strategy_id", "NO"),
+            ("eval_records", "strategy_version_id", "NO"),
+            ("feedback", "strategy_id", "NO"),
+            ("feedback", "strategy_version_id", "NO"),
+            ("fills", "strategy_id", "NO"),
+            ("fills", "strategy_version_id", "NO"),
+            ("opportunities", "strategy_id", "NO"),
+            ("opportunities", "strategy_version_id", "NO"),
+            ("orders", "strategy_id", "NO"),
+            ("orders", "strategy_version_id", "NO"),
+        ]
+
+        constraints_result = _run_psql(
+            temp_database_url,
+            "-At",
+            "-c",
+            """
+            SELECT conname
+            FROM pg_constraint
+            WHERE conname IN (
+                'feedback_strategy_identity_check',
+                'eval_records_strategy_identity_check',
+                'orders_strategy_identity_check',
+                'fills_strategy_identity_check',
+                'opportunities_strategy_identity_check'
             )
+            ORDER BY conname ASC
+            """,
+        )
+        assert constraints_result.stdout.splitlines() == sorted(CHECK_CONSTRAINTS)
+
+        indexes_result = _run_psql(
+            temp_database_url,
+            "-At",
+            "-c",
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND indexname IN (
+                'idx_feedback_strategy_identity',
+                'idx_eval_records_strategy_identity',
+                'idx_orders_strategy_identity',
+                'idx_fills_strategy_identity',
+                'idx_opportunities_strategy_identity'
+            )
+            ORDER BY indexname ASC
+            """,
+        )
+        assert indexes_result.stdout.splitlines() == sorted(STRATEGY_INDEXES)
+
+        _run_psql(
+            temp_database_url,
+            "-c",
+            """
+            INSERT INTO eval_records (
+                decision_id,
+                market_id,
+                prob_estimate,
+                resolved_outcome,
+                brier_score,
+                fill_status,
+                recorded_at,
+                citations,
+                strategy_id,
+                strategy_version_id
+            ) VALUES (
+                'decision-index',
+                'market-1',
+                0.6,
+                1.0,
+                0.16,
+                'filled',
+                now(),
+                '["seed"]'::jsonb,
+                'default',
+                'default-v1'
+            )
+            """,
+        )
+        explain_result = _run_psql(
+            temp_database_url,
+            "-At",
+            "-c",
+            """
+            SET enable_seqscan = off;
+            EXPLAIN SELECT *
+            FROM eval_records
+            WHERE strategy_id = 'default' AND strategy_version_id = 'default-v1';
+            """,
+        )
+        assert "idx_eval_records_strategy_identity" in explain_result.stdout
+
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            _run_psql(
+                temp_database_url,
+                "-c",
+                """
+                INSERT INTO eval_records (
+                    decision_id,
+                    market_id,
+                    prob_estimate,
+                    resolved_outcome,
+                    brier_score,
+                    fill_status,
+                    recorded_at,
+                    citations,
+                    strategy_id,
+                    strategy_version_id
+                ) VALUES (
+                    'decision-empty',
+                    'market-1',
+                    0.6,
+                    1.0,
+                    0.16,
+                    'filled',
+                    now(),
+                    '["seed"]'::jsonb,
+                    '',
+                    ''
+                )
+                """,
+            )
+        assert "eval_records_strategy_identity_check" in error.value.stderr
+    finally:
+        _run_psql(
+            admin_database_url,
+            "-c",
+            f"DROP DATABASE IF EXISTS {temp_database} WITH (FORCE)",
         )
 
-        assert actual_counts == {
-            "eval_records": 1,
-            "feedback": 1,
-            "fills": 1,
-            "orders": 1,
-        }
+
+def test_schema_sql_probe_blocks_null_strategy_rows_before_not_null_upgrade() -> None:
+    assert PMS_TEST_DATABASE_URL is not None
+
+    admin_database_url = _replace_database(PMS_TEST_DATABASE_URL, "postgres")
+    temp_database = f"pms_cp04_probe_{uuid.uuid4().hex[:12]}"
+    temp_database_url = _replace_database(PMS_TEST_DATABASE_URL, temp_database)
+
+    try:
+        _run_psql(admin_database_url, "-c", f"CREATE DATABASE {temp_database}")
+        _run_psql(
+            temp_database_url,
+            input_sql=_legacy_nullable_inner_ring_schema(),
+        )
+
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            _run_psql(temp_database_url, "-f", str(SCHEMA_PATH))
+
+        assert REMEDIATION_MESSAGE in error.value.stderr
     finally:
         _run_psql(
             admin_database_url,

@@ -278,25 +278,6 @@ async def test_eval_store_persists_rows_in_postgres(
 async def test_opportunity_store_persists_rows_in_postgres(
     db_conn: asyncpg.Connection,
 ) -> None:
-    await db_conn.execute(
-        """
-        CREATE TABLE opportunities (
-            opportunity_id TEXT PRIMARY KEY,
-            market_id TEXT NOT NULL,
-            token_id TEXT NOT NULL,
-            side TEXT NOT NULL,
-            selected_factor_values JSONB NOT NULL,
-            expected_edge DOUBLE PRECISION NOT NULL,
-            rationale TEXT NOT NULL,
-            target_size_usdc DOUBLE PRECISION NOT NULL,
-            expiry TIMESTAMPTZ,
-            staleness_policy TEXT NOT NULL,
-            strategy_id TEXT NOT NULL,
-            strategy_version_id TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL
-        )
-        """
-    )
     store = OpportunityStore(pool=cast(Any, _SingleConnectionPool(db_conn)))
     opportunity = _opportunity()
 
