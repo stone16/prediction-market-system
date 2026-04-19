@@ -176,6 +176,21 @@ async def test_api_routes_expose_mock_runner_state() -> None:
     assert decisions[0]["expected_edge"] == 0.3
     assert decisions[0]["kelly_size"] == 12.5
     assert metrics["brier_overall"] == 0.09
+    assert metrics["ops_view"]["brier_overall"] == 0.09
+    assert metrics["ops_view"]["pnl"] == 1.0
+    assert metrics["per_strategy"] == [
+        {
+            "strategy_id": "default",
+            "strategy_version_id": "default-v1",
+            "record_count": 1,
+            "insufficient_samples": False,
+            "brier_overall": 0.09,
+            "pnl": 1.0,
+            "fill_rate": 1.0,
+            "slippage_bps": 10.0,
+            "drawdown": 0.0,
+        }
+    ]
     assert [item["feedback_id"] for item in feedback] == ["fb-pending"]
 
 
