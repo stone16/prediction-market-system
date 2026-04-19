@@ -187,8 +187,8 @@ CREATE TABLE IF NOT EXISTS feedback (
     resolved_at TIMESTAMPTZ,
     category TEXT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    strategy_id TEXT NULL,
-    strategy_version_id TEXT NULL
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS eval_records (
@@ -205,16 +205,16 @@ CREATE TABLE IF NOT EXISTS eval_records (
     pnl DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     slippage_bps DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     filled BOOLEAN NOT NULL DEFAULT TRUE,
-    strategy_id TEXT NULL,
-    strategy_version_id TEXT NULL
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS orders (
     order_id TEXT PRIMARY KEY,
     market_id TEXT NOT NULL,
     ts TIMESTAMPTZ NOT NULL,
-    strategy_id TEXT NULL,
-    strategy_version_id TEXT NULL
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS fills (
@@ -222,8 +222,24 @@ CREATE TABLE IF NOT EXISTS fills (
     order_id TEXT NOT NULL,
     market_id TEXT NOT NULL,
     ts TIMESTAMPTZ NOT NULL,
-    strategy_id TEXT NULL,
-    strategy_version_id TEXT NULL
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS opportunities (
+    opportunity_id TEXT PRIMARY KEY,
+    market_id TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('yes', 'no')),
+    selected_factor_values JSONB NOT NULL,
+    expected_edge DOUBLE PRECISION NOT NULL,
+    rationale TEXT NOT NULL,
+    target_size_usdc DOUBLE PRECISION NOT NULL,
+    expiry TIMESTAMPTZ,
+    staleness_policy TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
 );
 
 -- END INNER-RING PRODUCT SHELLS
@@ -245,6 +261,143 @@ INSERT INTO strategy_versions (
     '{"config":{"factor_composition":[["factor-a",0.6],["factor-b",0.4]],"metadata":[["owner","system"],["tier","default"]],"strategy_id":"default"},"eval_spec":{"max_brier_score":0.3,"metrics":["brier","pnl","fill_rate"],"min_win_rate":0.5,"slippage_threshold_bps":50.0},"forecaster":{"forecasters":[["rules",[["threshold","0.55"]]],["stats",[["window","15m"]]],["llm",[]]]},"market_selection":{"resolution_time_max_horizon_days":7,"venue":"polymarket","volume_min_usdc":500.0},"risk":{"max_daily_drawdown_pct":2.5,"max_position_notional_usdc":100.0,"min_order_size_usdc":1.0}}'::jsonb
 )
 ON CONFLICT (strategy_version_id) DO NOTHING;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM feedback
+        WHERE strategy_id IS NULL OR strategy_version_id IS NULL
+    ) OR EXISTS (
+        SELECT 1
+        FROM eval_records
+        WHERE strategy_id IS NULL OR strategy_version_id IS NULL
+    ) OR EXISTS (
+        SELECT 1
+        FROM orders
+        WHERE strategy_id IS NULL OR strategy_version_id IS NULL
+    ) OR EXISTS (
+        SELECT 1
+        FROM fills
+        WHERE strategy_id IS NULL OR strategy_version_id IS NULL
+    ) THEN
+        RAISE EXCEPTION $message$
+CP04 remediation required before enforcing strategy identity columns.
+Run:
+UPDATE feedback SET strategy_id = 'default', strategy_version_id = 'default-v1' WHERE strategy_id IS NULL OR strategy_version_id IS NULL;
+UPDATE eval_records SET strategy_id = 'default', strategy_version_id = 'default-v1' WHERE strategy_id IS NULL OR strategy_version_id IS NULL;
+UPDATE orders SET strategy_id = 'default', strategy_version_id = 'default-v1' WHERE strategy_id IS NULL OR strategy_version_id IS NULL;
+UPDATE fills SET strategy_id = 'default', strategy_version_id = 'default-v1' WHERE strategy_id IS NULL OR strategy_version_id IS NULL;
+Then re-run schema.sql.
+$message$;
+    END IF;
+END
+$$;
+
+ALTER TABLE feedback
+    ALTER COLUMN strategy_id SET NOT NULL,
+    ALTER COLUMN strategy_version_id SET NOT NULL;
+
+ALTER TABLE eval_records
+    ALTER COLUMN strategy_id SET NOT NULL,
+    ALTER COLUMN strategy_version_id SET NOT NULL;
+
+ALTER TABLE orders
+    ALTER COLUMN strategy_id SET NOT NULL,
+    ALTER COLUMN strategy_version_id SET NOT NULL;
+
+ALTER TABLE fills
+    ALTER COLUMN strategy_id SET NOT NULL,
+    ALTER COLUMN strategy_version_id SET NOT NULL;
+
+ALTER TABLE opportunities
+    ALTER COLUMN strategy_id SET NOT NULL,
+    ALTER COLUMN strategy_version_id SET NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'feedback_strategy_identity_check'
+    ) THEN
+        ALTER TABLE feedback
+            ADD CONSTRAINT feedback_strategy_identity_check
+            CHECK (strategy_id != '' AND strategy_version_id != '');
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'eval_records_strategy_identity_check'
+    ) THEN
+        ALTER TABLE eval_records
+            ADD CONSTRAINT eval_records_strategy_identity_check
+            CHECK (strategy_id != '' AND strategy_version_id != '');
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'orders_strategy_identity_check'
+    ) THEN
+        ALTER TABLE orders
+            ADD CONSTRAINT orders_strategy_identity_check
+            CHECK (strategy_id != '' AND strategy_version_id != '');
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'fills_strategy_identity_check'
+    ) THEN
+        ALTER TABLE fills
+            ADD CONSTRAINT fills_strategy_identity_check
+            CHECK (strategy_id != '' AND strategy_version_id != '');
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'opportunities_strategy_identity_check'
+    ) THEN
+        ALTER TABLE opportunities
+            ADD CONSTRAINT opportunities_strategy_identity_check
+            CHECK (strategy_id != '' AND strategy_version_id != '');
+    END IF;
+END
+$$;
+
+CREATE INDEX IF NOT EXISTS idx_feedback_strategy_identity
+    ON feedback(strategy_id, strategy_version_id);
+
+CREATE INDEX IF NOT EXISTS idx_eval_records_strategy_identity
+    ON eval_records(strategy_id, strategy_version_id);
+
+CREATE INDEX IF NOT EXISTS idx_orders_strategy_identity
+    ON orders(strategy_id, strategy_version_id);
+
+CREATE INDEX IF NOT EXISTS idx_fills_strategy_identity
+    ON fills(strategy_id, strategy_version_id);
+
+CREATE INDEX IF NOT EXISTS idx_opportunities_strategy_identity
+    ON opportunities(strategy_id, strategy_version_id);
 
 INSERT INTO factors (
     factor_id,

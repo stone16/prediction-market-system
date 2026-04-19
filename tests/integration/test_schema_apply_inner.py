@@ -4,6 +4,7 @@ import os
 import subprocess
 import uuid
 from pathlib import Path
+import re
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
@@ -78,6 +79,12 @@ def _run_psql(
         capture_output=True,
         check=True,
     )
+
+
+def _extract_block(schema_text: str, begin: str, end: str) -> str:
+    match = re.search(rf"(?s){re.escape(begin)}\s*(.*?)\s*{re.escape(end)}", schema_text)
+    assert match is not None, f"{begin} / {end} block not found"
+    return match.group(1)
 
 
 def _legacy_nullable_inner_ring_schema() -> str:
@@ -180,9 +187,14 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
     assert PMS_TEST_DATABASE_URL is not None
 
     schema_text = SCHEMA_PATH.read_text()
-    assert "CREATE TABLE IF NOT EXISTS opportunities" in schema_text
-    assert schema_text.count("strategy_id TEXT NOT NULL") == 5
-    assert schema_text.count("strategy_version_id TEXT NOT NULL") == 5
+    inner_ring = _extract_block(
+        schema_text,
+        "-- BEGIN INNER-RING PRODUCT SHELLS",
+        "-- END INNER-RING PRODUCT SHELLS",
+    )
+    assert "CREATE TABLE IF NOT EXISTS opportunities" in inner_ring
+    assert inner_ring.count("strategy_id TEXT NOT NULL") == 5
+    assert inner_ring.count("strategy_version_id TEXT NOT NULL") == 5
 
     admin_database_url = _replace_database(PMS_TEST_DATABASE_URL, "postgres")
     temp_database = f"pms_cp04_{uuid.uuid4().hex[:12]}"
