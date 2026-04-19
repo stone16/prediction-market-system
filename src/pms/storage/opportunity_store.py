@@ -3,15 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
-import logging
 from typing import Literal, cast
 
 import asyncpg
 
 from pms.core.models import Opportunity
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,45 +21,40 @@ class OpportunityStore:
         if self.pool is None or not hasattr(self.pool, "acquire"):
             return
 
-        try:
-            async with self.pool.acquire() as connection:
-                await connection.execute(
-                    """
-                    INSERT INTO opportunities (
-                        opportunity_id,
-                        market_id,
-                        token_id,
-                        side,
-                        selected_factor_values,
-                        expected_edge,
-                        rationale,
-                        target_size_usdc,
-                        expiry,
-                        staleness_policy,
-                        strategy_id,
-                        strategy_version_id,
-                        created_at
-                    ) VALUES (
-                        $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13
-                    )
-                    """,
-                    opportunity.opportunity_id,
-                    opportunity.market_id,
-                    opportunity.token_id,
-                    opportunity.side,
-                    json.dumps(dict(opportunity.selected_factor_values)),
-                    opportunity.expected_edge,
-                    opportunity.rationale,
-                    opportunity.target_size_usdc,
-                    opportunity.expiry,
-                    opportunity.staleness_policy,
-                    opportunity.strategy_id,
-                    opportunity.strategy_version_id,
-                    opportunity.created_at,
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO opportunities (
+                    opportunity_id,
+                    market_id,
+                    token_id,
+                    side,
+                    selected_factor_values,
+                    expected_edge,
+                    rationale,
+                    target_size_usdc,
+                    expiry,
+                    staleness_policy,
+                    strategy_id,
+                    strategy_version_id,
+                    created_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13
                 )
-        except asyncpg.UndefinedTableError:
-            logger.warning(
-                "opportunities table is unavailable; skipping opportunity persistence",
+                """,
+                opportunity.opportunity_id,
+                opportunity.market_id,
+                opportunity.token_id,
+                opportunity.side,
+                json.dumps(dict(opportunity.selected_factor_values)),
+                opportunity.expected_edge,
+                opportunity.rationale,
+                opportunity.target_size_usdc,
+                opportunity.expiry,
+                opportunity.staleness_policy,
+                opportunity.strategy_id,
+                opportunity.strategy_version_id,
+                opportunity.created_at,
             )
 
     async def all(self) -> list[Opportunity]:
@@ -103,7 +94,7 @@ def _opportunity_from_row(row: asyncpg.Record) -> Opportunity:
     selected_factor_values = {
         str(key): float(value)
         for key, value in cast(dict[str, object], decoded).items()
-        if isinstance(value, (int, float))
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
     }
     return Opportunity(
         opportunity_id=cast(str, row["opportunity_id"]),

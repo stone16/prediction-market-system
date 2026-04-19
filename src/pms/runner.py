@@ -39,6 +39,12 @@ from pms.core.models import (
     TradeDecision,
 )
 from pms.evaluation.adapters.scoring import Scorer
+from pms.evaluation.feedback import EvaluatorFeedback
+from pms.evaluation.metrics import (
+    MetricsCollector,
+    StrategyMetricsSnapshot,
+    StrategyVersionKey,
+)
 from pms.evaluation.spool import EvalSpool
 from pms.factors.catalog import ensure_factor_catalog
 from pms.factors.definitions import REGISTERED
@@ -205,7 +211,12 @@ class Runner:
     def __post_init__(self) -> None:
         self.state = RunnerState(mode=self.config.mode)
         self._controller_factory = ControllerPipelineFactory(settings=self.config)
-        self._evaluator_spool = EvalSpool(store=self.eval_store, scorer=Scorer())
+        self._evaluator_spool = EvalSpool(
+            store=self.eval_store,
+            scorer=Scorer(),
+            feedback_generator=EvaluatorFeedback(self.feedback_store),
+            metrics_provider=self._metrics_by_strategy,
+        )
         self._decision_queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
         self._controller_lifecycle_lock = asyncio.Lock()
@@ -722,6 +733,31 @@ class Runner:
             finally:
                 self._decision_queue.task_done()
 
+    async def _metrics_by_strategy(
+        self,
+    ) -> dict[StrategyVersionKey, tuple[StrategyMetricsSnapshot, EvalSpec]]:
+        records = await self.eval_store.all()
+        snapshots = MetricsCollector(records).snapshot_by_strategy()
+        eval_specs = await self._active_eval_specs()
+        return {
+            key: (snapshot, eval_specs[key])
+            for key, snapshot in snapshots.items()
+            if key in eval_specs
+        }
+
+    async def _active_eval_specs(self) -> dict[StrategyVersionKey, EvalSpec]:
+        if (
+            self._strategy_registry is not None
+            and hasattr(self._strategy_registry, "list_active_strategies")
+        ):
+            active_strategies = await self._strategy_registry.list_active_strategies()
+        else:
+            active_strategies = [_default_active_strategy(self.config)]
+        return {
+            (strategy.strategy_id, strategy.strategy_version_id): strategy.eval_spec
+            for strategy in active_strategies
+        }
+
     def _should_stop_controller(self) -> bool:
         if self._stop_event.is_set() and self.sensor_stream.queue.empty():
             return True
@@ -1003,7 +1039,8 @@ class Runner:
                 for asset_id in asset_ids
             }
         )
-        await subscription_controller.update(merged_asset_ids)
+        async with self._reselection_lock:
+            await subscription_controller.update(merged_asset_ids)
 
     async def _maybe_inject_controller_release_cancel(
         self,

@@ -6,7 +6,8 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -378,6 +379,58 @@ async def test_runner_active_perception_reselection_is_serialized(
 
     discovery.poll_released.set()
     await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_refresh_subscription_updates_wait_for_reselection_lock() -> None:
+    events: list[list[str]] = []
+
+    @dataclass
+    class SerializingSubscriptionController:
+        active_calls: int = 0
+        max_active_calls: int = 0
+        first_call_started: asyncio.Event = field(default_factory=asyncio.Event)
+        release_first_call: asyncio.Event = field(default_factory=asyncio.Event)
+
+        async def update(self, asset_ids: list[str]) -> bool:
+            self.active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self.active_calls)
+            events.append(list(asset_ids))
+            if not self.first_call_started.is_set():
+                self.first_call_started.set()
+                await self.release_first_call.wait()
+            self.active_calls -= 1
+            return True
+
+    @dataclass
+    class StaticSelector:
+        asset_ids: list[str]
+
+        async def select(self) -> Any:
+            return type("MergeResult", (), {"asset_ids": tuple(self.asset_ids)})()
+
+    runner = _runner(RunMode.LIVE)
+    subscription_controller = SerializingSubscriptionController()
+    runner._market_selector = cast(Any, StaticSelector(["strategy-token"]))  # noqa: SLF001
+    runner._subscription_controller = cast(Any, subscription_controller)  # noqa: SLF001
+    runner._controller_runtimes = {  # noqa: SLF001
+        "alpha": cast(Any, SimpleNamespace(asset_ids=frozenset({"refresh-token"})))
+    }
+
+    reselect_task = asyncio.create_task(runner._reselect())  # noqa: SLF001
+    await asyncio.wait_for(subscription_controller.first_call_started.wait(), timeout=2.0)
+
+    refresh_task = asyncio.create_task(runner._refresh_subscription_assets_locked())  # noqa: SLF001
+    await asyncio.sleep(0)
+    assert subscription_controller.max_active_calls == 1
+    assert events == [["strategy-token"]]
+
+    subscription_controller.release_first_call.set()
+    await asyncio.wait_for(reselect_task, timeout=2.0)
+    await asyncio.wait_for(refresh_task, timeout=2.0)
+
+    assert subscription_controller.max_active_calls == 1
+    assert events == [["strategy-token"], ["refresh-token"]]
 
 
 @pytest.mark.asyncio

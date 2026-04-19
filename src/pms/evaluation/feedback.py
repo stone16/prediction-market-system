@@ -23,17 +23,26 @@ class EvaluatorFeedback:
             tuple[StrategyMetricsSnapshot, EvalSpec],
         ],
     ) -> list[Feedback]:
+        existing_feedback = await self.store.all()
+        existing_keys = {
+            _feedback_key(item)
+            for item in existing_feedback
+            if not item.resolved
+        }
         feedback: list[Feedback] = []
 
         for (strategy_id, strategy_version_id), (metrics, eval_spec) in metrics_by_strategy.items():
-            feedback.extend(
-                self._threshold_feedback(
-                    metrics=metrics,
-                    eval_spec=eval_spec,
-                    strategy_id=strategy_id,
-                    strategy_version_id=strategy_version_id,
-                )
-            )
+            for item in self._threshold_feedback(
+                metrics=metrics,
+                eval_spec=eval_spec,
+                strategy_id=strategy_id,
+                strategy_version_id=strategy_version_id,
+            ):
+                item_key = _feedback_key(item)
+                if item_key in existing_keys:
+                    continue
+                feedback.append(item)
+                existing_keys.add(item_key)
 
         for item in feedback:
             await self.store.append(
@@ -131,3 +140,13 @@ class EvaluatorFeedback:
             category=category,
             metadata=metadata,
         )
+
+
+def _feedback_key(feedback: Feedback) -> tuple[str, str, str]:
+    strategy_id = str(feedback.metadata.get("strategy_id", ""))
+    strategy_version_id = str(feedback.metadata.get("strategy_version_id", ""))
+    return (
+        strategy_id,
+        strategy_version_id,
+        feedback.category or "",
+    )

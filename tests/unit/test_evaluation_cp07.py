@@ -267,6 +267,55 @@ async def test_evaluator_feedback_uses_per_strategy_eval_thresholds() -> None:
     assert all(item.metadata["strategy_version_id"] == "alpha-v1" for item in feedback)
 
 
+@pytest.mark.asyncio
+async def test_eval_spool_generates_deduped_feedback_from_runtime_metrics() -> None:
+    store = cast(EvalStore, InMemoryEvalStore())
+    feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+
+    async def metrics_provider() -> dict[tuple[str, str], tuple[StrategyMetricsSnapshot, EvalSpec]]:
+        snapshots = MetricsCollector(
+            await cast(InMemoryEvalStore, store).all()
+        ).snapshot_by_strategy()
+        return {
+            key: (
+                snapshot,
+                EvalSpec(
+                    metrics=("brier", "pnl", "fill_rate"),
+                    max_brier_score=0.30,
+                    slippage_threshold_bps=50.0,
+                    min_win_rate=0.50,
+                ),
+            )
+            for key, snapshot in snapshots.items()
+        }
+
+    spool = EvalSpool(
+        store=store,
+        scorer=Scorer(),
+        feedback_generator=EvaluatorFeedback(feedback_store),
+        metrics_provider=metrics_provider,
+    )
+    await spool.start()
+
+    spool.enqueue(
+        _fill(decision_id="d-feedback-1", resolved_outcome=1.0, fill_price=0.42),
+        _decision(decision_id="d-feedback-1", price=0.4),
+    )
+    spool.enqueue(
+        _fill(decision_id="d-feedback-2", resolved_outcome=1.0, fill_price=0.42),
+        _decision(decision_id="d-feedback-2", price=0.4),
+    )
+
+    await asyncio.wait_for(spool.join(), timeout=1.0)
+    await spool.stop()
+
+    feedback = await cast(InMemoryFeedbackStore, feedback_store).all()
+
+    assert [item.category for item in feedback] == ["slippage"]
+    assert feedback[0].metadata["strategy_id"] == "default"
+    assert feedback[0].metadata["strategy_version_id"] == "default-v1"
+
+
 def test_metrics_snapshot_by_strategy_returns_only_present_keys() -> None:
     snapshots = MetricsCollector(
         [

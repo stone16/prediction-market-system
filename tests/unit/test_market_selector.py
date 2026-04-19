@@ -120,9 +120,13 @@ async def test_market_selector_builds_strategy_sets_before_merging(
     )
 
     class FakeRegistry:
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def list_market_selections(
             self,
         ) -> list[tuple[str, str, MarketSelectionSpec]]:
+            self.calls += 1
             return [
                 (
                     "alpha",
@@ -183,15 +187,17 @@ async def test_market_selector_builds_strategy_sets_before_merging(
             )
 
     fake_store = FakeStore()
+    fake_registry = FakeRegistry()
     merge_policy = RecordingMergePolicy()
     selector = market_selector_cls(
         store=fake_store,
-        registry=FakeRegistry(),
+        registry=fake_registry,
         merge_policy=merge_policy,
     )
 
     result = await selector.select()
 
+    assert fake_registry.calls == 1
     assert fake_store.calls == [
         ("polymarket", 7, 500.0),
         ("kalshi", 30, 1000.0),

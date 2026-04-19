@@ -519,11 +519,7 @@ def _json_factor_composition(value: object) -> tuple[FactorCompositionStep, ...]
                     "config.factor_composition.step.weight",
                 ),
                 threshold=_json_optional_float(
-                    _json_required_field(
-                        step_payload,
-                        "threshold",
-                        "config.factor_composition.step.threshold",
-                    ),
+                    step_payload.get("threshold"),
                     "config.factor_composition.step.threshold",
                 ),
             )

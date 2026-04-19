@@ -245,10 +245,6 @@ def _latest(items: Sequence[T], limit: int) -> list[T]:
     return list(items[-bounded_limit:])
 
 
-async def _metrics(runner: Runner) -> MetricsSnapshot:
-    return MetricsCollector(await runner.eval_store.all()).global_ops_snapshot()
-
-
 def _metrics_payload(records: list[EvalRecord]) -> dict[str, Any]:
     collector = MetricsCollector(records)
     ops_view = _metrics_aggregate_payload(records, collector.global_ops_snapshot())
