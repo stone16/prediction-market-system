@@ -58,3 +58,14 @@ class StrategyVersion:
     strategy_id: str
     strategy_version_id: str
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveStrategy:
+    strategy_id: str
+    strategy_version_id: str
+    config: StrategyConfig
+    risk: RiskParams
+    eval_spec: EvalSpec
+    forecaster: ForecasterSpec
+    market_selection: MarketSelectionSpec

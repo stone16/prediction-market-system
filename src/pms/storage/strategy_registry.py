@@ -10,6 +10,7 @@ import asyncpg
 
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
+    ActiveStrategy,
     EvalSpec,
     FactorCompositionStep,
     ForecasterSpec,
@@ -213,6 +214,41 @@ class PostgresStrategyRegistry:
                 )
             )
         return selections
+
+    async def list_active_strategies(self) -> list[ActiveStrategy]:
+        query = """
+        SELECT
+            strategies.strategy_id,
+            strategies.active_version_id AS strategy_version_id,
+            versions.config_json
+        FROM strategies
+        JOIN strategy_versions AS versions
+            ON versions.strategy_id = strategies.strategy_id
+           AND versions.strategy_version_id = strategies.active_version_id
+        WHERE strategies.active_version_id IS NOT NULL
+        ORDER BY strategies.strategy_id ASC
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query)
+        active_strategies: list[ActiveStrategy] = []
+        for row in rows:
+            strategy = _strategy_from_config_json(row["config_json"])
+            strategy_version_id = row["strategy_version_id"]
+            if not isinstance(strategy_version_id, str):
+                msg = "strategies.active_version_id did not return a string"
+                raise TypeError(msg)
+            active_strategies.append(
+                ActiveStrategy(
+                    strategy_id=_json_string(row["strategy_id"], "strategy_id"),
+                    strategy_version_id=strategy_version_id,
+                    config=strategy.config,
+                    risk=strategy.risk,
+                    eval_spec=strategy.eval_spec,
+                    forecaster=strategy.forecaster,
+                    market_selection=strategy.market_selection,
+                )
+            )
+        return active_strategies
 
     async def set_active(
         self,

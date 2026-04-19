@@ -56,6 +56,8 @@ class TradeDecision:
     prob_estimate: float
     expected_edge: float
     time_in_force: str
+    strategy_id: str = "default"
+    strategy_version_id: str = "default-v1"
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,8 @@ T = TypeVar("T")
 
 @dataclass
 class ControllerPipeline:
+    strategy_id: str = "default"
+    strategy_version_id: str = "default-v1"
     forecasters: Sequence[IForecaster] | None = None
     calibrator: ICalibrator | None = None
     sizer: ISizer | None = None
@@ -36,7 +38,7 @@ class ControllerPipeline:
             self.forecasters = (
                 RulesForecaster(),
                 StatisticalForecaster(),
-                LLMForecaster(config=self.settings.llm),
+                LLMForecaster(),
             )
         if self.calibrator is None:
             self.calibrator = NetcalCalibrator()
@@ -99,6 +101,8 @@ class ControllerPipeline:
             prob_estimate=prob_estimate,
             expected_edge=expected_edge,
             time_in_force=self.settings.controller.time_in_force,
+            strategy_id=self.strategy_id,
+            strategy_version_id=self.strategy_version_id,
         )
 
     async def decide(

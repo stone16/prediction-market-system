@@ -18,10 +18,12 @@ from pms.actuator.executor import ActuatorAdapter, ActuatorExecutor
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import PMSSettings
+from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.pipeline import ControllerPipeline
 from pms.core.enums import OrderStatus, RunMode
 from pms.core.interfaces import (
     DiscoveryPollCompleteSensor,
+    IController,
     ISensor,
     MarketSelectorLike,
     SubscriptionControllerLike,
@@ -55,7 +57,16 @@ from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
 from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
-from pms.strategies.projections import FactorCompositionStep
+from pms.strategies.projections import (
+    ActiveStrategy,
+    EvalSpec,
+    FactorCompositionStep,
+    ForecasterSpec,
+    MarketSelectionSpec,
+    RiskParams,
+    StrategyConfig,
+)
+from pms.strategies.versioning import compute_strategy_version_id
 
 
 logger = logging.getLogger(__name__)
@@ -83,6 +94,14 @@ class AsyncCloseable(Protocol):
     async def aclose(self) -> None: ...
 
 
+@dataclass(frozen=True)
+class StrategyControllerRuntime:
+    strategy_id: str
+    strategy_version_id: str
+    controller: IController
+    asset_ids: frozenset[str] | None
+
+
 @dataclass
 class RunnerState:
     mode: RunMode
@@ -107,7 +126,7 @@ class Runner:
         open_positions=[],
     ))
     sensor_stream: SensorStream = field(default_factory=SensorStream)
-    controller: ControllerPipeline | None = None
+    controller: IController | None = None
     state: RunnerState = field(init=False)
     actuator_executor: ActuatorExecutor = field(init=False)
     _evaluator_spool: EvalSpool = field(init=False)
@@ -131,6 +150,19 @@ class Runner:
         init=False,
         default=None,
     )
+    _controller_factory: ControllerPipelineFactory = field(init=False)
+    _controller_runtimes: dict[str, StrategyControllerRuntime] = field(
+        init=False,
+        default_factory=dict,
+    )
+    _controller_signal_queues: dict[str, asyncio.Queue[MarketSignal]] = field(
+        init=False,
+        default_factory=dict,
+    )
+    _controller_pipeline_tasks: dict[str, asyncio.Task[None]] = field(
+        init=False,
+        default_factory=dict,
+    )
     _reselection_task: asyncio.Task[None] | None = field(init=False, default=None)
     _reselection_lock: asyncio.Lock = field(init=False)
     _reselection_requested: asyncio.Event = field(init=False)
@@ -141,7 +173,7 @@ class Runner:
 
     def __post_init__(self) -> None:
         self.state = RunnerState(mode=self.config.mode)
-        self.controller = self.controller or ControllerPipeline(settings=self.config)
+        self._controller_factory = ControllerPipelineFactory(settings=self.config)
         self._evaluator_spool = EvalSpool(store=self.eval_store, scorer=Scorer())
         self._decision_queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
@@ -156,6 +188,10 @@ class Runner:
     @property
     def actuator_task(self) -> asyncio.Task[None] | None:
         return self._actuator_task
+
+    @property
+    def controller_pipeline_tasks(self) -> tuple[asyncio.Task[None], ...]:
+        return tuple(self._controller_pipeline_tasks.values())
 
     @property
     def factor_service_task(self) -> asyncio.Task[None] | None:
@@ -220,6 +256,7 @@ class Runner:
             tasks.append(self._factor_service_task)
         if self._controller_task is not None:
             tasks.append(self._controller_task)
+        tasks.extend(self._controller_pipeline_tasks.values())
         if self._actuator_task is not None:
             tasks.append(self._actuator_task)
         if self._reselection_task is not None:
@@ -263,6 +300,7 @@ class Runner:
                 self._factor_service_task = asyncio.create_task(self._factor_service.run())
             self._active_sensors = self._build_sensors()
             self._wire_active_perception(self._active_sensors)
+            await self._configure_controllers()
             await self.sensor_stream.start(self._active_sensors)
             await self._evaluator_spool.start()
             self._controller_task = asyncio.create_task(self._controller_loop())
@@ -289,7 +327,7 @@ class Runner:
         except BaseException as exc:  # pragma: no cover - exercised via unit tests
             error = exc
 
-        for task in (self._controller_task, self._actuator_task):
+        for task in (self._controller_task, *self._controller_pipeline_tasks.values(), self._actuator_task):
             if task is not None and not task.done():
                 task.cancel()
 
@@ -300,6 +338,7 @@ class Runner:
                     for task in (
                         factor_task,
                         self._controller_task,
+                        *self._controller_pipeline_tasks.values(),
                         self._actuator_task,
                     )
                     if task
@@ -335,6 +374,9 @@ class Runner:
         self._market_selector = None
         self._subscription_controller = None
         self._strategy_registry = None
+        self._controller_runtimes = {}
+        self._controller_signal_queues = {}
+        self._controller_pipeline_tasks = {}
         self._reselection_task = None
 
         try:
@@ -370,6 +412,10 @@ class Runner:
             await self._factor_service_task
         if self._controller_task is not None:
             await self._controller_task
+        for queue in self._controller_signal_queues.values():
+            await queue.join()
+        for task in self._controller_pipeline_tasks.values():
+            await task
         await self._decision_queue.join()
         if self._actuator_task is not None:
             await self._actuator_task
@@ -523,9 +569,8 @@ class Runner:
         return PolymarketActuator(self.config)
 
     async def _controller_loop(self) -> None:
-        controller = self.controller
-        if controller is None:
-            msg = "Runner controller is not initialized"
+        if not self._controller_runtimes:
+            msg = "Runner controller runtimes are not initialized"
             raise RuntimeError(msg)
         while True:
             if self._should_stop_controller():
@@ -537,12 +582,34 @@ class Runner:
 
             try:
                 _append_bounded(self.state.signals, signal)
-                decision = await controller.decide(signal, portfolio=self.portfolio)
+                for strategy_id, runtime in self._controller_runtimes.items():
+                    if not _matches_strategy_scope(runtime.asset_ids, signal):
+                        continue
+                    await self._controller_signal_queues[strategy_id].put(signal)
+            finally:
+                self.sensor_stream.queue.task_done()
+
+    async def _controller_pipeline_loop(self, strategy_id: str) -> None:
+        runtime = self._controller_runtimes[strategy_id]
+        queue = self._controller_signal_queues[strategy_id]
+        while True:
+            if self._should_stop_controller_pipeline(strategy_id):
+                return
+            try:
+                signal = await asyncio.wait_for(queue.get(), 0.05)
+            except TimeoutError:
+                continue
+
+            try:
+                decision = await runtime.controller.decide(
+                    signal,
+                    portfolio=self.portfolio,
+                )
                 if decision is not None:
                     _append_bounded(self.state.decisions, decision)
                     await self._decision_queue.put((decision, signal))
             finally:
-                self.sensor_stream.queue.task_done()
+                queue.task_done()
 
     async def _actuator_loop(self) -> None:
         while True:
@@ -579,8 +646,19 @@ class Runner:
     def _should_stop_actuator(self) -> bool:
         if self._stop_event.is_set() and self._decision_queue.empty():
             return True
-        controller_done = self._controller_task is not None and self._controller_task.done()
+        controller_done = (
+            self._controller_task is not None
+            and self._controller_task.done()
+            and all(task.done() for task in self._controller_pipeline_tasks.values())
+        )
         return controller_done and self._decision_queue.empty()
+
+    def _should_stop_controller_pipeline(self, strategy_id: str) -> bool:
+        queue = self._controller_signal_queues[strategy_id]
+        if self._stop_event.is_set() and queue.empty():
+            return True
+        dispatcher_done = self._controller_task is not None and self._controller_task.done()
+        return dispatcher_done and queue.empty()
 
     def _sensors_finished(self) -> bool:
         return bool(self.sensor_stream.tasks) and all(
@@ -601,6 +679,9 @@ class Runner:
         stop_error: BaseException | None = None
         if self._factor_service_task is not None and not self._factor_service_task.done():
             self._factor_service_task.cancel()
+        for task in self._controller_pipeline_tasks.values():
+            if not task.done():
+                task.cancel()
         reselection_task = self._reselection_task
         self._reselection_requested.set()
         self._clear_discovery_poll_complete_hook()
@@ -610,7 +691,7 @@ class Runner:
             await asyncio.gather(
                 *(
                     task
-                    for task in (self._factor_service_task,)
+                    for task in (self._factor_service_task, *self._controller_pipeline_tasks.values())
                     if task is not None
                 ),
                 return_exceptions=True,
@@ -647,6 +728,9 @@ class Runner:
         self._market_selector = None
         self._subscription_controller = None
         self._strategy_registry = None
+        self._controller_runtimes = {}
+        self._controller_signal_queues = {}
+        self._controller_pipeline_tasks = {}
         self._reselection_task = None
         await self._close_pg_pool()
 
@@ -701,6 +785,72 @@ class Runner:
         with suppress(asyncio.CancelledError):
             await task
 
+    async def _configure_controllers(self) -> None:
+        if self._controller_task is not None or self._controller_pipeline_tasks:
+            msg = "Runner controllers already configured"
+            raise RuntimeError(msg)
+        runtimes = await self._build_controller_runtimes()
+        self._controller_runtimes = {
+            runtime.strategy_id: runtime
+            for runtime in runtimes
+        }
+        self._controller_signal_queues = {
+            runtime.strategy_id: asyncio.Queue()
+            for runtime in runtimes
+        }
+        self._controller_pipeline_tasks = {
+            runtime.strategy_id: asyncio.create_task(
+                self._controller_pipeline_loop(runtime.strategy_id),
+                name=f"controller-pipeline:{runtime.strategy_id}",
+            )
+            for runtime in runtimes
+        }
+
+    async def _build_controller_runtimes(self) -> list[StrategyControllerRuntime]:
+        if self.controller is not None:
+            return [
+                StrategyControllerRuntime(
+                    strategy_id="default",
+                    strategy_version_id="default-v1",
+                    controller=self.controller,
+                    asset_ids=None,
+                )
+            ]
+
+        if (
+            self.config.mode != RunMode.BACKTEST
+            and self._strategy_registry is not None
+            and hasattr(self._strategy_registry, "list_active_strategies")
+            and hasattr(self._market_selector, "select_per_strategy")
+        ):
+            active_strategies = await self._strategy_registry.list_active_strategies()
+            selections = await cast(Any, self._market_selector).select_per_strategy()
+            scopes = {
+                selection.strategy_id: selection.asset_ids
+                for selection in selections
+            }
+            pipelines = self._controller_factory.build_many(active_strategies)
+            return [
+                StrategyControllerRuntime(
+                    strategy_id=strategy.strategy_id,
+                    strategy_version_id=strategy.strategy_version_id,
+                    controller=pipelines[strategy.strategy_id],
+                    asset_ids=scopes.get(strategy.strategy_id),
+                )
+                for strategy in active_strategies
+            ]
+
+        default_strategy = _default_active_strategy(self.config)
+        pipeline = self._controller_factory.build(default_strategy)
+        return [
+            StrategyControllerRuntime(
+                strategy_id=default_strategy.strategy_id,
+                strategy_version_id=default_strategy.strategy_version_id,
+                controller=pipeline,
+                asset_ids=None,
+            )
+        ]
+
 
 def _append_bounded(items: list[T], item: T) -> None:
     items.append(item)
@@ -726,6 +876,60 @@ def _find_subscription_sink(
         if callable(update_subscription):
             return cast(SubscriptionManagedSensor, sensor)
     return None
+
+
+def _matches_strategy_scope(
+    asset_ids: frozenset[str] | None,
+    signal: MarketSignal,
+) -> bool:
+    if asset_ids is None:
+        return True
+    candidate_id = signal.token_id or signal.market_id
+    return candidate_id in asset_ids
+
+
+def _default_active_strategy(settings: PMSSettings) -> ActiveStrategy:
+    config = StrategyConfig(
+        strategy_id="default",
+        factor_composition=DEFAULT_V2_FACTOR_COMPOSITION,
+        metadata=(("owner", "system"), ("tier", "default")),
+    )
+    risk = RiskParams(
+        max_position_notional_usdc=settings.risk.max_position_per_market,
+        max_daily_drawdown_pct=(
+            0.0 if settings.risk.max_drawdown_pct is None else settings.risk.max_drawdown_pct
+        ),
+        min_order_size_usdc=settings.risk.min_order_usdc,
+    )
+    eval_spec = EvalSpec(metrics=("brier", "pnl", "fill_rate"))
+    forecaster = ForecasterSpec(
+        forecasters=(
+            ("rules", (("threshold", "0.55"),)),
+            ("stats", (("window", "15m"),)),
+            ("llm", ()),
+        )
+    )
+    market_selection = MarketSelectionSpec(
+        venue="polymarket",
+        resolution_time_max_horizon_days=7,
+        volume_min_usdc=500.0,
+    )
+    strategy_version_id = compute_strategy_version_id(
+        config,
+        risk,
+        eval_spec,
+        forecaster,
+        market_selection,
+    )
+    return ActiveStrategy(
+        strategy_id="default",
+        strategy_version_id=strategy_version_id,
+        config=config,
+        risk=risk,
+        eval_spec=eval_spec,
+        forecaster=forecaster,
+        market_selection=market_selection,
+    )
 
 
 def _fill_from_order(
