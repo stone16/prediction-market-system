@@ -26,6 +26,7 @@ def test_sitecustomize_stubs_readline_only_for_pytest_on_darwin(
         importlib.reload(sitecustomize)
         assert isinstance(sys.modules.get("readline"), types.ModuleType)
     finally:
+        monkeypatch.setattr(sys, "argv", ["pms-api"])
         sys.modules.pop("readline", None)
         if original_readline is not None:
             sys.modules["readline"] = original_readline

@@ -77,3 +77,14 @@ class ActiveStrategy:
     eval_spec: EvalSpec
     forecaster: ForecasterSpec
     market_selection: MarketSelectionSpec
+
+    def __post_init__(self) -> None:
+        if not self.strategy_id:
+            msg = "ActiveStrategy.strategy_id must be non-empty"
+            raise ValueError(msg)
+        if not self.strategy_version_id:
+            msg = "ActiveStrategy.strategy_version_id must be non-empty"
+            raise ValueError(msg)
+        if self.config.strategy_id != self.strategy_id:
+            msg = "ActiveStrategy.strategy_id must match config.strategy_id"
+            raise ValueError(msg)

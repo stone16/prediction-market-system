@@ -442,6 +442,49 @@ async def test_runner_unregisters_strategy_mid_dispatch_and_releases_resources(
 
 
 @pytest.mark.asyncio
+async def test_runner_controller_loop_idles_until_strategy_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = MutableRegistry(active_strategies=[])
+    selector = MutableSelector(selections=[])
+    market_data = RecordingMarketDataSensor()
+    discovery = IdleDiscoverySensor()
+    alpha = ImmediateOpportunityController("strat-a")
+
+    _install_cp08_runtime(
+        monkeypatch,
+        registry=registry,
+        selector=selector,
+        market_data=market_data,
+        discovery=discovery,
+    )
+
+    runner = Runner(config=_settings(), historical_data_path=FIXTURE_PATH)
+    runner._controller_factory = cast(
+        Any,
+        FakeControllerFactory({"strat-a": alpha}),
+    )
+
+    await runner.start()
+    try:
+        assert runner.controller_task is not None
+        assert not runner.controller_task.done()
+        assert runner.controller_pipeline_tasks == ()
+
+        registry.active_strategies = [_active_strategy("strat-a")]
+        selector.selections = [_selection("strat-a", "asset-a")]
+
+        await registry.fire_change()
+        await _wait_for(lambda: "strat-a" in runner._controller_pipeline_tasks)
+        await _wait_for(lambda: market_data.asset_ids == ["asset-a"])
+
+        await runner.sensor_stream.queue.put(_signal("asset-a"))
+        await _wait_for(lambda: alpha.calls == 1)
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_controller_pipeline_runtime_error_triggers_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

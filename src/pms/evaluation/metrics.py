@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 
 from pms.core.models import EvalRecord
 
@@ -15,6 +16,7 @@ class MetricsSnapshot:
     brier_overall: float | None
     brier_by_category: dict[str, float]
     brier_samples: dict[str, int]
+    record_count: int
     pnl: float
     slippage_bps: float
     fill_rate: float
@@ -29,6 +31,7 @@ class StrategyMetricsSnapshot:
     brier_overall: float | None
     brier_by_category: dict[str, float]
     brier_samples: dict[str, int]
+    record_count: int
     pnl: float
     slippage_bps: float
     fill_rate: float
@@ -62,6 +65,7 @@ def _build_metrics_snapshot(records: tuple[EvalRecord, ...] | list[EvalRecord]) 
             brier_overall=None,
             brier_by_category={},
             brier_samples={},
+            record_count=0,
             pnl=0.0,
             slippage_bps=0.0,
             fill_rate=0.0,
@@ -69,26 +73,36 @@ def _build_metrics_snapshot(records: tuple[EvalRecord, ...] | list[EvalRecord]) 
             calibration_samples={},
         )
 
-    brier_by_category: dict[str, list[float]] = defaultdict(list)
+    brier_by_category: dict[str, list[Decimal]] = defaultdict(list)
     calibration_samples: dict[str, int] = defaultdict(int)
     for record in records:
         category = record.category or record.model_id or "unknown"
-        brier_by_category[category].append(record.brier_score)
+        brier_by_category[category].append(Decimal(str(record.brier_score)))
         calibration_samples[record.model_id or "unknown"] += 1
 
     filled_count = sum(1 for record in records if record.filled)
     winning_count = sum(1 for record in records if record.pnl > 0.0)
+    total_brier_score = sum(
+        Decimal(str(record.brier_score))
+        for record in records
+    )
+    total_pnl = sum(Decimal(str(record.pnl)) for record in records)
+    total_slippage_bps = sum(
+        Decimal(str(record.slippage_bps))
+        for record in records
+    )
     return MetricsSnapshot(
-        brier_overall=sum(record.brier_score for record in records) / len(records),
+        brier_overall=float(total_brier_score / Decimal(len(records))),
         brier_by_category={
-            category: sum(scores) / len(scores)
+            category: float(sum(scores) / Decimal(len(scores)))
             for category, scores in brier_by_category.items()
         },
         brier_samples={
             category: len(scores) for category, scores in brier_by_category.items()
         },
-        pnl=sum(record.pnl for record in records),
-        slippage_bps=sum(record.slippage_bps for record in records) / len(records),
+        record_count=len(records),
+        pnl=float(total_pnl),
+        slippage_bps=float(total_slippage_bps / Decimal(len(records))),
         fill_rate=filled_count / len(records),
         win_rate=winning_count / len(records),
         calibration_samples=dict(calibration_samples),
@@ -106,6 +120,7 @@ def _build_strategy_metrics_snapshot(
         brier_overall=metrics.brier_overall,
         brier_by_category=dict(metrics.brier_by_category),
         brier_samples=dict(metrics.brier_samples),
+        record_count=metrics.record_count,
         pnl=metrics.pnl,
         slippage_bps=metrics.slippage_bps,
         fill_rate=metrics.fill_rate,

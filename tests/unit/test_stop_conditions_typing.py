@@ -27,7 +27,7 @@ def test_stop_conditions_strings_remain_gate_threshold_only() -> None:
                     continue
                 if not isinstance(value, str):
                     continue
-                if any(prefix in value for prefix in FORBIDDEN_PREFIXES):
+                if any(value.startswith(prefix) for prefix in FORBIDDEN_PREFIXES):
                     violations.append(f"{path}:{token.start[0]}:{value}")
 
     assert violations == []

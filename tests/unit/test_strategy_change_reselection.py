@@ -13,6 +13,7 @@ import pytest
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal
+from pms.market_selection.merge import StrategyMarketSet
 from pms.runner import Runner
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
@@ -153,6 +154,15 @@ class RecordingSelector:
             (),
             {"asset_ids": tuple(self.returned_asset_ids)},
         )()
+
+    async def select_per_strategy(self) -> list[StrategyMarketSet]:
+        return [
+            StrategyMarketSet(
+                strategy_id="default",
+                strategy_version_id="default-v1",
+                asset_ids=frozenset(self.returned_asset_ids),
+            )
+        ]
 
 
 @dataclass
@@ -645,11 +655,13 @@ async def test_runner_start_stop_cycles_unregister_strategy_change_callbacks(
             historical_data_path=FIXTURE_PATH,
         )
         await runner.start()
-        registry = constructed[-1]
-        assert registry.callbacks == [
-            runner._request_reselection,
-            runner._sync_controller_runtimes,
-        ]
-        await runner.stop()
+        try:
+            registry = constructed[-1]
+            assert registry.callbacks == [
+                runner._request_reselection,
+                runner._sync_controller_runtimes,
+            ]
+        finally:
+            await runner.stop()
         assert registry.callbacks == []
         assert await _runner_tasks() == ()

@@ -81,7 +81,8 @@ class EvaluatorFeedback:
                             "category": category,
                             "observed_value": brier_score,
                             "threshold": eval_spec.max_brier_score,
-                            "sample_count": metrics.brier_samples.get(category, 0),
+                            "sample_size": metrics.brier_samples.get(category, 0),
+                            "market_cohort": category,
                         },
                     )
                 )
@@ -100,6 +101,8 @@ class EvaluatorFeedback:
                         "metric": "slippage_bps",
                         "observed_value": metrics.slippage_bps,
                         "threshold": eval_spec.slippage_threshold_bps,
+                        "sample_size": metrics.record_count,
+                        "market_cohort": "all_scored_fills",
                     },
                 )
             )
@@ -118,6 +121,8 @@ class EvaluatorFeedback:
                         "metric": "win_rate",
                         "observed_value": metrics.win_rate,
                         "threshold": eval_spec.min_win_rate,
+                        "sample_size": metrics.record_count,
+                        "market_cohort": "all_scored_fills",
                     },
                 )
             )

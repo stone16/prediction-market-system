@@ -99,6 +99,17 @@ export function mockMetrics(): MetricsResponse {
         fill_rate: 0.89,
         slippage_bps: 10.0,
         drawdown: 2.0
+      },
+      {
+        strategy_id: 'default',
+        strategy_version_id: 'default-v1',
+        record_count: 0,
+        insufficient_samples: true,
+        brier_overall: null,
+        pnl: 0.0,
+        fill_rate: 0.0,
+        slippage_bps: 0.0,
+        drawdown: 0.0
       }
     ],
     ops_view: opsView

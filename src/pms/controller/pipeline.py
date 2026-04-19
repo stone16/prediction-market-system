@@ -40,7 +40,7 @@ class ControllerPipeline:
             self.forecasters = (
                 RulesForecaster(),
                 StatisticalForecaster(),
-                LLMForecaster(),
+                LLMForecaster(config=self.settings.llm),
             )
         if self.calibrator is None:
             self.calibrator = NetcalCalibrator()

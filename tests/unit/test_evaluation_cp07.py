@@ -24,7 +24,12 @@ from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
 
 def _decision(
-    *, decision_id: str = "d-cp07", prob: float = 0.7, price: float = 0.4
+    *,
+    decision_id: str = "d-cp07",
+    prob: float = 0.7,
+    price: float = 0.4,
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v1",
 ) -> TradeDecision:
     return TradeDecision(
         decision_id=decision_id,
@@ -41,8 +46,8 @@ def _decision(
         expected_edge=prob - price,
         time_in_force="GTC",
         opportunity_id=f"op-{decision_id}",
-        strategy_id="default",
-        strategy_version_id="default-v1",
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
         model_id="model-a",
     )
 
@@ -53,6 +58,8 @@ def _fill(
     resolved_outcome: float | None = 1.0,
     fill_price: float = 0.42,
     status: str = OrderStatus.MATCHED.value,
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v1",
 ) -> FillRecord:
     now = datetime(2026, 4, 14, tzinfo=UTC)
     return FillRecord(
@@ -69,8 +76,8 @@ def _fill(
         filled_at=now,
         status=status,
         anomaly_flags=[],
-        strategy_id="default",
-        strategy_version_id="default-v1",
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
         resolved_outcome=resolved_outcome,
     )
 
@@ -121,6 +128,7 @@ def _strategy_snapshot(
         brier_overall=brier_score,
         brier_by_category={"model-a": brier_score},
         brier_samples={"model-a": sample_count},
+        record_count=sample_count,
         pnl=0.0,
         slippage_bps=slippage_bps,
         fill_rate=1.0,
@@ -151,23 +159,34 @@ def test_scorer_brier_known_values() -> None:
     assert second.brier_score == pytest.approx(0.25)
 
 
+def test_scorer_rejects_fill_and_decision_strategy_identity_mismatch() -> None:
+    scorer = Scorer()
+
+    with pytest.raises(ValueError, match="strategy identity must match"):
+        scorer.score(
+            _fill(strategy_id="alpha", strategy_version_id="alpha-v1"),
+            _decision(strategy_id="beta", strategy_version_id="beta-v1"),
+        )
+
+
 @pytest.mark.asyncio
 async def test_eval_spool_enqueue_is_non_blocking_and_scores_in_background(
 ) -> None:
     store = cast(EvalStore, InMemoryEvalStore())
     spool = EvalSpool(store=store, scorer=Scorer())
     await spool.start()
+    try:
+        started_at = time.perf_counter()
+        for index in range(100):
+            spool.enqueue(
+                _fill(decision_id=f"d-{index}", resolved_outcome=1.0),
+                _decision(prob=0.7),
+            )
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
 
-    started_at = time.perf_counter()
-    for index in range(100):
-        spool.enqueue(
-            _fill(decision_id=f"d-{index}", resolved_outcome=1.0),
-            _decision(prob=0.7),
-        )
-    elapsed_ms = (time.perf_counter() - started_at) * 1000
-
-    await spool.join()
-    await spool.stop()
+        await spool.join()
+    finally:
+        await spool.stop()
 
     assert elapsed_ms < 100
     assert len(await cast(InMemoryEvalStore, store).all()) == 100
@@ -179,18 +198,19 @@ async def test_eval_spool_skips_unresolved_fills_and_keeps_running(
     store = cast(EvalStore, InMemoryEvalStore())
     spool = EvalSpool(store=store, scorer=Scorer())
     await spool.start()
+    try:
+        spool.enqueue(
+            _fill(decision_id="d-unresolved", resolved_outcome=None),
+            _decision(decision_id="d-unresolved"),
+        )
+        spool.enqueue(
+            _fill(decision_id="d-resolved", resolved_outcome=1.0),
+            _decision(decision_id="d-resolved"),
+        )
 
-    spool.enqueue(
-        _fill(decision_id="d-unresolved", resolved_outcome=None),
-        _decision(decision_id="d-unresolved"),
-    )
-    spool.enqueue(
-        _fill(decision_id="d-resolved", resolved_outcome=1.0),
-        _decision(decision_id="d-resolved"),
-    )
-
-    await asyncio.wait_for(spool.join(), timeout=1.0)
-    await spool.stop()
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
 
     assert [record.decision_id for record in await cast(InMemoryEvalStore, store).all()] == ["d-resolved"]
 
@@ -296,24 +316,65 @@ async def test_eval_spool_generates_deduped_feedback_from_runtime_metrics() -> N
         metrics_provider=metrics_provider,
     )
     await spool.start()
+    try:
+        spool.enqueue(
+            _fill(decision_id="d-feedback-1", resolved_outcome=1.0, fill_price=0.42),
+            _decision(decision_id="d-feedback-1", price=0.4),
+        )
+        spool.enqueue(
+            _fill(decision_id="d-feedback-2", resolved_outcome=1.0, fill_price=0.42),
+            _decision(decision_id="d-feedback-2", price=0.4),
+        )
 
-    spool.enqueue(
-        _fill(decision_id="d-feedback-1", resolved_outcome=1.0, fill_price=0.42),
-        _decision(decision_id="d-feedback-1", price=0.4),
-    )
-    spool.enqueue(
-        _fill(decision_id="d-feedback-2", resolved_outcome=1.0, fill_price=0.42),
-        _decision(decision_id="d-feedback-2", price=0.4),
-    )
-
-    await asyncio.wait_for(spool.join(), timeout=1.0)
-    await spool.stop()
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
 
     feedback = await cast(InMemoryFeedbackStore, feedback_store).all()
 
     assert [item.category for item in feedback] == ["slippage"]
     assert feedback[0].metadata["strategy_id"] == "default"
     assert feedback[0].metadata["strategy_version_id"] == "default-v1"
+    assert feedback[0].metadata["sample_size"] == 1
+    assert feedback[0].metadata["market_cohort"] == "all_scored_fills"
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_logs_feedback_errors_and_keeps_scoring(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = cast(EvalStore, InMemoryEvalStore())
+
+    async def _failing_metrics_provider() -> dict[tuple[str, str], tuple[StrategyMetricsSnapshot, EvalSpec]]:
+        raise RuntimeError("metrics boom")
+
+    spool = EvalSpool(
+        store=store,
+        scorer=Scorer(),
+        feedback_generator=EvaluatorFeedback(cast(FeedbackStore, InMemoryFeedbackStore())),
+        metrics_provider=_failing_metrics_provider,
+    )
+    await spool.start()
+    try:
+        caplog.set_level("ERROR", logger="pms.evaluation.spool")
+        spool.enqueue(
+            _fill(decision_id="d-feedback-error", resolved_outcome=1.0),
+            _decision(decision_id="d-feedback-error"),
+        )
+        spool.enqueue(
+            _fill(decision_id="d-after-error", resolved_outcome=1.0),
+            _decision(decision_id="d-after-error"),
+        )
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    records = await cast(InMemoryEvalStore, store).all()
+    assert [record.decision_id for record in records] == [
+        "d-feedback-error",
+        "d-after-error",
+    ]
+    assert "feedback generation failed in evaluator spool" in caplog.text
 
 
 def test_metrics_snapshot_by_strategy_returns_only_present_keys() -> None:

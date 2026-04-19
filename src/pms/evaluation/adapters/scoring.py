@@ -12,6 +12,14 @@ class Scorer:
     def score(self, fill: FillRecord, decision: TradeDecision) -> EvalRecord:
         if fill.resolved_outcome is None:
             raise ValueError("FillRecord.resolved_outcome is required for scoring")
+        if (
+            fill.strategy_id != decision.strategy_id
+            or fill.strategy_version_id != decision.strategy_version_id
+        ):
+            msg = (
+                "FillRecord and TradeDecision strategy identity must match for scoring"
+            )
+            raise ValueError(msg)
 
         brier_score = (decision.prob_estimate - fill.resolved_outcome) ** 2
         model_id = _model_id(decision)

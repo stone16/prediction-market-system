@@ -168,3 +168,56 @@ def test_controller_pipeline_factory_keeps_calibrator_state_isolated_per_strateg
 
     assert pipelines["strat-a"].calibrator.calibrate(0.4, model_id=model_id) == pytest.approx(1.0)
     assert pipelines["strat-b"].calibrator.calibrate(0.4, model_id=model_id) == pytest.approx(0.4)
+
+
+def test_controller_pipeline_factory_uses_global_total_exposure_for_strategy_risk() -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    settings = PMSSettings()
+    settings.risk.max_total_exposure = 10_000.0
+    factory = factory_cls(settings=settings)
+
+    pipeline = factory.build(
+        _active_strategy(
+            strategy_id="strat-a",
+            strategy_version_id="strat-a-v1",
+            forecaster_names=("rules",),
+        )
+    )
+
+    assert pipeline.sizer.risk.max_position_per_market == 100.0
+    assert pipeline.sizer.risk.max_total_exposure == 10_000.0
+
+
+def test_controller_pipeline_factory_rejects_llm_raw_params_until_supported() -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    active_strategy_cls = _load_symbol(
+        "pms.strategies.projections",
+        "ActiveStrategy",
+    )
+    factory = factory_cls(settings=PMSSettings())
+    strategy = active_strategy_cls(
+        strategy_id="strat-llm",
+        strategy_version_id="strat-llm-v1",
+        config=StrategyConfig(
+            strategy_id="strat-llm",
+            factor_composition=(),
+            metadata=(("owner", "test"),),
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier",)),
+        forecaster=ForecasterSpec(
+            forecasters=(("llm", (("temperature", "0.7"),)),)
+        ),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not yet accept per-strategy params"):
+        factory.build(strategy)

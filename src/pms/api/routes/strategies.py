@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import asyncpg
@@ -147,11 +148,11 @@ def _active_version_id(row: StrategyRow) -> str:
 
 
 def _max_drawdown(records: list[EvalRecord]) -> float:
-    cumulative_pnl = 0.0
-    peak_equity = 0.0
-    max_drawdown = 0.0
+    cumulative_pnl = Decimal("0")
+    peak_equity = Decimal("0")
+    max_drawdown = Decimal("0")
     for record in records:
-        cumulative_pnl += record.pnl
+        cumulative_pnl += Decimal(str(record.pnl))
         peak_equity = max(peak_equity, cumulative_pnl)
         max_drawdown = max(max_drawdown, peak_equity - cumulative_pnl)
-    return max_drawdown
+    return float(max_drawdown)

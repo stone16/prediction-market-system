@@ -76,8 +76,8 @@ Implement it in `metrics.py` against the `FillRecord` +
 `TradeDecision` + `EvalRecord` triple. Define it per-strategy-per-
 category where possible; only fall back to global when the metric
 is inherently cross-strategy (e.g. total realised P&L at portfolio
-level). Register the threshold configuration in
-`config.risk.*` / `config.eval.*` — never hard-code thresholds.
+level). Define threshold fields in `EvalSpec` and consume them from
+`EvaluatorFeedback.generate(...)` — never hard-code thresholds.
 
 ## When adding a new metric threshold that fires `Feedback`
 

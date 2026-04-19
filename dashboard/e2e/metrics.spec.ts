@@ -3,16 +3,18 @@ import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { applySchema, executeSql, resetInnerRing } from './support/pg';
 
-const evidenceDir = path.resolve(
-  process.cwd(),
-  '..',
-  '.harness',
-  'pms-controller-per-strategy-v1',
-  'checkpoints',
-  '07',
-  'iter-1',
-  'evidence'
-);
+const evidenceDir = process.env.PMS_EVIDENCE_DIR
+  ? path.resolve(process.env.PMS_EVIDENCE_DIR)
+  : path.resolve(
+      process.cwd(),
+      '..',
+      '.harness',
+      'pms-controller-per-strategy-v1',
+      'checkpoints',
+      '07',
+      'iter-1',
+      'evidence'
+    );
 
 function seedMetricsFixture() {
   applySchema();
@@ -22,10 +24,10 @@ function seedMetricsFixture() {
       decision_id, market_id, prob_estimate, resolved_outcome, brier_score, fill_status,
       recorded_at, citations, category, model_id, pnl, slippage_bps, filled, strategy_id, strategy_version_id
     ) VALUES
-      ('alpha-eval-1', 'market-1', 0.61, 1.0, 0.09, 'matched', '2026-04-19T00:00:00+00:00', '["trade-1"]', 'model-a', 'model-a', 5.0, 10.0, TRUE, 'alpha', 'alpha-v1'),
-      ('alpha-eval-2', 'market-1', 0.52, 0.0, 0.16, 'matched', '2026-04-19T00:05:00+00:00', '["trade-2"]', 'model-a', 'model-a', -3.0, 20.0, TRUE, 'alpha', 'alpha-v1'),
-      ('beta-eval-1', 'market-2', 0.48, 0.0, 0.25, 'matched', '2026-04-19T00:10:00+00:00', '["trade-3"]', 'model-b', 'model-b', -2.0, 8.0, TRUE, 'beta', 'beta-v1'),
-      ('beta-eval-2', 'market-2', 0.7, 1.0, 0.36, 'matched', '2026-04-19T00:15:00+00:00', '["trade-4"]', 'model-b', 'model-b', 6.0, 12.0, TRUE, 'beta', 'beta-v1');
+      ('alpha-eval-1', 'market-1', 0.61, 1.0, 0.09, 'matched', '2026-04-19T00:00:00+00:00', '["trade-1"]', 'politics', 'model-a', 5.0, 10.0, TRUE, 'alpha', 'alpha-v1'),
+      ('alpha-eval-2', 'market-1', 0.52, 0.0, 0.16, 'matched', '2026-04-19T00:05:00+00:00', '["trade-2"]', 'politics', 'model-a', -3.0, 20.0, TRUE, 'alpha', 'alpha-v1'),
+      ('beta-eval-1', 'market-2', 0.48, 0.0, 0.25, 'matched', '2026-04-19T00:10:00+00:00', '["trade-3"]', 'sports', 'model-b', -2.0, 8.0, TRUE, 'beta', 'beta-v1'),
+      ('beta-eval-2', 'market-2', 0.7, 1.0, 0.36, 'matched', '2026-04-19T00:15:00+00:00', '["trade-4"]', 'sports', 'model-b', 6.0, 12.0, TRUE, 'beta', 'beta-v1');
   `);
 }
 

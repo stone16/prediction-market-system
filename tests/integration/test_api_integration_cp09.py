@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import cast
 
@@ -18,6 +19,11 @@ from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.environ.get("PMS_RUN_INTEGRATION") != "1",
+    reason="set PMS_RUN_INTEGRATION=1 to run integration tests",
+)
 @pytest.mark.asyncio
 async def test_api_backtest_runner_get_routes(tmp_path: Path) -> None:
     runner = Runner(

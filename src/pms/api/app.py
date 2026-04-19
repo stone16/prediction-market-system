@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any, TypeVar, cast
 
@@ -296,14 +297,14 @@ def _metrics_aggregate_payload(
         }
         for record in records
     ]
-    cumulative_pnl = 0.0
+    cumulative_pnl = Decimal("0")
     pnl_series: list[dict[str, Any]] = []
     for record in records:
-        cumulative_pnl += record.pnl
+        cumulative_pnl += Decimal(str(record.pnl))
         pnl_series.append(
             {
                 "recorded_at": record.recorded_at.isoformat(),
-                "pnl": cumulative_pnl,
+                "pnl": float(cumulative_pnl),
             }
         )
     payload["pnl_series"] = pnl_series
@@ -311,14 +312,14 @@ def _metrics_aggregate_payload(
 
 
 def _max_drawdown(records: list[EvalRecord]) -> float:
-    cumulative_pnl = 0.0
-    peak_equity = 0.0
-    max_drawdown = 0.0
+    cumulative_pnl = Decimal("0")
+    peak_equity = Decimal("0")
+    max_drawdown = Decimal("0")
     for record in records:
-        cumulative_pnl += record.pnl
+        cumulative_pnl += Decimal(str(record.pnl))
         peak_equity = max(peak_equity, cumulative_pnl)
         max_drawdown = max(max_drawdown, peak_equity - cumulative_pnl)
-    return max_drawdown
+    return float(max_drawdown)
 
 
 def _is_runner_running(runner: Runner) -> bool:

@@ -463,8 +463,8 @@ class Runner:
         for queue in controller_queues:
             await queue.join()
         controller_tasks = tuple(self._controller_pipeline_tasks.values())
-        for task in controller_tasks:
-            await task
+        if controller_tasks:
+            await asyncio.gather(*controller_tasks, return_exceptions=True)
         if self._controller_pipeline_error is not None:
             raise self._controller_pipeline_error
         await self._decision_queue.join()
@@ -640,9 +640,6 @@ class Runner:
         return PolymarketActuator(self.config)
 
     async def _controller_loop(self) -> None:
-        if not self._controller_runtimes:
-            msg = "Runner controller runtimes are not initialized"
-            raise RuntimeError(msg)
         while True:
             if self._should_stop_controller():
                 return
@@ -756,7 +753,10 @@ class Runner:
         }
 
     async def _active_eval_specs(self) -> dict[StrategyVersionKey, EvalSpec]:
-        if type(self.eval_store) is not EvalStore or type(self.feedback_store) is not FeedbackStore:
+        if self._strategy_registry is None or not hasattr(
+            self._strategy_registry,
+            "list_active_strategies",
+        ):
             if self._controller_runtimes:
                 default_eval_spec = _default_active_strategy(self.config).eval_spec
                 return {
@@ -771,13 +771,7 @@ class Runner:
                 ): default_strategy.eval_spec
             }
 
-        if (
-            self._strategy_registry is not None
-            and hasattr(self._strategy_registry, "list_active_strategies")
-        ):
-            active_strategies = await self._strategy_registry.list_active_strategies()
-        else:
-            active_strategies = [_default_active_strategy(self.config)]
+        active_strategies = await self._strategy_registry.list_active_strategies()
         return {
             (strategy.strategy_id, strategy.strategy_version_id): strategy.eval_spec
             for strategy in active_strategies
@@ -1009,12 +1003,19 @@ class Runner:
             )
             raise
         except Exception:
-            await asyncio.shield(
-                self._finalize_controller_runtime_release_locked(
-                    detached,
-                    allow_cancel_injection=False,
+            try:
+                await asyncio.shield(
+                    self._finalize_controller_runtime_release_locked(
+                        detached,
+                        allow_cancel_injection=False,
+                    )
                 )
-            )
+            except Exception as cleanup_error:  # noqa: BLE001
+                logger.warning(
+                    "controller runtime cleanup retry failed for %s: %s",
+                    detached.strategy_id,
+                    cleanup_error,
+                )
             raise
 
     def _detach_controller_runtime(

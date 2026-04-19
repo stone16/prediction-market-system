@@ -177,3 +177,39 @@ def test_strategy_projections_are_immutable_instances() -> None:
 
         with pytest.raises(FrozenInstanceError):
             setattr(projection, first_field, replacement_value)
+
+
+def test_eval_spec_defaults_are_part_of_projection_contract() -> None:
+    module = _load_projections_module()
+    sample = _sample_projection_values()["EvalSpec"]
+
+    assert sample.max_brier_score == module.DEFAULT_MAX_BRIER_SCORE
+    assert sample.slippage_threshold_bps == module.DEFAULT_SLIPPAGE_THRESHOLD_BPS
+    assert sample.min_win_rate == module.DEFAULT_MIN_WIN_RATE
+
+
+def test_active_strategy_rejects_identity_mismatch() -> None:
+    module = _load_projections_module()
+
+    with pytest.raises(ValueError, match="must match config.strategy_id"):
+        module.ActiveStrategy(
+            strategy_id="alpha",
+            strategy_version_id="alpha-v1",
+            config=module.StrategyConfig(
+                strategy_id="beta",
+                factor_composition=(),
+                metadata=(("owner", "test"),),
+            ),
+            risk=module.RiskParams(
+                max_position_notional_usdc=100.0,
+                max_daily_drawdown_pct=2.5,
+                min_order_size_usdc=1.0,
+            ),
+            eval_spec=module.EvalSpec(metrics=("brier",)),
+            forecaster=module.ForecasterSpec(forecasters=(("rules", ()),)),
+            market_selection=module.MarketSelectionSpec(
+                venue="polymarket",
+                resolution_time_max_horizon_days=7,
+                volume_min_usdc=500.0,
+            ),
+        )

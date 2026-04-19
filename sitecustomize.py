@@ -4,6 +4,7 @@ import os
 import platform
 import sys
 import types
+from pathlib import Path
 
 
 # Pytest 9 imports `readline` during startup to work around libedit capture
@@ -14,7 +15,10 @@ import types
 def _is_pytest_process() -> bool:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return True
-    return any("pytest" in arg for arg in sys.argv)
+    if not sys.argv:
+        return False
+    command = Path(sys.argv[0]).name
+    return command in {"pytest", "py.test"} or sys.argv[:2] == ["-m", "pytest"]
 
 
 if platform.system() == "Darwin" and _is_pytest_process():

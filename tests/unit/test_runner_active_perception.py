@@ -118,6 +118,15 @@ class RecordingSelector:
             {"asset_ids": tuple(self.returned_asset_ids)},
         )()
 
+    async def select_per_strategy(self) -> list[StrategyMarketSet]:
+        return [
+            StrategyMarketSet(
+                strategy_id="default",
+                strategy_version_id="default-v1",
+                asset_ids=frozenset(self.returned_asset_ids),
+            )
+        ]
+
 
 @dataclass
 class RecordingSubscriptionController:
@@ -224,9 +233,23 @@ def _install_live_doubles(
         events.append("pool-ready")
         return fake_pool
 
+    class EmptyRegistry:
+        def __init__(self, pool: object) -> None:
+            del pool
+
+        def register_change_callback(self, callback: Any) -> None:
+            del callback
+
+        def unregister_change_callback(self, callback: Any) -> None:
+            del callback
+
+        async def list_active_strategies(self) -> list[object]:
+            return []
+
     monkeypatch.setattr("pms.runner.asyncpg.create_pool", fake_create_pool)
     monkeypatch.setattr("pms.runner.MarketDiscoverySensor", lambda **kwargs: discovery)
     monkeypatch.setattr("pms.runner.MarketDataSensor", lambda **kwargs: market_data)
+    monkeypatch.setattr("pms.runner.PostgresStrategyRegistry", EmptyRegistry)
     monkeypatch.setattr("pms.runner.MarketSelector", lambda *args, **kwargs: selector)
     monkeypatch.setattr(
         "pms.runner.SensorSubscriptionController",
@@ -408,6 +431,15 @@ async def test_refresh_subscription_updates_wait_for_reselection_lock() -> None:
 
         async def select(self) -> Any:
             return type("MergeResult", (), {"asset_ids": tuple(self.asset_ids)})()
+
+        async def select_per_strategy(self) -> list[StrategyMarketSet]:
+            return [
+                StrategyMarketSet(
+                    strategy_id="alpha",
+                    strategy_version_id="alpha-v1",
+                    asset_ids=frozenset(self.asset_ids),
+                )
+            ]
 
     runner = _runner(RunMode.LIVE)
     subscription_controller = SerializingSubscriptionController()

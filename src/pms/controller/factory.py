@@ -34,7 +34,12 @@ class ControllerPipelineFactory:
             strategy_version_id=strategy.strategy_version_id,
             forecasters=self._build_forecasters(strategy),
             calibrator=NetcalCalibrator(),
-            sizer=KellySizer(risk=_risk_settings(strategy)),
+            sizer=KellySizer(
+                risk=_risk_settings(
+                    strategy,
+                    fallback=self.settings.risk,
+                )
+            ),
             router=Router(self.settings.controller),
             settings=self.settings,
         )
@@ -71,16 +76,26 @@ def _build_forecaster(
             prior_strength=2.0 if prior_strength is None else float(prior_strength)
         )
     if name == "llm":
+        if raw_params:
+            msg = (
+                "LLMForecaster does not yet accept per-strategy params: "
+                f"{raw_params!r}"
+            )
+            raise ValueError(msg)
         return LLMForecaster(config=llm_settings)
     msg = f"Unsupported forecaster {name!r}"
     raise ValueError(msg)
 
 
-def _risk_settings(strategy: ActiveStrategy) -> RiskSettings:
+def _risk_settings(
+    strategy: ActiveStrategy,
+    *,
+    fallback: RiskSettings,
+) -> RiskSettings:
     return RiskSettings(
         max_position_usdc=strategy.risk.max_position_notional_usdc,
         max_position_per_market=strategy.risk.max_position_notional_usdc,
-        max_total_exposure=strategy.risk.max_position_notional_usdc,
+        max_total_exposure=fallback.max_total_exposure,
         min_order_usdc=strategy.risk.min_order_size_usdc,
         max_drawdown_pct=strategy.risk.max_daily_drawdown_pct,
     )

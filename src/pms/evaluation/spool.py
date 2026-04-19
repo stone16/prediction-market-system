@@ -67,7 +67,10 @@ class EvalSpool:
                     )
                     continue
                 await self.store.append(self.scorer.score(fill, decision))
-                await self._generate_feedback()
+                try:
+                    await self._generate_feedback()
+                except Exception:  # noqa: BLE001
+                    logger.exception("feedback generation failed in evaluator spool")
             finally:
                 self._queue.task_done()
 
