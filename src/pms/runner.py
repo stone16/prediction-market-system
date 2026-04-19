@@ -195,6 +195,10 @@ class Runner:
         init=False,
         default_factory=dict,
     )
+    _controller_pipeline_error: BaseException | None = field(
+        init=False,
+        default=None,
+    )
     _controller_lifecycle_lock: asyncio.Lock = field(init=False)
     _controller_release_cancel_point: ControllerReleaseCancelPoint | None = field(
         init=False,
@@ -314,6 +318,7 @@ class Runner:
             raise RuntimeError(msg)
 
         self._stop_event.clear()
+        self._controller_pipeline_error = None
         self.state.runner_started_at = datetime.now(tz=UTC)
 
         try:
@@ -460,6 +465,8 @@ class Runner:
         controller_tasks = tuple(self._controller_pipeline_tasks.values())
         for task in controller_tasks:
             await task
+        if self._controller_pipeline_error is not None:
+            raise self._controller_pipeline_error
         await self._decision_queue.join()
         if self._actuator_task is not None:
             await self._actuator_task
@@ -698,6 +705,9 @@ class Runner:
                 strategy_id,
                 error,
             )
+            if self._controller_pipeline_error is None:
+                self._controller_pipeline_error = error
+            raise
         finally:
             current_task = asyncio.current_task()
             if (
@@ -746,6 +756,21 @@ class Runner:
         }
 
     async def _active_eval_specs(self) -> dict[StrategyVersionKey, EvalSpec]:
+        if type(self.eval_store) is not EvalStore or type(self.feedback_store) is not FeedbackStore:
+            if self._controller_runtimes:
+                default_eval_spec = _default_active_strategy(self.config).eval_spec
+                return {
+                    (runtime.strategy_id, runtime.strategy_version_id): default_eval_spec
+                    for runtime in self._controller_runtimes.values()
+                }
+            default_strategy = _default_active_strategy(self.config)
+            return {
+                (
+                    default_strategy.strategy_id,
+                    default_strategy.strategy_version_id,
+                ): default_strategy.eval_spec
+            }
+
         if (
             self._strategy_registry is not None
             and hasattr(self._strategy_registry, "list_active_strategies")
@@ -913,10 +938,22 @@ class Runner:
         signal_queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
         self._controller_runtimes[runtime.strategy_id] = runtime
         self._controller_signal_queues[runtime.strategy_id] = signal_queue
-        self._controller_pipeline_tasks[runtime.strategy_id] = asyncio.create_task(
+        task = asyncio.create_task(
             self._controller_pipeline_loop(runtime.strategy_id),
             name=f"controller-pipeline:{runtime.strategy_id}",
         )
+        task.add_done_callback(self._capture_controller_pipeline_exception)
+        self._controller_pipeline_tasks[runtime.strategy_id] = task
+
+    def _capture_controller_pipeline_exception(
+        self,
+        task: asyncio.Task[None],
+    ) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None and self._controller_pipeline_error is None:
+            self._controller_pipeline_error = error
 
     async def _sync_controller_runtimes(self) -> None:
         if self.controller is not None or self._strategy_registry is None:
