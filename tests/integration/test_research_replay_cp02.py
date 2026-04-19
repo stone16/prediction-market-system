@@ -8,7 +8,6 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
-from pms.core.models import BookLevel, BookSnapshot, Market, PriceChange, Token, Trade
 from pms.research.specs import (
     BacktestDataset,
     BacktestExecutionConfig,
@@ -17,6 +16,14 @@ from pms.research.specs import (
     RiskPolicy,
 )
 from pms.storage.market_data_store import PostgresMarketDataStore
+from tests.integration.test_market_data_store import (
+    _level,
+    _market as _md_market,
+    _price_change as _md_price_change,
+    _snapshot,
+    _token as _md_token,
+    _trade as _md_trade,
+)
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
@@ -32,20 +39,6 @@ pytestmark = [
         reason="set PMS_TEST_DATABASE_URL to the compose-backed PostgreSQL URI",
     ),
 ]
-
-
-def _market(*, market_id: str) -> Market:
-    return Market(
-        condition_id=market_id,
-        slug=market_id,
-        question="Will CP02 replay reconstruct outer-ring data?",
-        venue="polymarket",
-        resolves_at=datetime(2026, 4, 15, tzinfo=UTC),
-        created_at=datetime(2026, 2, 28, tzinfo=UTC),
-        last_seen_at=datetime(2026, 3, 31, 23, 59, tzinfo=UTC),
-        volume_24h=2_500.0,
-    )
-
 
 def _spec(*, market_id: str) -> BacktestSpec:
     dataset = BacktestDataset(
@@ -76,43 +69,31 @@ async def _seed_replay_rows(
     market_id: str,
     token_id: str,
 ) -> None:
-    await store.write_market(_market(market_id=market_id))
-    await store.write_token(
-        _token(
-            token_id=token_id,
+    await store.write_market(
+        _md_market(
             condition_id=market_id,
-            outcome="YES",
+            slug=market_id,
+            question="Will CP02 replay reconstruct outer-ring data?",
+            created_at=datetime(2026, 2, 28, tzinfo=UTC),
+            last_seen_at=datetime(2026, 3, 31, 23, 59, tzinfo=UTC),
         )
     )
+    await store.write_token(_md_token(token_id=token_id, condition_id=market_id))
     await store.write_book_snapshot(
-        BookSnapshot(
-            id=0,
+        _snapshot(
             market_id=market_id,
             token_id=token_id,
             ts=datetime(2026, 3, 1, 0, 0, tzinfo=UTC),
-            hash="snapshot-1",
+            hash_value="snapshot-1",
             source="subscribe",
         ),
         [
-            BookLevel(
-                snapshot_id=0,
-                market_id=market_id,
-                side="BUY",
-                price=0.41,
-                size=120.0,
-            ),
-            BookLevel(
-                snapshot_id=0,
-                market_id=market_id,
-                side="SELL",
-                price=0.59,
-                size=95.0,
-            ),
+            _level(snapshot_id=0, market_id=market_id, side="BUY", price=0.41, size=120.0),
+            _level(snapshot_id=0, market_id=market_id, side="SELL", price=0.59, size=95.0),
         ],
     )
     await store.write_price_change(
-        PriceChange(
-            id=0,
+        _md_price_change(
             market_id=market_id,
             token_id=token_id,
             ts=datetime(2026, 3, 8, 0, 0, tzinfo=UTC),
@@ -121,25 +102,16 @@ async def _seed_replay_rows(
             size=140.0,
             best_bid=0.43,
             best_ask=0.57,
-            hash="delta-1",
+            hash_value="delta-1",
         )
     )
     await store.write_trade(
-        Trade(
-            id=0,
+        _md_trade(
             market_id=market_id,
             token_id=token_id,
             ts=datetime(2026, 3, 16, 12, 0, tzinfo=UTC),
             price=0.52,
         )
-    )
-
-
-def _token(*, token_id: str, condition_id: str, outcome: str = "YES") -> Token:
-    return Token(
-        token_id=token_id,
-        condition_id=condition_id,
-        outcome=cast(Any, outcome),
     )
 
 
@@ -227,27 +199,23 @@ async def test_market_universe_replay_engine_preserves_price_change_state_across
     market_id = "market-replay-straddle"
     token_id = "token-replay-straddle"
     store = PostgresMarketDataStore(pg_pool)
-    await store.write_market(_market(market_id=market_id))
-    await store.write_token(
-        _token(token_id=token_id, condition_id=market_id, outcome="YES")
-    )
+    await store.write_market(_md_market(condition_id=market_id, slug=market_id))
+    await store.write_token(_md_token(token_id=token_id, condition_id=market_id))
     await store.write_book_snapshot(
-        BookSnapshot(
-            id=0,
+        _snapshot(
             market_id=market_id,
             token_id=token_id,
             ts=datetime(2026, 3, 1, tzinfo=UTC),
-            hash="snapshot-straddle",
+            hash_value="snapshot-straddle",
             source="subscribe",
         ),
         [
-            BookLevel(snapshot_id=0, market_id=market_id, side="BUY", price=0.40, size=100.0),
-            BookLevel(snapshot_id=0, market_id=market_id, side="SELL", price=0.60, size=100.0),
+            _level(snapshot_id=0, market_id=market_id, side="BUY", price=0.40, size=100.0),
+            _level(snapshot_id=0, market_id=market_id, side="SELL", price=0.60, size=100.0),
         ],
     )
     await store.write_price_change(
-        PriceChange(
-            id=0,
+        _md_price_change(
             market_id=market_id,
             token_id=token_id,
             ts=datetime(2026, 3, 2, tzinfo=UTC),
@@ -256,12 +224,11 @@ async def test_market_universe_replay_engine_preserves_price_change_state_across
             size=110.0,
             best_bid=0.42,
             best_ask=0.60,
-            hash="delta-a",
+            hash_value="delta-a",
         )
     )
     await store.write_price_change(
-        PriceChange(
-            id=0,
+        _md_price_change(
             market_id=market_id,
             token_id=token_id,
             ts=datetime(2026, 3, 9, tzinfo=UTC),
@@ -270,7 +237,7 @@ async def test_market_universe_replay_engine_preserves_price_change_state_across
             size=90.0,
             best_bid=0.42,
             best_ask=0.58,
-            hash="delta-b",
+            hash_value="delta-b",
         )
     )
 

@@ -355,15 +355,15 @@ async def _fetch_price_changes(
         list(market_ids),
     )
     return [
-            PriceChange(
-                id=cast(int, row["id"]),
-                market_id=cast(str, row["market_id"]),
-                token_id=cast(str, row["token_id"]),
-                ts=cast(datetime, row["ts"]),
-                side=cast(BookSide, row["side"]),
-                price=cast(float, row["price"]),
-                size=cast(float, row["size"]),
-                best_bid=cast(float | None, row["best_bid"]),
+        PriceChange(
+            id=cast(int, row["id"]),
+            market_id=cast(str, row["market_id"]),
+            token_id=cast(str, row["token_id"]),
+            ts=cast(datetime, row["ts"]),
+            side=cast(BookSide, row["side"]),
+            price=cast(float, row["price"]),
+            size=cast(float, row["size"]),
+            best_bid=cast(float | None, row["best_bid"]),
             best_ask=cast(float | None, row["best_ask"]),
             hash=cast(str | None, row["hash"]),
         )
