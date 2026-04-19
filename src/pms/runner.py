@@ -847,18 +847,27 @@ class Runner:
             ]
 
         if (
-            self.config.mode != RunMode.BACKTEST
-            and self._strategy_registry is not None
+            self._strategy_registry is not None
             and hasattr(self._strategy_registry, "list_active_strategies")
-            and hasattr(self._market_selector, "select_per_strategy")
-            and self._market_selector is not None
+            and (
+                (
+                    self._market_selector is not None
+                    and hasattr(self._market_selector, "select_per_strategy")
+                )
+                or not self._owns_pg_pool
+            )
         ):
             active_strategies = await self._strategy_registry.list_active_strategies()
-            selections = await self._market_selector.select_per_strategy()
-            scopes = {
-                selection.strategy_id: selection.asset_ids
-                for selection in selections
-            }
+            scopes: dict[str, frozenset[str]] = {}
+            if (
+                self._market_selector is not None
+                and hasattr(self._market_selector, "select_per_strategy")
+            ):
+                selections = await self._market_selector.select_per_strategy()
+                scopes = {
+                    selection.strategy_id: selection.asset_ids
+                    for selection in selections
+                }
             pipelines = self._controller_factory.build_many(active_strategies)
             return [
                 StrategyControllerRuntime(
@@ -988,6 +997,8 @@ def _fill_from_order(
         filled_at=order_state.last_updated_at,
         status=order_state.status,
         anomaly_flags=[],
+        strategy_id=decision.strategy_id,
+        strategy_version_id=decision.strategy_version_id,
         resolved_outcome=_resolved_outcome(signal),
     )
 

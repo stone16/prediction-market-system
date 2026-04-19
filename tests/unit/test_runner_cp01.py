@@ -225,6 +225,8 @@ async def test_runner_creates_one_controller_task_per_active_strategy_and_fans_o
             submitted_at=datetime(2026, 4, 19, tzinfo=UTC),
             last_updated_at=datetime(2026, 4, 19, tzinfo=UTC),
             raw_status="rejected",
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
         )
 
     monkeypatch.setattr("pms.runner.asyncpg.create_pool", fake_create_pool)

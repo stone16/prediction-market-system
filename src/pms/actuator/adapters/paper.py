@@ -61,4 +61,6 @@ def _matched_order_state(
         submitted_at=now,
         last_updated_at=now,
         raw_status="matched",
+        strategy_id=decision.strategy_id,
+        strategy_version_id=decision.strategy_version_id,
     )

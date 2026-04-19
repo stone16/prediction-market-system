@@ -22,7 +22,14 @@ class InMemoryFeedbackStore:
     def __init__(self, items: list[Feedback] | None = None) -> None:
         self._items = list(items or [])
 
-    async def append(self, feedback: Feedback) -> None:
+    async def append(
+        self,
+        feedback: Feedback,
+        *,
+        strategy_id: str | None = None,
+        strategy_version_id: str | None = None,
+    ) -> None:
+        del strategy_id, strategy_version_id
         self._items.append(feedback)
 
     async def all(self) -> list[Feedback]:

@@ -76,10 +76,17 @@ def _feedback(feedback_id: str) -> Feedback:
     )
 
 
-def _eval_record(decision_id: str) -> EvalRecord:
+def _eval_record(
+    decision_id: str,
+    *,
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v1",
+) -> EvalRecord:
     return EvalRecord(
         market_id="market-cp09",
         decision_id=decision_id,
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
         prob_estimate=0.7,
         resolved_outcome=1.0,
         brier_score=0.09,
@@ -204,8 +211,16 @@ async def test_feedback_store_persists_and_filters_rows_in_postgres(
     )
     store = FeedbackStore(pool=cast(Any, _SingleConnectionPool(db_conn)))
 
-    await store.append(_feedback("fb-1"))
-    await store.append(_feedback("fb-2"))
+    await store.append(
+        _feedback("fb-1"),
+        strategy_id="default",
+        strategy_version_id=active_version.strategy_version_id,
+    )
+    await store.append(
+        _feedback("fb-2"),
+        strategy_id="default",
+        strategy_version_id=active_version.strategy_version_id,
+    )
     await store.resolve("fb-1")
 
     unresolved = await store.list(resolved=False)
@@ -236,7 +251,12 @@ async def test_eval_store_persists_rows_in_postgres(
     )
     store = EvalStore(pool=cast(Any, _SingleConnectionPool(db_conn)))
 
-    await store.append(_eval_record("decision-cp09"))
+    await store.append(
+        _eval_record(
+            "decision-cp09",
+            strategy_version_id=active_version.strategy_version_id,
+        )
+    )
 
     records = await store.all()
     stored_row = await db_conn.fetchrow(

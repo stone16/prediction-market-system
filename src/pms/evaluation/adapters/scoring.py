@@ -18,6 +18,8 @@ class Scorer:
         return EvalRecord(
             market_id=fill.market_id,
             decision_id=decision.decision_id,
+            strategy_id=fill.strategy_id,
+            strategy_version_id=fill.strategy_version_id,
             prob_estimate=decision.prob_estimate,
             resolved_outcome=fill.resolved_outcome,
             brier_score=brier_score,

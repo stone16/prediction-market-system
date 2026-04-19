@@ -92,6 +92,8 @@ def _decision() -> TradeDecision:
         expected_edge=0.3,
         time_in_force="GTC",
         opportunity_id="opportunity-api",
+        strategy_id="default",
+        strategy_version_id="default-v1",
         model_id="model-a",
     )
 
@@ -112,6 +114,8 @@ def _fill() -> FillRecord:
         filled_at=now,
         status=OrderStatus.MATCHED.value,
         anomaly_flags=[],
+        strategy_id="default",
+        strategy_version_id="default-v1",
         resolved_outcome=1.0,
     )
 
@@ -120,6 +124,8 @@ def _eval_record() -> EvalRecord:
     return EvalRecord(
         market_id="api-market",
         decision_id="decision-api",
+        strategy_id="default",
+        strategy_version_id="default-v1",
         prob_estimate=0.7,
         resolved_outcome=1.0,
         brier_score=0.09,

@@ -116,6 +116,8 @@ def _eval_record_from_payload(payload: dict[str, Any]) -> EvalRecord:
     return EvalRecord(
         market_id=str(payload["market_id"]),
         decision_id=str(payload["decision_id"]),
+        strategy_id=str(payload.get("strategy_id", "default")),
+        strategy_version_id=str(payload.get("strategy_version_id", "default-v1")),
         prob_estimate=float(payload["prob_estimate"]),
         resolved_outcome=float(payload["resolved_outcome"]),
         brier_score=float(payload["brier_score"]),

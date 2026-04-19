@@ -79,7 +79,7 @@ def _strategy(*, drawdown_pct: float) -> Strategy:
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_feedback_and_eval_stores_use_active_strategy_version_by_default(
+async def test_feedback_and_eval_stores_persist_explicit_strategy_tags(
     pg_pool: asyncpg.Pool,
 ) -> None:
     active_version = await PostgresStrategyRegistry(pg_pool).create_version(
@@ -98,12 +98,16 @@ async def test_feedback_and_eval_stores_use_active_strategy_version_by_default(
             severity="warning",
             created_at=created_at,
             category="reservation",
-        )
+        ),
+        strategy_id="default",
+        strategy_version_id=active_version.strategy_version_id,
     )
     await eval_store.append(
         EvalRecord(
             market_id="reservation-market",
             decision_id="reservation-decision",
+            strategy_id="default",
+            strategy_version_id=active_version.strategy_version_id,
             prob_estimate=0.63,
             resolved_outcome=1.0,
             brier_score=0.1369,

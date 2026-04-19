@@ -37,6 +37,8 @@ def _decision(
         expected_edge=prob - price,
         time_in_force="GTC",
         opportunity_id=f"op-{decision_id}",
+        strategy_id="default",
+        strategy_version_id="default-v1",
         model_id="model-a",
     )
 
@@ -63,6 +65,8 @@ def _fill(
         filled_at=now,
         status=status,
         anomaly_flags=[],
+        strategy_id="default",
+        strategy_version_id="default-v1",
         resolved_outcome=resolved_outcome,
     )
 
@@ -80,6 +84,8 @@ def _eval_record(
     return EvalRecord(
         market_id="m-cp07",
         decision_id=decision_id,
+        strategy_id="default",
+        strategy_version_id="default-v1",
         prob_estimate=0.7,
         resolved_outcome=1.0,
         brier_score=brier_score,

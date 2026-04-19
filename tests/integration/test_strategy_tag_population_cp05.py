@@ -3,18 +3,23 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 import os
-from typing import Any
+from typing import Any, cast
 
 import asyncpg
 import pytest
 
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
+from pms.controller.calibrators.netcal import NetcalCalibrator
+from pms.controller.pipeline import ControllerPipeline
+from pms.controller.router import Router
+from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal
 from pms.market_selection.merge import StrategyMarketSet
 from pms.runner import Runner
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
+    ActiveStrategy,
     EvalSpec,
     FactorCompositionStep,
     ForecasterSpec,
@@ -79,6 +84,43 @@ class _NoopFactorService:
 
     async def run(self) -> None:
         return None
+
+
+class StaticForecaster:
+    def predict(self, signal: MarketSignal) -> tuple[float, float, str]:
+        del signal
+        return (0.67, 0.9, "strategy-tag-test")
+
+    async def forecast(self, signal: MarketSignal) -> float:
+        del signal
+        return 0.67
+
+
+class DeterministicFactory:
+    def __init__(self, settings: PMSSettings) -> None:
+        self.settings = settings
+
+    def build_many(
+        self,
+        strategies: list[ActiveStrategy],
+    ) -> dict[str, ControllerPipeline]:
+        return {
+            strategy.strategy_id: ControllerPipeline(
+                strategy_id=strategy.strategy_id,
+                strategy_version_id=strategy.strategy_version_id,
+                forecasters=[StaticForecaster()],
+                calibrator=NetcalCalibrator(),
+                sizer=KellySizer(
+                    risk=RiskSettings(
+                        max_position_per_market=500.0,
+                        max_total_exposure=10_000.0,
+                    )
+                ),
+                router=Router(),
+                settings=self.settings,
+            )
+            for strategy in strategies
+        }
 
 
 class FilteredRegistry(PostgresStrategyRegistry):
@@ -191,6 +233,7 @@ async def test_runner_persists_distinct_eval_record_strategy_pairs_for_two_strat
         feedback_store=FeedbackStore(),
     )
     runner.bind_pg_pool(pg_pool)
+    runner._controller_factory = cast(Any, DeterministicFactory(_settings()))
 
     try:
         await runner.start()

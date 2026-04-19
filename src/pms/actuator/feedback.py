@@ -32,5 +32,9 @@ class ActuatorFeedback:
                 "status": order_state.status,
             },
         )
-        await self.store.append(feedback)
+        await self.store.append(
+            feedback,
+            strategy_id=order_state.strategy_id,
+            strategy_version_id=order_state.strategy_version_id,
+        )
         return feedback

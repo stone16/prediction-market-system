@@ -8,7 +8,6 @@ from typing import cast
 import asyncpg
 
 from pms.core.models import EvalRecord
-from pms.storage.strategy_tags import resolve_strategy_tags
 
 
 @dataclass
@@ -18,20 +17,9 @@ class EvalStore:
     def bind_pool(self, pool: asyncpg.Pool) -> None:
         self.pool = pool
 
-    async def append(
-        self,
-        record: EvalRecord,
-        *,
-        strategy_id: str = "default",
-        strategy_version_id: str | None = None,
-    ) -> None:
+    async def append(self, record: EvalRecord) -> None:
         async with self._pool().acquire() as connection:
-            await insert_eval_record_row(
-                connection,
-                record,
-                strategy_id=strategy_id,
-                strategy_version_id=strategy_version_id,
-            )
+            await insert_eval_record_row(connection, record)
 
     async def all(self) -> list[EvalRecord]:
         if self.pool is None:
@@ -49,6 +37,8 @@ class EvalStore:
                     fill_status,
                     recorded_at,
                     citations,
+                    strategy_id,
+                    strategy_version_id,
                     category,
                     model_id,
                     pnl,
@@ -70,15 +60,7 @@ class EvalStore:
 async def insert_eval_record_row(
     connection: asyncpg.Connection,
     record: EvalRecord,
-    *,
-    strategy_id: str = "default",
-    strategy_version_id: str | None = None,
 ) -> None:
-    resolved_strategy_id, resolved_strategy_version_id = await resolve_strategy_tags(
-        connection,
-        strategy_id=strategy_id,
-        strategy_version_id=strategy_version_id,
-    )
     await connection.execute(
         """
         INSERT INTO eval_records (
@@ -114,8 +96,8 @@ async def insert_eval_record_row(
         record.pnl,
         record.slippage_bps,
         record.filled,
-        resolved_strategy_id,
-        resolved_strategy_version_id,
+        record.strategy_id,
+        record.strategy_version_id,
     )
 
 
@@ -133,6 +115,8 @@ def _eval_record_from_row(row: asyncpg.Record) -> EvalRecord:
     return EvalRecord(
         market_id=cast(str, row["market_id"]),
         decision_id=cast(str, row["decision_id"]),
+        strategy_id=cast(str, row["strategy_id"]),
+        strategy_version_id=cast(str, row["strategy_version_id"]),
         prob_estimate=cast(float, row["prob_estimate"]),
         resolved_outcome=cast(float, row["resolved_outcome"]),
         brier_score=cast(float, row["brier_score"]),

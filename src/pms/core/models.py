@@ -75,8 +75,8 @@ class TradeDecision:
     expected_edge: float
     time_in_force: str
     opportunity_id: str
-    strategy_id: str = "default"
-    strategy_version_id: str = "default-v1"
+    strategy_id: str
+    strategy_version_id: str
     model_id: str | None = None
 
 
@@ -95,6 +95,8 @@ class OrderState:
     submitted_at: datetime
     last_updated_at: datetime
     raw_status: str
+    strategy_id: str
+    strategy_version_id: str
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,8 @@ class FillRecord:
     filled_at: datetime
     status: str
     anomaly_flags: list[str]
+    strategy_id: str
+    strategy_version_id: str
     fill_id: str | None = None
     filled_contracts: float | None = None
     fee_bps: int | None = None
@@ -223,6 +227,8 @@ class Trade:
 class EvalRecord:
     market_id: str
     decision_id: str
+    strategy_id: str
+    strategy_version_id: str
     prob_estimate: float
     resolved_outcome: float
     brier_score: float

@@ -104,6 +104,8 @@ async def test_runner_forwards_opportunity_id_to_actuator() -> None:
             submitted_at=datetime(2026, 4, 19, tzinfo=UTC),
             last_updated_at=datetime(2026, 4, 19, tzinfo=UTC),
             raw_status="rejected",
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
         )
 
     opportunity_store = InMemoryOpportunityStore()

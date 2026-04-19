@@ -151,6 +151,8 @@ def test_controller_pipeline_factory_keeps_calibrator_state_isolated_per_strateg
         EvalRecord(
             market_id="market-cp01",
             decision_id=f"decision-{index}",
+            strategy_id="default",
+            strategy_version_id="default-v1",
             prob_estimate=0.4,
             resolved_outcome=1.0,
             brier_score=0.36,
