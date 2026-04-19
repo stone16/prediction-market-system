@@ -97,6 +97,12 @@ def test_strategy_registry_rehydrates_legacy_factor_composition_shape() -> None:
             threshold=None,
         ),
     )
+    assert strategy.eval_spec == EvalSpec(
+        metrics=("brier", "pnl", "fill_rate"),
+        max_brier_score=0.30,
+        slippage_threshold_bps=50.0,
+        min_win_rate=0.50,
+    )
 
 
 def test_strategy_registry_round_trips_new_factor_composition_shape() -> None:

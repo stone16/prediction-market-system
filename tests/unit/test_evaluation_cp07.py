@@ -7,15 +7,19 @@ from typing import cast
 
 import pytest
 
-from pms.config import RiskSettings
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side
 from pms.core.models import EvalRecord, Feedback, FillRecord, TradeDecision
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
-from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
+from pms.evaluation.metrics import (
+    MetricsCollector,
+    MetricsSnapshot,
+    StrategyMetricsSnapshot,
+)
 from pms.evaluation.spool import EvalSpool
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.strategies.projections import EvalSpec
 from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
 
@@ -74,6 +78,8 @@ def _fill(
 def _eval_record(
     *,
     decision_id: str = "d-cp07",
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v1",
     brier_score: float = 0.09,
     category: str = "model-a",
     model_id: str = "model-a",
@@ -84,8 +90,8 @@ def _eval_record(
     return EvalRecord(
         market_id="m-cp07",
         decision_id=decision_id,
-        strategy_id="default",
-        strategy_version_id="default-v1",
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
         prob_estimate=0.7,
         resolved_outcome=1.0,
         brier_score=brier_score,
@@ -97,6 +103,29 @@ def _eval_record(
         pnl=pnl,
         slippage_bps=slippage_bps,
         filled=filled,
+    )
+
+
+def _strategy_snapshot(
+    *,
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v1",
+    brier_score: float = 0.31,
+    sample_count: int = 20,
+    slippage_bps: float = 51.0,
+    win_rate: float = 0.54,
+) -> StrategyMetricsSnapshot:
+    return StrategyMetricsSnapshot(
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
+        brier_overall=brier_score,
+        brier_by_category={"model-a": brier_score},
+        brier_samples={"model-a": sample_count},
+        pnl=0.0,
+        slippage_bps=slippage_bps,
+        fill_rate=1.0,
+        win_rate=win_rate,
+        calibration_samples={"model-a": sample_count},
     )
 
 
@@ -167,7 +196,7 @@ async def test_eval_spool_skips_unresolved_fills_and_keeps_running(
 
 
 def test_metrics_snapshot_empty_and_aggregated_records() -> None:
-    empty = MetricsCollector([]).snapshot()
+    empty = MetricsCollector([]).global_ops_snapshot()
 
     assert empty.brier_overall is None
 
@@ -184,7 +213,7 @@ def test_metrics_snapshot_empty_and_aggregated_records() -> None:
                 filled=False,
             ),
         ]
-    ).snapshot()
+    ).global_ops_snapshot()
 
     assert snapshot.brier_overall == pytest.approx(0.17)
     assert snapshot.brier_by_category == {"model-a": 0.09, "model-b": 0.25}
@@ -195,42 +224,69 @@ def test_metrics_snapshot_empty_and_aggregated_records() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evaluator_feedback_threshold_boundaries() -> None:
-    generator = EvaluatorFeedback(
-        cast(FeedbackStore, InMemoryFeedbackStore()),
-        risk=RiskSettings(
-            max_brier_score=0.30,
-            slippage_threshold_bps=50.0,
-            min_win_rate=0.55,
-        ),
-    )
+async def test_evaluator_feedback_uses_per_strategy_eval_thresholds() -> None:
+    generator = EvaluatorFeedback(cast(FeedbackStore, InMemoryFeedbackStore()))
+    alpha_key = ("alpha", "alpha-v1")
+    beta_key = ("beta", "beta-v1")
 
-    below_sample_floor = MetricsSnapshot(
-        brier_overall=0.31,
-        brier_by_category={"model-a": 0.31},
-        brier_samples={"model-a": 19},
-        pnl=0.0,
-        slippage_bps=50.0,
-        fill_rate=1.0,
-        win_rate=0.55,
-        calibration_samples={"model-a": 19},
+    feedback = await generator.generate(
+        {
+            alpha_key: (
+                _strategy_snapshot(
+                    strategy_id=alpha_key[0],
+                    strategy_version_id=alpha_key[1],
+                ),
+                EvalSpec(
+                    metrics=("brier", "pnl", "fill_rate"),
+                    max_brier_score=0.30,
+                    slippage_threshold_bps=50.0,
+                    min_win_rate=0.55,
+                ),
+            ),
+            beta_key: (
+                _strategy_snapshot(
+                    strategy_id=beta_key[0],
+                    strategy_version_id=beta_key[1],
+                ),
+                EvalSpec(
+                    metrics=("brier", "pnl", "fill_rate"),
+                    max_brier_score=0.40,
+                    slippage_threshold_bps=60.0,
+                    min_win_rate=0.50,
+                ),
+            ),
+        }
     )
-    crossed = MetricsSnapshot(
-        brier_overall=0.31,
-        brier_by_category={"model-a": 0.31},
-        brier_samples={"model-a": 20},
-        pnl=0.0,
-        slippage_bps=51.0,
-        fill_rate=1.0,
-        win_rate=0.54,
-        calibration_samples={"model-a": 20},
-    )
-
-    assert await generator.generate(below_sample_floor) == []
-    feedback = await generator.generate(crossed)
 
     assert {item.category for item in feedback} == {
         "brier:model-a",
         "slippage",
         "win_rate",
     }
+    assert all(item.metadata["strategy_id"] == "alpha" for item in feedback)
+    assert all(item.metadata["strategy_version_id"] == "alpha-v1" for item in feedback)
+
+
+def test_metrics_snapshot_by_strategy_returns_only_present_keys() -> None:
+    snapshots = MetricsCollector(
+        [
+            _eval_record(
+                decision_id="alpha-1",
+                strategy_id="alpha",
+                strategy_version_id="alpha-v1",
+                brier_score=0.09,
+            ),
+            _eval_record(
+                decision_id="beta-1",
+                strategy_id="beta",
+                strategy_version_id="beta-v1",
+                brier_score=0.25,
+                category="model-b",
+                model_id="model-b",
+            ),
+        ]
+    ).snapshot_by_strategy()
+
+    assert set(snapshots) == {("alpha", "alpha-v1"), ("beta", "beta-v1")}
+    assert snapshots[("alpha", "alpha-v1")].brier_overall == pytest.approx(0.09)
+    assert snapshots[("beta", "beta-v1")].brier_by_category == {"model-b": 0.25}
