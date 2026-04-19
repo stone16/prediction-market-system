@@ -13,7 +13,7 @@ import asyncpg
 import pytest
 
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus
-from pms.core.models import EvalRecord, Feedback
+from pms.core.models import EvalRecord, Feedback, Opportunity
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
     EvalSpec,
@@ -25,6 +25,7 @@ from pms.strategies.projections import (
 )
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.opportunity_store import OpportunityStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 
 
@@ -90,6 +91,24 @@ def _eval_record(decision_id: str) -> EvalRecord:
         pnl=1.0,
         slippage_bps=10.0,
         filled=True,
+    )
+
+
+def _opportunity(opportunity_id: str = "op-cp02") -> Opportunity:
+    return Opportunity(
+        opportunity_id=opportunity_id,
+        market_id="market-cp02",
+        token_id="token-cp02",
+        side="yes",
+        selected_factor_values={"fair_value": 0.61},
+        expected_edge=0.21,
+        rationale="rules:edge",
+        target_size_usdc=12.5,
+        expiry=datetime(2026, 4, 30, tzinfo=UTC),
+        staleness_policy="market_signal_freshness",
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        created_at=datetime(2026, 4, 19, tzinfo=UTC),
     )
 
 
@@ -233,6 +252,72 @@ async def test_eval_store_persists_rows_in_postgres(
     assert stored_row is not None
     assert stored_row["strategy_id"] == "default"
     assert stored_row["strategy_version_id"] == active_version.strategy_version_id
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_opportunity_store_persists_rows_in_postgres(
+    db_conn: asyncpg.Connection,
+) -> None:
+    await db_conn.execute(
+        """
+        CREATE TABLE opportunities (
+            opportunity_id TEXT PRIMARY KEY,
+            market_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            selected_factor_values JSONB NOT NULL,
+            expected_edge DOUBLE PRECISION NOT NULL,
+            rationale TEXT NOT NULL,
+            target_size_usdc DOUBLE PRECISION NOT NULL,
+            expiry TIMESTAMPTZ,
+            staleness_policy TEXT NOT NULL,
+            strategy_id TEXT NOT NULL,
+            strategy_version_id TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL
+        )
+        """
+    )
+    store = OpportunityStore(pool=cast(Any, _SingleConnectionPool(db_conn)))
+    opportunity = _opportunity()
+
+    await store.insert(opportunity)
+
+    stored_row = await db_conn.fetchrow(
+        """
+        SELECT
+            opportunity_id,
+            market_id,
+            token_id,
+            side,
+            selected_factor_values,
+            expected_edge,
+            rationale,
+            target_size_usdc,
+            expiry,
+            staleness_policy,
+            strategy_id,
+            strategy_version_id,
+            created_at
+        FROM opportunities
+        WHERE opportunity_id = $1
+        """,
+        opportunity.opportunity_id,
+    )
+
+    assert stored_row is not None
+    assert stored_row["opportunity_id"] == opportunity.opportunity_id
+    assert stored_row["market_id"] == opportunity.market_id
+    assert stored_row["token_id"] == opportunity.token_id
+    assert stored_row["side"] == opportunity.side
+    assert stored_row["selected_factor_values"] == {"fair_value": 0.61}
+    assert stored_row["expected_edge"] == pytest.approx(opportunity.expected_edge)
+    assert stored_row["rationale"] == opportunity.rationale
+    assert stored_row["target_size_usdc"] == pytest.approx(opportunity.target_size_usdc)
+    assert stored_row["expiry"] == opportunity.expiry
+    assert stored_row["staleness_policy"] == opportunity.staleness_policy
+    assert stored_row["strategy_id"] == opportunity.strategy_id
+    assert stored_row["strategy_version_id"] == opportunity.strategy_version_id
+    assert stored_row["created_at"] == opportunity.created_at
 
 
 @pytest.mark.asyncio(loop_scope="session")

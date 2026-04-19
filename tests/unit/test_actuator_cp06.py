@@ -43,6 +43,7 @@ def _decision(
         prob_estimate=0.6,
         expected_edge=0.2,
         time_in_force="GTC",
+        opportunity_id=f"op-{decision_id}",
     )
 
 

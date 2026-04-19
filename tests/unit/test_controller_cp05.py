@@ -235,15 +235,17 @@ async def test_controller_pipeline_averages_three_neutralized_forecasters_to_yes
         router=Router(ControllerSettings(min_volume=100.0)),
     )
 
-    decision = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
 
-    assert decision is not None
+    assert emission is not None
+    opportunity, decision = emission
     assert decision.market_id == "m-cp05"
     assert decision.side == "BUY"
     assert decision.prob_estimate == pytest.approx(0.4)
     assert decision.expected_edge == pytest.approx(0.0)
     assert decision.price == 0.4
     assert decision.size == pytest.approx(0.0, abs=1e-12)
+    assert decision.opportunity_id == opportunity.opportunity_id
     assert decision.stop_conditions
 
 
@@ -262,9 +264,10 @@ async def test_controller_pipeline_excludes_disabled_llm_and_failed_forecasters(
         router=Router(ControllerSettings(min_volume=100.0)),
     )
 
-    decision = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
 
-    assert decision is not None
+    assert emission is not None
+    _, decision = emission
     assert decision.prob_estimate == pytest.approx(0.4)
     assert "forecaster failed" in caplog.text
 

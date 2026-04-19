@@ -87,10 +87,12 @@ def _decision() -> TradeDecision:
         size=12.5,
         order_type="limit",
         max_slippage_bps=100,
-        stop_conditions=["model_id:model-a"],
+        stop_conditions=["min_volume:100.00"],
         prob_estimate=0.7,
         expected_edge=0.3,
         time_in_force="GTC",
+        opportunity_id="opportunity-api",
+        model_id="model-a",
     )
 
 

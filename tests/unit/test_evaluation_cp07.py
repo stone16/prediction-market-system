@@ -32,10 +32,12 @@ def _decision(
         size=10.0,
         order_type="limit",
         max_slippage_bps=100,
-        stop_conditions=["model_id:model-a"],
+        stop_conditions=["min_volume:100.00"],
         prob_estimate=prob,
         expected_edge=prob - price,
         time_in_force="GTC",
+        opportunity_id=f"op-{decision_id}",
+        model_id="model-a",
     )
 
 
