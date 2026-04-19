@@ -50,6 +50,10 @@ that governs this layer:
   samples.
 - `feedback.py` — `EvaluatorFeedback` emits `Feedback` items when
   thresholds breach.
+- `/metrics` dashboard page — the per-strategy breakdown is the
+  primary block; the cross-strategy rollup remains below it under
+  the explicit heading `ops view (cross-strategy)` so operators can
+  still find the global view quickly.
 
 ## Do not
 
