@@ -7,6 +7,7 @@ calculation internals before values cross into these dataclasses.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -42,6 +43,23 @@ class MarketSignal:
 
 
 @dataclass(frozen=True)
+class Opportunity:
+    opportunity_id: str
+    market_id: str
+    token_id: str
+    side: Literal["yes", "no"]
+    selected_factor_values: Mapping[str, float]
+    expected_edge: float
+    rationale: str
+    target_size_usdc: float
+    expiry: datetime | None
+    staleness_policy: str
+    strategy_id: str
+    strategy_version_id: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class TradeDecision:
     decision_id: str
     market_id: str
@@ -56,8 +74,10 @@ class TradeDecision:
     prob_estimate: float
     expected_edge: float
     time_in_force: str
+    opportunity_id: str
     strategy_id: str = "default"
     strategy_version_id: str = "default-v1"
+    model_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -32,6 +32,7 @@ from pms.core.interfaces import (
 from pms.core.models import (
     FillRecord,
     MarketSignal,
+    Opportunity,
     OrderState,
     Portfolio,
     Position,
@@ -54,6 +55,7 @@ from pms.sensor.stream import SensorStream
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 from pms.storage.market_data_store import PostgresMarketDataStore
+from pms.storage.opportunity_store import OpportunityStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
 from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
@@ -94,6 +96,15 @@ class AsyncCloseable(Protocol):
     async def aclose(self) -> None: ...
 
 
+@runtime_checkable
+class OpportunityAwareController(Protocol):
+    async def on_signal(
+        self,
+        signal: MarketSignal,
+        portfolio: Portfolio | None = None,
+    ) -> tuple[Opportunity, TradeDecision] | None: ...
+
+
 @dataclass(frozen=True)
 class StrategyControllerRuntime:
     strategy_id: str
@@ -107,6 +118,7 @@ class RunnerState:
     mode: RunMode
     runner_started_at: datetime | None = None
     signals: list[MarketSignal] = field(default_factory=list)
+    opportunities: list[Opportunity] = field(default_factory=list)
     decisions: list[TradeDecision] = field(default_factory=list)
     orders: list[OrderState] = field(default_factory=list)
     fills: list[FillRecord] = field(default_factory=list)
@@ -119,6 +131,7 @@ class Runner:
     sensors: Sequence[ISensor] | None = None
     eval_store: EvalStore = field(default_factory=EvalStore)
     feedback_store: FeedbackStore = field(default_factory=FeedbackStore)
+    opportunity_store: OpportunityStore = field(default_factory=OpportunityStore)
     portfolio: Portfolio = field(default_factory=lambda: Portfolio(
         total_usdc=1000.0,
         free_usdc=1000.0,
@@ -547,12 +560,16 @@ class Runner:
             self.eval_store.bind_pool(self._pg_pool)
         if isinstance(self.feedback_store, FeedbackStore):
             self.feedback_store.bind_pool(self._pg_pool)
+        if isinstance(self.opportunity_store, OpportunityStore):
+            self.opportunity_store.bind_pool(self._pg_pool)
 
     def _unbind_runtime_stores(self) -> None:
         if isinstance(self.eval_store, EvalStore):
             self.eval_store.pool = None
         if isinstance(self.feedback_store, FeedbackStore):
             self.feedback_store.pool = None
+        if isinstance(self.opportunity_store, OpportunityStore):
+            self.opportunity_store.pool = None
 
     def _build_executor(self, mode: RunMode) -> ActuatorExecutor:
         return ActuatorExecutor(
@@ -601,10 +618,22 @@ class Runner:
                 continue
 
             try:
-                decision = await runtime.controller.decide(
-                    signal,
-                    portfolio=self.portfolio,
-                )
+                decision: TradeDecision | None = None
+                if isinstance(runtime.controller, OpportunityAwareController):
+                    emission = await runtime.controller.on_signal(
+                        signal,
+                        portfolio=self.portfolio,
+                    )
+                    if emission is None:
+                        continue
+                    opportunity, decision = emission
+                    await self.opportunity_store.insert(opportunity)
+                    _append_bounded(self.state.opportunities, opportunity)
+                else:
+                    decision = await runtime.controller.decide(
+                        signal,
+                        portfolio=self.portfolio,
+                    )
                 if decision is not None:
                     _append_bounded(self.state.decisions, decision)
                     await self._decision_queue.put((decision, signal))

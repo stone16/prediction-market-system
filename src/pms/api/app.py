@@ -312,10 +312,7 @@ def _last_signal_at(signals: Sequence[MarketSignal]) -> str | None:
 
 
 def _forecaster(decision: TradeDecision) -> str:
-    for condition in decision.stop_conditions:
-        if condition.startswith("model_id:"):
-            return condition.removeprefix("model_id:")
-    return "unknown"
+    return "unknown" if decision.model_id is None else decision.model_id
 
 
 def _jsonable(value: Any) -> Any:

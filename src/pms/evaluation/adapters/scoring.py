@@ -33,10 +33,7 @@ class Scorer:
 
 
 def _model_id(decision: TradeDecision) -> str:
-    for condition in decision.stop_conditions:
-        if condition.startswith("model_id:"):
-            return condition.removeprefix("model_id:")
-    return "unknown"
+    return "unknown" if decision.model_id is None else decision.model_id
 
 
 def _pnl(fill: FillRecord, decision: TradeDecision) -> float:
