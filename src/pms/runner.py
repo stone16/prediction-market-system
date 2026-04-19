@@ -443,9 +443,11 @@ class Runner:
             await self._factor_service_task
         if self._controller_task is not None:
             await self._controller_task
-        for queue in self._controller_signal_queues.values():
+        controller_queues = tuple(self._controller_signal_queues.values())
+        for queue in controller_queues:
             await queue.join()
-        for task in self._controller_pipeline_tasks.values():
+        controller_tasks = tuple(self._controller_pipeline_tasks.values())
+        for task in controller_tasks:
             await task
         await self._decision_queue.join()
         if self._actuator_task is not None:
