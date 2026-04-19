@@ -309,7 +309,9 @@ async def test_opportunity_store_persists_rows_in_postgres(
     assert stored_row["market_id"] == opportunity.market_id
     assert stored_row["token_id"] == opportunity.token_id
     assert stored_row["side"] == opportunity.side
-    assert stored_row["selected_factor_values"] == {"fair_value": 0.61}
+    assert json.loads(cast(str, stored_row["selected_factor_values"])) == {
+        "fair_value": 0.61,
+    }
     assert stored_row["expected_edge"] == pytest.approx(opportunity.expected_edge)
     assert stored_row["rationale"] == opportunity.rationale
     assert stored_row["target_size_usdc"] == pytest.approx(opportunity.target_size_usdc)
@@ -318,6 +320,7 @@ async def test_opportunity_store_persists_rows_in_postgres(
     assert stored_row["strategy_id"] == opportunity.strategy_id
     assert stored_row["strategy_version_id"] == opportunity.strategy_version_id
     assert stored_row["created_at"] == opportunity.created_at
+    assert await store.all() == [opportunity]
 
 
 @pytest.mark.asyncio(loop_scope="session")
