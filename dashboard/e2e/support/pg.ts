@@ -36,6 +36,6 @@ export function resetMiddleRing() {
 
 export function resetInnerRing() {
   executeSql(`
-    TRUNCATE TABLE feedback, eval_records RESTART IDENTITY CASCADE;
+    TRUNCATE TABLE opportunities, feedback, eval_records, fills, orders RESTART IDENTITY CASCADE;
   `);
 }
