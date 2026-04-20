@@ -28,18 +28,19 @@ CLAUDE.md, contributors expected to follow) → `retired` (resolved).
 | domain-math-piecewise                | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 2 |
 | lifecycle-cleanup-exit-paths         | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 3 |
 | document-instead-of-fix              | 1           | medium   | active     | pms-v1     | pms-v1      | Proposal 4 |
-| cross-checkpoint-integration         | 4           | medium   | proposed   | pms-v1     | pms-factor-panel-v1 | Proposal 5 |
+| cross-checkpoint-integration         | 5           | medium   | proposed   | pms-v1     | pms-research-backtest-v1 | Proposal 5 |
 | magnitude-overrun-tests              | 2           | low      | monitoring | pms-v1     | pms-factor-panel-v1 | Proposal 6 |
 | rule-conflict-precedence             | 1           | low      | active     | pms-v1     | pms-v1      | Proposal 7 |
 | runtime-behaviour-vs-design-intent   | 1           | high     | active     | pms-v1     | pms-v1      | Principle |
 | project-ide-tooling-drift            | 2           | low      | monitoring | pms-v1     | pms-strategy-aggregate-v1 | Skill defect |
 | tool-env-assumption                  | 1           | medium   | active     | pms-phase2 | pms-phase2  | phase2-P1 |
-| stale-baseline                       | 3           | medium   | active     | pms-phase2 | pms-factor-panel-v1 | phase2-P2 |
+| stale-baseline                       | 4           | medium   | active     | pms-phase2 | pms-research-backtest-v1 | phase2-P2 |
 | pytest-marker-no-auto-deselect       | 1           | low      | active     | pms-phase2 | pms-phase2  | phase2-P3 |
 | lockfile-drift-on-optional-dep       | 1           | low      | observation| pms-phase3 | pms-phase3  | phase3-P1 |
 | private-helper-boundary-drift        | 1           | medium   | observation| pms-market-data-v1 | pms-market-data-v1 | Observation |
 | skipped-full-verify-pre-merge        | 1           | medium   | observation| pms-factor-panel-v1 | pms-factor-panel-v1 | Observation |
 | empty-harness-phase-artifacts        | 1           | low      | observation| pms-factor-panel-v1 | pms-factor-panel-v1 | Observation |
+| generated-artifact-drift             | 1           | low      | observation| pms-research-backtest-v1 | pms-research-backtest-v1 | Observation |
 
 Active rules are codified in `/CLAUDE.md` at the repo root (Phase 3D).
 Cross-checkpoint integration remains `proposed` because the harness-side
@@ -87,6 +88,9 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 - `empty-harness-phase-artifacts` — `spec-review/` and `e2e/`
   directories created but not populated during the task; harness
   flow was compressed relative to S1 / S2
+- `generated-artifact-drift` — automated checkpoint or review-loop
+  commits stage generated local artifacts (`.coverage`, framework
+  stubs, Playwright evidence) that are not intended product changes
 
 ## Skill Defect Log
 
@@ -94,6 +98,7 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 |--------|--------------------|----------|-----------------------------------------------------------|------------------|
 | pms-v1 | harness bootstrap  | low      | Pyright not configured to use uv-managed venv             | flagged for review |
 | pms-v1 | harness evaluator  | low      | Magnitude gate conflates production and test LOC          | flagged for review |
+| pms-research-backtest-v1 | harness review-loop | low | Preflight checkpoint commit staged generated artifacts (`.coverage`, `next-env.d.ts`, Playwright evidence PNG) | flagged for review |
 
 ## Task History
 
@@ -105,3 +110,4 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 | pms-market-data-v1 | 2026-04-17 | 12  | 11         | 14    | 0       | [2026-04-17-pms-market-data-v1.md](./2026-04-17-pms-market-data-v1.md) |
 | pms-strategy-aggregate-v1 | 2026-04-17 | 7   | 7          | 7     | 0       | [2026-04-17-pms-strategy-aggregate-v1.md](./2026-04-17-pms-strategy-aggregate-v1.md) |
 | pms-factor-panel-v1 | 2026-04-18 | 8   | 7          | 9     | 0       | [2026-04-18-pms-factor-panel-v1.md](./2026-04-18-pms-factor-panel-v1.md) |
+| pms-research-backtest-v1 | 2026-04-20 | 13  | 11         | 15    | 0       | [2026-04-20-pms-research-backtest-v1.md](./2026-04-20-pms-research-backtest-v1.md) |
