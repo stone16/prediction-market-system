@@ -1,13 +1,33 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 import re
+from typing import Any, cast
 
+import pytest
+
+from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
 from pms.research.entities import (
     PortfolioTarget,
     deserialize_portfolio_target_json,
     serialize_portfolio_target_json,
+)
+from pms.research.runner import BacktestRunner
+from pms.research.specs import (
+    BacktestDataset,
+    BacktestExecutionConfig,
+    BacktestSpec,
+    ExecutionModel,
+)
+from pms.strategies.projections import (
+    ActiveStrategy,
+    EvalSpec,
+    ForecasterSpec,
+    MarketSelectionSpec,
+    RiskParams,
+    StrategyConfig,
 )
 
 
@@ -60,3 +80,180 @@ def test_portfolio_target_remains_research_only() -> None:
     ):
         for path in root.rglob("*.py"):
             assert forbidden_pattern.search(path.read_text(encoding="utf-8")) is None
+
+
+class _ReplayEngine:
+    def __init__(self, signals: list[MarketSignal]) -> None:
+        self._signals = signals
+
+    async def stream(
+        self,
+        spec: BacktestSpec,
+        exec_config: BacktestExecutionConfig,
+    ) -> AsyncIterator[MarketSignal]:
+        del spec, exec_config
+        for signal in self._signals:
+            yield signal
+
+
+class _PortfolioRecordingPipeline:
+    def __init__(self) -> None:
+        self.portfolios: list[Portfolio] = []
+
+    async def on_signal(
+        self,
+        signal: MarketSignal,
+        portfolio: Portfolio | None = None,
+    ) -> tuple[Opportunity, TradeDecision] | None:
+        assert portfolio is not None
+        self.portfolios.append(portfolio)
+        emission_index = len(self.portfolios)
+        return (
+            Opportunity(
+                opportunity_id=f"opp-{emission_index}",
+                market_id=signal.market_id,
+                token_id=cast(str, signal.token_id),
+                side="yes",
+                selected_factor_values={},
+                expected_edge=0.1,
+                rationale="portfolio-state-check",
+                target_size_usdc=10.0,
+                expiry=signal.resolves_at,
+                staleness_policy="research",
+                strategy_id="alpha",
+                strategy_version_id="alpha-v1",
+                created_at=signal.fetched_at,
+            ),
+            TradeDecision(
+                decision_id=f"decision-{emission_index}",
+                market_id=signal.market_id,
+                token_id=signal.token_id,
+                venue=signal.venue,
+                side="BUY",
+                price=signal.yes_price,
+                size=10.0,
+                order_type="limit",
+                max_slippage_bps=50,
+                stop_conditions=[],
+                prob_estimate=0.7,
+                expected_edge=0.2,
+                time_in_force="GTC",
+                opportunity_id=f"opp-{emission_index}",
+                strategy_id="alpha",
+                strategy_version_id="alpha-v1",
+                model_id="rules",
+            ),
+        )
+
+
+class _PipelineFactory:
+    def __init__(self, pipeline: _PortfolioRecordingPipeline) -> None:
+        self._pipeline = pipeline
+
+    def build(self, strategy: ActiveStrategy) -> _PortfolioRecordingPipeline:
+        del strategy
+        return self._pipeline
+
+
+def _active_strategy() -> ActiveStrategy:
+    return ActiveStrategy(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        config=StrategyConfig(
+            strategy_id="alpha",
+            factor_composition=(),
+            metadata=(("owner", "test"),),
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier", "pnl")),
+        forecaster=ForecasterSpec(forecasters=(("rules", ()),)),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+        ),
+    )
+
+
+def _signal(ts: datetime) -> MarketSignal:
+    return MarketSignal(
+        market_id="research-runner-market",
+        token_id="yes-token",
+        venue="polymarket",
+        title="Will CP04b runner tests pass?",
+        yes_price=0.4,
+        volume_24h=1000.0,
+        resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
+        orderbook={
+            "bids": [{"price": 0.39, "size": 100.0}],
+            "asks": [{"price": 0.41, "size": 100.0}],
+        },
+        external_signal={"resolved_outcome": 1.0},
+        fetched_at=ts,
+        market_status="open",
+    )
+
+
+def _spec() -> BacktestSpec:
+    return BacktestSpec(
+        strategy_versions=(("alpha", "alpha-v1"),),
+        dataset=BacktestDataset(
+            source="fixture",
+            version="v1",
+            coverage_start=datetime(2026, 4, 1, tzinfo=UTC),
+            coverage_end=datetime(2026, 4, 30, tzinfo=UTC),
+            market_universe_filter={"market_ids": ["research-runner-market"]},
+            data_quality_gaps=(),
+        ),
+        execution_model=ExecutionModel(
+            fee_rate=0.0,
+            slippage_bps=5.0,
+            latency_ms=0.0,
+            staleness_ms=60000.0,
+            fill_policy="immediate_or_cancel",
+        ),
+        risk_policy=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        date_range_start=datetime(2026, 4, 1, tzinfo=UTC),
+        date_range_end=datetime(2026, 4, 30, tzinfo=UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_backtest_runner_updates_portfolio_between_replay_signals() -> None:
+    pipeline = _PortfolioRecordingPipeline()
+    runner = BacktestRunner(
+        writable_pool=cast(Any, object()),
+        readonly_pool=cast(Any, object()),
+        replay_engine=_ReplayEngine(
+            [
+                _signal(datetime(2026, 4, 20, 0, 0, tzinfo=UTC)),
+                _signal(datetime(2026, 4, 20, 0, 1, tzinfo=UTC)),
+            ]
+        ),
+        controller_factory=_PipelineFactory(pipeline),
+    )
+
+    accumulator = await runner._run_strategy(
+        strategy=_active_strategy(),
+        spec=_spec(),
+        exec_config=BacktestExecutionConfig(),
+    )
+
+    assert accumulator.fill_count == 2
+    assert len(pipeline.portfolios) == 2
+    assert pipeline.portfolios[0].free_usdc == pytest.approx(1000.0)
+    assert pipeline.portfolios[0].open_positions == []
+    assert pipeline.portfolios[1].free_usdc == pytest.approx(990.0)
+    assert pipeline.portfolios[1].locked_usdc == pytest.approx(10.0)
+    assert len(pipeline.portfolios[1].open_positions) == 1
+    assert pipeline.portfolios[1].open_positions[0].shares_held == pytest.approx(
+        10.0 / 0.41
+    )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 import json
@@ -17,7 +17,8 @@ import asyncpg
 
 from pms.actuator.adapters.paper import PaperActuator
 from pms.controller.factory import ControllerPipelineFactory
-from pms.core.models import MarketSignal, Portfolio, Position
+from pms.core.enums import OrderStatus
+from pms.core.models import FillRecord, MarketSignal, OrderState, Portfolio, Position
 from pms.evaluation.metrics import StrategyVersionKey
 from pms.research.entities import PortfolioTarget, serialize_portfolio_target_json
 from pms.research.replay import MarketUniverseReplayEngine
@@ -266,6 +267,10 @@ class BacktestRunner:
                 ).execute(cast(Any, decision), portfolio)
             except Exception:
                 continue
+            fill = _fill_from_order(order_state, decision, signal)
+            if fill is None:
+                continue
+            portfolio = _portfolio_with_fill(portfolio, fill)
             fill_price = cast(float | None, getattr(order_state, "fill_price", None))
             if fill_price is not None:
                 accumulator.record_fill(
@@ -442,6 +447,93 @@ def _default_portfolio(strategy: ActiveStrategy) -> Portfolio:
         locked_usdc=0.0,
         open_positions=[],
         max_drawdown_pct=0.0,
+    )
+
+
+def _fill_from_order(
+    order_state: OrderState,
+    decision: object,
+    signal: MarketSignal,
+) -> FillRecord | None:
+    if order_state.status != OrderStatus.MATCHED.value or order_state.fill_price is None:
+        return None
+    if order_state.filled_size <= 0.0:
+        return None
+    if order_state.fill_price <= 0.0:
+        return None
+
+    return FillRecord(
+        trade_id=order_state.order_id,
+        order_id=order_state.order_id,
+        decision_id=order_state.decision_id,
+        market_id=order_state.market_id,
+        token_id=order_state.token_id,
+        venue=order_state.venue,
+        side=cast(str, getattr(decision, "side")),
+        fill_price=order_state.fill_price,
+        fill_size=order_state.filled_size,
+        executed_at=order_state.submitted_at,
+        filled_at=order_state.last_updated_at,
+        status=order_state.status,
+        anomaly_flags=[],
+        strategy_id=order_state.strategy_id,
+        strategy_version_id=order_state.strategy_version_id,
+        resolved_outcome=_resolved_outcome(signal),
+    )
+
+
+def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
+    positions = list(portfolio.open_positions)
+    fill_size = fill.fill_size
+    contracts = _filled_contracts(fill)
+    for index, position in enumerate(positions):
+        if _same_position(position, fill):
+            new_shares = position.shares_held + contracts
+            avg_entry_price = (
+                position.avg_entry_price * position.shares_held
+                + fill.fill_price * contracts
+            ) / new_shares
+            positions[index] = replace(
+                position,
+                shares_held=new_shares,
+                avg_entry_price=avg_entry_price,
+                locked_usdc=position.locked_usdc + fill_size,
+            )
+            break
+    else:
+        positions.append(
+            Position(
+                market_id=fill.market_id,
+                token_id=fill.token_id,
+                venue=fill.venue,
+                side=fill.side,
+                shares_held=contracts,
+                avg_entry_price=fill.fill_price,
+                unrealized_pnl=0.0,
+                locked_usdc=fill_size,
+            )
+        )
+
+    return replace(
+        portfolio,
+        free_usdc=portfolio.free_usdc - fill_size,
+        locked_usdc=portfolio.locked_usdc + fill_size,
+        open_positions=positions,
+    )
+
+
+def _filled_contracts(fill: FillRecord) -> float:
+    if fill.filled_contracts is not None:
+        return fill.filled_contracts
+    return fill.fill_size / fill.fill_price
+
+
+def _same_position(position: Position, fill: FillRecord) -> bool:
+    return (
+        position.market_id == fill.market_id
+        and position.token_id == fill.token_id
+        and position.venue == fill.venue
+        and position.side == fill.side
     )
 
 
