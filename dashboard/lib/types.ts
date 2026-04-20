@@ -133,3 +133,96 @@ export type FactorSeriesResponse = {
   market_id: string;
   points: FactorPoint[];
 };
+
+export type BacktestRankingMetric = 'brier' | 'sharpe' | 'pnl_cum';
+
+export type SelectionDenominator = 'backtest_set' | 'live_set' | 'union';
+
+export type BacktestRunRow = {
+  run_id: string;
+  spec_hash: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  strategy_ids: string[];
+  date_range_start: string;
+  date_range_end: string;
+  exec_config_json: {
+    chunk_days?: number;
+    time_budget?: number;
+  };
+  spec_json: {
+    strategy_versions?: Array<[string, string]>;
+    dataset?: {
+      source?: string;
+      version?: string;
+      coverage_start?: string;
+      coverage_end?: string;
+    };
+  };
+  queued_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  failure_reason: string | null;
+  worker_pid: number | null;
+  worker_host: string | null;
+};
+
+export type BacktestStrategyRunRow = {
+  strategy_run_id: string;
+  run_id: string;
+  strategy_id: string;
+  strategy_version_id: string;
+  brier: number | null;
+  pnl_cum: number | null;
+  drawdown_max: number | null;
+  fill_rate: number | null;
+  slippage_bps: number | null;
+  opportunity_count: number | null;
+  decision_count: number | null;
+  fill_count: number | null;
+  portfolio_target_json:
+    | Array<{
+        market_id: string;
+        token_id: string;
+        side: string;
+        timestamp: string;
+        target_size_usdc: number;
+      }>
+    | null;
+  started_at: string;
+  finished_at: string | null;
+};
+
+export type BacktestEnqueueResponse = {
+  run_ids: string[];
+  unique_run_count: number;
+  runs: Array<{
+    run_id: string;
+    spec_hash: string;
+    inserted: boolean;
+  }>;
+};
+
+export type BacktestLiveComparisonResponse = {
+  comparison_id: string;
+  run_id: string;
+  strategy_id: string;
+  strategy_version_id: string;
+  live_window_start: string;
+  live_window_end: string;
+  denominator: SelectionDenominator;
+  equity_delta_json: Array<{
+    day: string;
+    backtest_equity: number;
+    live_equity: number;
+    delta: number;
+  }>;
+  overlap_ratio: number;
+  backtest_only_symbols: string[];
+  live_only_symbols: string[];
+  time_alignment_policy_json: Record<string, number>;
+  symbol_normalization_policy_json: {
+    token_id_aliases?: Record<string, string>;
+    market_id_aliases?: Record<string, string>;
+  };
+  computed_at: string;
+};

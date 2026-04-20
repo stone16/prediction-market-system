@@ -1,6 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
+  BacktestEnqueueResponse,
+  BacktestLiveComparisonResponse,
+  BacktestRunRow,
+  BacktestStrategyRunRow,
   Decision,
   FactorCatalogEntry,
   FactorCatalogResponse,
@@ -120,6 +124,16 @@ export function mockStrategies(): StrategiesResponse {
   return {
     strategies: [
       {
+        strategy_id: 'alpha',
+        active_version_id: 'alpha-v1',
+        created_at: '2026-04-18T00:00:00+00:00'
+      },
+      {
+        strategy_id: 'beta',
+        active_version_id: 'beta-v1',
+        created_at: '2026-04-18T00:00:00+00:00'
+      },
+      {
         strategy_id: 'default',
         active_version_id: 'd50c4db65699c222620c85f0cf84c0324c148a34b212c5f69903dbf4b950757c',
         created_at: '2026-04-14T00:00:00+00:00'
@@ -166,6 +180,182 @@ export function mockStrategyMetrics(): StrategyMetricsResponse {
         fill_rate: 0.0,
         slippage_bps: 0.0,
         drawdown: 0.0
+      }
+    ]
+  };
+}
+
+export function mockBacktestRuns(): BacktestRunRow[] {
+  return [
+    {
+      run_id: '11111111-1111-1111-1111-111111111111',
+      spec_hash: 'spec-completed',
+      status: 'completed',
+      strategy_ids: ['alpha', 'beta', 'gamma'],
+      date_range_start: '2026-04-01T00:00:00+00:00',
+      date_range_end: '2026-04-30T00:00:00+00:00',
+      exec_config_json: { chunk_days: 7, time_budget: 1800 },
+      spec_json: {
+        strategy_versions: [
+          ['alpha', 'alpha-v1'],
+          ['beta', 'beta-v1'],
+          ['gamma', 'gamma-v1']
+        ]
+      },
+      queued_at: '2026-04-18T09:00:00+00:00',
+      started_at: '2026-04-18T09:00:05+00:00',
+      finished_at: '2026-04-18T09:03:05+00:00',
+      failure_reason: null,
+      worker_pid: null,
+      worker_host: null
+    },
+    {
+      run_id: '22222222-2222-2222-2222-222222222222',
+      spec_hash: 'spec-running',
+      status: 'running',
+      strategy_ids: ['alpha'],
+      date_range_start: '2026-04-15T00:00:00+00:00',
+      date_range_end: '2026-04-20T00:00:00+00:00',
+      exec_config_json: { chunk_days: 7, time_budget: 900 },
+      spec_json: {
+        strategy_versions: [['alpha', 'alpha-v1']]
+      },
+      queued_at: '2026-04-19T09:00:00+00:00',
+      started_at: '2026-04-19T09:00:10+00:00',
+      finished_at: null,
+      failure_reason: null,
+      worker_pid: 99999,
+      worker_host: 'mock-host'
+    }
+  ];
+}
+
+export function mockBacktestRun(runId: string): BacktestRunRow | null {
+  return mockBacktestRuns().find((run) => run.run_id === runId) ?? null;
+}
+
+export function mockBacktestStrategyRuns(runId: string): BacktestStrategyRunRow[] {
+  if (runId !== '11111111-1111-1111-1111-111111111111') {
+    return [];
+  }
+  return [
+    {
+      strategy_run_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      run_id: runId,
+      strategy_id: 'alpha',
+      strategy_version_id: 'alpha-v1',
+      brier: 0.11,
+      pnl_cum: 3.0,
+      drawdown_max: 4.0,
+      fill_rate: 0.92,
+      slippage_bps: 8.0,
+      opportunity_count: 6,
+      decision_count: 5,
+      fill_count: 3,
+      portfolio_target_json: [
+        {
+          market_id: 'market-a',
+          token_id: 'token-a',
+          side: 'buy_yes',
+          timestamp: '2026-04-09T10:00:00+00:00',
+          target_size_usdc: 20
+        },
+        {
+          market_id: 'market-b',
+          token_id: 'token-b',
+          side: 'buy_yes',
+          timestamp: '2026-04-09T11:00:00+00:00',
+          target_size_usdc: 25
+        }
+      ],
+      started_at: '2026-04-18T09:00:05+00:00',
+      finished_at: '2026-04-18T09:01:05+00:00'
+    },
+    {
+      strategy_run_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      run_id: runId,
+      strategy_id: 'beta',
+      strategy_version_id: 'beta-v1',
+      brier: 0.26,
+      pnl_cum: 12.0,
+      drawdown_max: 3.0,
+      fill_rate: 0.81,
+      slippage_bps: 12.0,
+      opportunity_count: 5,
+      decision_count: 4,
+      fill_count: 2,
+      portfolio_target_json: [
+        {
+          market_id: 'market-c',
+          token_id: 'token-c',
+          side: 'buy_yes',
+          timestamp: '2026-04-09T12:00:00+00:00',
+          target_size_usdc: 20
+        }
+      ],
+      started_at: '2026-04-18T09:00:10+00:00',
+      finished_at: '2026-04-18T09:01:10+00:00'
+    },
+    {
+      strategy_run_id: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+      run_id: runId,
+      strategy_id: 'gamma',
+      strategy_version_id: 'gamma-v1',
+      brier: 0.18,
+      pnl_cum: -1.0,
+      drawdown_max: 1.0,
+      fill_rate: 0.67,
+      slippage_bps: 6.0,
+      opportunity_count: 4,
+      decision_count: 4,
+      fill_count: 1,
+      portfolio_target_json: [
+        {
+          market_id: 'market-e',
+          token_id: 'token-e',
+          side: 'buy_yes',
+          timestamp: '2026-04-09T14:00:00+00:00',
+          target_size_usdc: 20
+        }
+      ],
+      started_at: '2026-04-18T09:00:20+00:00',
+      finished_at: '2026-04-18T09:01:20+00:00'
+    }
+  ];
+}
+
+export function mockBacktestComparison(runId: string): BacktestLiveComparisonResponse {
+  return {
+    comparison_id: 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',
+    run_id: runId,
+    strategy_id: 'alpha',
+    strategy_version_id: 'alpha-v1',
+    live_window_start: '2026-04-10T00:00:00+00:00',
+    live_window_end: '2026-04-12T23:59:59+00:00',
+    denominator: 'union',
+    equity_delta_json: [
+      { day: '2026-04-10', backtest_equity: 3.0, live_equity: 1.0, delta: 2.0 },
+      { day: '2026-04-11', backtest_equity: 6.0, live_equity: 3.5, delta: 2.5 },
+      { day: '2026-04-12', backtest_equity: 10.0, live_equity: 3.5, delta: 6.5 }
+    ],
+    overlap_ratio: 0.33,
+    backtest_only_symbols: ['token-b'],
+    live_only_symbols: ['token-c'],
+    time_alignment_policy_json: {},
+    symbol_normalization_policy_json: {},
+    computed_at: '2026-04-12T12:00:00+00:00'
+  };
+}
+
+export function mockEnqueueBacktestRun(): BacktestEnqueueResponse {
+  return {
+    run_ids: ['33333333-3333-3333-3333-333333333333'],
+    unique_run_count: 1,
+    runs: [
+      {
+        run_id: '33333333-3333-3333-3333-333333333333',
+        spec_hash: 'spec-enqueued',
+        inserted: true
       }
     ]
   };

@@ -19,6 +19,7 @@ from pms.api.research_routes import (
     compute_backtest_live_comparison,
     enqueue_backtest_runs,
     fetch_backtest_run,
+    list_backtest_runs,
     list_backtest_strategy_runs,
     scan_orphaned_backtest_runs,
 )
@@ -224,6 +225,12 @@ def create_app(
             return await enqueue_backtest_runs(active_runner.pg_pool, sweep_yaml)
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/research/backtest")
+    async def get_backtest_runs(limit: int = Query(default=25, ge=1, le=100)) -> list[dict[str, Any]]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        return await list_backtest_runs(active_runner.pg_pool, limit=limit)
 
     @app.get("/research/backtest/{run_id}")
     async def get_backtest_run(run_id: str) -> dict[str, Any]:

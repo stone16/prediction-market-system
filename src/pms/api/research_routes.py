@@ -75,6 +75,38 @@ async def fetch_backtest_run(
     return None if row is None else _record_to_json(row)
 
 
+async def list_backtest_runs(
+    pg_pool: asyncpg.Pool,
+    *,
+    limit: int = 25,
+) -> list[dict[str, object]]:
+    async with pg_pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT
+                run_id,
+                spec_hash,
+                status,
+                strategy_ids,
+                date_range_start,
+                date_range_end,
+                exec_config_json,
+                spec_json,
+                queued_at,
+                started_at,
+                finished_at,
+                failure_reason,
+                worker_pid,
+                worker_host
+            FROM backtest_runs
+            ORDER BY queued_at DESC, run_id DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [_record_to_json(row) for row in rows]
+
+
 async def list_backtest_strategy_runs(
     pg_pool: asyncpg.Pool,
     run_id: str,
@@ -376,6 +408,7 @@ __all__ = [
     "compute_backtest_live_comparison",
     "enqueue_backtest_runs",
     "fetch_backtest_run",
+    "list_backtest_runs",
     "list_backtest_strategy_runs",
     "orphaned_failure_reason",
     "scan_orphaned_backtest_runs",
