@@ -43,7 +43,7 @@ PidProvider: TypeAlias = Callable[[], int]
 
 
 class ReplayEngineLike(Protocol):
-    async def stream(
+    def stream(
         self,
         spec: BacktestSpec,
         exec_config: BacktestExecutionConfig,
@@ -440,7 +440,7 @@ def _default_portfolio(strategy: ActiveStrategy) -> Portfolio:
         total_usdc=starting_cash,
         free_usdc=starting_cash,
         locked_usdc=0.0,
-        open_positions=list[Position](),
+        open_positions=[],
         max_drawdown_pct=0.0,
     )
 
@@ -481,8 +481,14 @@ def _deserialize_backtest_spec(raw_value: object) -> BacktestSpec:
 def _deserialize_execution_config(raw_value: object) -> BacktestExecutionConfig:
     payload = _json_object(raw_value)
     return BacktestExecutionConfig(
-        chunk_days=int(payload.get("chunk_days", 7)),
-        time_budget=int(payload.get("time_budget", 1800)),
+        chunk_days=_coerce_int(
+            payload.get("chunk_days", 7),
+            field_name="BacktestExecutionConfig.chunk_days",
+        ),
+        time_budget=_coerce_int(
+            payload.get("time_budget", 1800),
+            field_name="BacktestExecutionConfig.time_budget",
+        ),
     )
 
 
@@ -521,20 +527,41 @@ def _deserialize_dataset(raw_value: object) -> BacktestDataset:
 def _deserialize_execution_model(raw_value: object) -> ExecutionModel:
     payload = _json_object(raw_value)
     return ExecutionModel(
-        fee_rate=float(payload["fee_rate"]),
-        slippage_bps=float(payload["slippage_bps"]),
-        latency_ms=float(payload["latency_ms"]),
-        staleness_ms=float(payload["staleness_ms"]),
-        fill_policy=cast(Literal["immediate_or_cancel", "limit_if_touched"], payload["fill_policy"]),
+        fee_rate=_coerce_float(
+            payload["fee_rate"],
+            field_name="ExecutionModel.fee_rate",
+        ),
+        slippage_bps=_coerce_float(
+            payload["slippage_bps"],
+            field_name="ExecutionModel.slippage_bps",
+        ),
+        latency_ms=_coerce_float(
+            payload["latency_ms"],
+            field_name="ExecutionModel.latency_ms",
+        ),
+        staleness_ms=_coerce_float(
+            payload["staleness_ms"],
+            field_name="ExecutionModel.staleness_ms",
+        ),
+        fill_policy=_coerce_fill_policy(payload["fill_policy"]),
     )
 
 
 def _deserialize_risk_policy(raw_value: object) -> RiskPolicy:
     payload = _json_object(raw_value)
     return RiskPolicy(
-        max_position_notional_usdc=float(payload["max_position_notional_usdc"]),
-        max_daily_drawdown_pct=float(payload["max_daily_drawdown_pct"]),
-        min_order_size_usdc=float(payload["min_order_size_usdc"]),
+        max_position_notional_usdc=_coerce_float(
+            payload["max_position_notional_usdc"],
+            field_name="RiskPolicy.max_position_notional_usdc",
+        ),
+        max_daily_drawdown_pct=_coerce_float(
+            payload["max_daily_drawdown_pct"],
+            field_name="RiskPolicy.max_daily_drawdown_pct",
+        ),
+        min_order_size_usdc=_coerce_float(
+            payload["min_order_size_usdc"],
+            field_name="RiskPolicy.min_order_size_usdc",
+        ),
     )
 
 
@@ -547,6 +574,29 @@ def _deserialize_datetime(raw_value: object) -> datetime:
         msg = "Backtest datetime fields must be timezone-aware"
         raise ValueError(msg)
     return value
+
+
+def _coerce_int(raw_value: object, *, field_name: str) -> int:
+    if not isinstance(raw_value, int) or isinstance(raw_value, bool):
+        msg = f"{field_name} must decode to an integer"
+        raise TypeError(msg)
+    return raw_value
+
+
+def _coerce_float(raw_value: object, *, field_name: str) -> float:
+    if not isinstance(raw_value, int | float) or isinstance(raw_value, bool):
+        msg = f"{field_name} must decode to a numeric value"
+        raise TypeError(msg)
+    return float(raw_value)
+
+
+def _coerce_fill_policy(
+    raw_value: object,
+) -> Literal["immediate_or_cancel", "limit_if_touched"]:
+    if raw_value not in ("immediate_or_cancel", "limit_if_touched"):
+        msg = "ExecutionModel.fill_policy must decode to a supported fill policy"
+        raise TypeError(msg)
+    return raw_value
 
 
 def _json_object(raw_value: object) -> dict[str, object]:
