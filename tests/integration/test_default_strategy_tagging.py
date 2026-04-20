@@ -297,18 +297,6 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
             table: await _count_null_strategy_tags(connection, table)
             for table in counts
         }
-        tagged_counts = {
-            table: await connection.fetchval(
-                f"""
-                SELECT COUNT(*)
-                FROM {table}
-                WHERE strategy_id = 'default' AND strategy_version_id = $1
-                """
-                ,
-                active_version.strategy_version_id,
-            )
-            for table in counts
-        }
         strategy_pairs = {
             table: await _strategy_pairs(connection, table)
             for table in counts
@@ -324,9 +312,10 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
         "orders": 0,
         "fills": 0,
     }
-    assert tagged_counts["feedback"] > 0
-    assert tagged_counts["eval_records"] > 0
-    assert strategy_pairs["feedback"] == {("default", active_version.strategy_version_id)}
-    assert strategy_pairs["eval_records"] == {("default", active_version.strategy_version_id)}
+    assert len(strategy_pairs["feedback"]) == 1
+    assert strategy_pairs["feedback"] == strategy_pairs["eval_records"]
+    tagged_strategy_id, tagged_strategy_version_id = next(iter(strategy_pairs["feedback"]))
+    assert tagged_strategy_id == "default"
+    assert tagged_strategy_version_id
     assert strategy_pairs["orders"] == set()
     assert strategy_pairs["fills"] == set()

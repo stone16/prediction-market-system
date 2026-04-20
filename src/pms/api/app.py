@@ -12,9 +12,17 @@ from enum import Enum
 from typing import Any, TypeVar, cast
 
 import asyncpg
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from pms.api.research_routes import (
+    compute_backtest_live_comparison,
+    enqueue_backtest_runs,
+    fetch_backtest_run,
+    list_backtest_runs,
+    list_backtest_strategy_runs,
+    scan_orphaned_backtest_runs,
+)
 from pms.api.routes.factors import list_factor_catalog, list_factor_series
 from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
@@ -62,6 +70,8 @@ def create_app(
             await active_runner.start()
         elif not auto_start:
             await _ensure_runner_pool(active_runner)
+        if active_runner.pg_pool is not None:
+            await scan_orphaned_backtest_runs(active_runner.pg_pool)
         try:
             yield
         finally:
@@ -205,6 +215,52 @@ def create_app(
             since=since,
             limit=limit,
         )
+
+    @app.post("/research/backtest")
+    async def create_backtest_run(request: Request) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            sweep_yaml = (await request.body()).decode("utf-8")
+            return await enqueue_backtest_runs(active_runner.pg_pool, sweep_yaml)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/research/backtest")
+    async def get_backtest_runs(limit: int = Query(default=25, ge=1, le=100)) -> list[dict[str, Any]]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        return await list_backtest_runs(active_runner.pg_pool, limit=limit)
+
+    @app.get("/research/backtest/{run_id}")
+    async def get_backtest_run(run_id: str) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await fetch_backtest_run(active_runner.pg_pool, run_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Backtest run not found")
+        return payload
+
+    @app.get("/research/backtest/{run_id}/strategies")
+    async def get_backtest_strategy_runs(run_id: str) -> list[dict[str, Any]]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        return await list_backtest_strategy_runs(active_runner.pg_pool, run_id)
+
+    @app.post("/research/backtest/{run_id}/compare")
+    async def compare_backtest_run(run_id: str, request: Request) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            return await compute_backtest_live_comparison(
+                active_runner.pg_pool,
+                run_id,
+                await request.json(),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/feedback/{feedback_id}/resolve")
     async def resolve_feedback(feedback_id: str) -> dict[str, Any]:

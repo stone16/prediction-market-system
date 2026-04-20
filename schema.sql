@@ -242,6 +242,84 @@ CREATE TABLE IF NOT EXISTS opportunities (
     created_at TIMESTAMPTZ NOT NULL
 );
 
+-- research backtest inner-ring tables (Invariants 3, 8)
+
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    run_id UUID PRIMARY KEY,
+    spec_hash TEXT NOT NULL,
+    status TEXT NOT NULL,
+    strategy_ids TEXT[] NOT NULL,
+    date_range_start TIMESTAMPTZ NOT NULL,
+    date_range_end TIMESTAMPTZ NOT NULL,
+    exec_config_json JSONB NOT NULL,
+    spec_json JSONB NOT NULL,
+    queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    failure_reason TEXT,
+    worker_pid INTEGER,
+    worker_host TEXT,
+    CONSTRAINT backtest_runs_status_check
+        CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled'))
+);
+
+CREATE TABLE IF NOT EXISTS strategy_runs (
+    strategy_run_id UUID PRIMARY KEY,
+    run_id UUID NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL,
+    brier DOUBLE PRECISION,
+    pnl_cum DOUBLE PRECISION,
+    drawdown_max DOUBLE PRECISION,
+    fill_rate DOUBLE PRECISION,
+    slippage_bps DOUBLE PRECISION,
+    opportunity_count INTEGER,
+    decision_count INTEGER,
+    fill_count INTEGER,
+    portfolio_target_json JSONB,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ,
+    CONSTRAINT strategy_runs_strategy_identity_check
+        CHECK (strategy_id != '' AND strategy_version_id != '')
+);
+
+CREATE TABLE IF NOT EXISTS evaluation_reports (
+    report_id UUID PRIMARY KEY,
+    run_id UUID NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    ranking_metric TEXT NOT NULL,
+    ranked_strategies JSONB NOT NULL,
+    benchmark_rows JSONB NOT NULL DEFAULT '[]'::jsonb,
+    attribution_commentary TEXT,
+    warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    next_action TEXT,
+    generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT evaluation_reports_ranking_metric_check
+        CHECK (ranking_metric IN ('brier', 'sharpe', 'pnl_cum')),
+    CONSTRAINT evaluation_reports_run_id_ranking_metric_key
+        UNIQUE (run_id, ranking_metric)
+);
+
+CREATE TABLE IF NOT EXISTS backtest_live_comparisons (
+    comparison_id UUID PRIMARY KEY,
+    run_id UUID NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL,
+    live_window_start TIMESTAMPTZ NOT NULL,
+    live_window_end TIMESTAMPTZ NOT NULL,
+    denominator TEXT NOT NULL,
+    equity_delta_json JSONB NOT NULL,
+    overlap_ratio DOUBLE PRECISION NOT NULL,
+    backtest_only_symbols TEXT[] NOT NULL,
+    live_only_symbols TEXT[] NOT NULL,
+    time_alignment_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    symbol_normalization_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT backtest_live_comparisons_denominator_check
+        CHECK (denominator IN ('backtest_set', 'live_set', 'union')),
+    CONSTRAINT backtest_live_comparisons_strategy_identity_check
+        CHECK (strategy_id != '' AND strategy_version_id != '')
+);
+
 -- END INNER-RING PRODUCT SHELLS
 
 -- default strategy seed (Invariant 3 NULLABLE→seed pattern).
@@ -384,6 +462,90 @@ BEGIN
 END
 $$;
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'backtest_runs_status_check'
+    ) THEN
+        ALTER TABLE backtest_runs
+            ADD CONSTRAINT backtest_runs_status_check
+            CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled'));
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'strategy_runs_strategy_identity_check'
+    ) THEN
+        ALTER TABLE strategy_runs
+            ADD CONSTRAINT strategy_runs_strategy_identity_check
+            CHECK (strategy_id != '' AND strategy_version_id != '');
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'evaluation_reports_ranking_metric_check'
+    ) THEN
+        ALTER TABLE evaluation_reports
+            ADD CONSTRAINT evaluation_reports_ranking_metric_check
+            CHECK (ranking_metric IN ('brier', 'sharpe', 'pnl_cum'));
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'evaluation_reports_run_id_ranking_metric_key'
+    ) THEN
+        ALTER TABLE evaluation_reports
+            ADD CONSTRAINT evaluation_reports_run_id_ranking_metric_key
+            UNIQUE (run_id, ranking_metric);
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'backtest_live_comparisons_denominator_check'
+    ) THEN
+        ALTER TABLE backtest_live_comparisons
+            ADD CONSTRAINT backtest_live_comparisons_denominator_check
+            CHECK (denominator IN ('backtest_set', 'live_set', 'union'));
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'backtest_live_comparisons_strategy_identity_check'
+    ) THEN
+        ALTER TABLE backtest_live_comparisons
+            ADD CONSTRAINT backtest_live_comparisons_strategy_identity_check
+            CHECK (strategy_id != '' AND strategy_version_id != '');
+    END IF;
+END
+$$;
+
 CREATE INDEX IF NOT EXISTS idx_feedback_strategy_identity
     ON feedback(strategy_id, strategy_version_id);
 
@@ -398,6 +560,18 @@ CREATE INDEX IF NOT EXISTS idx_fills_strategy_identity
 
 CREATE INDEX IF NOT EXISTS idx_opportunities_strategy_identity
     ON opportunities(strategy_id, strategy_version_id);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_status
+    ON backtest_runs(status);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_queued_at_desc
+    ON backtest_runs(queued_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_runs_run_id
+    ON strategy_runs(run_id);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_live_comparisons_run_strategy_identity
+    ON backtest_live_comparisons(run_id, strategy_id, strategy_version_id);
 
 INSERT INTO factors (
     factor_id,

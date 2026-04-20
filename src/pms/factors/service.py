@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
+from typing import Any
 
 import asyncpg
 
 from pms.core.models import Market, MarketSignal
 from pms.factors.base import FactorDefinition, FactorValueRow
+from pms.research.cache import FactorPanel, load_factor_panel
 from pms.storage.market_data_store import PostgresMarketDataStore
 
 
@@ -99,6 +101,23 @@ class FactorService:
                 self._last_persisted_ts[dedupe_key] = row.ts
                 persisted += 1
         return persisted
+
+    async def get_panel(
+        self,
+        factor_id: str,
+        param: str | Mapping[str, Any] | None,
+        market_ids: Sequence[str],
+        ts_start: datetime,
+        ts_end: datetime,
+    ) -> FactorPanel:
+        return await load_factor_panel(
+            self.pool,
+            factor_id=factor_id,
+            param=param,
+            market_ids=market_ids,
+            ts_start=ts_start,
+            ts_end=ts_end,
+        )
 
     async def _forward_signals(self) -> None:
         try:
