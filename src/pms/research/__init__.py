@@ -9,6 +9,12 @@ from .entities import (
     deserialize_portfolio_target_json,
     serialize_portfolio_target_json,
 )
+from .policies import (
+    SelectionDenominator,
+    SelectionSimilarityMetric,
+    SymbolNormalizationPolicy,
+    TimeAlignmentPolicy,
+)
 from .replay import MarketUniverseReplayEngine, ReplayEngineInvariantError
 from .report import EvaluationReportGenerator
 from .runner import BacktestRunner
@@ -37,6 +43,10 @@ __all__ = [
     "RankedStrategy",
     "ReplayEngineInvariantError",
     "RiskPolicy",
+    "SelectionDenominator",
+    "SelectionSimilarityMetric",
+    "SymbolNormalizationPolicy",
+    "TimeAlignmentPolicy",
     "deserialize_portfolio_target_json",
     "serialize_portfolio_target_json",
 ]
