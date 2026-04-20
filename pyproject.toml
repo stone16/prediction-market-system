@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 pms-api = "pms.api.__main__:main"
+pms-research = "pms.research.cli:main"
 
 [project.optional-dependencies]
 # CP05: Anthropic SDK powers the optional LLM forecaster. Install with

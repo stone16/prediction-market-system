@@ -19,6 +19,7 @@ from .specs import (
     ExecutionModel,
     RiskPolicy,
 )
+from .sweep import ParameterSweep
 
 __all__ = [
     "BacktestDataset",
@@ -32,6 +33,7 @@ __all__ = [
     "MarketUniverseReplayEngine",
     "PortfolioTarget",
     "PortfolioTargetKey",
+    "ParameterSweep",
     "RankedStrategy",
     "ReplayEngineInvariantError",
     "RiskPolicy",
