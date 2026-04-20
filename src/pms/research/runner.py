@@ -82,6 +82,10 @@ class _StrategyAccumulator:
     opportunity_count: int = 0
     decision_count: int = 0
     fill_count: int = 0
+    # Fills whose signal carried a `resolved_outcome`. Only those can
+    # contribute real P&L; when this stays zero we must not publish a
+    # spurious 0.0 pnl_cum (see `as_insert_args`).
+    fills_with_resolution: int = 0
     brier_scores: list[Decimal] = field(default_factory=list)
     slippage_bps_values: list[Decimal] = field(default_factory=list)
     cumulative_pnl: Decimal = Decimal("0")
@@ -124,6 +128,8 @@ class _StrategyAccumulator:
     ) -> None:
         self.fill_count += 1
         self.slippage_bps_values.append(Decimal(str(self.execution_model.slippage_bps)))
+        if _resolved_outcome(signal) is not None:
+            self.fills_with_resolution += 1
         pnl_delta = _pnl_delta(
             signal=signal,
             opportunity_side=cast(str, getattr(opportunity, "side")),
@@ -160,14 +166,26 @@ class _StrategyAccumulator:
         fill_rate = (
             self.fill_count / self.decision_count if self.decision_count > 0 else 0.0
         )
+        # When zero fills had resolution data, cumulative_pnl is structurally
+        # 0 from summing no-op `_pnl_delta` contributions — not a genuine
+        # zero outcome. Emit NULL so downstream reports can distinguish
+        # "no P&L to compute" from "computed P&L that happens to be zero".
+        pnl_cum: float | None
+        drawdown_max: float | None
+        if self.fills_with_resolution > 0:
+            pnl_cum = float(self.cumulative_pnl)
+            drawdown_max = float(self.max_drawdown)
+        else:
+            pnl_cum = None
+            drawdown_max = None
         return (
             str(uuid4()),
             run_id,
             self.strategy_id,
             self.strategy_version_id,
             brier,
-            float(self.cumulative_pnl),
-            float(self.max_drawdown),
+            pnl_cum,
+            drawdown_max,
             fill_rate,
             slippage_bps,
             self.opportunity_count,
@@ -224,6 +242,7 @@ class BacktestRunner:
             msg = "no_strategy_versions"
             raise ValueError(msg)
         strategies = await self._load_strategies(claimed_run.spec.strategy_versions)
+        accumulators: list[_StrategyAccumulator] = []
         for index, strategy in enumerate(strategies):
             if index == 0:
                 await _maybe_call_cancel_probe(self.cancel_probe, "before_first_strategy")
@@ -234,10 +253,13 @@ class BacktestRunner:
                 spec=claimed_run.spec,
                 exec_config=claimed_run.exec_config,
             )
-            await self._insert_strategy_run(
-                run_id=claimed_run.run_id,
-                accumulator=accumulator,
-            )
+            accumulators.append(accumulator)
+        # atomic persist: either every strategy_runs row lands or none — prevents
+        # partial success leaking into reports when a later strategy raises.
+        await self._insert_strategy_runs_atomically(
+            run_id=claimed_run.run_id,
+            accumulators=accumulators,
+        )
         await _maybe_call_cancel_probe(self.cancel_probe, "after_last_strategy")
 
     async def _run_strategy(
@@ -368,39 +390,43 @@ class BacktestRunner:
             await self.readonly_pool.release(connection)
         return strategies
 
-    async def _insert_strategy_run(
+    async def _insert_strategy_runs_atomically(
         self,
         *,
         run_id: str,
-        accumulator: _StrategyAccumulator,
+        accumulators: Sequence[_StrategyAccumulator],
     ) -> None:
+        if not accumulators:
+            return
         connection = await self.writable_pool.acquire()
         try:
-            await connection.execute(
-                """
-                INSERT INTO strategy_runs (
-                    strategy_run_id,
-                    run_id,
-                    strategy_id,
-                    strategy_version_id,
-                    brier,
-                    pnl_cum,
-                    drawdown_max,
-                    fill_rate,
-                    slippage_bps,
-                    opportunity_count,
-                    decision_count,
-                    fill_count,
-                    portfolio_target_json,
-                    started_at,
-                    finished_at
-                ) VALUES (
-                    $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9,
-                    $10, $11, $12, $13::jsonb, $14, $15
-                )
-                """,
-                *accumulator.as_insert_args(run_id=run_id),
-            )
+            async with connection.transaction():
+                for accumulator in accumulators:
+                    await connection.execute(
+                        """
+                        INSERT INTO strategy_runs (
+                            strategy_run_id,
+                            run_id,
+                            strategy_id,
+                            strategy_version_id,
+                            brier,
+                            pnl_cum,
+                            drawdown_max,
+                            fill_rate,
+                            slippage_bps,
+                            opportunity_count,
+                            decision_count,
+                            fill_count,
+                            portfolio_target_json,
+                            started_at,
+                            finished_at
+                        ) VALUES (
+                            $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9,
+                            $10, $11, $12, $13::jsonb, $14, $15
+                        )
+                        """,
+                        *accumulator.as_insert_args(run_id=run_id),
+                    )
         finally:
             await self.writable_pool.release(connection)
 
