@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+import os
 from typing import Any, cast
 from uuid import uuid4
 
@@ -22,6 +23,20 @@ from pms.strategies.projections import (
     RiskParams,
     StrategyConfig,
 )
+
+PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        os.environ.get("PMS_RUN_INTEGRATION") != "1",
+        reason="set PMS_RUN_INTEGRATION=1 to run PostgreSQL integration tests",
+    ),
+    pytest.mark.skipif(
+        PMS_TEST_DATABASE_URL is None,
+        reason="set PMS_TEST_DATABASE_URL to the compose-backed PostgreSQL URI",
+    ),
+]
 
 
 @dataclass
