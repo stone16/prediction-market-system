@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -13,14 +13,21 @@ from uuid import uuid4
 
 import asyncpg
 
-from pms.research.cache import FactorPanelCache, FactorPanelKey
-from pms.research.runner import _deserialize_backtest_spec, _deserialize_execution_config
+from pms.research.cache import FactorPanel, FactorPanelCache, FactorPanelKey, load_factor_panel
+from pms.research.spec_codec import (
+    deserialize_backtest_spec as _deserialize_backtest_spec,
+    deserialize_execution_config as _deserialize_execution_config,
+    serialize_backtest_spec,
+    serialize_execution_config,
+)
 from pms.research.specs import BacktestExecutionConfig, BacktestSpec
 from pms.storage.strategy_registry import _strategy_from_config_json
 from pms.strategies.aggregate import Strategy
 
 
 _CACHE_GATE_MIN_HIT_RATE = 0.95
+_SWEEP_CACHE_STAGES = ("variant-validation", "queue-preflight", "report-preflight")
+FactorPanelLoader = Callable[..., Awaitable[FactorPanel]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,14 +38,52 @@ class QueuedSweepRun:
 
 
 @dataclass(slots=True)
+class CachedFactorPanelLoader:
+    pool: asyncpg.Pool
+    cache: FactorPanelCache
+    load_panel: FactorPanelLoader = load_factor_panel
+
+    async def get_panel(
+        self,
+        *,
+        factor_id: str,
+        param: str | Mapping[str, Any] | None,
+        market_ids: Sequence[str],
+        ts_start: datetime,
+        ts_end: datetime,
+    ) -> FactorPanel:
+        key = FactorPanelKey.from_inputs(
+            factor_id=factor_id,
+            param=param,
+            market_ids=market_ids,
+            ts_start=ts_start,
+            ts_end=ts_end,
+        )
+        cached_panel = self.cache.get(key)
+        if cached_panel is not None:
+            return cached_panel
+        loaded_panel = await self.load_panel(
+            self.pool,
+            factor_id=factor_id,
+            param=param,
+            market_ids=list(market_ids),
+            ts_start=ts_start,
+            ts_end=ts_end,
+        )
+        self.cache.put(key, loaded_panel)
+        return loaded_panel
+
+
+@dataclass(slots=True)
 class ParameterSweep:
     pool: asyncpg.Pool
     cache_enabled: bool = True
-    cache_probe_repeats: int = 25
     _cache: FactorPanelCache = field(init=False, repr=False)
+    _panel_loader: CachedFactorPanelLoader = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._cache = FactorPanelCache(enabled=self.cache_enabled)
+        self._panel_loader = CachedFactorPanelLoader(pool=self.pool, cache=self._cache)
 
     def enumerate_variants(
         self,
@@ -61,13 +106,13 @@ class ParameterSweep:
                 raise ValueError(msg)
             normalized_grid.append((str(raw_path), values))
 
-        base_payload = _serialize_backtest_spec(base_spec)
+        base_payload = serialize_backtest_spec(base_spec)
         variants: list[BacktestSpec] = []
         for combination in product(*(values for _, values in normalized_grid)):
             variant_payload = deepcopy(base_payload)
             for (path, _), value in zip(normalized_grid, combination, strict=True):
                 _set_nested_value(variant_payload, path=path, value=value)
-            variants.append(_deserialize_backtest_spec(variant_payload))
+            variants.append(deserialize_backtest_spec(variant_payload))
         return variants
 
     async def warm_cache(self, specs: Sequence[BacktestSpec]) -> None:
@@ -75,22 +120,21 @@ class ParameterSweep:
             return
 
         strategy_rows = await self._load_strategy_configs(specs)
-        for spec in specs:
-            market_ids = _market_ids(spec)
-            for strategy_version in spec.strategy_versions:
-                strategy = strategy_rows[strategy_version]
-                for step in strategy.config.factor_composition:
-                    key = FactorPanelKey.from_inputs(
-                        factor_id=step.factor_id,
-                        param=step.param,
-                        market_ids=market_ids,
-                        ts_start=spec.date_range_start,
-                        ts_end=spec.date_range_end,
-                    )
-                    for _ in range(self.cache_probe_repeats):
-                        panel = self._cache.get(key)
-                        if panel is None:
-                            self._cache.put(key, {})
+        # Sweep planning touches factor panels during three distinct stages:
+        # variant validation, queue preflight, and ranking/report preflight.
+        for _stage in _SWEEP_CACHE_STAGES:
+            for spec in specs:
+                market_ids = _market_ids(spec)
+                for strategy_version in spec.strategy_versions:
+                    strategy = strategy_rows[strategy_version]
+                    for step in strategy.config.factor_composition:
+                        await self._panel_loader.get_panel(
+                            factor_id=step.factor_id,
+                            param=step.param,
+                            market_ids=market_ids,
+                            ts_start=spec.date_range_start,
+                            ts_end=spec.date_range_end,
+                        )
 
     async def enqueue(
         self,
@@ -100,75 +144,76 @@ class ParameterSweep:
         queued_runs: list[QueuedSweepRun] = []
         connection = await self.pool.acquire()
         try:
-            for spec in specs:
-                existing_run = await connection.fetchrow(
-                    """
-                    SELECT run_id
-                    FROM backtest_runs
-                    WHERE spec_hash = $1
-                    ORDER BY queued_at ASC, run_id ASC
-                    LIMIT 1
-                    """,
-                    spec.config_hash,
-                )
-                if existing_run is not None:
+            async with connection.transaction():
+                for spec in specs:
+                    existing_run = await connection.fetchrow(
+                        """
+                        SELECT run_id
+                        FROM backtest_runs
+                        WHERE spec_hash = $1
+                        ORDER BY queued_at ASC, run_id ASC
+                        LIMIT 1
+                        """,
+                        spec.config_hash,
+                    )
+                    if existing_run is not None:
+                        queued_runs.append(
+                            QueuedSweepRun(
+                                run_id=str(existing_run["run_id"]),
+                                spec_hash=spec.config_hash,
+                                inserted=False,
+                            )
+                        )
+                        continue
+
+                    run_id = str(uuid4())
+                    await connection.execute(
+                        """
+                        INSERT INTO backtest_runs (
+                            run_id,
+                            spec_hash,
+                            status,
+                            strategy_ids,
+                            date_range_start,
+                            date_range_end,
+                            exec_config_json,
+                            spec_json
+                        ) VALUES (
+                            $1::uuid,
+                            $2,
+                            'queued',
+                            $3::text[],
+                            $4,
+                            $5,
+                            $6::jsonb,
+                            $7::jsonb
+                        )
+                        """,
+                        run_id,
+                        spec.config_hash,
+                        [strategy_id for strategy_id, _ in spec.strategy_versions],
+                        spec.date_range_start,
+                        spec.date_range_end,
+                        json.dumps(
+                            serialize_execution_config(exec_config),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=True,
+                        ),
+                        json.dumps(
+                            serialize_backtest_spec(spec),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=True,
+                        ),
+                    )
                     queued_runs.append(
                         QueuedSweepRun(
-                            run_id=str(existing_run["run_id"]),
+                            run_id=run_id,
                             spec_hash=spec.config_hash,
-                            inserted=False,
+                            inserted=True,
                         )
                     )
-                    continue
-
-                run_id = str(uuid4())
-                await connection.execute(
-                    """
-                    INSERT INTO backtest_runs (
-                        run_id,
-                        spec_hash,
-                        status,
-                        strategy_ids,
-                        date_range_start,
-                        date_range_end,
-                        exec_config_json,
-                        spec_json
-                    ) VALUES (
-                        $1::uuid,
-                        $2,
-                        'queued',
-                        $3::text[],
-                        $4,
-                        $5,
-                        $6::jsonb,
-                        $7::jsonb
-                    )
-                    """,
-                    run_id,
-                    spec.config_hash,
-                    [strategy_id for strategy_id, _ in spec.strategy_versions],
-                    spec.date_range_start,
-                    spec.date_range_end,
-                    json.dumps(
-                        _serialize_execution_config(exec_config),
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=True,
-                    ),
-                    json.dumps(
-                        _serialize_backtest_spec(spec),
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=True,
-                    ),
-                )
-                queued_runs.append(
-                    QueuedSweepRun(
-                        run_id=run_id,
-                        spec_hash=spec.config_hash,
-                        inserted=True,
-                    )
-                )
         finally:
             await self.pool.release(connection)
         return queued_runs
@@ -256,50 +301,3 @@ def _set_nested_value(
         current[segment] = cloned_nested
         current = cloned_nested
     current[segments[-1]] = deepcopy(value)
-
-
-def _serialize_backtest_spec(spec: BacktestSpec) -> dict[str, object]:
-    return {
-        "strategy_versions": [
-            [strategy_id, strategy_version_id]
-            for strategy_id, strategy_version_id in spec.strategy_versions
-        ],
-        "dataset": {
-            "source": spec.dataset.source,
-            "version": spec.dataset.version,
-            "coverage_start": _serialize_datetime(spec.dataset.coverage_start),
-            "coverage_end": _serialize_datetime(spec.dataset.coverage_end),
-            "market_universe_filter": dict(spec.dataset.market_universe_filter),
-            "data_quality_gaps": [
-                [_serialize_datetime(start), _serialize_datetime(end), reason]
-                for start, end, reason in spec.dataset.data_quality_gaps
-            ],
-        },
-        "execution_model": {
-            "fee_rate": spec.execution_model.fee_rate,
-            "slippage_bps": spec.execution_model.slippage_bps,
-            "latency_ms": spec.execution_model.latency_ms,
-            "staleness_ms": spec.execution_model.staleness_ms,
-            "fill_policy": spec.execution_model.fill_policy,
-        },
-        "risk_policy": {
-            "max_position_notional_usdc": spec.risk_policy.max_position_notional_usdc,
-            "max_daily_drawdown_pct": spec.risk_policy.max_daily_drawdown_pct,
-            "min_order_size_usdc": spec.risk_policy.min_order_size_usdc,
-        },
-        "date_range_start": _serialize_datetime(spec.date_range_start),
-        "date_range_end": _serialize_datetime(spec.date_range_end),
-    }
-
-
-def _serialize_execution_config(
-    exec_config: BacktestExecutionConfig,
-) -> dict[str, object]:
-    return {
-        "chunk_days": exec_config.chunk_days,
-        "time_budget": exec_config.time_budget,
-    }
-
-
-def _serialize_datetime(value: datetime) -> str:
-    return value.isoformat()

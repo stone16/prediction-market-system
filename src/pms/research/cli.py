@@ -12,7 +12,7 @@ import json
 import os
 import signal
 import sys
-from typing import Any
+from typing import Callable
 
 import asyncpg
 import yaml
@@ -371,7 +371,7 @@ def _cancel_probe_from_env() -> CancelProbe | None:
 
 def _install_signal_handlers(
     loop: asyncio.AbstractEventLoop,
-    request_stop: Any,
+    request_stop: Callable[[], None],
 ) -> list[signal.Signals]:
     handled: list[signal.Signals] = []
     for handled_signal in (signal.SIGTERM, signal.SIGINT):
