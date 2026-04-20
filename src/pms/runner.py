@@ -19,6 +19,8 @@ from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import PMSSettings
 from pms.controller.factory import ControllerPipelineFactory
+from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
+from pms.controller.outcome_tokens import MarketDataOutcomeTokenResolver
 from pms.controller.pipeline import ControllerPipeline
 from pms.core.enums import OrderStatus, RunMode
 from pms.core.interfaces import (
@@ -610,6 +612,13 @@ class Runner:
         if self._pg_pool is None:
             msg = "Runner PostgreSQL pool is not initialized"
             raise RuntimeError(msg)
+        if isinstance(self._controller_factory, ControllerPipelineFactory):
+            market_data_store = PostgresMarketDataStore(self._pg_pool)
+            self._controller_factory = ControllerPipelineFactory(
+                settings=self.config,
+                factor_reader=PostgresFactorSnapshotReader(self._pg_pool),
+                outcome_token_resolver=MarketDataOutcomeTokenResolver(market_data_store),
+            )
         if isinstance(self.eval_store, EvalStore):
             self.eval_store.bind_pool(self._pg_pool)
         if isinstance(self.feedback_store, FeedbackStore):
@@ -618,6 +627,8 @@ class Runner:
             self.opportunity_store.bind_pool(self._pg_pool)
 
     def _unbind_runtime_stores(self) -> None:
+        if isinstance(self._controller_factory, ControllerPipelineFactory):
+            self._controller_factory = ControllerPipelineFactory(settings=self.config)
         if isinstance(self.eval_store, EvalStore):
             self.eval_store.pool = None
         if isinstance(self.feedback_store, FeedbackStore):

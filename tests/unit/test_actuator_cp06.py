@@ -143,6 +143,43 @@ async def test_paper_actuator_fills_buy_at_best_ask() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paper_actuator_derives_no_fill_price_from_yes_bid() -> None:
+    actuator = PaperActuator(
+        orderbooks={
+            "m-cp06": {
+                "bids": [{"price": 0.62, "size": 100.0}],
+                "asks": [{"price": 0.64, "size": 100.0}],
+            }
+        }
+    )
+
+    state = await actuator.execute(
+        TradeDecision(
+            decision_id="d-no-cp06",
+            market_id="m-cp06",
+            token_id="t-no",
+            venue="polymarket",
+            side=Side.BUY.value,
+            price=0.38,
+            size=10.0,
+            order_type="limit",
+            max_slippage_bps=100,
+            stop_conditions=["unit-test"],
+            prob_estimate=0.38,
+            expected_edge=0.02,
+            time_in_force="GTC",
+            opportunity_id="op-d-no-cp06",
+            strategy_id="default",
+            strategy_version_id="default-v1",
+            outcome="NO",
+        )
+    )
+
+    assert state.status == OrderStatus.MATCHED.value
+    assert state.fill_price == pytest.approx(0.38)
+
+
+@pytest.mark.asyncio
 async def test_paper_actuator_empty_orderbook_raises_insufficient_liquidity() -> None:
     actuator = PaperActuator(orderbooks={"m-cp06": {"bids": [], "asks": []}})
 

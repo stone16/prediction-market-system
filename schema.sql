@@ -239,7 +239,9 @@ CREATE TABLE IF NOT EXISTS opportunities (
     staleness_policy TEXT NOT NULL,
     strategy_id TEXT NOT NULL,
     strategy_version_id TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
+    created_at TIMESTAMPTZ NOT NULL,
+    factor_snapshot_hash TEXT,
+    composition_trace JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
 -- research backtest inner-ring tables (Invariants 3, 8)
@@ -391,6 +393,12 @@ ALTER TABLE fills
 ALTER TABLE opportunities
     ALTER COLUMN strategy_id SET NOT NULL,
     ALTER COLUMN strategy_version_id SET NOT NULL;
+
+ALTER TABLE opportunities
+    ADD COLUMN IF NOT EXISTS factor_snapshot_hash TEXT;
+
+ALTER TABLE opportunities
+    ADD COLUMN IF NOT EXISTS composition_trace JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 DO $$
 BEGIN
