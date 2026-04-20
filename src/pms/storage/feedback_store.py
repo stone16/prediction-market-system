@@ -22,7 +22,9 @@ SELECT
     resolved,
     resolved_at,
     category,
-    metadata
+    metadata,
+    strategy_id,
+    strategy_version_id
 FROM feedback
 """
 
@@ -38,7 +40,7 @@ class FeedbackStore:
         self,
         feedback: Feedback,
         *,
-        strategy_id: str = "default",
+        strategy_id: str | None = None,
         strategy_version_id: str | None = None,
     ) -> None:
         async with self._pool().acquire() as connection:
@@ -103,13 +105,17 @@ async def insert_feedback_row(
     connection: asyncpg.Connection,
     feedback: Feedback,
     *,
-    strategy_id: str = "default",
+    strategy_id: str | None = None,
     strategy_version_id: str | None = None,
 ) -> None:
     resolved_strategy_id, resolved_strategy_version_id = await resolve_strategy_tags(
         connection,
-        strategy_id=strategy_id,
-        strategy_version_id=strategy_version_id,
+        strategy_id=feedback.strategy_id if strategy_id is None else strategy_id,
+        strategy_version_id=(
+            feedback.strategy_version_id
+            if strategy_version_id is None
+            else strategy_version_id
+        ),
     )
     await connection.execute(
         """
@@ -157,6 +163,8 @@ def _feedback_from_record(record: asyncpg.Record) -> Feedback:
         resolved_at=cast(datetime | None, record["resolved_at"]),
         category=cast(str | None, record["category"]),
         metadata=_metadata_from_value(record["metadata"]),
+        strategy_id=cast(str, record["strategy_id"]),
+        strategy_version_id=cast(str, record["strategy_version_id"]),
     )
 
 

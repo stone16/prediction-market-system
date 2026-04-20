@@ -57,6 +57,8 @@ class Opportunity:
     strategy_id: str
     strategy_version_id: str
     created_at: datetime
+    factor_snapshot_hash: str | None = None
+    composition_trace: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -77,7 +79,16 @@ class TradeDecision:
     opportunity_id: str
     strategy_id: str
     strategy_version_id: str
+    outcome: Outcome = "YES"
     model_id: str | None = None
+
+    @property
+    def action(self) -> str:
+        return self.side
+
+    @property
+    def limit_price(self) -> float:
+        return self.price
 
 
 @dataclass(frozen=True)
@@ -254,3 +265,5 @@ class Feedback:
     resolved_at: datetime | None = None
     category: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    strategy_id: str = "default"
+    strategy_version_id: str = "default-v1"
