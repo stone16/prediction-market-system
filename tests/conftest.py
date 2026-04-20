@@ -12,6 +12,10 @@ class _TestAsyncpgConnection:
         del query, args
         return "INSERT 0 1"
 
+    async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        del query, args
+        return []
+
     async def fetchrow(self, query: str, *args: object) -> None:
         del query, args
         return None
