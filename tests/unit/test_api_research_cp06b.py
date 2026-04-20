@@ -3,16 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import httpx
 import pytest
 
+from pms.api.app import create_app
 from pms.api.research_routes import (
     _record_to_json,
+    compute_backtest_live_comparison,
     enqueue_backtest_runs,
+    fetch_backtest_run,
     scan_orphaned_backtest_runs,
 )
 from pms.research.sweep import QueuedSweepRun
+from pms.runner import Runner
 
 
 _SWEEP_YAML = """
@@ -188,3 +193,110 @@ def test_record_to_json_only_decodes_known_json_columns() -> None:
         "failure_reason": '{"unterminated"',
         "queued_at": "2026-04-20T12:00:00+00:00",
     }
+
+
+@pytest.mark.asyncio
+async def test_enqueue_backtest_runs_rejects_non_mapping_yaml() -> None:
+    # malformed YAML (empty) — yaml.safe_load returns None, not a mapping
+    with pytest.raises(TypeError, match="mapping"):
+        await enqueue_backtest_runs(cast(Any, object()), "")
+
+
+@pytest.mark.asyncio
+async def test_enqueue_backtest_runs_rejects_list_top_level() -> None:
+    with pytest.raises(TypeError, match="mapping"):
+        await enqueue_backtest_runs(cast(Any, object()), "- a\n- b\n")
+
+
+@pytest.mark.asyncio
+async def test_compute_backtest_live_comparison_rejects_non_mapping_body() -> None:
+    with pytest.raises(TypeError, match="mapping"):
+        await compute_backtest_live_comparison(cast(Any, object()), "run-1", [])
+
+
+@pytest.mark.asyncio
+async def test_compute_backtest_live_comparison_rejects_missing_denominator() -> None:
+    body = {
+        "live_window_start": "2026-04-01T00:00:00+00:00",
+        "live_window_end": "2026-04-02T00:00:00+00:00",
+    }
+    with pytest.raises(ValueError, match="denominator"):
+        await compute_backtest_live_comparison(cast(Any, object()), "run-1", body)
+
+
+@pytest.mark.asyncio
+async def test_compute_backtest_live_comparison_rejects_tz_naive_window() -> None:
+    body = {
+        "live_window_start": "2026-04-01T00:00:00",
+        "live_window_end": "2026-04-02T00:00:00+00:00",
+        "denominator": "backtest_set",
+    }
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await compute_backtest_live_comparison(cast(Any, object()), "run-1", body)
+
+
+class _FetchRowConnection:
+    async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+        del query, args
+        return None
+
+
+class _FetchRowContext:
+    async def __aenter__(self) -> _FetchRowConnection:
+        return _FetchRowConnection()
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+
+class _FetchRowPool:
+    def acquire(self) -> _FetchRowContext:
+        return _FetchRowContext()
+
+
+@pytest.mark.asyncio
+async def test_fetch_backtest_run_returns_none_for_unknown_run_id() -> None:
+    result = await fetch_backtest_run(cast(Any, _FetchRowPool()), "missing-run")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_create_backtest_run_returns_503_when_pg_pool_unset() -> None:
+    # No pg_pool bound and auto_start=False means the lifespan contextmanager
+    # is the only codepath that might create one. httpx.ASGITransport does not
+    # invoke lifespan by default, so pg_pool stays None and the route yields 503.
+    runner = Runner()
+    app = create_app(runner, auto_start=False)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post("/research/backtest", content="")
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_get_backtest_run_returns_503_when_pg_pool_unset() -> None:
+    runner = Runner()
+    app = create_app(runner, auto_start=False)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/research/backtest/any-id")
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_compare_backtest_run_returns_503_when_pg_pool_unset() -> None:
+    runner = Runner()
+    app = create_app(runner, auto_start=False)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/research/backtest/any-id/compare",
+            json={"denominator": "backtest_set"},
+        )
+    assert response.status_code == 503
