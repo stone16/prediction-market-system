@@ -422,9 +422,10 @@ async def test_backtest_live_comparison_non_identity_time_policy_updates_curve_a
         )
 
     assert warnings is not None
+    decoded_warnings = json.loads(warnings) if isinstance(warnings, str) else warnings
     assert any(
         "non-identity comparison policy applied" in warning
-        for warning in cast(list[str], warnings)
+        for warning in cast(list[str], decoded_warnings)
     )
 
 

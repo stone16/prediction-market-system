@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 import json
 import os
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import asyncpg
 import yaml
 
+from pms.research.comparison import BacktestLiveComparisonTool
+from pms.research.policies import (
+    SelectionDenominator,
+    SymbolNormalizationPolicy,
+    TimeAlignmentPolicy,
+)
 from pms.research.spec_codec import deserialize_backtest_spec, deserialize_execution_config
 from pms.research.sweep import ParameterSweep, QueuedSweepRun
 
@@ -100,6 +107,45 @@ async def list_backtest_strategy_runs(
     return [_record_to_json(row) for row in rows]
 
 
+async def compute_backtest_live_comparison(
+    pg_pool: asyncpg.Pool,
+    run_id: str,
+    raw_body: object,
+) -> dict[str, object]:
+    if not isinstance(raw_body, Mapping):
+        msg = "comparison request body must decode to a mapping"
+        raise TypeError(msg)
+    live_window_start = _required_datetime(raw_body, "live_window_start")
+    live_window_end = _required_datetime(raw_body, "live_window_end")
+    denominator = _required_denominator(raw_body)
+    strategy_id, strategy_version_id = await _strategy_identity_for_compare(
+        pg_pool,
+        run_id=run_id,
+        raw_strategy_id=raw_body.get("strategy_id"),
+        raw_strategy_version_id=raw_body.get("strategy_version_id"),
+    )
+    tool = BacktestLiveComparisonTool(
+        pool=pg_pool,
+        time_alignment_policy=_time_alignment_policy(raw_body.get("time_alignment_policy")),
+        symbol_normalization_policy=_symbol_normalization_policy(
+            raw_body.get("symbol_normalization_policy")
+        ),
+    )
+    comparison = await tool.compute(
+        run_id=run_id,
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
+        live_window_start=live_window_start,
+        live_window_end=live_window_end,
+        denominator=denominator,
+    )
+    payload = _jsonify(asdict(comparison))
+    if not isinstance(payload, dict):
+        msg = "comparison payload must encode to a mapping"
+        raise TypeError(msg)
+    return cast(dict[str, object], payload)
+
+
 async def scan_orphaned_backtest_runs(
     pg_pool: asyncpg.Pool,
     *,
@@ -142,6 +188,117 @@ async def scan_orphaned_backtest_runs(
 
 def orphaned_failure_reason() -> str:
     return _ORPHANED_FAILURE_REASON
+
+
+def _required_datetime(payload: Mapping[str, object], key: str) -> datetime:
+    raw_value = payload.get(key)
+    if not isinstance(raw_value, str) or not raw_value:
+        msg = f"{key} must be a non-empty ISO8601 string"
+        raise TypeError(msg)
+    timestamp = datetime.fromisoformat(raw_value)
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        msg = f"{key} must be timezone-aware"
+        raise ValueError(msg)
+    return timestamp
+
+
+def _required_denominator(payload: Mapping[str, object]) -> SelectionDenominator:
+    raw_value = payload.get("denominator")
+    if raw_value not in ("backtest_set", "live_set", "union"):
+        msg = "denominator must be one of 'backtest_set', 'live_set', or 'union'"
+        raise ValueError(msg)
+    return raw_value
+
+
+async def _strategy_identity_for_compare(
+    pg_pool: asyncpg.Pool,
+    *,
+    run_id: str,
+    raw_strategy_id: object,
+    raw_strategy_version_id: object,
+) -> tuple[str, str]:
+    if raw_strategy_id is None and raw_strategy_version_id is None:
+        async with pg_pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT DISTINCT strategy_id, strategy_version_id
+                FROM strategy_runs
+                WHERE run_id = $1::uuid
+                ORDER BY strategy_id ASC, strategy_version_id ASC
+                """,
+                run_id,
+            )
+        if not rows:
+            msg = f"Backtest run {run_id} has no strategy rows to compare"
+            raise LookupError(msg)
+        if len(rows) != 1:
+            msg = (
+                "strategy_id and strategy_version_id are required when a run "
+                "contains multiple strategy rows"
+            )
+            raise ValueError(msg)
+        return (cast(str, rows[0]["strategy_id"]), cast(str, rows[0]["strategy_version_id"]))
+    if not isinstance(raw_strategy_id, str) or not raw_strategy_id:
+        msg = "strategy_id must be a non-empty string when provided"
+        raise TypeError(msg)
+    if not isinstance(raw_strategy_version_id, str) or not raw_strategy_version_id:
+        msg = "strategy_version_id must be a non-empty string when provided"
+        raise TypeError(msg)
+    return (raw_strategy_id, raw_strategy_version_id)
+
+
+def _time_alignment_policy(raw_value: object) -> TimeAlignmentPolicy:
+    if raw_value is None:
+        return TimeAlignmentPolicy()
+    if not isinstance(raw_value, Mapping):
+        msg = "time_alignment_policy must decode to a mapping"
+        raise TypeError(msg)
+    return TimeAlignmentPolicy(
+        generated_offset_s=_float_field(raw_value, "generated_offset_s", default=0.0),
+        exchange_offset_s=_float_field(raw_value, "exchange_offset_s", default=0.0),
+        ingest_offset_s=_float_field(raw_value, "ingest_offset_s", default=0.0),
+        evaluation_offset_s=_float_field(raw_value, "evaluation_offset_s", default=0.0),
+    )
+
+
+def _symbol_normalization_policy(raw_value: object) -> SymbolNormalizationPolicy:
+    if raw_value is None:
+        return SymbolNormalizationPolicy()
+    if not isinstance(raw_value, Mapping):
+        msg = "symbol_normalization_policy must decode to a mapping"
+        raise TypeError(msg)
+    return SymbolNormalizationPolicy(
+        token_id_aliases=_alias_map(raw_value.get("token_id_aliases")),
+        market_id_aliases=_alias_map(raw_value.get("market_id_aliases")),
+    )
+
+
+def _alias_map(raw_value: object) -> Mapping[str, str]:
+    if raw_value is None:
+        return {}
+    if not isinstance(raw_value, Mapping):
+        msg = "alias maps must decode to string-to-string mappings"
+        raise TypeError(msg)
+    normalized: dict[str, str] = {}
+    for key, value in raw_value.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            msg = "alias maps must decode to string-to-string mappings"
+            raise TypeError(msg)
+        normalized[key] = value
+    return normalized
+
+
+def _float_field(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    default: float,
+) -> float:
+    raw_value = payload.get(key, default)
+    if not isinstance(raw_value, (int, float)) or isinstance(raw_value, bool):
+        msg = f"{key} must be numeric"
+        raise TypeError(msg)
+    return float(raw_value)
 
 
 def _load_yaml_payload(sweep_yaml: str) -> dict[str, object]:
@@ -216,6 +373,7 @@ def _looks_like_json(value: str) -> bool:
 
 
 __all__ = [
+    "compute_backtest_live_comparison",
     "enqueue_backtest_runs",
     "fetch_backtest_run",
     "list_backtest_strategy_runs",

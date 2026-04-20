@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from pms.api.research_routes import (
+    compute_backtest_live_comparison,
     enqueue_backtest_runs,
     fetch_backtest_run,
     list_backtest_strategy_runs,
@@ -238,6 +239,21 @@ def create_app(
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_backtest_strategy_runs(active_runner.pg_pool, run_id)
+
+    @app.post("/research/backtest/{run_id}/compare")
+    async def compare_backtest_run(run_id: str, request: Request) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            return await compute_backtest_live_comparison(
+                active_runner.pg_pool,
+                run_id,
+                await request.json(),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/feedback/{feedback_id}/resolve")
     async def resolve_feedback(feedback_id: str) -> dict[str, Any]:

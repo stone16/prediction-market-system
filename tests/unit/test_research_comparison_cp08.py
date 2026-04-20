@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, is_dataclass
+from datetime import UTC, datetime
 from inspect import Parameter, signature
 
 import pytest
@@ -18,8 +19,8 @@ def test_backtest_live_comparison_types_are_frozen_dataclasses() -> None:
         run_id="run-1",
         strategy_id="alpha",
         strategy_version_id="alpha-v1",
-        live_window_start="2026-04-10T00:00:00+00:00",  # type: ignore[arg-type]
-        live_window_end="2026-04-12T23:59:59+00:00",  # type: ignore[arg-type]
+        live_window_start=datetime(2026, 4, 10, 0, 0, tzinfo=UTC),
+        live_window_end=datetime(2026, 4, 12, 23, 59, 59, tzinfo=UTC),
         denominator="union",
         equity_delta_json=(),
         overlap_ratio=0.25,
@@ -27,7 +28,7 @@ def test_backtest_live_comparison_types_are_frozen_dataclasses() -> None:
         live_only_symbols=("market-c::token-c",),
         time_alignment_policy_json={},
         symbol_normalization_policy_json={},
-        computed_at="2026-04-12T00:00:00+00:00",  # type: ignore[arg-type]
+        computed_at=datetime(2026, 4, 12, 0, 0, tzinfo=UTC),
     )
 
     with pytest.raises(FrozenInstanceError):
@@ -42,7 +43,7 @@ def test_backtest_live_comparison_tool_requires_explicit_policy_args() -> None:
     assert parameters["symbol_normalization_policy"].default is Parameter.empty
 
     tool = BacktestLiveComparisonTool(
-        pool=object(),  # type: ignore[arg-type]
+        pool=object(),
         time_alignment_policy=TimeAlignmentPolicy(),
         symbol_normalization_policy=SymbolNormalizationPolicy(),
     )

@@ -1,5 +1,10 @@
 """Research-side backtest models and execution utilities."""
 
+from .comparison import (
+    BacktestLiveComparison,
+    BacktestLiveComparisonStore,
+    BacktestLiveComparisonTool,
+)
 from .entities import (
     EvaluationRankingMetric,
     EvaluationReport,
@@ -28,6 +33,9 @@ from .specs import (
 from .sweep import ParameterSweep
 
 __all__ = [
+    "BacktestLiveComparison",
+    "BacktestLiveComparisonStore",
+    "BacktestLiveComparisonTool",
     "BacktestDataset",
     "BacktestExecutionConfig",
     "BacktestRunner",
