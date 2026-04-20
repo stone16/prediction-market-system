@@ -218,6 +218,9 @@ class BacktestRunner:
         return True
 
     async def _execute_claimed(self, claimed_run: _ClaimedRun) -> None:
+        if not claimed_run.spec.strategy_versions:
+            msg = "no_strategy_versions"
+            raise ValueError(msg)
         strategies = await self._load_strategies(claimed_run.spec.strategy_versions)
         for index, strategy in enumerate(strategies):
             if index == 0:
