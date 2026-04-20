@@ -12,6 +12,18 @@ export type SweepParameterRow = {
   values: string;
 };
 
+export type SweepRiskPolicy = {
+  max_position_notional_usdc: number;
+  max_daily_drawdown_pct: number;
+  min_order_size_usdc: number;
+};
+
+export const DEFAULT_SWEEP_RISK_POLICY: SweepRiskPolicy = {
+  max_position_notional_usdc: 100,
+  max_daily_drawdown_pct: 2.5,
+  min_order_size_usdc: 1
+};
+
 const STRATEGY_IDENTITY_SEPARATOR = '::';
 const NUMERIC_PARAMETER_PATTERN = /^-?(?:\d+|\d+\.\d+|\.\d+)$/;
 
@@ -138,7 +150,9 @@ export function buildSweepYaml(args: {
   chunkDays: number;
   timeBudget: number;
   parameterRows: SweepParameterRow[];
+  riskPolicy?: SweepRiskPolicy;
 }): string {
+  const riskPolicy = args.riskPolicy ?? DEFAULT_SWEEP_RISK_POLICY;
   const strategyVersions = args.selectedStrategies.map((strategy) => [
     strategy.strategy_id,
     strategy.active_version_id ?? `${strategy.strategy_id}-v1`
@@ -185,9 +199,9 @@ export function buildSweepYaml(args: {
       },
       execution_model: executionModel,
       risk_policy: {
-        max_position_notional_usdc: 100,
-        max_daily_drawdown_pct: 2.5,
-        min_order_size_usdc: 1
+        max_position_notional_usdc: riskPolicy.max_position_notional_usdc,
+        max_daily_drawdown_pct: riskPolicy.max_daily_drawdown_pct,
+        min_order_size_usdc: riskPolicy.min_order_size_usdc
       },
       date_range_start: `${args.startDate}T00:00:00+00:00`,
       date_range_end: `${args.endDate}T00:00:00+00:00`

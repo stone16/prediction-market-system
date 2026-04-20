@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { apiPost } from '@/lib/api';
 import {
   buildSweepYaml,
+  DEFAULT_SWEEP_RISK_POLICY,
   defaultParameterRows,
   ensureRunId,
   type SweepParameterRow
@@ -16,6 +17,14 @@ type NewSweepModalProps = {
   onSubmitted: (runId: string) => void;
 };
 
+function parsePositiveNumber(raw: string, fallback: number): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
 export function NewSweepModal({ strategies, onClose, onSubmitted }: NewSweepModalProps) {
   const [selectedStrategyIds, setSelectedStrategyIds] = useState<string[]>([]);
   const [startDate, setStartDate] = useState('2026-04-01');
@@ -25,6 +34,15 @@ export function NewSweepModal({ strategies, onClose, onSubmitted }: NewSweepModa
   );
   const [chunkDays, setChunkDays] = useState('7');
   const [timeBudget, setTimeBudget] = useState('1800');
+  const [maxPositionNotional, setMaxPositionNotional] = useState(
+    String(DEFAULT_SWEEP_RISK_POLICY.max_position_notional_usdc)
+  );
+  const [maxDailyDrawdownPct, setMaxDailyDrawdownPct] = useState(
+    String(DEFAULT_SWEEP_RISK_POLICY.max_daily_drawdown_pct)
+  );
+  const [minOrderSize, setMinOrderSize] = useState(
+    String(DEFAULT_SWEEP_RISK_POLICY.min_order_size_usdc)
+  );
   const [parameterRows, setParameterRows] = useState<SweepParameterRow[]>(defaultParameterRows());
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,9 +60,34 @@ export function NewSweepModal({ strategies, onClose, onSubmitted }: NewSweepModa
         profile,
         chunkDays: parseInt(chunkDays || '7', 10),
         timeBudget: parseInt(timeBudget || '1800', 10),
-        parameterRows
+        parameterRows,
+        riskPolicy: {
+          max_position_notional_usdc: parsePositiveNumber(
+            maxPositionNotional,
+            DEFAULT_SWEEP_RISK_POLICY.max_position_notional_usdc
+          ),
+          max_daily_drawdown_pct: parsePositiveNumber(
+            maxDailyDrawdownPct,
+            DEFAULT_SWEEP_RISK_POLICY.max_daily_drawdown_pct
+          ),
+          min_order_size_usdc: parsePositiveNumber(
+            minOrderSize,
+            DEFAULT_SWEEP_RISK_POLICY.min_order_size_usdc
+          )
+        }
       }),
-    [chunkDays, endDate, parameterRows, profile, selectedStrategies, startDate, timeBudget]
+    [
+      chunkDays,
+      endDate,
+      maxDailyDrawdownPct,
+      maxPositionNotional,
+      minOrderSize,
+      parameterRows,
+      profile,
+      selectedStrategies,
+      startDate,
+      timeBudget
+    ]
   );
   const canSubmit = selectedStrategies.length > 0 && startDate !== '' && endDate !== '';
 
@@ -160,6 +203,30 @@ export function NewSweepModal({ strategies, onClose, onSubmitted }: NewSweepModa
               <label className="field-group">
                 <span>Time budget</span>
                 <input value={timeBudget} onChange={(event) => setTimeBudget(event.target.value)} />
+              </label>
+              <label className="field-group">
+                <span>Max position notional (USDC)</span>
+                <input
+                  value={maxPositionNotional}
+                  data-testid="risk-max-position-notional"
+                  onChange={(event) => setMaxPositionNotional(event.target.value)}
+                />
+              </label>
+              <label className="field-group">
+                <span>Max daily drawdown (%)</span>
+                <input
+                  value={maxDailyDrawdownPct}
+                  data-testid="risk-max-daily-drawdown-pct"
+                  onChange={(event) => setMaxDailyDrawdownPct(event.target.value)}
+                />
+              </label>
+              <label className="field-group">
+                <span>Min order size (USDC)</span>
+                <input
+                  value={minOrderSize}
+                  data-testid="risk-min-order-size"
+                  onChange={(event) => setMinOrderSize(event.target.value)}
+                />
               </label>
             </div>
           </section>
