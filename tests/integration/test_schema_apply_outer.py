@@ -22,6 +22,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("resolves_at", "timestamp with time zone"),
         ("created_at", "timestamp with time zone"),
         ("last_seen_at", "timestamp with time zone"),
+        ("volume_24h", "double precision"),
     ],
     "tokens": [
         ("token_id", "text"),

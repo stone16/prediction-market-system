@@ -33,6 +33,11 @@ STRATEGY_INDEXES = [
     "idx_opportunities_strategy_identity",
     "idx_orders_strategy_identity",
 ]
+INNER_RING_NOT_NULL_TABLES = [
+    *STRATEGY_TABLES,
+    "strategy_runs",
+    "backtest_live_comparisons",
+]
 REMEDIATION_MESSAGE = """CP04 remediation required before enforcing strategy identity columns.
 Run:
 UPDATE feedback SET strategy_id = 'default', strategy_version_id = 'default-v1' WHERE strategy_id IS NULL OR strategy_version_id IS NULL;
@@ -193,8 +198,10 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
         "-- END INNER-RING PRODUCT SHELLS",
     )
     assert "CREATE TABLE IF NOT EXISTS opportunities" in inner_ring
-    assert inner_ring.count("strategy_id TEXT NOT NULL") == 5
-    assert inner_ring.count("strategy_version_id TEXT NOT NULL") == 5
+    assert inner_ring.count("strategy_id TEXT NOT NULL") == len(INNER_RING_NOT_NULL_TABLES)
+    assert inner_ring.count("strategy_version_id TEXT NOT NULL") == len(
+        INNER_RING_NOT_NULL_TABLES
+    )
 
     admin_database_url = _replace_database(PMS_TEST_DATABASE_URL, "postgres")
     temp_database = f"pms_cp04_{uuid.uuid4().hex[:12]}"

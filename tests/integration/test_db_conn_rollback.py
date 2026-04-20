@@ -67,14 +67,18 @@ async def test_db_conn_rolls_back_each_test_transaction(
             source,
             message,
             severity,
-            created_at
-        ) VALUES ($1, $2, $3, $4, $5, now())
+            created_at,
+            strategy_id,
+            strategy_version_id
+        ) VALUES ($1, $2, $3, $4, $5, now(), $6, $7)
         """,
         "feedback-cp04",
         "sensor",
         "integration-test",
         "rollback me",
         "warning",
+        "default",
+        "default-v1",
     )
 
     inside_row_count = await db_conn.fetchval("SELECT COUNT(*) FROM feedback")
