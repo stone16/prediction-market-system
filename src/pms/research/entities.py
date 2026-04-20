@@ -9,6 +9,7 @@ import json
 from typing import Any, Literal, TypeAlias, cast
 
 
+EvaluationRankingMetric = Literal["brier", "sharpe", "pnl_cum"]
 PortfolioTargetSide = Literal["buy_yes", "buy_no"]
 PortfolioTargetKey: TypeAlias = tuple[str, str, PortfolioTargetSide, datetime]
 
@@ -93,6 +94,27 @@ class PortfolioTarget:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RankedStrategy:
+    strategy_id: str
+    strategy_version_id: str
+    metric_value: float
+    rank: int
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationReport:
+    report_id: str
+    run_id: str
+    ranking_metric: EvaluationRankingMetric
+    ranked_strategies: tuple[RankedStrategy, ...]
+    benchmark_rows: tuple[Mapping[str, object], ...]
+    attribution_commentary: str
+    warnings: tuple[str, ...]
+    next_action: str
+    generated_at: datetime
+
+
 def serialize_portfolio_target_json(target: PortfolioTarget) -> str:
     return json.dumps(
         target.to_json_value(),
@@ -133,9 +155,12 @@ def _required_float(payload: Mapping[str, object], key: str) -> float:
 
 
 __all__ = [
+    "EvaluationRankingMetric",
+    "EvaluationReport",
     "PortfolioTarget",
     "PortfolioTargetKey",
     "PortfolioTargetSide",
+    "RankedStrategy",
     "deserialize_portfolio_target_json",
     "serialize_portfolio_target_json",
 ]
