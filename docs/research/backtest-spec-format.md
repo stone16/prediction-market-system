@@ -234,10 +234,26 @@ Practical mapping from telemetry to fields:
 
 - `slippage_bps`: move this first. It is directly surfaced in `/metrics`.
 - `latency_ms`: update from order round-trip or watchdog latency telemetry.
+  **Current limitation:** this field is recorded on the profile but the
+  replay engine does not yet consume it, so it does not influence backtest
+  output or `config_hash`. Revisit once the runner applies it.
 - `staleness_ms`: update from the point where live data is no longer trusted.
+  **Current limitation:** same as `latency_ms` — declared but unconsumed, and
+  therefore excluded from `config_hash` to prevent cache-dedup misfires.
 - `fee_rate`: update only when the venue fee schedule or account tier changes.
 - `fill_policy`: update only when the execution style changed; it is not a
   tuning knob for making reports look better.
+
+## Brier and P&L availability
+
+`strategy_runs.brier` and `strategy_runs.pnl_cum` are populated only for fills
+whose signal carried a `resolved_outcome`. In replay-driven backtests this
+comes from the historical resolution of the market the fill touched. If no
+fills in a run ever saw a resolution (e.g. every selected market is still
+open by the backtest end), the runner writes `brier=NULL` and `pnl_cum=NULL`
+rather than a misleading `0.0`. Downstream reports must treat `NULL` as
+"not computed" and skip those strategies when ranking by `brier` or
+`pnl_cum`.
 
 Recommended calibration discipline:
 
