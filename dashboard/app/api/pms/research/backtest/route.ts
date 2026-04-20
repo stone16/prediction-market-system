@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { mockBacktestRuns, mockEnqueueBacktestRun } from '@/lib/mock-store';
+import { mockBacktestRuns } from '@/lib/mock-store';
 import { upstreamResponse } from '@/lib/upstream';
 
 export async function GET(request: Request) {
@@ -19,5 +19,5 @@ export async function POST(request: Request) {
     body
   });
   if (upstream) return upstream;
-  return NextResponse.json(mockEnqueueBacktestRun());
+  return NextResponse.json({ detail: 'Research backend unavailable' }, { status: 503 });
 }

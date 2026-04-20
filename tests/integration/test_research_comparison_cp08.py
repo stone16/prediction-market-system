@@ -219,6 +219,23 @@ async def _insert_live_opportunity(
 
 
 async def _insert_pnl_report(pool: asyncpg.Pool, *, run_id: str, generated_at: datetime) -> None:
+    await _insert_report(
+        pool,
+        run_id=run_id,
+        generated_at=generated_at,
+        ranking_metric="pnl_cum",
+        metric_value=2.5,
+    )
+
+
+async def _insert_report(
+    pool: asyncpg.Pool,
+    *,
+    run_id: str,
+    generated_at: datetime,
+    ranking_metric: str,
+    metric_value: float,
+) -> None:
     async with pool.acquire() as connection:
         await connection.execute(
             """
@@ -235,28 +252,82 @@ async def _insert_pnl_report(pool: asyncpg.Pool, *, run_id: str, generated_at: d
             ) VALUES (
                 $1::uuid,
                 $2::uuid,
-                'pnl_cum',
-                $3::jsonb,
+                $3,
+                $4::jsonb,
                 '[]'::jsonb,
                 'fixture',
                 '[]'::jsonb,
                 'fixture',
-                $4
+                $5
             )
             """,
             str(uuid4()),
             run_id,
+            ranking_metric,
             json.dumps(
                 [
                     {
                         "strategy_id": "alpha",
                         "strategy_version_id": "alpha-v1",
-                        "metric_value": 2.5,
+                        "metric_value": metric_value,
                         "rank": 1,
                     }
                 ]
             ),
             generated_at,
+        )
+
+
+async def _insert_live_eval_record(
+    pool: asyncpg.Pool,
+    *,
+    run_id: str,
+    market_id: str,
+    recorded_at: datetime,
+    pnl: float,
+) -> None:
+    del run_id
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO eval_records (
+                decision_id,
+                market_id,
+                prob_estimate,
+                resolved_outcome,
+                brier_score,
+                fill_status,
+                recorded_at,
+                citations,
+                category,
+                model_id,
+                pnl,
+                slippage_bps,
+                filled,
+                strategy_id,
+                strategy_version_id
+            ) VALUES (
+                $1,
+                $2,
+                0.6,
+                1.0,
+                0.16,
+                'matched',
+                $3,
+                '[]'::jsonb,
+                'fixture',
+                'fixture-model',
+                $4,
+                5.0,
+                TRUE,
+                'alpha',
+                'alpha-v1'
+            )
+            """,
+            f"decision-{uuid4()}",
+            market_id,
+            recorded_at,
+            pnl,
         )
 
 
@@ -267,6 +338,20 @@ async def _seed_comparison_fixture(pool: asyncpg.Pool, *, run_id: str) -> None:
         pool,
         market_id="market-b",
         ts=datetime(2026, 4, 11, 0, 30, tzinfo=UTC),
+    )
+    await _insert_live_eval_record(
+        pool,
+        run_id=run_id,
+        market_id="market-b",
+        recorded_at=datetime(2026, 4, 11, 0, 30, tzinfo=UTC),
+        pnl=1.5,
+    )
+    await _insert_live_eval_record(
+        pool,
+        run_id=run_id,
+        market_id="market-b",
+        recorded_at=datetime(2026, 4, 12, 12, 0, tzinfo=UTC),
+        pnl=1.0,
     )
     await _insert_live_opportunity(
         pool,
@@ -342,6 +427,8 @@ async def test_backtest_live_comparison_compute_supports_all_denominators(
         "2026-04-11",
         "2026-04-12",
     ]
+    assert union_view.equity_delta_json[0]["live_equity"] == pytest.approx(0.0)
+    assert union_view.equity_delta_json[-1]["live_equity"] == pytest.approx(2.5)
     assert backtest_view.overlap_ratio == pytest.approx(0.5)
     assert live_view.overlap_ratio == pytest.approx(1.0 / 3.0)
     assert union_view.overlap_ratio == pytest.approx(0.25)
@@ -387,7 +474,7 @@ async def test_backtest_live_comparison_non_identity_time_policy_updates_curve_a
     )
     shifted_tool = BacktestLiveComparisonTool(
         pool=pg_pool,
-        time_alignment_policy=TimeAlignmentPolicy(exchange_offset_s=-3600.0),
+        time_alignment_policy=TimeAlignmentPolicy(evaluation_offset_s=-3600.0),
         symbol_normalization_policy=SymbolNormalizationPolicy(),
     )
 
@@ -427,6 +514,81 @@ async def test_backtest_live_comparison_non_identity_time_policy_updates_curve_a
         "non-identity comparison policy applied" in warning
         for warning in cast(list[str], decoded_warnings)
     )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_backtest_live_comparison_warning_append_is_scoped_and_idempotent(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    run_id = str(uuid4())
+    await _seed_comparison_fixture(pg_pool, run_id=run_id)
+    await _insert_report(
+        pg_pool,
+        run_id=run_id,
+        generated_at=datetime(2026, 4, 12, 12, 0, tzinfo=UTC),
+        ranking_metric="brier",
+        metric_value=0.11,
+    )
+
+    tool = BacktestLiveComparisonTool(
+        pool=pg_pool,
+        time_alignment_policy=TimeAlignmentPolicy(evaluation_offset_s=-3600.0),
+        symbol_normalization_policy=SymbolNormalizationPolicy(),
+    )
+    live_window_start = datetime(2026, 4, 10, 0, 0, tzinfo=UTC)
+    live_window_end = datetime(2026, 4, 12, 23, 59, 59, tzinfo=UTC)
+
+    await tool.compute(
+        run_id=run_id,
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        live_window_start=live_window_start,
+        live_window_end=live_window_end,
+        denominator="union",
+    )
+    await tool.compute(
+        run_id=run_id,
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        live_window_start=live_window_start,
+        live_window_end=live_window_end,
+        denominator="union",
+    )
+
+    async with pg_pool.acquire() as connection:
+        pnl_warnings = await connection.fetchval(
+            """
+            SELECT warnings
+            FROM evaluation_reports
+            WHERE run_id = $1::uuid
+              AND ranking_metric = 'pnl_cum'
+            """,
+            run_id,
+        )
+        brier_warnings = await connection.fetchval(
+            """
+            SELECT warnings
+            FROM evaluation_reports
+            WHERE run_id = $1::uuid
+              AND ranking_metric = 'brier'
+            """,
+            run_id,
+        )
+
+    assert pnl_warnings is not None
+    decoded_pnl_warnings = (
+        json.loads(pnl_warnings) if isinstance(pnl_warnings, str) else pnl_warnings
+    )
+    matching_warnings = [
+        warning
+        for warning in cast(list[str], decoded_pnl_warnings)
+        if "non-identity comparison policy applied" in warning
+    ]
+    assert len(matching_warnings) == 1
+    decoded_brier_warnings = (
+        json.loads(brier_warnings) if isinstance(brier_warnings, str) else brier_warnings
+    )
+    assert decoded_brier_warnings == []
 
 
 @pytest.mark.asyncio(loop_scope="session")

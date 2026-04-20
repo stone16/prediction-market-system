@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { Nav } from '@/components/Nav';
 import { apiPost } from '@/lib/api';
-import { strategyIdentityValue } from '@/lib/backtest';
+import { parseStrategyIdentity, strategyIdentityValue } from '@/lib/backtest';
 import { useLiveData } from '@/lib/useLiveData';
 import type {
   BacktestLiveComparisonResponse,
@@ -51,7 +51,11 @@ export function BacktestComparePage({ runId }: BacktestComparePageProps) {
     if (strategyIdentity === '' || liveWindowStart === '' || liveWindowEnd === '') {
       return;
     }
-    const [strategyId, strategyVersionId] = strategyIdentity.split('::');
+    const parsedIdentity = parseStrategyIdentity(strategyIdentity);
+    if (parsedIdentity === null) {
+      setError('Invalid strategy selection');
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -60,8 +64,8 @@ export function BacktestComparePage({ runId }: BacktestComparePageProps) {
         {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            strategy_id: strategyId,
-            strategy_version_id: strategyVersionId,
+            strategy_id: parsedIdentity.strategyId,
+            strategy_version_id: parsedIdentity.strategyVersionId,
             live_window_start: `${liveWindowStart}T00:00:00+00:00`,
             live_window_end: `${liveWindowEnd}T23:59:59+00:00`,
             denominator

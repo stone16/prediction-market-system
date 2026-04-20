@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import is_dataclass
+from datetime import UTC, datetime
 import importlib
 import inspect
 import math
 import re
-from typing import Any
+from typing import Any, Mapping, cast
 
 import pytest
 
@@ -118,3 +119,39 @@ def test_polymarket_live_estimate_assignments_have_source_comments() -> None:
         assert any(
             SOURCE_COMMENT_PATTERN.match(line) for line in comment_window
         ), field_name
+
+
+def test_paper_profile_round_trips_through_spec_codec_with_infinite_staleness() -> None:
+    from pms.research.spec_codec import deserialize_backtest_spec, serialize_backtest_spec
+    from pms.research.specs import BacktestDataset, BacktestSpec, ExecutionModel
+    from pms.strategies.projections import RiskParams
+
+    spec = BacktestSpec(
+        strategy_versions=(("alpha", "alpha-v1"),),
+        dataset=BacktestDataset(
+            source="fixture",
+            version="v1",
+            coverage_start=datetime(2026, 4, 1, tzinfo=UTC),
+            coverage_end=datetime(2026, 4, 30, tzinfo=UTC),
+            market_universe_filter={"market_ids": ["market-a"]},
+            data_quality_gaps=(),
+        ),
+        execution_model=ExecutionModel.polymarket_paper(),
+        risk_policy=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        date_range_start=datetime(2026, 4, 1, tzinfo=UTC),
+        date_range_end=datetime(2026, 4, 30, tzinfo=UTC),
+    )
+
+    payload = serialize_backtest_spec(spec)
+    execution_model_payload = cast(Mapping[str, object], payload["execution_model"])
+
+    assert execution_model_payload["staleness_ms"] == ".inf"
+    assert len(spec.config_hash) == 64
+
+    decoded = deserialize_backtest_spec(payload)
+
+    assert math.isinf(decoded.execution_model.staleness_ms)

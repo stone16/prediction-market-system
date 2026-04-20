@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-import json
 import os
 import socket
 from typing import Any, Literal, Protocol, TypeAlias, cast
@@ -16,18 +15,21 @@ from uuid import uuid4
 import asyncpg
 
 from pms.actuator.adapters.paper import PaperActuator
+from pms.actuator.risk import InsufficientLiquidityError
 from pms.controller.factory import ControllerPipelineFactory
 from pms.core.enums import OrderStatus
 from pms.core.models import FillRecord, MarketSignal, OrderState, Portfolio, Position
 from pms.evaluation.metrics import StrategyVersionKey
 from pms.research.entities import PortfolioTarget, serialize_portfolio_target_json
 from pms.research.replay import MarketUniverseReplayEngine
+from pms.research.spec_codec import (
+    deserialize_backtest_spec as _codec_deserialize_backtest_spec,
+    deserialize_execution_config as _codec_deserialize_execution_config,
+)
 from pms.research.specs import (
-    BacktestDataset,
     BacktestExecutionConfig,
     BacktestSpec,
     ExecutionModel,
-    RiskPolicy,
 )
 from pms.storage.strategy_registry import _strategy_from_config_json
 from pms.strategies.projections import ActiveStrategy
@@ -268,7 +270,7 @@ class BacktestRunner:
                 order_state = await PaperActuator(
                     orderbooks={signal.market_id: signal.orderbook}
                 ).execute(cast(Any, decision), portfolio)
-            except Exception:
+            except InsufficientLiquidityError:
                 continue
             fill = _fill_from_order(order_state, decision, signal)
             if fill is None:
@@ -320,8 +322,8 @@ class BacktestRunner:
             return None
         return _ClaimedRun(
             run_id=str(cast(object, row["run_id"])),
-            spec=_deserialize_backtest_spec(row["spec_json"]),
-            exec_config=_deserialize_execution_config(row["exec_config_json"]),
+            spec=_codec_deserialize_backtest_spec(row["spec_json"]),
+            exec_config=_codec_deserialize_execution_config(row["exec_config_json"]),
         )
 
     async def _load_strategies(
@@ -549,157 +551,6 @@ async def _maybe_call_cancel_probe(
     outcome = probe(point)
     if asyncio.iscoroutine(outcome):
         await cast(Awaitable[None], outcome)
-
-
-def _deserialize_backtest_spec(raw_value: object) -> BacktestSpec:
-    payload = _json_object(raw_value)
-    strategy_versions_raw = payload.get("strategy_versions", ())
-    if not isinstance(strategy_versions_raw, list):
-        msg = "BacktestSpec.strategy_versions must decode to a JSON array"
-        raise TypeError(msg)
-    strategy_versions: list[StrategyVersionKey] = []
-    for item in strategy_versions_raw:
-        if not isinstance(item, list | tuple) or len(item) != 2:
-            msg = "BacktestSpec.strategy_versions entries must be pairs"
-            raise TypeError(msg)
-        strategy_versions.append((str(item[0]), str(item[1])))
-    return BacktestSpec(
-        strategy_versions=tuple(strategy_versions),
-        dataset=_deserialize_dataset(payload["dataset"]),
-        execution_model=_deserialize_execution_model(payload["execution_model"]),
-        risk_policy=_deserialize_risk_policy(payload["risk_policy"]),
-        date_range_start=_deserialize_datetime(payload["date_range_start"]),
-        date_range_end=_deserialize_datetime(payload["date_range_end"]),
-    )
-
-
-def _deserialize_execution_config(raw_value: object) -> BacktestExecutionConfig:
-    payload = _json_object(raw_value)
-    return BacktestExecutionConfig(
-        chunk_days=_coerce_int(
-            payload.get("chunk_days", 7),
-            field_name="BacktestExecutionConfig.chunk_days",
-        ),
-        time_budget=_coerce_int(
-            payload.get("time_budget", 1800),
-            field_name="BacktestExecutionConfig.time_budget",
-        ),
-    )
-
-
-def _deserialize_dataset(raw_value: object) -> BacktestDataset:
-    payload = _json_object(raw_value)
-    raw_gaps = payload.get("data_quality_gaps", [])
-    if not isinstance(raw_gaps, list):
-        msg = "BacktestDataset.data_quality_gaps must decode to a JSON array"
-        raise TypeError(msg)
-    gaps: list[tuple[datetime, datetime, str]] = []
-    for item in raw_gaps:
-        if not isinstance(item, list | tuple) or len(item) != 3:
-            msg = "BacktestDataset.data_quality_gaps entries must be triples"
-            raise TypeError(msg)
-        gaps.append(
-            (
-                _deserialize_datetime(item[0]),
-                _deserialize_datetime(item[1]),
-                str(item[2]),
-            )
-        )
-    market_universe_filter = payload.get("market_universe_filter", {})
-    if not isinstance(market_universe_filter, Mapping):
-        msg = "BacktestDataset.market_universe_filter must decode to a JSON object"
-        raise TypeError(msg)
-    return BacktestDataset(
-        source=str(payload["source"]),
-        version=str(payload["version"]),
-        coverage_start=_deserialize_datetime(payload["coverage_start"]),
-        coverage_end=_deserialize_datetime(payload["coverage_end"]),
-        market_universe_filter=cast(Mapping[str, Any], dict(market_universe_filter)),
-        data_quality_gaps=tuple(gaps),
-    )
-
-
-def _deserialize_execution_model(raw_value: object) -> ExecutionModel:
-    payload = _json_object(raw_value)
-    return ExecutionModel(
-        fee_rate=_coerce_float(
-            payload["fee_rate"],
-            field_name="ExecutionModel.fee_rate",
-        ),
-        slippage_bps=_coerce_float(
-            payload["slippage_bps"],
-            field_name="ExecutionModel.slippage_bps",
-        ),
-        latency_ms=_coerce_float(
-            payload["latency_ms"],
-            field_name="ExecutionModel.latency_ms",
-        ),
-        staleness_ms=_coerce_float(
-            payload["staleness_ms"],
-            field_name="ExecutionModel.staleness_ms",
-        ),
-        fill_policy=_coerce_fill_policy(payload["fill_policy"]),
-    )
-
-
-def _deserialize_risk_policy(raw_value: object) -> RiskPolicy:
-    payload = _json_object(raw_value)
-    return RiskPolicy(
-        max_position_notional_usdc=_coerce_float(
-            payload["max_position_notional_usdc"],
-            field_name="RiskPolicy.max_position_notional_usdc",
-        ),
-        max_daily_drawdown_pct=_coerce_float(
-            payload["max_daily_drawdown_pct"],
-            field_name="RiskPolicy.max_daily_drawdown_pct",
-        ),
-        min_order_size_usdc=_coerce_float(
-            payload["min_order_size_usdc"],
-            field_name="RiskPolicy.min_order_size_usdc",
-        ),
-    )
-
-
-def _deserialize_datetime(raw_value: object) -> datetime:
-    if not isinstance(raw_value, str):
-        msg = "Backtest datetime fields must decode to ISO-8601 strings"
-        raise TypeError(msg)
-    value = datetime.fromisoformat(raw_value)
-    if value.tzinfo is None or value.utcoffset() is None:
-        msg = "Backtest datetime fields must be timezone-aware"
-        raise ValueError(msg)
-    return value
-
-
-def _coerce_int(raw_value: object, *, field_name: str) -> int:
-    if not isinstance(raw_value, int) or isinstance(raw_value, bool):
-        msg = f"{field_name} must decode to an integer"
-        raise TypeError(msg)
-    return raw_value
-
-
-def _coerce_float(raw_value: object, *, field_name: str) -> float:
-    if not isinstance(raw_value, int | float) or isinstance(raw_value, bool):
-        msg = f"{field_name} must decode to a numeric value"
-        raise TypeError(msg)
-    return float(raw_value)
-
-
-def _coerce_fill_policy(
-    raw_value: object,
-) -> Literal["immediate_or_cancel", "limit_if_touched"]:
-    if raw_value not in ("immediate_or_cancel", "limit_if_touched"):
-        msg = "ExecutionModel.fill_policy must decode to a supported fill policy"
-        raise TypeError(msg)
-    return raw_value
-
-
-def _json_object(raw_value: object) -> dict[str, object]:
-    decoded = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
-    if not isinstance(decoded, dict):
-        msg = "Expected JSON object payload"
-        raise TypeError(msg)
-    return cast(dict[str, object], decoded)
 
 
 def _resolved_outcome(signal: MarketSignal) -> float | None:

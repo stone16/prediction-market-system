@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 import json
+import math
 from typing import Any, Literal, cast
 
 from pms.research.specs import (
@@ -70,16 +71,20 @@ def serialize_backtest_spec(spec: BacktestSpec) -> dict[str, object]:
             ],
         },
         "execution_model": {
-            "fee_rate": spec.execution_model.fee_rate,
-            "slippage_bps": spec.execution_model.slippage_bps,
-            "latency_ms": spec.execution_model.latency_ms,
-            "staleness_ms": spec.execution_model.staleness_ms,
+            "fee_rate": _serialize_float(spec.execution_model.fee_rate),
+            "slippage_bps": _serialize_float(spec.execution_model.slippage_bps),
+            "latency_ms": _serialize_float(spec.execution_model.latency_ms),
+            "staleness_ms": _serialize_float(spec.execution_model.staleness_ms),
             "fill_policy": spec.execution_model.fill_policy,
         },
         "risk_policy": {
-            "max_position_notional_usdc": spec.risk_policy.max_position_notional_usdc,
-            "max_daily_drawdown_pct": spec.risk_policy.max_daily_drawdown_pct,
-            "min_order_size_usdc": spec.risk_policy.min_order_size_usdc,
+            "max_position_notional_usdc": _serialize_float(
+                spec.risk_policy.max_position_notional_usdc
+            ),
+            "max_daily_drawdown_pct": _serialize_float(
+                spec.risk_policy.max_daily_drawdown_pct
+            ),
+            "min_order_size_usdc": _serialize_float(spec.risk_policy.min_order_size_usdc),
         },
         "date_range_start": serialize_datetime(spec.date_range_start),
         "date_range_end": serialize_datetime(spec.date_range_end),
@@ -191,6 +196,14 @@ def _coerce_int(raw_value: object, *, field_name: str) -> int:
 
 
 def _coerce_float(raw_value: object, *, field_name: str) -> float:
+    if isinstance(raw_value, str):
+        sentinel = raw_value.strip().lower()
+        if sentinel in {".inf", "inf", "infinity"}:
+            return float("inf")
+        if sentinel in {"-.inf", "-inf", "-infinity"}:
+            return float("-inf")
+        if sentinel in {".nan", "nan"}:
+            return float("nan")
     if not isinstance(raw_value, int | float) or isinstance(raw_value, bool):
         msg = f"{field_name} must decode to a numeric value"
         raise TypeError(msg)
@@ -212,3 +225,11 @@ def _json_object(raw_value: object) -> dict[str, object]:
         msg = "Expected JSON object payload"
         raise TypeError(msg)
     return cast(dict[str, object], decoded)
+
+
+def _serialize_float(value: float) -> float | str:
+    if math.isnan(value):
+        return ".nan"
+    if math.isinf(value):
+        return ".inf" if value > 0 else "-.inf"
+    return value

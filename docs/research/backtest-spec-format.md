@@ -90,7 +90,7 @@ Field notes:
 | `base_spec.dataset.version` | string | yes | Dataset version or snapshot id. |
 | `base_spec.dataset.coverage_start` | ISO-8601 datetime with offset | yes | Must be timezone-aware. |
 | `base_spec.dataset.coverage_end` | ISO-8601 datetime with offset | yes | Must be timezone-aware. |
-| `base_spec.dataset.market_universe_filter` | mapping | yes | Arbitrary JSON-like object. Use `market_ids` when you want a fixed universe. |
+| `base_spec.dataset.market_universe_filter` | mapping | yes | Replay currently applies `market_ids`, `condition_ids`, and optional `venue`. Other keys stay in the serialized spec but are ignored by `MarketUniverseReplayEngine` until that filter surface expands. |
 | `base_spec.dataset.data_quality_gaps` | array of 3-item arrays | yes | Each item is `[start, end, reason]`. |
 | `base_spec.execution_model.fee_rate` | number | yes | Used by `ExecutionModel.fee_curve()`. |
 | `base_spec.execution_model.slippage_bps` | number | yes | Average execution slippage in basis points. |

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import json
 from typing import Any, cast
 from uuid import uuid4
@@ -191,14 +191,14 @@ class BacktestLiveComparisonTool:
                 )
                 raise LookupError(msg)
 
-            fill_rows = await connection.fetch(
+            eval_rows = await connection.fetch(
                 """
-                SELECT ts
-                FROM fills
+                SELECT recorded_at, pnl
+                FROM eval_records
                 WHERE strategy_id = $1
                   AND strategy_version_id = $2
-                  AND ts BETWEEN $3 AND $4
-                ORDER BY ts ASC
+                  AND recorded_at BETWEEN $3 AND $4
+                ORDER BY recorded_at ASC
                 """,
                 strategy_id,
                 strategy_version_id,
@@ -219,18 +219,6 @@ class BacktestLiveComparisonTool:
                 padded_window_start,
                 padded_window_end,
             )
-            report_rows = await connection.fetch(
-                """
-                SELECT ranked_strategies, generated_at
-                FROM evaluation_reports
-                WHERE ranking_metric = 'pnl_cum'
-                  AND generated_at BETWEEN $1 AND $2
-                ORDER BY generated_at ASC
-                """,
-                padded_window_start,
-                padded_window_end,
-            )
-
         backtest_symbols = _backtest_symbols(
             raw_portfolio_target=strategy_row["portfolio_target_json"],
             strategy_id=strategy_id,
@@ -255,10 +243,7 @@ class BacktestLiveComparisonTool:
             denominator=denominator,
             equity_delta_json=_equity_delta_rows(
                 backtest_equity=backtest_equity,
-                fill_rows=fill_rows,
-                report_rows=report_rows,
-                strategy_id=strategy_id,
-                strategy_version_id=strategy_version_id,
+                eval_rows=eval_rows,
                 window_start=live_window_start,
                 window_end=live_window_end,
                 time_alignment_policy=self.time_alignment_policy,
@@ -270,7 +255,7 @@ class BacktestLiveComparisonTool:
             symbol_normalization_policy_json=_symbol_normalization_policy_json(
                 self.symbol_normalization_policy
             ),
-            computed_at=datetime.now(tz=live_window_start.tzinfo),
+            computed_at=datetime.now(tz=UTC),
         )
         saved = await BacktestLiveComparisonStore(self.pool).insert(comparison)
         warning = _policy_warning(
@@ -278,7 +263,12 @@ class BacktestLiveComparisonTool:
             symbol_normalization_policy=self.symbol_normalization_policy,
         )
         if warning is not None:
-            await _append_warning(self.pool, run_id=run_id, warning=warning)
+            await _append_warning(
+                self.pool,
+                run_id=run_id,
+                ranking_metric="pnl_cum",
+                warning=warning,
+            )
         return saved
 
 
@@ -333,32 +323,21 @@ def _live_symbols(
 def _equity_delta_rows(
     *,
     backtest_equity: float,
-    fill_rows: Sequence[asyncpg.Record],
-    report_rows: Sequence[asyncpg.Record],
-    strategy_id: str,
-    strategy_version_id: str,
+    eval_rows: Sequence[asyncpg.Record],
     window_start: datetime,
     window_end: datetime,
     time_alignment_policy: TimeAlignmentPolicy,
 ) -> tuple[Mapping[str, object], ...]:
     daily_live_increments: dict[date, float] = defaultdict(float)
-    for row in fill_rows:
-        shifted_timestamp = time_alignment_policy.apply_exchange(cast(datetime, row["ts"]))
-        if _within_window(shifted_timestamp, window_start, window_end):
-            daily_live_increments[shifted_timestamp.date()] += 1.0
-    for row in report_rows:
+    for row in eval_rows:
         shifted_timestamp = time_alignment_policy.apply_evaluation(
-            cast(datetime, row["generated_at"])
+            cast(datetime, row["recorded_at"])
         )
         if not _within_window(shifted_timestamp, window_start, window_end):
             continue
-        metric_value = _matching_metric_value(
-            raw_ranked_strategies=row["ranked_strategies"],
-            strategy_id=strategy_id,
-            strategy_version_id=strategy_version_id,
-        )
-        if metric_value is not None:
-            daily_live_increments[shifted_timestamp.date()] += metric_value
+        pnl = row["pnl"]
+        if isinstance(pnl, (int, float)) and not isinstance(pnl, bool):
+            daily_live_increments[shifted_timestamp.date()] += float(pnl)
 
     live_equity = 0.0
     rows: list[Mapping[str, object]] = []
@@ -373,26 +352,6 @@ def _equity_delta_rows(
             }
         )
     return tuple(rows)
-
-
-def _matching_metric_value(
-    *,
-    raw_ranked_strategies: object,
-    strategy_id: str,
-    strategy_version_id: str,
-) -> float | None:
-    decoded = _json_array(raw_ranked_strategies)
-    for item in decoded:
-        if not isinstance(item, Mapping):
-            continue
-        if (
-            item.get("strategy_id") == strategy_id
-            and item.get("strategy_version_id") == strategy_version_id
-        ):
-            value = item.get("metric_value")
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return float(value)
-    return None
 
 
 def _normalized_symbol(
@@ -473,16 +432,25 @@ def _policy_warning(
     )
 
 
-async def _append_warning(pool: asyncpg.Pool, *, run_id: str, warning: str) -> None:
+async def _append_warning(
+    pool: asyncpg.Pool,
+    *,
+    run_id: str,
+    ranking_metric: str,
+    warning: str,
+) -> None:
     async with pool.acquire() as connection:
         await connection.execute(
             """
             UPDATE evaluation_reports
             SET warnings = warnings || $2::jsonb
             WHERE run_id = $1::uuid
+              AND ranking_metric = $3
+              AND NOT (warnings @> $2::jsonb)
             """,
             run_id,
             json.dumps([warning], separators=(",", ":"), ensure_ascii=True),
+            ranking_metric,
         )
 
 

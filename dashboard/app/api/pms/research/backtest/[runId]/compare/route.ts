@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import { mockBacktestComparison } from '@/lib/mock-store';
 import { upstreamResponse } from '@/lib/upstream';
 
 type RouteContext = {
@@ -17,5 +16,5 @@ export async function POST(request: Request, context: RouteContext) {
     body
   });
   if (upstream) return upstream;
-  return NextResponse.json(mockBacktestComparison(runId));
+  return NextResponse.json({ detail: 'Research backend unavailable' }, { status: 503 });
 }

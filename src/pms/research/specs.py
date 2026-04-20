@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import Enum
 from hashlib import sha256
 import json
+import math
 from typing import Any, Literal, TypeAlias
 
 from pms.evaluation.metrics import StrategyVersionKey
@@ -54,7 +55,13 @@ def _normalize_value(value: Any) -> Any:
     if isinstance(value, list):
         normalized_items = [_normalize_value(item) for item in value]
         return sorted(normalized_items, key=_json_sort_key)
-    if isinstance(value, (str, int, float, bool)) or value is None:
+    if isinstance(value, float):
+        if math.isnan(value):
+            return ".nan"
+        if math.isinf(value):
+            return ".inf" if value > 0 else "-.inf"
+        return value
+    if isinstance(value, (str, int, bool)) or value is None:
         return value
 
     msg = f"BacktestSpec hashing does not support value of type {type(value).__name__}"

@@ -9,6 +9,10 @@ import {
   formatTimeBudgetUsed,
   rankingMetricLabel,
   sortStrategyRuns,
+  strategyDetailLinkTestId,
+  strategyDetailPanelTestId,
+  strategyIdentityValue,
+  strategyRowTestId,
   statusTone
 } from '@/lib/backtest';
 import { useLiveData } from '@/lib/useLiveData';
@@ -25,7 +29,7 @@ export function BacktestRunView({ runId }: BacktestRunViewProps) {
     runState.data?.status === 'running' ? 2_000 : 15_000
   );
   const [rankingMetric, setRankingMetric] = useState<BacktestRankingMetric>('brier');
-  const [expandedStrategyId, setExpandedStrategyId] = useState<string | null>(null);
+  const [expandedStrategyIdentity, setExpandedStrategyIdentity] = useState<string | null>(null);
 
   const run = runState.data;
   const strategyRuns = strategyState.data ?? [];
@@ -135,15 +139,16 @@ export function BacktestRunView({ runId }: BacktestRunViewProps) {
               </thead>
               <tbody>
                 {sortedStrategies.map((strategyRun, index) => {
-                  const expanded = expandedStrategyId === strategyRun.strategy_id;
+                  const strategyIdentity = strategyIdentityValue(strategyRun);
+                  const expanded = expandedStrategyIdentity === strategyIdentity;
                   return (
-                    <Fragment key={`${strategyRun.strategy_id}:${strategyRun.strategy_version_id}`}>
+                    <Fragment key={strategyIdentity}>
                       <tr
                         className="interactive-row"
-                        data-testid={`strategy-row-${strategyRun.strategy_id}`}
+                        data-testid={strategyRowTestId(strategyRun)}
                         onClick={() =>
-                          setExpandedStrategyId((current) =>
-                            current === strategyRun.strategy_id ? null : strategyRun.strategy_id
+                          setExpandedStrategyIdentity((current) =>
+                            current === strategyIdentity ? null : strategyIdentity
                           )
                         }
                       >
@@ -162,7 +167,7 @@ export function BacktestRunView({ runId }: BacktestRunViewProps) {
                           <td colSpan={9}>
                             <div
                               className="detail-panel"
-                              data-testid={`strategy-detail-panel-${strategyRun.strategy_id}`}
+                              data-testid={strategyDetailPanelTestId(strategyRun)}
                             >
                               <div className="detail-grid">
                                 <section>
@@ -180,9 +185,9 @@ export function BacktestRunView({ runId }: BacktestRunViewProps) {
                               </div>
                               <div className="detail-actions">
                                 <Link
-                                  href={`/backtest/${runId}/${strategyRun.strategy_id}`}
+                                  href={`/backtest/${runId}/${strategyIdentity}`}
                                   className="ghost-button"
-                                  data-testid={`strategy-detail-link-${strategyRun.strategy_id}`}
+                                  data-testid={strategyDetailLinkTestId(strategyRun)}
                                 >
                                   Details
                                 </Link>

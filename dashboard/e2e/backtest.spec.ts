@@ -413,23 +413,23 @@ test('run detail supports sorting, inline expansion, and bookmarkable details', 
   await page.goto(`/backtest/${completedRunId}`);
 
   await expect(page.getByTestId('backtest-run-view')).toBeVisible();
-  await expect(page.getByTestId('strategy-row-alpha')).toBeVisible();
+  await expect(page.getByTestId('strategy-row-alpha-alpha-v1')).toBeVisible();
   await expect(page.locator('[data-testid^="strategy-row-"]').first()).toContainText('alpha');
 
   await page.getByLabel('Ranking metric').selectOption('sharpe');
   await expect(page.locator('[data-testid^="strategy-row-"]').first()).toContainText('beta');
 
-  await page.getByTestId('strategy-row-alpha').click();
-  await expect(page.getByTestId('strategy-detail-panel-alpha')).toBeVisible();
-  await page.getByTestId('strategy-row-alpha').click();
-  await expect(page.getByTestId('strategy-detail-panel-alpha')).toBeHidden();
+  await page.getByTestId('strategy-row-alpha-alpha-v1').click();
+  await expect(page.getByTestId('strategy-detail-panel-alpha-alpha-v1')).toBeVisible();
+  await page.getByTestId('strategy-row-alpha-alpha-v1').click();
+  await expect(page.getByTestId('strategy-detail-panel-alpha-alpha-v1')).toBeHidden();
 
-  await page.getByTestId('strategy-row-beta').click();
-  await page.getByTestId('strategy-detail-link-beta').click();
-  await expect(page).toHaveURL(new RegExp(`/backtest/${completedRunId}/beta$`));
+  await page.getByTestId('strategy-row-beta-beta-v1').click();
+  await page.getByTestId('strategy-detail-link-beta-beta-v1').click();
+  await expect(page).toHaveURL(new RegExp(`/backtest/${completedRunId}/beta::beta-v1$`));
   await expect(page.getByTestId('backtest-strategy-detail-view')).toBeVisible();
 
-  await page.goto(`/backtest/${completedRunId}/beta`);
+  await page.goto(`/backtest/${completedRunId}/beta::beta-v1`);
   await expect(page.getByTestId('backtest-strategy-detail-view')).toBeVisible();
 });
 

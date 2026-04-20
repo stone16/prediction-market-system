@@ -257,3 +257,29 @@ async def test_backtest_runner_updates_portfolio_between_replay_signals() -> Non
     assert pipeline.portfolios[1].open_positions[0].shares_held == pytest.approx(
         10.0 / 0.41
     )
+
+
+@pytest.mark.asyncio
+async def test_backtest_runner_propagates_unexpected_actuator_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = _PortfolioRecordingPipeline()
+    runner = BacktestRunner(
+        writable_pool=cast(Any, object()),
+        readonly_pool=cast(Any, object()),
+        replay_engine=_ReplayEngine([_signal(datetime(2026, 4, 20, 0, 0, tzinfo=UTC))]),
+        controller_factory=_PipelineFactory(pipeline),
+    )
+
+    async def _boom(self: object, decision: object, portfolio: object | None = None) -> object:
+        del self, decision, portfolio
+        raise RuntimeError("actuator exploded")
+
+    monkeypatch.setattr("pms.research.runner.PaperActuator.execute", _boom)
+
+    with pytest.raises(RuntimeError, match="actuator exploded"):
+        await runner._run_strategy(
+            strategy=_active_strategy(),
+            spec=_spec(),
+            exec_config=BacktestExecutionConfig(),
+        )

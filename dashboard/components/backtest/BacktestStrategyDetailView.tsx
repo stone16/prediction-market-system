@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { Nav } from '@/components/Nav';
-import { formatDateTime } from '@/lib/backtest';
+import { formatDateTime, parseStrategyIdentity } from '@/lib/backtest';
 import { useLiveData } from '@/lib/useLiveData';
 import type { BacktestRunRow, BacktestStrategyRunRow } from '@/lib/types';
 
@@ -20,8 +20,15 @@ export function BacktestStrategyDetailView({
     `/research/backtest/${runId}/strategies`,
     15_000
   );
+  const parsedIdentity = parseStrategyIdentity(strategyId);
   const strategyRun =
-    (strategyState.data ?? []).find((row) => row.strategy_id === strategyId) ?? null;
+    (strategyState.data ?? []).find((row) =>
+      parsedIdentity
+        ? row.strategy_id === parsedIdentity.strategyId &&
+          row.strategy_version_id === parsedIdentity.strategyVersionId
+        : row.strategy_id === strategyId
+    ) ?? null;
+  const strategyLabel = strategyRun?.strategy_id ?? parsedIdentity?.strategyId ?? strategyId;
 
   return (
     <main className="shell">
@@ -30,7 +37,7 @@ export function BacktestStrategyDetailView({
         <div className="hero">
           <div>
             <p className="eyebrow">Research</p>
-            <h1>{strategyId}</h1>
+            <h1>{strategyLabel}</h1>
             <p className="lede">Bookmarkable detail view for the strategy row inside this backtest run.</p>
           </div>
           <div className="hero-actions">

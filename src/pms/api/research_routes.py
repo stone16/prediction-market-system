@@ -22,6 +22,19 @@ from pms.research.sweep import ParameterSweep, QueuedSweepRun
 
 
 _ORPHANED_FAILURE_REASON = "orphaned (worker process gone)"
+_JSON_COLUMN_NAMES = frozenset(
+    {
+        "benchmark_rows",
+        "equity_delta_json",
+        "exec_config_json",
+        "portfolio_target_json",
+        "ranked_strategies",
+        "spec_json",
+        "symbol_normalization_policy_json",
+        "time_alignment_policy_json",
+        "warnings",
+    }
+)
 PidProbe = Callable[[int], None]
 
 
@@ -379,7 +392,10 @@ def _pid_missing(pid: int, probe: PidProbe) -> bool:
 
 
 def _record_to_json(record: Mapping[str, object]) -> dict[str, object]:
-    return {key: _jsonify(value) for key, value in dict(record).items()}
+    return {
+        key: _jsonify(_decode_json_column(key, value))
+        for key, value in dict(record).items()
+    }
 
 
 def _jsonify(value: object) -> object:
@@ -393,15 +409,13 @@ def _jsonify(value: object) -> object:
         return [_jsonify(item) for item in value]
     if isinstance(value, dict):
         return {str(key): _jsonify(item) for key, item in value.items()}
-    if isinstance(value, str) and _looks_like_json(value):
-        decoded = json.loads(value)
-        return _jsonify(decoded)
     return value
 
 
-def _looks_like_json(value: str) -> bool:
-    stripped = value.strip()
-    return stripped.startswith("{") or stripped.startswith("[")
+def _decode_json_column(key: str, value: object) -> object:
+    if key not in _JSON_COLUMN_NAMES or not isinstance(value, str):
+        return value
+    return json.loads(value)
 
 
 __all__ = [

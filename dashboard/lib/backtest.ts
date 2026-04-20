@@ -12,6 +12,9 @@ export type SweepParameterRow = {
   values: string;
 };
 
+const STRATEGY_IDENTITY_SEPARATOR = '::';
+const NUMERIC_PARAMETER_PATTERN = /^-?(?:\d+|\d+\.\d+|\.\d+)$/;
+
 const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: 'medium',
   timeStyle: 'short'
@@ -93,7 +96,38 @@ export function sortStrategyRuns(
 }
 
 export function strategyIdentityValue(strategyRun: BacktestStrategyRunRow): string {
-  return `${strategyRun.strategy_id}::${strategyRun.strategy_version_id}`;
+  return `${encodeURIComponent(strategyRun.strategy_id)}${STRATEGY_IDENTITY_SEPARATOR}${encodeURIComponent(strategyRun.strategy_version_id)}`;
+}
+
+export function parseStrategyIdentity(
+  value: string
+): { strategyId: string; strategyVersionId: string } | null {
+  const separatorIndex = value.indexOf(STRATEGY_IDENTITY_SEPARATOR);
+  if (separatorIndex <= 0 || separatorIndex >= value.length - STRATEGY_IDENTITY_SEPARATOR.length) {
+    return null;
+  }
+  try {
+    return {
+      strategyId: decodeURIComponent(value.slice(0, separatorIndex)),
+      strategyVersionId: decodeURIComponent(
+        value.slice(separatorIndex + STRATEGY_IDENTITY_SEPARATOR.length)
+      )
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function strategyRowTestId(strategyRun: BacktestStrategyRunRow): string {
+  return `strategy-row-${sanitizeTestIdPart(strategyRun.strategy_id)}-${sanitizeTestIdPart(strategyRun.strategy_version_id)}`;
+}
+
+export function strategyDetailPanelTestId(strategyRun: BacktestStrategyRunRow): string {
+  return `strategy-detail-panel-${sanitizeTestIdPart(strategyRun.strategy_id)}-${sanitizeTestIdPart(strategyRun.strategy_version_id)}`;
+}
+
+export function strategyDetailLinkTestId(strategyRun: BacktestStrategyRunRow): string {
+  return `strategy-detail-link-${sanitizeTestIdPart(strategyRun.strategy_id)}-${sanitizeTestIdPart(strategyRun.strategy_version_id)}`;
 }
 
 export function buildSweepYaml(args: {
@@ -113,16 +147,16 @@ export function buildSweepYaml(args: {
     args.profile === 'polymarket_live_estimate'
       ? {
           fee_rate: 0.04,
-          slippage_bps: 8,
+          slippage_bps: 10,
           latency_ms: 250,
-          staleness_ms: 60000,
+          staleness_ms: 120000,
           fill_policy: 'immediate_or_cancel'
         }
       : {
           fee_rate: 0,
           slippage_bps: 0,
           latency_ms: 0,
-          staleness_ms: 60000,
+          staleness_ms: Number.POSITIVE_INFINITY,
           fill_policy: 'immediate_or_cancel'
         };
   const parameterGrid: Record<string, Array<boolean | number | string>> = {};
@@ -204,8 +238,8 @@ function parseParameterValue(value: string): boolean | number | string {
   }
   if (value === 'true') return true;
   if (value === 'false') return false;
-  const numeric = Number(value);
-  if (!Number.isNaN(numeric) && value !== '') {
+  if (NUMERIC_PARAMETER_PATTERN.test(value)) {
+    const numeric = Number(value);
     return numeric;
   }
   return value;
@@ -253,8 +287,18 @@ function isScalar(value: unknown): value is boolean | number | string | null {
 
 function serializeScalar(value: boolean | number | string | null | unknown): string {
   if (value === null) return 'null';
-  if (typeof value === 'number' || typeof value === 'boolean') {
+  if (typeof value === 'number') {
+    if (Number.isNaN(value)) return '.nan';
+    if (value === Number.POSITIVE_INFINITY) return '.inf';
+    if (value === Number.NEGATIVE_INFINITY) return '-.inf';
+    return String(value);
+  }
+  if (typeof value === 'boolean') {
     return String(value);
   }
   return JSON.stringify(String(value));
+}
+
+function sanitizeTestIdPart(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]+/g, '-');
 }

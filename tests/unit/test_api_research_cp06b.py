@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from pms.api.research_routes import enqueue_backtest_runs, scan_orphaned_backtest_runs
+from pms.api.research_routes import (
+    _record_to_json,
+    enqueue_backtest_runs,
+    scan_orphaned_backtest_runs,
+)
 from pms.research.sweep import QueuedSweepRun
 
 
@@ -167,3 +172,19 @@ def test_api_package_does_not_reference_backtest_runner() -> None:
     assert api_sources
     for path in api_sources:
         assert "BacktestRunner" not in path.read_text(encoding="utf-8")
+
+
+def test_record_to_json_only_decodes_known_json_columns() -> None:
+    payload = _record_to_json(
+        {
+            "spec_json": '{"strategy_versions":[["alpha","alpha-v1"]]}',
+            "failure_reason": '{"unterminated"',
+            "queued_at": datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+        }
+    )
+
+    assert payload == {
+        "spec_json": {"strategy_versions": [["alpha", "alpha-v1"]]},
+        "failure_reason": '{"unterminated"',
+        "queued_at": "2026-04-20T12:00:00+00:00",
+    }
