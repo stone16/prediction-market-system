@@ -58,7 +58,7 @@ curl       http://127.0.0.1:8000/status        # {running: true, ...}
 curl -X POST http://127.0.0.1:8000/run/stop    # graceful shutdown
 ```
 
-The `Overview` and `Backtest` dashboard pages include a **Runner Controls**
+The `Overview` dashboard page includes a **Runner Controls**
 panel that calls these endpoints directly.
 
 ## Development
@@ -73,6 +73,7 @@ PMS_RUN_INTEGRATION=1 uv run pytest -m integration   # PostgreSQL + live-network
 Baseline invariants enforced by CI:
 - pytest 246 passing, 54 skipped (integration gated on `PMS_RUN_INTEGRATION=1`).
 - mypy strict must be clean on every committed source file.
+- Research sweep and worker spec format: `docs/research/backtest-spec-format.md`
 
 ### Isolating dev state
 
