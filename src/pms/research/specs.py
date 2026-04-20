@@ -68,12 +68,38 @@ def _normalize_value(value: Any) -> Any:
     raise TypeError(msg)
 
 
+_HASH_IGNORED_EXECUTION_MODEL_FIELDS: frozenset[str] = frozenset(
+    {
+        # staleness_ms and latency_ms are declared on ExecutionModel but the
+        # research replay engine does not yet apply them. Including them in
+        # the hash would treat identical-behavior profiles as distinct runs
+        # and poison cache dedup. Remove from this set once the runner
+        # consumes the field.
+        "latency_ms",
+        "staleness_ms",
+    }
+)
+
+
+def _hashable_execution_model(execution_model: object) -> Any:
+    """Returns the subset of execution_model fields that actually influence
+    backtest output today. See `_HASH_IGNORED_EXECUTION_MODEL_FIELDS`."""
+    if not is_dataclass(execution_model) or isinstance(execution_model, type):
+        return execution_model
+    fields = asdict(execution_model)
+    return {
+        key: value
+        for key, value in fields.items()
+        if key not in _HASH_IGNORED_EXECUTION_MODEL_FIELDS
+    }
+
+
 def _compute_config_hash(*, spec: BacktestSpec) -> str:
     canonical_payload = _normalize_value(
         {
             "strategy_versions": spec.strategy_versions,
             "dataset": spec.dataset,
-            "execution_model": spec.execution_model,
+            "execution_model": _hashable_execution_model(spec.execution_model),
             "risk_policy": spec.risk_policy,
             "date_range_start": spec.date_range_start,
             "date_range_end": spec.date_range_end,
@@ -92,6 +118,14 @@ def _compute_config_hash(*, spec: BacktestSpec) -> str:
 class BacktestExecutionConfig:
     chunk_days: int = 7
     time_budget: int = 1800
+
+    def __post_init__(self) -> None:
+        if self.chunk_days <= 0:
+            msg = "BacktestExecutionConfig.chunk_days must be positive"
+            raise ValueError(msg)
+        if self.time_budget <= 0:
+            msg = "BacktestExecutionConfig.time_budget must be positive"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +186,41 @@ class BacktestSpec:
     config_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
+        _validate_backtest_spec(self)
         object.__setattr__(self, "config_hash", _compute_config_hash(spec=self))
+
+
+def _validate_backtest_spec(spec: BacktestSpec) -> None:
+    if not spec.strategy_versions:
+        msg = "BacktestSpec.strategy_versions must be non-empty"
+        raise ValueError(msg)
+    if len(set(spec.strategy_versions)) != len(spec.strategy_versions):
+        msg = "BacktestSpec.strategy_versions contains duplicate entries"
+        raise ValueError(msg)
+    for label, value in (
+        ("date_range_start", spec.date_range_start),
+        ("date_range_end", spec.date_range_end),
+        ("dataset.coverage_start", spec.dataset.coverage_start),
+        ("dataset.coverage_end", spec.dataset.coverage_end),
+    ):
+        if value.tzinfo is None or value.utcoffset() is None:
+            msg = f"BacktestSpec.{label} must be timezone-aware"
+            raise ValueError(msg)
+    if spec.date_range_start >= spec.date_range_end:
+        msg = "BacktestSpec.date_range_start must precede date_range_end"
+        raise ValueError(msg)
+    if spec.date_range_start < spec.dataset.coverage_start:
+        msg = (
+            "BacktestSpec.date_range_start must fall within "
+            "BacktestDataset.coverage range"
+        )
+        raise ValueError(msg)
+    if spec.date_range_end > spec.dataset.coverage_end:
+        msg = (
+            "BacktestSpec.date_range_end must fall within "
+            "BacktestDataset.coverage range"
+        )
+        raise ValueError(msg)
 
 
 __all__ = [
