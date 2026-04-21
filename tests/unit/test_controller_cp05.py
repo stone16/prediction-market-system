@@ -19,6 +19,7 @@ from pms.controller.forecasters.llm import (
 )
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
+from pms.controller.outcome_tokens import OutcomeTokens
 from pms.controller.pipeline import ControllerPipeline
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
@@ -99,6 +100,30 @@ class FailingForecaster:
 
     async def forecast(self, signal: MarketSignal) -> float:
         raise RuntimeError("forecast failed")
+
+
+class ConstantForecaster:
+    def __init__(self, probability: float) -> None:
+        self.probability = probability
+
+    def predict(self, signal: MarketSignal) -> tuple[float, float, str]:
+        del signal
+        return (self.probability, 0.0, "constant")
+
+    async def forecast(self, signal: MarketSignal) -> float:
+        del signal
+        return self.probability
+
+
+class NoNoTokenResolver:
+    async def resolve(
+        self,
+        *,
+        market_id: str,
+        signal_token_id: str | None,
+    ) -> OutcomeTokens:
+        del market_id, signal_token_id
+        return OutcomeTokens(yes_token_id="yes-token", no_token_id=None)
 
 
 class FixedSizer:
@@ -269,6 +294,51 @@ async def test_controller_pipeline_suppresses_sub_min_order_decision_and_tracks_
 
 
 @pytest.mark.asyncio
+async def test_controller_pipeline_uses_default_dependencies_for_neutral_signals() -> None:
+    pipeline = ControllerPipeline()
+
+    assert await pipeline.decide(_signal(), portfolio=_portfolio()) is None
+    assert pipeline.suppressed_zero_size == 1
+    assert isinstance(pipeline.forecasters, tuple)
+    assert pipeline.calibrator is not None
+    assert pipeline.sizer is not None
+    assert pipeline.router is not None
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_returns_none_when_all_forecasters_fail() -> None:
+    pipeline = ControllerPipeline(
+        forecasters=[FailingForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=1000.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is None
+    assert pipeline.suppressed_zero_size == 0
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_reports_missing_no_token_for_bearish_signal() -> None:
+    pipeline = ControllerPipeline(
+        forecasters=[ConstantForecaster(0.4)],
+        outcome_token_resolver=NoNoTokenResolver(),
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=1000.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(yes_price=0.6), portfolio=_portfolio())
+
+    assert emission is None
+    assert pipeline.suppressed_zero_size == 0
+    assert pipeline.last_diagnostic is not None
+    assert pipeline.last_diagnostic.code == "missing_no_token"
+
+
+@pytest.mark.asyncio
 async def test_controller_pipeline_excludes_disabled_llm_and_failed_forecasters(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -285,9 +355,8 @@ async def test_controller_pipeline_excludes_disabled_llm_and_failed_forecasters(
 
     emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
 
-    assert emission is not None
-    _, decision = emission
-    assert decision.prob_estimate == pytest.approx(0.4)
+    assert emission is None
+    assert pipeline.suppressed_zero_size == 1
     assert "forecaster failed" in caplog.text
 
 
