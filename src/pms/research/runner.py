@@ -14,15 +14,22 @@ from uuid import uuid4
 
 import asyncpg
 
-from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.risk import InsufficientLiquidityError
 from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
 from pms.controller.outcome_tokens import MarketDataOutcomeTokenResolver
 from pms.core.enums import OrderStatus
-from pms.core.models import FillRecord, MarketSignal, OrderState, Portfolio, Position
+from pms.core.models import (
+    FillRecord,
+    MarketSignal,
+    OrderState,
+    Portfolio,
+    Position,
+    TradeDecision,
+)
 from pms.evaluation.metrics import StrategyVersionKey
 from pms.research.entities import PortfolioTarget, serialize_portfolio_target_json
+from pms.research.execution import BacktestExecutionSimulator
 from pms.research.replay import MarketUniverseReplayEngine
 from pms.research.spec_codec import (
     deserialize_backtest_spec as _codec_deserialize_backtest_spec,
@@ -66,6 +73,17 @@ class ControllerPipelineLike(Protocol):
 
 class ControllerPipelineFactoryLike(Protocol):
     def build(self, strategy: ActiveStrategy) -> ControllerPipelineLike: ...
+
+
+class BacktestExecutionSimulatorLike(Protocol):
+    async def execute(
+        self,
+        *,
+        signal: MarketSignal,
+        decision: TradeDecision,
+        portfolio: Portfolio | None = None,
+        execution_model: ExecutionModel,
+    ) -> OrderState: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +147,9 @@ class _StrategyAccumulator:
         fill_price: float,
     ) -> None:
         self.fill_count += 1
-        self.slippage_bps_values.append(Decimal(str(self.execution_model.slippage_bps)))
+        self.slippage_bps_values.append(
+            Decimal(str(_decision_slippage_bps(decision=decision, fill_price=fill_price)))
+        )
         if _resolved_outcome(signal) is not None:
             self.fills_with_resolution += 1
         pnl_delta = _pnl_delta(
@@ -207,6 +227,9 @@ class BacktestRunner:
         default_factory=ControllerPipelineFactory
     )
     replay_engine: ReplayEngineLike | None = None
+    execution_simulator: BacktestExecutionSimulatorLike = field(
+        default_factory=BacktestExecutionSimulator
+    )
     strategy_loader: StrategyLoader | None = None
     cancel_probe: CancelProbe | None = None
     host_provider: HostProvider = socket.gethostname
@@ -299,9 +322,12 @@ class BacktestRunner:
                 decision=decision,
             )
             try:
-                order_state = await PaperActuator(
-                    orderbooks={signal.market_id: signal.orderbook}
-                ).execute(cast(Any, decision), portfolio)
+                order_state = await self.execution_simulator.execute(
+                    signal=signal,
+                    decision=cast(Any, decision),
+                    portfolio=portfolio,
+                    execution_model=spec.execution_model,
+                )
             except InsufficientLiquidityError:
                 continue
             fill = _fill_from_order(order_state, decision, signal)
@@ -566,6 +592,19 @@ def _filled_contracts(fill: FillRecord) -> float:
     if fill.filled_contracts is not None:
         return fill.filled_contracts
     return fill.fill_size / fill.fill_price
+
+
+def _decision_slippage_bps(*, decision: object, fill_price: float) -> float:
+    raw_limit_price = getattr(decision, "limit_price", getattr(decision, "price", 0.0))
+    limit_price = float(cast(float, raw_limit_price))
+    if limit_price <= 0.0:
+        return 0.0
+    action = cast(str, getattr(decision, "action", getattr(decision, "side", "BUY")))
+    if action == "SELL":
+        slippage = limit_price - fill_price
+    else:
+        slippage = fill_price - limit_price
+    return max(0.0, slippage / limit_price * 10_000.0)
 
 
 def _same_position(position: Position, fill: FillRecord) -> bool:
