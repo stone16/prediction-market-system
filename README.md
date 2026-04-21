@@ -31,20 +31,33 @@ tests/                 # pytest suite (unit + integration)
 ## Quick start — backend + dashboard end-to-end
 
 ```bash
-# 1. Install Python deps
+# 1. Start PostgreSQL for local development
+docker compose up -d postgres
+
+# 2. Install Python deps
 uv sync
 
-# 2. Start the FastAPI backend (port 8000 by default)
+# 3. Point PMS at your local dev database and apply migrations
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_dev
+uv run alembic upgrade head
+
+# Escape hatch: roll back to the pre-migration state for the current DATABASE_URL
+uv run alembic downgrade base
+
+# 4. Start the FastAPI backend (port 8000 by default)
 uv run pms-api                       # → http://127.0.0.1:8000
 # Optional: auto-start the runner at boot
 PMS_AUTO_START=1 uv run pms-api
 
-# 3. In another shell, start the dashboard (port 3100)
+# 5. In another shell, start the dashboard (port 3100)
 cd dashboard
 npm install
 PMS_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 #   → http://127.0.0.1:3100
 ```
+
+schema.sql is a reference artifact, not the runtime source; apply runtime
+schema changes with Alembic.
 
 If `PMS_API_BASE_URL` is unset the dashboard silently falls back to the
 bundled mock store (`dashboard/lib/mock-store.ts`) — useful for pure frontend

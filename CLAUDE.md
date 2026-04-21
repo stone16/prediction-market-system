@@ -41,6 +41,8 @@ work (see promoted rule: *Fresh-clone baseline verification*).
 
 Integration tests:
 ```bash
+export DATABASE_URL="${PMS_TEST_DATABASE_URL:-postgres://postgres:postgres@localhost:5432/pms_test}"
+uv run alembic upgrade head
 PMS_RUN_INTEGRATION=1 uv run pytest -m integration
 ```
 
