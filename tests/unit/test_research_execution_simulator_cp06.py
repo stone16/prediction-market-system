@@ -48,7 +48,7 @@ def _decision(
     action: Literal["BUY", "SELL"] = "BUY",
     outcome: Literal["YES", "NO"] = "YES",
     limit_price: float = 0.4,
-    size: float = 10.0,
+    notional_usdc: float = 10.0,
 ) -> TradeDecision:
     token_id = "no-token" if outcome == "NO" else "yes-token"
     return TradeDecision(
@@ -57,8 +57,7 @@ def _decision(
         token_id=token_id,
         venue="polymarket",
         side=action,
-        price=limit_price,
-        size=size,
+        notional_usdc=notional_usdc,
         order_type="limit",
         max_slippage_bps=100,
         stop_conditions=[],

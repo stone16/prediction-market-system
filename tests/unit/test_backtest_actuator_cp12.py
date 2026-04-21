@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 
 from pms.actuator.adapters.backtest import BacktestActuator
+from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.risk import InsufficientLiquidityError
 from pms.core.models import Portfolio, TradeDecision
 
@@ -102,15 +103,29 @@ def _fixture(
 
 @pytest.mark.asyncio
 async def test_backtest_actuator_matches_notional_and_quantity(tmp_path: Path) -> None:
-    actuator = BacktestActuator(_fixture(tmp_path))
+    fixture_path = _fixture(tmp_path)
+    actuator = BacktestActuator(fixture_path)
+    paper = PaperActuator(
+        orderbooks={
+            "market-cp12": {
+                "bids": [{"price": 0.24, "size": 1_000.0}],
+                "asks": [{"price": 0.25, "size": 1_000.0}],
+            }
+        }
+    )
 
-    state = await actuator.execute(_decision(), _portfolio())
+    decision = _decision()
+    expected = await paper.execute(decision, _portfolio())
+    state = await actuator.execute(decision, _portfolio())
 
     assert state.fill_price == pytest.approx(0.25)
     assert state.requested_notional_usdc == pytest.approx(100.0)
     assert state.filled_notional_usdc == pytest.approx(100.0)
     assert state.remaining_notional_usdc == pytest.approx(0.0)
     assert state.filled_quantity == pytest.approx(400.0)
+    assert state.fill_price == pytest.approx(expected.fill_price)
+    assert state.filled_notional_usdc == pytest.approx(expected.filled_notional_usdc)
+    assert state.filled_quantity == pytest.approx(expected.filled_quantity)
 
 
 @pytest.mark.asyncio
