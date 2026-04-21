@@ -68,30 +68,11 @@ def _normalize_value(value: Any) -> Any:
     raise TypeError(msg)
 
 
-_HASH_IGNORED_EXECUTION_MODEL_FIELDS: frozenset[str] = frozenset(
-    {
-        # staleness_ms and latency_ms are declared on ExecutionModel but the
-        # research replay engine does not yet apply them. Including them in
-        # the hash would treat identical-behavior profiles as distinct runs
-        # and poison cache dedup. Remove from this set once the runner
-        # consumes the field.
-        "latency_ms",
-        "staleness_ms",
-    }
-)
-
-
 def _hashable_execution_model(execution_model: object) -> Any:
-    """Returns the subset of execution_model fields that actually influence
-    backtest output today. See `_HASH_IGNORED_EXECUTION_MODEL_FIELDS`."""
+    """Returns the execution_model fields that influence backtest output."""
     if not is_dataclass(execution_model) or isinstance(execution_model, type):
         return execution_model
-    fields = asdict(execution_model)
-    return {
-        key: value
-        for key, value in fields.items()
-        if key not in _HASH_IGNORED_EXECUTION_MODEL_FIELDS
-    }
+    return asdict(execution_model)
 
 
 def _compute_config_hash(*, spec: BacktestSpec) -> str:

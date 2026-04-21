@@ -14,6 +14,7 @@ from .entities import (
     deserialize_portfolio_target_json,
     serialize_portfolio_target_json,
 )
+from .execution import BacktestExecutionSimulator
 from .policies import (
     SelectionDenominator,
     SelectionSimilarityMetric,
@@ -38,6 +39,7 @@ __all__ = [
     "BacktestLiveComparisonTool",
     "BacktestDataset",
     "BacktestExecutionConfig",
+    "BacktestExecutionSimulator",
     "BacktestRunner",
     "BacktestSpec",
     "EvaluationRankingMetric",
