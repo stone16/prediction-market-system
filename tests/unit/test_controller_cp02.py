@@ -70,6 +70,7 @@ async def test_controller_pipeline_on_signal_emits_opportunity_and_linked_decisi
     assert opportunity.selected_factor_values == {
         "fair_value": 0.61,
         "confidence": 0.8,
+        "yes_price": 0.4,
     }
     assert opportunity.rationale == "StaticForecaster:factor-value edge"
     assert opportunity.target_size_usdc == decision.size

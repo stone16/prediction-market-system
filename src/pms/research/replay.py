@@ -90,7 +90,8 @@ class MarketUniverseReplayEngine:
 
         market_metadata = await self._load_market_metadata(spec.dataset.market_universe_filter)
         if not market_metadata:
-            return
+            msg = "BacktestSpec.dataset.market_universe_filter matched zero markets"
+            raise ValueError(msg)
 
         market_ids = tuple(sorted(market_metadata))
         states: dict[tuple[str, str], _LastBookState] = {}

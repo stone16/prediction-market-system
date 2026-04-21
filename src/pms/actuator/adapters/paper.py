@@ -26,7 +26,10 @@ class PaperActuator:
 
 
 def _best_fill_price(orderbook: dict[str, Any], decision: TradeDecision) -> float:
-    side_key = "asks" if decision.side == Side.BUY.value else "bids"
+    if decision.outcome == "NO":
+        side_key = "bids" if decision.action == Side.BUY.value else "asks"
+    else:
+        side_key = "asks" if decision.action == Side.BUY.value else "bids"
     levels = orderbook.get(side_key)
     if not isinstance(levels, list) or not levels:
         raise InsufficientLiquidityError(f"{side_key} depth is empty")
@@ -38,7 +41,10 @@ def _best_fill_price(orderbook: dict[str, Any], decision: TradeDecision) -> floa
         raise InsufficientLiquidityError(f"{side_key} depth is empty")
     if available_size < decision.size:
         raise InsufficientLiquidityError(f"{side_key} depth is insufficient")
-    return float(cast(str | int | float, best["price"]))
+    best_price = float(cast(str | int | float, best["price"]))
+    if decision.outcome == "NO":
+        return 1.0 - best_price
+    return best_price
 
 
 def _matched_order_state(

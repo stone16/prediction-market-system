@@ -18,7 +18,10 @@ from pms.actuator.executor import ActuatorAdapter, ActuatorExecutor
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import PMSSettings
+from pms.controller.diagnostics import ControllerDiagnostic
 from pms.controller.factory import ControllerPipelineFactory
+from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
+from pms.controller.outcome_tokens import MarketDataOutcomeTokenResolver
 from pms.controller.pipeline import ControllerPipeline
 from pms.core.enums import OrderStatus, RunMode
 from pms.core.interfaces import (
@@ -141,6 +144,7 @@ class RunnerState:
     decisions: list[TradeDecision] = field(default_factory=list)
     orders: list[OrderState] = field(default_factory=list)
     fills: list[FillRecord] = field(default_factory=list)
+    controller_diagnostics: list[ControllerDiagnostic] = field(default_factory=list)
 
 
 @dataclass
@@ -610,6 +614,13 @@ class Runner:
         if self._pg_pool is None:
             msg = "Runner PostgreSQL pool is not initialized"
             raise RuntimeError(msg)
+        if isinstance(self._controller_factory, ControllerPipelineFactory):
+            market_data_store = PostgresMarketDataStore(self._pg_pool)
+            self._controller_factory = ControllerPipelineFactory(
+                settings=self.config,
+                factor_reader=PostgresFactorSnapshotReader(self._pg_pool),
+                outcome_token_resolver=MarketDataOutcomeTokenResolver(market_data_store),
+            )
         if isinstance(self.eval_store, EvalStore):
             self.eval_store.bind_pool(self._pg_pool)
         if isinstance(self.feedback_store, FeedbackStore):
@@ -618,6 +629,8 @@ class Runner:
             self.opportunity_store.bind_pool(self._pg_pool)
 
     def _unbind_runtime_stores(self) -> None:
+        if isinstance(self._controller_factory, ControllerPipelineFactory):
+            self._controller_factory = ControllerPipelineFactory(settings=self.config)
         if isinstance(self.eval_store, EvalStore):
             self.eval_store.pool = None
         if isinstance(self.feedback_store, FeedbackStore):
@@ -680,6 +693,9 @@ class Runner:
                             portfolio=self.portfolio,
                         )
                         if emission is None:
+                            diagnostic = _controller_diagnostic(runtime.controller)
+                            if diagnostic is not None:
+                                _append_bounded(self.state.controller_diagnostics, diagnostic)
                             continue
                         opportunity, decision = emission
                         await self.opportunity_store.insert(opportunity)
@@ -1172,6 +1188,13 @@ def _append_bounded(items: list[T], item: T) -> None:
         del items[:overflow]
 
 
+def _controller_diagnostic(controller: object) -> ControllerDiagnostic | None:
+    diagnostic = getattr(controller, "last_diagnostic", None)
+    if isinstance(diagnostic, ControllerDiagnostic):
+        return diagnostic
+    return None
+
+
 def _find_discovery_sensor(
     sensors: Sequence[ISensor],
 ) -> DiscoveryPollCompleteSensor | None:
@@ -1264,7 +1287,7 @@ def _fill_from_order(
         market_id=order_state.market_id,
         token_id=order_state.token_id,
         venue=order_state.venue,
-        side=decision.side,
+        side=decision.action if decision.action is not None else decision.side,
         fill_price=order_state.fill_price,
         fill_size=order_state.filled_size,
         executed_at=order_state.submitted_at,

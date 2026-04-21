@@ -168,7 +168,7 @@ def test_backtest_spec_config_hash_is_deterministic_for_equivalent_inputs() -> N
         ),
         (
             "date_range_end",
-            lambda: _build_spec(date_range_end=datetime(2026, 4, 1, 23, 59, tzinfo=UTC)),
+            lambda: _build_spec(date_range_end=datetime(2026, 3, 31, 23, 58, tzinfo=UTC)),
         ),
     ],
 )
@@ -228,3 +228,97 @@ def test_backtest_spec_requires_timezone_aware_datetimes_for_hashing() -> None:
             date_range_start=datetime(2026, 3, 1, 0, 0),
             date_range_end=datetime(2026, 3, 1, 0, 0, tzinfo=UTC) + timedelta(days=1),
         )
+
+
+def test_backtest_spec_rejects_empty_strategy_versions() -> None:
+    with pytest.raises(ValueError, match="strategy_versions"):
+        _build_spec(strategy_versions=())
+
+
+def test_backtest_spec_rejects_duplicate_strategy_versions() -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        _build_spec(
+            strategy_versions=(("alpha", "v1"), ("alpha", "v1")),
+        )
+
+
+def test_backtest_spec_rejects_inverted_date_range() -> None:
+    with pytest.raises(ValueError, match="date_range_start"):
+        _build_spec(
+            date_range_start=datetime(2026, 3, 31, tzinfo=UTC),
+            date_range_end=datetime(2026, 3, 1, tzinfo=UTC),
+        )
+
+
+def test_backtest_spec_rejects_date_range_outside_dataset_coverage() -> None:
+    with pytest.raises(ValueError, match="coverage"):
+        _build_spec(
+            date_range_start=datetime(2026, 2, 1, tzinfo=UTC),
+            date_range_end=datetime(2026, 2, 15, tzinfo=UTC),
+        )
+    with pytest.raises(ValueError, match="coverage"):
+        _build_spec(
+            date_range_start=datetime(2026, 3, 1, tzinfo=UTC),
+            date_range_end=datetime(2026, 4, 30, tzinfo=UTC),
+        )
+
+
+def test_backtest_execution_config_rejects_non_positive_values() -> None:
+    config_cls = _load_symbol("pms.research.specs", "BacktestExecutionConfig")
+    assert callable(config_cls)
+
+    with pytest.raises(ValueError, match="chunk_days"):
+        config_cls(chunk_days=0, time_budget=1800)
+    with pytest.raises(ValueError, match="chunk_days"):
+        config_cls(chunk_days=-1, time_budget=1800)
+    with pytest.raises(ValueError, match="time_budget"):
+        config_cls(chunk_days=7, time_budget=0)
+    with pytest.raises(ValueError, match="time_budget"):
+        config_cls(chunk_days=7, time_budget=-30)
+
+
+def _build_real_execution_model(
+    *,
+    fee_rate: float = 0.0,
+    slippage_bps: float = 0.0,
+    latency_ms: float = 0.0,
+    staleness_ms: float = 60_000.0,
+) -> Any:
+    execution_model_cls = _load_symbol("pms.research.specs", "ExecutionModel")
+    return execution_model_cls(
+        fee_rate=fee_rate,
+        slippage_bps=slippage_bps,
+        latency_ms=latency_ms,
+        staleness_ms=staleness_ms,
+        fill_policy="immediate_or_cancel",
+    )
+
+
+def test_backtest_spec_config_hash_changes_for_latency_and_staleness_once_runner_applies_them() -> None:
+    """Now that the backtest execution simulator consumes latency_ms and
+    staleness_ms, they must distinguish spec hashes."""
+    baseline = _build_spec(execution_model=_build_real_execution_model())
+    variant_latency = _build_spec(
+        execution_model=_build_real_execution_model(latency_ms=250.0),
+    )
+    variant_staleness = _build_spec(
+        execution_model=_build_real_execution_model(staleness_ms=120_000.0),
+    )
+
+    assert variant_latency.config_hash != baseline.config_hash
+    assert variant_staleness.config_hash != baseline.config_hash
+
+
+def test_backtest_spec_config_hash_still_changes_for_applied_execution_fields() -> None:
+    """fee_rate, slippage_bps, and fill_policy are also consumed — they
+    must continue to distinguish spec hashes."""
+    baseline = _build_spec(execution_model=_build_real_execution_model())
+    variant_fee = _build_spec(
+        execution_model=_build_real_execution_model(fee_rate=0.04),
+    )
+    variant_slippage = _build_spec(
+        execution_model=_build_real_execution_model(slippage_bps=10.0),
+    )
+
+    assert variant_fee.config_hash != baseline.config_hash
+    assert variant_slippage.config_hash != baseline.config_hash

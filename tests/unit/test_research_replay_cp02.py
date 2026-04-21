@@ -88,3 +88,31 @@ async def test_market_universe_replay_engine_releases_pool_connection_on_cancell
 
     assert pool.acquire_count == pool.release_count
     assert pool.currently_acquired == 0
+
+
+class _EmptyMetadataConnection:
+    async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        del query, args
+        return []
+
+
+class _EmptyMetadataPool:
+    def __init__(self) -> None:
+        self._connection = _EmptyMetadataConnection()
+
+    async def acquire(self) -> _EmptyMetadataConnection:
+        return self._connection
+
+    async def release(self, connection: _EmptyMetadataConnection) -> None:
+        del connection
+
+
+@pytest.mark.asyncio
+async def test_market_universe_replay_engine_rejects_empty_filter_match() -> None:
+    from pms.research.replay import MarketUniverseReplayEngine
+
+    engine = MarketUniverseReplayEngine(pool=cast(Any, _EmptyMetadataPool()))
+
+    with pytest.raises(ValueError, match="matched zero markets"):
+        async for _ in engine.stream(_spec(), BacktestExecutionConfig(chunk_days=7)):
+            pass
