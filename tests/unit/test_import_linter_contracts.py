@@ -15,6 +15,7 @@ SENSOR_ACTUATOR_CONTROLLER_CONTRACT = "Sensor + Actuator: no controller import"
 SENSOR_MARKET_SELECTION_CONTRACT = "Sensor: no market_selection import"
 ACTUATOR_MARKET_SELECTION_CONTRACT = "Actuator: no market_selection import"
 MARKET_SELECTION_AGGREGATE_CONTRACT = "Market selection: no aggregate import"
+KALSHI_STUB_BOUNDARY_CONTRACT = "Kalshi stub helper stays at runtime boundaries"
 
 IMPORT_LINTER_CONFIG = """
 [project]
@@ -60,6 +61,21 @@ name = "Market selection: no aggregate import"
 type = "forbidden"
 source_modules = ["pms.market_selection"]
 forbidden_modules = ["pms.strategies.aggregate"]
+
+[[tool.importlinter.contracts]]
+name = "Kalshi stub helper stays at runtime boundaries"
+type = "protected"
+protected_modules = ["pms.core.venue_support"]
+allowed_importers = [
+    "pms.sensor.adapters.historical",
+    "pms.sensor.adapters.market_discovery",
+    "pms.market_selection.selector",
+    "pms.actuator.executor",
+    "pms.actuator.adapters.paper",
+    "pms.actuator.adapters.backtest",
+    "pms.research.execution",
+]
+as_packages = false
 """.strip()
 
 
@@ -101,6 +117,11 @@ def _lint_imports_command() -> list[str]:
             "from pms.strategies.aggregate import Strategy\n",
             MARKET_SELECTION_AGGREGATE_CONTRACT,
         ),
+        (
+            "pms/controller/bad.py",
+            "from pms.core.venue_support import kalshi_stub_error\n",
+            KALSHI_STUB_BOUNDARY_CONTRACT,
+        ),
     ],
 )
 def test_import_linter_rejects_forbidden_dependencies(
@@ -117,11 +138,16 @@ def test_import_linter_rejects_forbidden_dependencies(
         "pms/controller",
         "pms/strategies",
         "pms/market_selection",
+        "pms/core",
     ]:
         package_dir = tmp_path / package
         package_dir.mkdir(parents=True, exist_ok=True)
         (package_dir / "__init__.py").write_text("")
     (tmp_path / "pms/strategies/aggregate.py").write_text("class Strategy: ...\n")
+    (tmp_path / "pms/core/venue_support.py").write_text(
+        "def kalshi_stub_error(context: str) -> Exception:\n"
+        "    return NotImplementedError(context)\n"
+    )
     (tmp_path / "pms/market_selection/selector.py").write_text(
         "class MarketSelector: ...\n"
     )
@@ -160,5 +186,6 @@ def test_current_tree_lints_clean() -> None:
         SENSOR_MARKET_SELECTION_CONTRACT,
         ACTUATOR_MARKET_SELECTION_CONTRACT,
         MARKET_SELECTION_AGGREGATE_CONTRACT,
+        KALSHI_STUB_BOUNDARY_CONTRACT,
     ]:
         assert contract in result.stdout

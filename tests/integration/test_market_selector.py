@@ -157,8 +157,8 @@ async def test_market_selector_returns_merged_asset_ids_from_active_strategies(
     )
     await registry.create_version(
         _strategy(
-            "kalshi-near",
-            venue="kalshi",
+            "polymarket-near",
+            venue="polymarket",
             resolution_time_max_horizon_days=10,
             volume_min_usdc=1_000.0,
         )
@@ -195,22 +195,22 @@ async def test_market_selector_returns_merged_asset_ids_from_active_strategies(
     )
     await _seed_market(
         store,
-        market_id="ka-near",
-        venue="kalshi",
+        market_id="pm-near-secondary",
+        venue="polymarket",
         resolves_at=now + timedelta(days=4),
         volume_24h=1_500.0,
     )
     await _seed_market(
         store,
-        market_id="ka-far",
-        venue="kalshi",
+        market_id="pm-far-secondary",
+        venue="polymarket",
         resolves_at=now + timedelta(days=20),
         volume_24h=1_500.0,
     )
     await _seed_market(
         store,
-        market_id="ka-low-volume",
-        venue="kalshi",
+        market_id="pm-low-volume-secondary",
+        venue="polymarket",
         resolves_at=now + timedelta(days=3),
         volume_24h=200.0,
     )
@@ -224,9 +224,11 @@ async def test_market_selector_returns_merged_asset_ids_from_active_strategies(
     result = await selector.select()
 
     assert result.asset_ids == [
-        "ka-near-no",
-        "ka-near-yes",
+        "pm-far-secondary-no",
+        "pm-far-secondary-yes",
         "pm-fast-no",
         "pm-fast-yes",
+        "pm-near-secondary-no",
+        "pm-near-secondary-yes",
     ]
     assert result.conflicts == []
