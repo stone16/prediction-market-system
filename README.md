@@ -6,8 +6,11 @@ Modular prediction market trading system organised around a **cybernetic loop**:
 Sensor → Controller → Actuator → Evaluator → Feedback → (Controller)
 ```
 
-Target venues: Polymarket (primary) and Kalshi. Supports three run modes:
-`backtest`, `paper`, and `live` (gated by config).
+Target venues: Polymarket (primary). Kalshi is reserved in the venue enum but
+has no adapter in v1 — see CP06's stub gate. Implemented run modes are
+`backtest` and `paper`; `live` is not implemented in v1, and
+`src/pms/actuator/adapters/polymarket.py:23-25` raises `NotImplementedError`
+after the `live_trading_enabled` guard.
 
 ## Layout
 
