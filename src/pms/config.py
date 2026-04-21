@@ -38,15 +38,12 @@ class ControllerSettings(BaseModel):
 
 
 class RiskSettings(BaseModel):
-    max_position_usdc: float = 100.0
     max_position_per_market: float = 100.0
     max_total_exposure: float = 1000.0
-    max_brier_score: float = 0.30
-    slippage_threshold_bps: float = 50.0
-    min_win_rate: float = 0.50
-    min_order_usdc: float = 1.0
     max_drawdown_pct: float | None = None
     max_open_positions: int | None = None
+    min_order_usdc: float = 1.0
+    slippage_threshold_bps: float = 50.0
 
 
 class SensorSettings(BaseModel):

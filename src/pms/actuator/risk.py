@@ -21,11 +21,18 @@ class RiskManager:
     risk: RiskSettings = field(default_factory=RiskSettings)
 
     def check(self, decision: TradeDecision, portfolio: Portfolio) -> RiskDecision:
-        market_exposure = _market_exposure(portfolio, decision.market_id) + decision.size
+        notional = decision.notional_usdc
+        if notional <= 0.0:
+            return RiskDecision(False, "non_positive_size")
+
+        if notional < self.risk.min_order_usdc:
+            return RiskDecision(False, "min_order_usdc")
+
+        market_exposure = _market_exposure(portfolio, decision.market_id) + notional
         if market_exposure > self.risk.max_position_per_market:
             return RiskDecision(False, "max_position_per_market")
 
-        total_exposure = portfolio.locked_usdc + decision.size
+        total_exposure = portfolio.locked_usdc + notional
         if total_exposure > self.risk.max_total_exposure:
             return RiskDecision(False, "max_total_exposure")
 
@@ -36,7 +43,16 @@ class RiskManager:
         ):
             return RiskDecision(False, "drawdown_circuit_breaker")
 
-        if decision.size > portfolio.free_usdc:
+        if (
+            self.risk.max_open_positions is not None
+            and len(portfolio.open_positions) >= self.risk.max_open_positions
+        ):
+            return RiskDecision(False, "max_open_positions")
+
+        if decision.max_slippage_bps > self.risk.slippage_threshold_bps:
+            return RiskDecision(False, "slippage_threshold_bps")
+
+        if notional > portfolio.free_usdc:
             return RiskDecision(False, "insufficient_free_usdc")
 
         return RiskDecision(True, "approved")
