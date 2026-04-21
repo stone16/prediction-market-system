@@ -5,6 +5,21 @@ const databaseUrl =
   process.env.DATABASE_URL ??
   'postgresql://postgres:postgres@localhost:5432/pms_test';
 
+const dashboardApiBaseUrlOverride = process.env.PMS_DASHBOARD_API_BASE_URL;
+const dashboardEnv = {
+  ...process.env
+};
+
+if (dashboardApiBaseUrlOverride !== undefined) {
+  if (dashboardApiBaseUrlOverride === '') {
+    delete dashboardEnv.PMS_API_BASE_URL;
+  } else {
+    dashboardEnv.PMS_API_BASE_URL = dashboardApiBaseUrlOverride;
+  }
+} else {
+  dashboardEnv.PMS_API_BASE_URL = 'http://127.0.0.1:8000';
+}
+
 export default defineConfig({
   testDir: './e2e',
   timeout: 30_000,
@@ -18,7 +33,7 @@ export default defineConfig({
   webServer: [
     {
       command:
-        'bash -lc \'cd .. && psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --file schema.sql && uv run pms-api\'',
+        'bash -lc \'cd .. && uv run alembic upgrade head && uv run pms-api\'',
       env: {
         ...process.env,
         DATABASE_URL: databaseUrl
@@ -28,7 +43,8 @@ export default defineConfig({
       timeout: 120_000
     },
     {
-      command: 'PMS_API_BASE_URL=http://127.0.0.1:8000 npm run dev',
+      command: 'npm run dev',
+      env: dashboardEnv,
       url: 'http://127.0.0.1:3100',
       reuseExistingServer: false,
       timeout: 120_000
