@@ -45,11 +45,22 @@ class NullFactorSnapshotReader:
         strategy_id: str,
         strategy_version_id: str,
     ) -> FactorSnapshot:
-        del market_id, as_of, strategy_id, strategy_version_id
         missing_factors = tuple(
             dict.fromkeys((step.factor_id, step.param) for step in required)
         )
-        return FactorSnapshot(values={}, missing_factors=missing_factors)
+        return FactorSnapshot(
+            values={},
+            missing_factors=missing_factors,
+            snapshot_hash=_snapshot_hash(
+                market_id=market_id,
+                as_of=as_of,
+                strategy_id=strategy_id,
+                strategy_version_id=strategy_version_id,
+                required_keys=missing_factors,
+                values={},
+                missing_factors=missing_factors,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,12 +76,23 @@ class PostgresFactorSnapshotReader:
         strategy_id: str,
         strategy_version_id: str,
     ) -> FactorSnapshot:
-        del strategy_id, strategy_version_id
         required_keys = tuple(
             dict.fromkeys((step.factor_id, step.param) for step in required)
         )
         if not required_keys:
-            return FactorSnapshot(values={}, missing_factors=())
+            return FactorSnapshot(
+                values={},
+                missing_factors=(),
+                snapshot_hash=_snapshot_hash(
+                    market_id=market_id,
+                    as_of=as_of,
+                    strategy_id=strategy_id,
+                    strategy_version_id=strategy_version_id,
+                    required_keys=(),
+                    values={},
+                    missing_factors=(),
+                ),
+            )
 
         factor_ids = [factor_id for factor_id, _ in required_keys]
         params = [param for _, param in required_keys]
@@ -120,7 +142,15 @@ class PostgresFactorSnapshotReader:
         return FactorSnapshot(
             values=values,
             missing_factors=tuple(missing_factors),
-            snapshot_hash=_snapshot_hash(market_id=market_id, as_of=as_of, values=values),
+            snapshot_hash=_snapshot_hash(
+                market_id=market_id,
+                as_of=as_of,
+                strategy_id=strategy_id,
+                strategy_version_id=strategy_version_id,
+                required_keys=required_keys,
+                values=values,
+                missing_factors=tuple(missing_factors),
+            ),
         )
 
 
@@ -128,14 +158,28 @@ def _snapshot_hash(
     *,
     market_id: str,
     as_of: datetime,
+    strategy_id: str,
+    strategy_version_id: str,
+    required_keys: Sequence[FactorKey],
     values: Mapping[FactorKey, float],
+    missing_factors: Sequence[FactorKey],
 ) -> str:
     payload = {
         "market_id": market_id,
         "as_of": as_of.isoformat(),
+        "strategy_id": strategy_id,
+        "strategy_version_id": strategy_version_id,
+        "required_keys": [
+            [factor_id, param]
+            for factor_id, param in sorted(required_keys)
+        ],
         "values": [
             [factor_id, param, values[(factor_id, param)]]
             for factor_id, param in sorted(values)
+        ],
+        "missing_factors": [
+            [factor_id, param]
+            for factor_id, param in sorted(missing_factors)
         ],
     }
     return sha256(

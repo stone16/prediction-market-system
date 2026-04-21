@@ -212,3 +212,14 @@ async def test_negative_edge_skips_when_no_token_cannot_be_resolved() -> None:
     emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
 
     assert emission is None
+    diagnostic = getattr(pipeline, "last_diagnostic")
+    assert diagnostic is not None
+    assert diagnostic.code == "missing_no_token"
+    assert diagnostic.market_id == "market-buy-no"
+    assert diagnostic.strategy_id == "alpha"
+    assert diagnostic.strategy_version_id == "alpha-v1"
+    assert diagnostic.metadata == {
+        "signal_token_id": "yes-token",
+        "yes_token_id": "yes-token",
+        "outcome": "NO",
+    }

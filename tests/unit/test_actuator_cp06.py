@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -25,7 +25,7 @@ def _decision(
     *,
     decision_id: str = "d-cp06",
     market_id: str = "m-cp06",
-    side: str = Side.BUY.value,
+    side: Literal["BUY", "SELL"] = Side.BUY.value,
     price: float = 0.4,
     size: float = 10.0,
 ) -> TradeDecision:

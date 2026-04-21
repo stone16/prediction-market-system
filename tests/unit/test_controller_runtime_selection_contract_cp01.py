@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import asdict
 from datetime import UTC, datetime
 import importlib
 from typing import Any
@@ -183,6 +184,13 @@ async def test_controller_pipeline_uses_strategy_factor_composition_not_forecast
     assert decision.prob_estimate == pytest.approx(0.72)
     assert decision.expected_edge == pytest.approx(0.32)
     assert opportunity.expected_edge == pytest.approx(0.32)
+    assert opportunity.selected_factor_values == {
+        "fair_value": pytest.approx(0.58),
+        "yes_price": pytest.approx(0.4),
+        "rules": pytest.approx(0.10),
+        "llm": pytest.approx(0.90),
+        "snapshot_probability": pytest.approx(0.72),
+    }
     assert opportunity.factor_snapshot_hash == "snapshot-72"
     assert opportunity.composition_trace == {
         "selected_probability": pytest.approx(0.72),
@@ -253,3 +261,67 @@ def test_controller_pipeline_factory_passes_strategy_and_factor_reader() -> None
 
     assert pipeline.strategy == strategy
     assert pipeline.factor_reader is factor_reader
+
+
+def test_snapshot_hash_distinguishes_missing_factors_and_strategy_identity() -> None:
+    snapshot_hash = _load_symbol("pms.controller.factor_snapshot", "_snapshot_hash")
+
+    with_missing = snapshot_hash(
+        market_id="market-runtime-contract",
+        as_of=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        required_keys=(("rules", ""), ("llm", "")),
+        values={("rules", ""): 0.55},
+        missing_factors=(("llm", ""),),
+    )
+    without_missing = snapshot_hash(
+        market_id="market-runtime-contract",
+        as_of=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        required_keys=(("rules", ""),),
+        values={("rules", ""): 0.55},
+        missing_factors=(),
+    )
+    other_strategy = snapshot_hash(
+        market_id="market-runtime-contract",
+        as_of=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+        strategy_id="beta",
+        strategy_version_id="beta-v2",
+        required_keys=(("rules", ""), ("llm", "")),
+        values={("rules", ""): 0.55},
+        missing_factors=(("llm", ""),),
+    )
+
+    assert with_missing != without_missing
+    assert with_missing != other_strategy
+
+
+def test_trade_decision_asdict_exposes_normalized_order_intent_fields() -> None:
+    decision = asdict(
+        _load_symbol("pms.core.models", "TradeDecision")(
+            decision_id="decision-runtime-contract",
+            market_id="market-runtime-contract",
+            token_id="yes-token",
+            venue="polymarket",
+            side="BUY",
+            price=0.4,
+            size=10.0,
+            order_type="limit",
+            max_slippage_bps=50,
+            stop_conditions=[],
+            prob_estimate=0.72,
+            expected_edge=0.32,
+            time_in_force="GTC",
+            opportunity_id="opportunity-runtime-contract",
+            strategy_id="alpha",
+            strategy_version_id="alpha-v1",
+            model_id="ensemble",
+        )
+    )
+
+    assert decision["side"] == "BUY"
+    assert decision["price"] == pytest.approx(0.4)
+    assert decision["action"] == "BUY"
+    assert decision["limit_price"] == pytest.approx(0.4)
