@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 import json
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import asyncpg
 
@@ -37,9 +38,12 @@ class OpportunityStore:
                     staleness_policy,
                     strategy_id,
                     strategy_version_id,
-                    created_at
+                    created_at,
+                    factor_snapshot_hash,
+                    composition_trace
                 ) VALUES (
-                    $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13
+                    $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13,
+                    $14, $15::jsonb
                 )
                 """,
                 opportunity.opportunity_id,
@@ -55,6 +59,8 @@ class OpportunityStore:
                 opportunity.strategy_id,
                 opportunity.strategy_version_id,
                 opportunity.created_at,
+                opportunity.factor_snapshot_hash,
+                json.dumps(dict(opportunity.composition_trace)),
             )
 
     async def all(self) -> list[Opportunity]:
@@ -77,7 +83,9 @@ class OpportunityStore:
                     staleness_policy,
                     strategy_id,
                     strategy_version_id,
-                    created_at
+                    created_at,
+                    factor_snapshot_hash,
+                    composition_trace
                 FROM opportunities
                 ORDER BY created_at ASC, opportunity_id ASC
                 """
@@ -96,6 +104,7 @@ def _opportunity_from_row(row: asyncpg.Record) -> Opportunity:
         for key, value in cast(dict[str, object], decoded).items()
         if isinstance(value, (int, float)) and not isinstance(value, bool)
     }
+    composition_trace = _json_object(row["composition_trace"])
     return Opportunity(
         opportunity_id=cast(str, row["opportunity_id"]),
         market_id=cast(str, row["market_id"]),
@@ -110,4 +119,17 @@ def _opportunity_from_row(row: asyncpg.Record) -> Opportunity:
         strategy_id=cast(str, row["strategy_id"]),
         strategy_version_id=cast(str, row["strategy_version_id"]),
         created_at=cast(datetime, row["created_at"]),
+        factor_snapshot_hash=cast(str | None, row["factor_snapshot_hash"]),
+        composition_trace=composition_trace,
     )
+
+
+def _json_object(value: object) -> Mapping[str, Any]:
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        if isinstance(decoded, dict):
+            return cast(dict[str, Any], decoded)
+        return {}
+    if isinstance(value, dict):
+        return cast(dict[str, Any], value)
+    return {}

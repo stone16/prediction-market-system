@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -25,7 +25,7 @@ def _decision(
     *,
     decision_id: str = "d-cp06",
     market_id: str = "m-cp06",
-    side: str = Side.BUY.value,
+    side: Literal["BUY", "SELL"] = Side.BUY.value,
     price: float = 0.4,
     size: float = 10.0,
 ) -> TradeDecision:
@@ -140,6 +140,43 @@ async def test_paper_actuator_fills_buy_at_best_ask() -> None:
     assert state.fill_price == 0.41
     assert state.filled_size == 10.0
     assert state.remaining_size == 0.0
+
+
+@pytest.mark.asyncio
+async def test_paper_actuator_derives_no_fill_price_from_yes_bid() -> None:
+    actuator = PaperActuator(
+        orderbooks={
+            "m-cp06": {
+                "bids": [{"price": 0.62, "size": 100.0}],
+                "asks": [{"price": 0.64, "size": 100.0}],
+            }
+        }
+    )
+
+    state = await actuator.execute(
+        TradeDecision(
+            decision_id="d-no-cp06",
+            market_id="m-cp06",
+            token_id="t-no",
+            venue="polymarket",
+            side=Side.BUY.value,
+            price=0.38,
+            size=10.0,
+            order_type="limit",
+            max_slippage_bps=100,
+            stop_conditions=["unit-test"],
+            prob_estimate=0.38,
+            expected_edge=0.02,
+            time_in_force="GTC",
+            opportunity_id="op-d-no-cp06",
+            strategy_id="default",
+            strategy_version_id="default-v1",
+            outcome="NO",
+        )
+    )
+
+    assert state.status == OrderStatus.MATCHED.value
+    assert state.fill_price == pytest.approx(0.38)
 
 
 @pytest.mark.asyncio

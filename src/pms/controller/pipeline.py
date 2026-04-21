@@ -6,17 +6,29 @@ from datetime import UTC, datetime
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from pms.config import PMSSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
+from pms.controller.diagnostics import ControllerDiagnostic
+from pms.controller.factor_snapshot import (
+    FactorKey,
+    FactorSnapshotReader,
+    NullFactorSnapshotReader,
+)
 from pms.controller.forecasters.llm import LLMForecaster
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
+from pms.controller.outcome_tokens import (
+    NullOutcomeTokenResolver,
+    OutcomeTokenResolver,
+)
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.interfaces import ICalibrator, IForecaster, ISizer
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
+from pms.factors.composition import apply_composition, evaluate_branch_probabilities
+from pms.strategies.projections import ActiveStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +41,24 @@ T = TypeVar("T")
 class ControllerPipeline:
     strategy_id: str = "default"
     strategy_version_id: str = "default-v1"
+    strategy: ActiveStrategy | None = None
+    factor_reader: FactorSnapshotReader = field(
+        default_factory=NullFactorSnapshotReader
+    )
+    outcome_token_resolver: OutcomeTokenResolver = field(
+        default_factory=NullOutcomeTokenResolver
+    )
     forecasters: Sequence[IForecaster] | None = None
     calibrator: ICalibrator | None = None
     sizer: ISizer | None = None
     router: Router | None = None
     settings: PMSSettings = field(default_factory=PMSSettings)
+    last_diagnostic: ControllerDiagnostic | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
+        if self.strategy is not None:
+            self.strategy_id = self.strategy.strategy_id
+            self.strategy_version_id = self.strategy.strategy_version_id
         if self.forecasters is None:
             self.forecasters = (
                 RulesForecaster(),
@@ -54,6 +77,7 @@ class ControllerPipeline:
         signal: MarketSignal,
         portfolio: Portfolio | None = None,
     ) -> OpportunityEmission | None:
+        self.last_diagnostic = None
         router = _required(self.router, "router")
         if not router.gate(signal):
             return None
@@ -70,23 +94,84 @@ class ControllerPipeline:
         probabilities: list[float] = []
         model_ids: list[str] = []
         rationales: list[str] = []
+        runtime_probabilities: dict[str, float] = {}
+        forecaster_names = _strategy_forecaster_names(self.strategy)
         calibrator = _required(self.calibrator, "calibrator")
-        for forecaster, result in zip(forecasters, results, strict=True):
+        for index, (forecaster, result) in enumerate(
+            zip(forecasters, results, strict=True)
+        ):
             if isinstance(result, BaseException):
                 logger.warning("forecaster failed: %s", result)
                 continue
             if result is None:
                 continue
             model_id = _model_id(result, forecaster)
+            calibrated_probability = calibrator.calibrate(
+                float(result[0]),
+                model_id=model_id,
+            )
             model_ids.append(model_id)
-            probabilities.append(calibrator.calibrate(float(result[0]), model_id=model_id))
+            probabilities.append(calibrated_probability)
             if result[2]:
                 rationales.append(f"{model_id}:{result[2]}")
+            runtime_factor_id = _runtime_factor_id(
+                forecaster_names[index] if index < len(forecaster_names) else None
+            )
+            if runtime_factor_id is not None:
+                runtime_probabilities[runtime_factor_id] = calibrated_probability
 
         if not probabilities:
             return None
 
         prob_estimate = sum(probabilities) / len(probabilities)
+        factor_snapshot_hash: str | None = None
+        composition_trace: dict[str, object] = {}
+        factor_values = _signal_factor_values(signal)
+        factor_values.update(
+            {
+                (factor_id, ""): value
+                for factor_id, value in runtime_probabilities.items()
+            }
+        )
+        if self.strategy is not None and self.strategy.config.factor_composition:
+            factor_snapshot = await self.factor_reader.snapshot(
+                market_id=signal.market_id,
+                as_of=signal.timestamp,
+                required=self.strategy.config.factor_composition,
+                strategy_id=self.strategy.strategy_id,
+                strategy_version_id=self.strategy.strategy_version_id,
+            )
+            factor_values = dict(factor_snapshot.values)
+            factor_values.update(_signal_factor_values(signal))
+            factor_values.update(
+                {
+                    (factor_id, ""): value
+                    for factor_id, value in runtime_probabilities.items()
+                }
+            )
+            try:
+                branch_probabilities = evaluate_branch_probabilities(
+                    self.strategy.config.factor_composition,
+                    factor_values,
+                )
+                prob_estimate = apply_composition(
+                    self.strategy.config.factor_composition,
+                    factor_values,
+                )
+                factor_snapshot_hash = factor_snapshot.snapshot_hash
+                composition_trace = {
+                    "selected_probability": prob_estimate,
+                    "expected_edge": prob_estimate - signal.yes_price,
+                    "factor_snapshot_hash": factor_snapshot.snapshot_hash,
+                    "missing_factors": [
+                        _factor_key_label((factor_id, param))
+                        for factor_id, param in factor_snapshot.missing_factors
+                    ],
+                    "branch_probabilities": branch_probabilities,
+                }
+            except (KeyError, ValueError) as exc:
+                logger.warning("composition resolution failed: %s", exc)
+                return None
         expected_edge = prob_estimate - signal.yes_price
         active_portfolio = portfolio or _default_portfolio()
         sizer = _required(self.sizer, "sizer")
@@ -96,12 +181,50 @@ class ControllerPipeline:
             portfolio=active_portfolio,
         )
         now = datetime.now(tz=UTC)
+        opportunity_side: Literal["yes", "no"] = (
+            "yes" if expected_edge >= 0.0 else "no"
+        )
+        decision_token_id = signal.token_id
+        decision_outcome: Literal["YES", "NO"] = "YES"
+        decision_price = signal.yes_price
+        if expected_edge < 0.0:
+            outcome_tokens = await self.outcome_token_resolver.resolve(
+                market_id=signal.market_id,
+                signal_token_id=signal.token_id,
+            )
+            if outcome_tokens.no_token_id is None:
+                self.last_diagnostic = ControllerDiagnostic(
+                    code="missing_no_token",
+                    message=(
+                        "Skipping bearish decision because no NO token could be resolved."
+                    ),
+                    market_id=signal.market_id,
+                    strategy_id=self.strategy_id,
+                    strategy_version_id=self.strategy_version_id,
+                    token_id=signal.token_id,
+                    severity="warning",
+                    metadata={
+                        "signal_token_id": signal.token_id,
+                        "yes_token_id": outcome_tokens.yes_token_id,
+                        "outcome": "NO",
+                    },
+                )
+                logger.info(
+                    "controller diagnostic %s for %s",
+                    self.last_diagnostic.code,
+                    signal.market_id,
+                    extra={"controller_diagnostic": self.last_diagnostic},
+                )
+                return None
+            decision_token_id = outcome_tokens.no_token_id
+            decision_outcome = "NO"
+            decision_price = max(0.0, 1.0 - signal.yes_price)
         opportunity = Opportunity(
             opportunity_id=f"opportunity-{uuid.uuid4().hex}",
             market_id=signal.market_id,
-            token_id=signal.token_id,
-            side="yes" if expected_edge >= 0.0 else "no",
-            selected_factor_values=_selected_factor_values(signal),
+            token_id=decision_token_id,
+            side=opportunity_side,
+            selected_factor_values=_selected_factor_values(factor_values),
             expected_edge=expected_edge,
             rationale=_rationale_text(rationales),
             target_size_usdc=size,
@@ -110,15 +233,17 @@ class ControllerPipeline:
             strategy_id=self.strategy_id,
             strategy_version_id=self.strategy_version_id,
             created_at=now,
+            factor_snapshot_hash=factor_snapshot_hash,
+            composition_trace=composition_trace,
         )
 
         return opportunity, TradeDecision(
             decision_id=f"decision-{uuid.uuid4().hex}",
             market_id=signal.market_id,
-            token_id=signal.token_id,
+            token_id=decision_token_id,
             venue=signal.venue,
-            side="BUY" if expected_edge >= 0.0 else "SELL",
-            price=signal.yes_price,
+            side="BUY",
+            price=decision_price,
             size=size,
             order_type="limit",
             max_slippage_bps=self.settings.controller.max_slippage_bps,
@@ -129,6 +254,9 @@ class ControllerPipeline:
             opportunity_id=opportunity.opportunity_id,
             strategy_id=self.strategy_id,
             strategy_version_id=self.strategy_version_id,
+            action="BUY",
+            limit_price=decision_price,
+            outcome=decision_outcome,
             model_id=_decision_model_id(model_ids),
         )
 
@@ -167,12 +295,44 @@ def _decision_model_id(model_ids: Sequence[str]) -> str | None:
     return "ensemble"
 
 
-def _selected_factor_values(signal: MarketSignal) -> dict[str, float]:
+def _selected_factor_values(factor_values: dict[FactorKey, float]) -> dict[str, float]:
     return {
-        key: float(value)
+        _factor_key_label(key): value
+        for key, value in sorted(factor_values.items())
+    }
+
+
+def _signal_factor_values(signal: MarketSignal) -> dict[tuple[str, str], float]:
+    factor_values = {
+        (key, ""): float(value)
         for key, value in signal.external_signal.items()
         if isinstance(value, (int, float)) and not isinstance(value, bool)
     }
+    factor_values[("yes_price", "")] = signal.yes_price
+    return factor_values
+
+
+def _factor_key_label(key: FactorKey) -> str:
+    factor_id, param = key
+    if not param:
+        return factor_id
+    return f"{factor_id}:{param}"
+
+
+def _strategy_forecaster_names(strategy: ActiveStrategy | None) -> tuple[str, ...]:
+    if strategy is None:
+        return ()
+    return tuple(name for name, _ in strategy.forecaster.forecasters)
+
+
+def _runtime_factor_id(forecaster_name: str | None) -> str | None:
+    if forecaster_name is None:
+        return None
+    if forecaster_name == "stats":
+        return "statistical"
+    if forecaster_name in {"rules", "llm"}:
+        return forecaster_name
+    return None
 
 
 def _rationale_text(rationales: Sequence[str]) -> str:

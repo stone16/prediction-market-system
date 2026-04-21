@@ -10,8 +10,10 @@ from typing import Any, cast
 import pytest
 
 from pms.actuator.executor import ActuatorExecutor
-from pms.config import PMSSettings, RiskSettings
+from pms.config import ControllerSettings, PMSSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
+from pms.controller.factor_snapshot import FactorSnapshot
+from pms.controller.outcome_tokens import OutcomeTokens
 from pms.controller.pipeline import ControllerPipeline
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
@@ -42,6 +44,45 @@ class IdleSensor:
         while True:
             await asyncio.sleep(60.0)
             yield _signal()
+
+
+class StaticLowForecaster:
+    def predict(self, signal: MarketSignal) -> tuple[float, float, str]:
+        del signal
+        return (0.30, 0.9, "runner skip diagnostic")
+
+    async def forecast(self, signal: MarketSignal) -> float:
+        del signal
+        return 0.30
+
+
+class RecordingFactorReader:
+    async def snapshot(
+        self,
+        *,
+        market_id: str,
+        as_of: datetime,
+        required: object,
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> FactorSnapshot:
+        del market_id, as_of, required, strategy_id, strategy_version_id
+        return FactorSnapshot(
+            values={("snapshot_probability", ""): 0.30},
+            missing_factors=(),
+            snapshot_hash="snapshot-runner-skip",
+        )
+
+
+class NoNoTokenResolver:
+    async def resolve(
+        self,
+        *,
+        market_id: str,
+        signal_token_id: str | None,
+    ) -> OutcomeTokens:
+        del market_id, signal_token_id
+        return OutcomeTokens(yes_token_id="runner-token", no_token_id=None)
 
 
 def _signal() -> MarketSignal:
@@ -76,6 +117,15 @@ async def _wait_for_opportunities(runner: Runner, count: int) -> None:
     while len(runner.state.opportunities) < count:
         if asyncio.get_running_loop().time() >= deadline:
             msg = f"timed out waiting for {count} opportunities"
+            raise AssertionError(msg)
+        await asyncio.sleep(0.01)
+
+
+async def _wait_for_diagnostics(runner: Runner, count: int) -> None:
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while len(runner.state.controller_diagnostics) < count:
+        if asyncio.get_running_loop().time() >= deadline:
+            msg = f"timed out waiting for {count} controller diagnostics"
             raise AssertionError(msg)
         await asyncio.sleep(0.01)
 
@@ -144,3 +194,73 @@ async def test_runner_forwards_opportunity_id_to_actuator() -> None:
     assert runner.state.opportunities[0].opportunity_id == opportunity.opportunity_id
     assert captured_decisions[0].opportunity_id == opportunity.opportunity_id
     assert captured_decisions[0].stop_conditions
+
+
+@pytest.mark.asyncio
+async def test_runner_records_structured_controller_diagnostics_for_skipped_bearish_signal() -> None:
+    from pms.strategies.projections import (
+        ActiveStrategy,
+        EvalSpec,
+        FactorCompositionStep,
+        ForecasterSpec,
+        MarketSelectionSpec,
+        RiskParams,
+        StrategyConfig,
+    )
+
+    strategy = ActiveStrategy(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        config=StrategyConfig(
+            strategy_id="alpha",
+            factor_composition=(
+                FactorCompositionStep(
+                    factor_id="snapshot_probability",
+                    role="runtime_probability",
+                    param="",
+                    weight=1.0,
+                    threshold=None,
+                ),
+            ),
+            metadata=(),
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier",)),
+        forecaster=ForecasterSpec(forecasters=(("rules", ()),)),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=100.0,
+        ),
+    )
+    runner = Runner(
+        config=_settings(),
+        historical_data_path=FIXTURE_PATH,
+        sensors=[IdleSensor()],
+        controller=ControllerPipeline(
+            strategy=strategy,
+            factor_reader=RecordingFactorReader(),
+            outcome_token_resolver=NoNoTokenResolver(),
+            forecasters=[StaticLowForecaster()],
+            calibrator=NetcalCalibrator(),
+            sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+            router=Router(ControllerSettings(min_volume=100.0)),
+        ),
+        opportunity_store=cast(Any, InMemoryOpportunityStore()),
+    )
+
+    try:
+        await runner.start()
+        await runner.sensor_stream.queue.put(_signal())
+        await _wait_for_diagnostics(runner, 1)
+    finally:
+        await runner.stop()
+
+    assert runner.state.opportunities == []
+    assert runner.state.decisions == []
+    assert runner.state.controller_diagnostics[0].code == "missing_no_token"
+    assert runner.state.controller_diagnostics[0].metadata["signal_token_id"] == "runner-token"

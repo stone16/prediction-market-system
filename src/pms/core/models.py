@@ -57,6 +57,8 @@ class Opportunity:
     strategy_id: str
     strategy_version_id: str
     created_at: datetime
+    factor_snapshot_hash: str | None = None
+    composition_trace: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,7 @@ class TradeDecision:
     market_id: str
     token_id: str | None
     venue: Venue
-    side: str
+    side: BookSide
     price: float
     size: float
     order_type: str
@@ -77,7 +79,22 @@ class TradeDecision:
     opportunity_id: str
     strategy_id: str
     strategy_version_id: str
+    action: BookSide | None = None
+    limit_price: float | None = None
+    outcome: Outcome = "YES"
     model_id: str | None = None
+
+    def __post_init__(self) -> None:
+        action = self.side if self.action is None else self.action
+        if action != self.side:
+            msg = "TradeDecision.action must match TradeDecision.side"
+            raise ValueError(msg)
+        limit_price = self.price if self.limit_price is None else self.limit_price
+        if limit_price != self.price:
+            msg = "TradeDecision.limit_price must match TradeDecision.price"
+            raise ValueError(msg)
+        object.__setattr__(self, "action", action)
+        object.__setattr__(self, "limit_price", limit_price)
 
 
 @dataclass(frozen=True)
@@ -254,3 +271,5 @@ class Feedback:
     resolved_at: datetime | None = None
     category: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    strategy_id: str = "default"
+    strategy_version_id: str = "default-v1"

@@ -5,9 +5,17 @@ from dataclasses import dataclass, field
 
 from pms.config import LLMSettings, PMSSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
+from pms.controller.factor_snapshot import (
+    FactorSnapshotReader,
+    NullFactorSnapshotReader,
+)
 from pms.controller.forecasters.llm import LLMForecaster
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
+from pms.controller.outcome_tokens import (
+    NullOutcomeTokenResolver,
+    OutcomeTokenResolver,
+)
 from pms.controller.pipeline import ControllerPipeline
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
@@ -18,6 +26,12 @@ from pms.strategies.projections import ActiveStrategy
 @dataclass
 class ControllerPipelineFactory:
     settings: PMSSettings = field(default_factory=PMSSettings)
+    factor_reader: FactorSnapshotReader = field(
+        default_factory=NullFactorSnapshotReader
+    )
+    outcome_token_resolver: OutcomeTokenResolver = field(
+        default_factory=NullOutcomeTokenResolver
+    )
 
     def build_many(
         self,
@@ -30,8 +44,11 @@ class ControllerPipelineFactory:
 
     def build(self, strategy: ActiveStrategy) -> ControllerPipeline:
         return ControllerPipeline(
+            strategy=strategy,
             strategy_id=strategy.strategy_id,
             strategy_version_id=strategy.strategy_version_id,
+            factor_reader=self.factor_reader,
+            outcome_token_resolver=self.outcome_token_resolver,
             forecasters=self._build_forecasters(strategy),
             calibrator=NetcalCalibrator(),
             sizer=KellySizer(

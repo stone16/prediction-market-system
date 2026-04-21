@@ -167,13 +167,15 @@ async def test_api_routes_expose_mock_runner_state() -> None:
     assert status["mode"] == "backtest"
     assert status["runner_started_at"] == "2026-04-14T00:00:00+00:00"
     assert status["sensors"][0].keys() == {"name", "status", "last_signal_at"}
-    assert status["controller"] == {"decisions_total": 1}
+    assert status["controller"] == {"decisions_total": 1, "diagnostics_total": 0}
     assert status["actuator"] == {"fills_total": 1, "mode": "backtest"}
     assert status["evaluator"] == {"eval_records_total": 1, "brier_overall": 0.09}
     assert signals[0]["market_id"] == "api-market"
     assert decisions[0]["forecaster"] == "model-a"
     assert decisions[0]["prob_estimate"] == 0.7
     assert decisions[0]["expected_edge"] == 0.3
+    assert decisions[0]["action"] == "BUY"
+    assert decisions[0]["limit_price"] == 0.4
     assert decisions[0]["kelly_size"] == 12.5
     assert metrics["brier_overall"] == 0.09
     assert metrics["ops_view"]["brier_overall"] == 0.09

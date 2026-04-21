@@ -159,6 +159,37 @@ def test_scorer_brier_known_values() -> None:
     assert second.brier_score == pytest.approx(0.25)
 
 
+def test_scorer_pnl_for_buy_no_uses_complementary_contract_outcome() -> None:
+    scorer = Scorer()
+    decision = TradeDecision(
+        decision_id="d-buy-no",
+        market_id="m-cp07",
+        token_id="t-no",
+        venue="polymarket",
+        side=Side.BUY.value,
+        price=0.38,
+        size=10.0,
+        order_type="limit",
+        max_slippage_bps=100,
+        stop_conditions=["min_volume:100.00"],
+        prob_estimate=0.62,
+        expected_edge=0.24,
+        time_in_force="GTC",
+        opportunity_id="op-d-buy-no",
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        model_id="model-a",
+        outcome="NO",
+    )
+
+    record = scorer.score(
+        _fill(decision_id="d-buy-no", resolved_outcome=0.0, fill_price=0.38),
+        decision,
+    )
+
+    assert record.pnl == pytest.approx(6.2)
+
+
 def test_scorer_rejects_fill_and_decision_strategy_identity_mismatch() -> None:
     scorer = Scorer()
 

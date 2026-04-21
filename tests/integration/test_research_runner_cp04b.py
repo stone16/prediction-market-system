@@ -74,11 +74,15 @@ class BlockingPipeline:
         strategy_id: str,
         strategy_version_id: str,
         gate: asyncio.Event | None = None,
+        started_event: asyncio.Event | None = None,
+        completed_event: asyncio.Event | None = None,
         error: Exception | None = None,
     ) -> None:
         self._strategy_id = strategy_id
         self._strategy_version_id = strategy_version_id
         self._gate = gate
+        self._started_event = started_event
+        self._completed_event = completed_event
         self._error = error
         self._emitted = False
 
@@ -91,10 +95,14 @@ class BlockingPipeline:
         if self._emitted:
             return None
         self._emitted = True
+        if self._started_event is not None:
+            self._started_event.set()
         if self._gate is not None:
             await self._gate.wait()
         if self._error is not None:
             raise self._error
+        if self._completed_event is not None:
+            self._completed_event.set()
         opportunity = Opportunity(
             opportunity_id=f"opp-{self._strategy_id}",
             market_id=signal.market_id,
@@ -290,12 +298,6 @@ async def _run_status(pool: asyncpg.Pool, run_id: str) -> tuple[str, str | None]
     return cast(str, row["status"]), cast(str | None, row["failure_reason"])
 
 
-async def _wait_for_count(pool: asyncpg.Pool, run_id: str, expected: int) -> None:
-    async with asyncio.timeout(3.0):
-        while await _strategy_run_count(pool, run_id) != expected:
-            await asyncio.sleep(0.01)
-
-
 @pytest.mark.asyncio(loop_scope="session")
 async def test_backtest_runner_claims_one_queued_run_under_race(
     pg_pool: asyncpg.Pool,
@@ -362,12 +364,15 @@ async def test_backtest_runner_rejects_empty_strategy_runs_at_application_layer(
     )
 
     assert await runner.execute(run_id) is False
-    assert await _run_status(pg_pool, run_id) == ("failed", "no_strategy_versions")
+    assert await _run_status(pg_pool, run_id) == (
+        "failed",
+        "BacktestSpec.strategy_versions must be non-empty",
+    )
     assert await _strategy_run_count(pg_pool, run_id) == 0
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_backtest_runner_streams_strategy_rows_as_each_strategy_finishes(
+async def test_backtest_runner_defers_strategy_rows_until_all_strategies_finish(
     pg_pool: asyncpg.Pool,
 ) -> None:
     run_id = str(uuid4())
@@ -378,7 +383,10 @@ async def test_backtest_runner_streams_strategy_rows_as_each_strategy_finishes(
     )
     await _insert_run(pg_pool, run_id=run_id, strategy_versions=strategy_keys)
 
+    alpha_completed = asyncio.Event()
+    beta_started = asyncio.Event()
     beta_gate = asyncio.Event()
+    gamma_started = asyncio.Event()
     gamma_gate = asyncio.Event()
     strategies = {
         key: _active_strategy(strategy_id=key[0], strategy_version_id=key[1])
@@ -394,28 +402,32 @@ async def test_backtest_runner_streams_strategy_rows_as_each_strategy_finishes(
                 "alpha": BlockingPipeline(
                     strategy_id="alpha",
                     strategy_version_id="alpha-v1",
+                    completed_event=alpha_completed,
                 ),
                 "beta": BlockingPipeline(
                     strategy_id="beta",
                     strategy_version_id="beta-v1",
                     gate=beta_gate,
+                    started_event=beta_started,
                 ),
                 "gamma": BlockingPipeline(
                     strategy_id="gamma",
                     strategy_version_id="gamma-v1",
                     gate=gamma_gate,
+                    started_event=gamma_started,
                 ),
             }
         ),
     )
 
     task = asyncio.create_task(runner.execute(run_id))
-    await _wait_for_count(pg_pool, run_id, 1)
-    assert await _strategy_run_count(pg_pool, run_id) == 1
+    await asyncio.wait_for(alpha_completed.wait(), timeout=1.0)
+    await asyncio.wait_for(beta_started.wait(), timeout=1.0)
+    assert await _strategy_run_count(pg_pool, run_id) == 0
 
     beta_gate.set()
-    await _wait_for_count(pg_pool, run_id, 2)
-    assert await _strategy_run_count(pg_pool, run_id) == 2
+    await asyncio.wait_for(gamma_started.wait(), timeout=1.0)
+    assert await _strategy_run_count(pg_pool, run_id) == 0
 
     gamma_gate.set()
     assert await task is True
@@ -430,7 +442,7 @@ async def test_backtest_runner_streams_strategy_rows_as_each_strategy_finishes(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_backtest_runner_preserves_partial_results_on_strategy_failure(
+async def test_backtest_runner_discards_partial_results_on_strategy_failure(
     pg_pool: asyncpg.Pool,
 ) -> None:
     run_id = str(uuid4())
@@ -473,7 +485,7 @@ async def test_backtest_runner_preserves_partial_results_on_strategy_failure(
 
     assert await runner.execute(run_id) is False
     assert await _run_status(pg_pool, run_id) == ("failed", "strategy-two boom")
-    assert await _strategy_run_count(pg_pool, run_id) == 1
+    assert await _strategy_run_count(pg_pool, run_id) == 0
     assert tracking_writable.acquire_calls == tracking_writable.release_calls
     assert tracking_readonly.acquire_calls == tracking_readonly.release_calls
 
@@ -525,7 +537,7 @@ async def test_backtest_runner_marks_time_budget_exceeded(
     ("cancel_point", "expected_rows"),
     [
         ("before_first_strategy", 0),
-        ("between_strategies", 1),
+        ("between_strategies", 0),
         ("after_last_strategy", 2),
     ],
 )

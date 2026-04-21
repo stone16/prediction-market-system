@@ -294,12 +294,9 @@ def _build_real_execution_model(
     )
 
 
-def test_backtest_spec_config_hash_ignores_unapplied_execution_fields() -> None:
-    """latency_ms and staleness_ms are declared on ExecutionModel but neither
-    the replay engine nor the runner applies them yet. Hashing them would
-    make cache-dedup treat otherwise-identical-behavior profiles as distinct
-    runs, producing misleading "rerun" decisions. Exclude them from the
-    hash until the runner actually consumes them."""
+def test_backtest_spec_config_hash_changes_for_latency_and_staleness_once_runner_applies_them() -> None:
+    """Now that the backtest execution simulator consumes latency_ms and
+    staleness_ms, they must distinguish spec hashes."""
     baseline = _build_spec(execution_model=_build_real_execution_model())
     variant_latency = _build_spec(
         execution_model=_build_real_execution_model(latency_ms=250.0),
@@ -308,12 +305,12 @@ def test_backtest_spec_config_hash_ignores_unapplied_execution_fields() -> None:
         execution_model=_build_real_execution_model(staleness_ms=120_000.0),
     )
 
-    assert variant_latency.config_hash == baseline.config_hash
-    assert variant_staleness.config_hash == baseline.config_hash
+    assert variant_latency.config_hash != baseline.config_hash
+    assert variant_staleness.config_hash != baseline.config_hash
 
 
 def test_backtest_spec_config_hash_still_changes_for_applied_execution_fields() -> None:
-    """fee_rate, slippage_bps, and fill_policy ARE consumed today — they
+    """fee_rate, slippage_bps, and fill_policy are also consumed — they
     must continue to distinguish spec hashes."""
     baseline = _build_spec(execution_model=_build_real_execution_model())
     variant_fee = _build_spec(

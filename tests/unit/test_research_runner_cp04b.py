@@ -254,8 +254,9 @@ async def test_backtest_runner_updates_portfolio_between_replay_signals() -> Non
     assert pipeline.portfolios[1].free_usdc == pytest.approx(990.0)
     assert pipeline.portfolios[1].locked_usdc == pytest.approx(10.0)
     assert len(pipeline.portfolios[1].open_positions) == 1
+    expected_fill_price = 0.41 * (1.0 + _spec().execution_model.slippage_bps / 10_000.0)
     assert pipeline.portfolios[1].open_positions[0].shares_held == pytest.approx(
-        10.0 / 0.41
+        10.0 / expected_fill_price
     )
 
 
@@ -271,13 +272,20 @@ async def test_backtest_runner_propagates_unexpected_actuator_errors(
         controller_factory=_PipelineFactory(pipeline),
     )
 
-    async def _boom(self: object, decision: object, portfolio: object | None = None) -> object:
-        del self, decision, portfolio
-        raise RuntimeError("actuator exploded")
+    async def _boom(
+        self: object,
+        *,
+        signal: object,
+        decision: object,
+        portfolio: object | None = None,
+        execution_model: object,
+    ) -> object:
+        del self, signal, decision, portfolio, execution_model
+        raise RuntimeError("execution simulator exploded")
 
-    monkeypatch.setattr("pms.research.runner.PaperActuator.execute", _boom)
+    monkeypatch.setattr("pms.research.execution.BacktestExecutionSimulator.execute", _boom)
 
-    with pytest.raises(RuntimeError, match="actuator exploded"):
+    with pytest.raises(RuntimeError, match="execution simulator exploded"):
         await runner._run_strategy(
             strategy=_active_strategy(),
             spec=_spec(),
@@ -442,3 +450,37 @@ async def test_strategy_accumulator_emits_numeric_pnl_when_any_resolution_observ
 
     args = accumulator.as_insert_args(run_id="11111111-1111-1111-1111-111111111111")
     assert args[5] is not None, "pnl_cum must remain numeric when resolutions observed"
+
+
+@pytest.mark.asyncio
+async def test_backtest_runner_execution_model_staleness_budget_can_prevent_fill() -> None:
+    pipeline = _PortfolioRecordingPipeline()
+    runner = BacktestRunner(
+        writable_pool=cast(Any, object()),
+        readonly_pool=cast(Any, object()),
+        replay_engine=_ReplayEngine([_signal(datetime(2026, 4, 20, 0, 0, tzinfo=UTC))]),
+        controller_factory=_PipelineFactory(pipeline),
+    )
+    spec = BacktestSpec(
+        strategy_versions=(("alpha", "alpha-v1"),),
+        dataset=_spec().dataset,
+        execution_model=ExecutionModel(
+            fee_rate=0.0,
+            slippage_bps=0.0,
+            latency_ms=250.0,
+            staleness_ms=100.0,
+            fill_policy="immediate_or_cancel",
+        ),
+        risk_policy=_spec().risk_policy,
+        date_range_start=_spec().date_range_start,
+        date_range_end=_spec().date_range_end,
+    )
+
+    accumulator = await runner._run_strategy(
+        strategy=_active_strategy(),
+        spec=spec,
+        exec_config=BacktestExecutionConfig(),
+    )
+
+    assert accumulator.decision_count == 1
+    assert accumulator.fill_count == 0

@@ -95,7 +95,10 @@ def create_app(
             "runner_started_at": _jsonable(active_runner.state.runner_started_at),
             "running": _is_runner_running(active_runner),
             "sensors": _sensor_statuses(active_runner),
-            "controller": {"decisions_total": len(active_runner.state.decisions)},
+            "controller": {
+                "decisions_total": len(active_runner.state.decisions),
+                "diagnostics_total": len(active_runner.state.controller_diagnostics),
+            },
             "actuator": {
                 "fills_total": len(active_runner.state.fills),
                 "mode": active_runner.state.mode.value,
