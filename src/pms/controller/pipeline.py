@@ -175,17 +175,13 @@ class ControllerPipeline:
         expected_edge = prob_estimate - signal.yes_price
         active_portfolio = portfolio or _default_portfolio()
         sizer = _required(self.sizer, "sizer")
-        size = sizer.size(
-            prob=prob_estimate,
-            market_price=signal.yes_price,
-            portfolio=active_portfolio,
-        )
         now = datetime.now(tz=UTC)
         opportunity_side: Literal["yes", "no"] = (
             "yes" if expected_edge >= 0.0 else "no"
         )
         decision_token_id = signal.token_id
         decision_outcome: Literal["YES", "NO"] = "YES"
+        decision_probability = prob_estimate
         decision_price = signal.yes_price
         if expected_edge < 0.0:
             outcome_tokens = await self.outcome_token_resolver.resolve(
@@ -218,7 +214,13 @@ class ControllerPipeline:
                 return None
             decision_token_id = outcome_tokens.no_token_id
             decision_outcome = "NO"
+            decision_probability = max(0.0, 1.0 - prob_estimate)
             decision_price = max(0.0, 1.0 - signal.yes_price)
+        size = sizer.size(
+            prob=decision_probability,
+            market_price=decision_price,
+            portfolio=active_portfolio,
+        )
         opportunity = Opportunity(
             opportunity_id=f"opportunity-{uuid.uuid4().hex}",
             market_id=signal.market_id,
@@ -243,8 +245,8 @@ class ControllerPipeline:
             token_id=decision_token_id,
             venue=signal.venue,
             side="BUY",
-            price=decision_price,
-            size=size,
+            limit_price=decision_price,
+            notional_usdc=size,
             order_type="limit",
             max_slippage_bps=self.settings.controller.max_slippage_bps,
             stop_conditions=router.stop_conditions(signal),
@@ -255,7 +257,6 @@ class ControllerPipeline:
             strategy_id=self.strategy_id,
             strategy_version_id=self.strategy_version_id,
             action="BUY",
-            limit_price=decision_price,
             outcome=decision_outcome,
             model_id=_decision_model_id(model_ids),
         )

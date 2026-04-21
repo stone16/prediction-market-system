@@ -95,3 +95,21 @@ async def test_controller_pipeline_on_signal_emits_opportunity_and_linked_decisi
     assert decision.strategy_version_id == "alpha-v1"
     assert decision.limit_price == pytest.approx(0.4)
     assert decision.stop_conditions
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_decide_returns_notional_decision() -> None:
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    decision = await pipeline.decide(_signal(), portfolio=_portfolio())
+
+    assert decision is not None
+    assert decision.notional_usdc == pytest.approx(_expected_kelly_notional())
+    assert decision.limit_price == pytest.approx(0.4)
