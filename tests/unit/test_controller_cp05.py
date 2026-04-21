@@ -339,6 +339,29 @@ async def test_controller_pipeline_reports_missing_no_token_for_bearish_signal()
 
 
 @pytest.mark.asyncio
+async def test_controller_pipeline_emits_opportunity_and_decision_for_positive_size() -> None:
+    pipeline = ControllerPipeline(
+        forecasters=[ConstantForecaster(0.6)],
+        calibrator=NetcalCalibrator(),
+        sizer=FixedSizer(2.0),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is not None
+    opportunity, decision = emission
+    assert opportunity.market_id == "m-cp05"
+    assert opportunity.target_size_usdc == pytest.approx(2.0)
+    assert decision.market_id == "m-cp05"
+    assert decision.notional_usdc == pytest.approx(2.0)
+    assert decision.limit_price == pytest.approx(0.4)
+    assert decision.model_id == "ConstantForecaster"
+    assert decision.opportunity_id == opportunity.opportunity_id
+    assert pipeline.suppressed_zero_size == 0
+
+
+@pytest.mark.asyncio
 async def test_controller_pipeline_excludes_disabled_llm_and_failed_forecasters(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
