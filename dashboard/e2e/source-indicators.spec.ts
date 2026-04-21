@@ -35,6 +35,10 @@ test('mock mode shows source banner and badges on key pages', async ({ page }) =
 
   const errors: string[] = [];
   await captureConsoleErrors(page, errors);
+  const mockStatusResponse = await page.request.get('/api/status');
+
+  expect(mockStatusResponse.ok()).toBeTruthy();
+  expect((await mockStatusResponse.json()).source).toBe('mock');
 
   for (const [route, screenshotName] of [
     ['/', 'cp07-home-mock.png'],
@@ -60,6 +64,10 @@ test('live mode hides source banner and badges on key pages', async ({ page }) =
 
   const errors: string[] = [];
   await captureConsoleErrors(page, errors);
+  const liveStatusResponse = await page.request.get('/api/status');
+
+  expect(liveStatusResponse.ok()).toBeTruthy();
+  expect((await liveStatusResponse.json()).source).toBe('live');
 
   for (const [route, screenshotName] of [
     ['/', 'cp07-home-live.png'],
