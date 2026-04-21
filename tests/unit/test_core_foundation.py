@@ -8,7 +8,7 @@ from typing import Any, get_type_hints
 
 import pytest
 
-from pms.config import PMSSettings
+from pms.config import PMSSettings, RiskSettings
 from pms.core import interfaces, models
 from pms.core.enums import (
     FeedbackSource,
@@ -206,7 +206,15 @@ def test_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert default_settings.mode is RunMode.BACKTEST
     assert default_settings.live_trading_enabled is False
-    assert default_settings.risk.max_position_usdc == 100.0
+    assert default_settings.risk.max_position_per_market == 100.0
+    assert set(RiskSettings.model_fields) == {
+        "max_position_per_market",
+        "max_total_exposure",
+        "max_drawdown_pct",
+        "max_open_positions",
+        "min_order_usdc",
+        "slippage_threshold_bps",
+    }
 
     monkeypatch.setenv("PMS_MODE", "paper")
     env_settings = PMSSettings()
@@ -234,7 +242,7 @@ def test_config_loads_optional_yaml_file(tmp_path: Path) -> None:
                 "polymarket:",
                 "  host: https://clob.example.test",
                 "risk:",
-                "  max_position_usdc: 25.0",
+                "  max_position_per_market: 25.0",
             ]
         ),
         encoding="utf-8",
@@ -245,4 +253,4 @@ def test_config_loads_optional_yaml_file(tmp_path: Path) -> None:
     assert settings.mode is RunMode.LIVE
     assert settings.live_trading_enabled is True
     assert settings.polymarket.host == "https://clob.example.test"
-    assert settings.risk.max_position_usdc == 25.0
+    assert settings.risk.max_position_per_market == 25.0
