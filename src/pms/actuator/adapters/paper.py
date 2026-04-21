@@ -27,9 +27,9 @@ class PaperActuator:
 
 def _best_fill_price(orderbook: dict[str, Any], decision: TradeDecision) -> float:
     if decision.outcome == "NO":
-        side_key = "bids" if decision.side == Side.BUY.value else "asks"
+        side_key = "bids" if decision.action == Side.BUY.value else "asks"
     else:
-        side_key = "asks" if decision.side == Side.BUY.value else "bids"
+        side_key = "asks" if decision.action == Side.BUY.value else "bids"
     levels = orderbook.get(side_key)
     if not isinstance(levels, list) or not levels:
         raise InsufficientLiquidityError(f"{side_key} depth is empty")

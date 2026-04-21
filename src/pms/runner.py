@@ -18,6 +18,7 @@ from pms.actuator.executor import ActuatorAdapter, ActuatorExecutor
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import PMSSettings
+from pms.controller.diagnostics import ControllerDiagnostic
 from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
 from pms.controller.outcome_tokens import MarketDataOutcomeTokenResolver
@@ -143,6 +144,7 @@ class RunnerState:
     decisions: list[TradeDecision] = field(default_factory=list)
     orders: list[OrderState] = field(default_factory=list)
     fills: list[FillRecord] = field(default_factory=list)
+    controller_diagnostics: list[ControllerDiagnostic] = field(default_factory=list)
 
 
 @dataclass
@@ -691,6 +693,9 @@ class Runner:
                             portfolio=self.portfolio,
                         )
                         if emission is None:
+                            diagnostic = _controller_diagnostic(runtime.controller)
+                            if diagnostic is not None:
+                                _append_bounded(self.state.controller_diagnostics, diagnostic)
                             continue
                         opportunity, decision = emission
                         await self.opportunity_store.insert(opportunity)
@@ -1183,6 +1188,13 @@ def _append_bounded(items: list[T], item: T) -> None:
         del items[:overflow]
 
 
+def _controller_diagnostic(controller: object) -> ControllerDiagnostic | None:
+    diagnostic = getattr(controller, "last_diagnostic", None)
+    if isinstance(diagnostic, ControllerDiagnostic):
+        return diagnostic
+    return None
+
+
 def _find_discovery_sensor(
     sensors: Sequence[ISensor],
 ) -> DiscoveryPollCompleteSensor | None:
@@ -1275,7 +1287,7 @@ def _fill_from_order(
         market_id=order_state.market_id,
         token_id=order_state.token_id,
         venue=order_state.venue,
-        side=decision.side,
+        side=decision.action if decision.action is not None else decision.side,
         fill_price=order_state.fill_price,
         fill_size=order_state.filled_size,
         executed_at=order_state.submitted_at,

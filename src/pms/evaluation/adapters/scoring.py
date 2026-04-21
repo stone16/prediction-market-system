@@ -50,19 +50,22 @@ def _pnl(fill: FillRecord, decision: TradeDecision) -> float:
     if fill.resolved_outcome is None:
         return 0.0
     contract_outcome = _contract_outcome(fill.resolved_outcome, decision)
-    if decision.side == Side.SELL.value:
+    action = decision.action if decision.action is not None else decision.side
+    if action == Side.SELL.value:
         return (fill.fill_price - contract_outcome) * fill.fill_size
     return (contract_outcome - fill.fill_price) * fill.fill_size
 
 
 def _slippage_bps(fill: FillRecord, decision: TradeDecision) -> float:
-    if decision.price == 0.0:
+    limit_price = decision.limit_price if decision.limit_price is not None else decision.price
+    if limit_price == 0.0:
         return 0.0
-    if decision.side == Side.SELL.value:
-        slippage = decision.price - fill.fill_price
+    action = decision.action if decision.action is not None else decision.side
+    if action == Side.SELL.value:
+        slippage = limit_price - fill.fill_price
     else:
-        slippage = fill.fill_price - decision.price
-    return max(0.0, slippage / decision.price * 10_000)
+        slippage = fill.fill_price - limit_price
+    return max(0.0, slippage / limit_price * 10_000)
 
 
 def _contract_outcome(resolved_outcome: float, decision: TradeDecision) -> float:
