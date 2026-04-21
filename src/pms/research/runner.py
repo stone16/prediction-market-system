@@ -248,11 +248,13 @@ class BacktestRunner:
             )
 
     async def execute(self, run_id: str) -> bool:
-        claimed_run = await self._claim_run(run_id)
-        if claimed_run is None:
-            return False
-
         try:
+            # Legacy or manually inserted rows can still fail spec deserialization
+            # after the run is claimed; surface that as a failed run instead of
+            # leaving the claimed row stuck in status='running'.
+            claimed_run = await self._claim_run(run_id)
+            if claimed_run is None:
+                return False
             await asyncio.wait_for(
                 self._execute_claimed(claimed_run),
                 timeout=claimed_run.exec_config.time_budget,
