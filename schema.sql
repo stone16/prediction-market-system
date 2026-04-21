@@ -221,6 +221,25 @@ CREATE TABLE IF NOT EXISTS orders (
     strategy_version_id TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS order_intents (
+    decision_id TEXT PRIMARY KEY,
+    strategy_id TEXT NOT NULL CHECK (strategy_id != ''),
+    strategy_version_id TEXT NOT NULL CHECK (strategy_version_id != ''),
+    acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    released_at TIMESTAMPTZ,
+    worker_host TEXT,
+    worker_pid INTEGER,
+    outcome TEXT,
+    CONSTRAINT order_intents_outcome_check
+        CHECK (outcome IS NULL OR outcome IN ('matched', 'invalid', 'rejected', 'venue_rejection', 'cancelled_ttl', 'cancelled_limit_invalidated', 'cancelled_session_end'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_intents_strategy_acquired_at_desc
+    ON order_intents(strategy_id, acquired_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_order_intents_released_at_nulls_first
+    ON order_intents(released_at NULLS FIRST);
+
 CREATE TABLE IF NOT EXISTS fills (
     fill_id TEXT PRIMARY KEY,
     order_id TEXT NOT NULL,
