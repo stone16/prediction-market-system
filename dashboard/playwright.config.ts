@@ -6,9 +6,9 @@ const databaseUrl =
   'postgresql://postgres:postgres@localhost:5432/pms_test';
 
 const dashboardApiBaseUrlOverride = process.env.PMS_DASHBOARD_API_BASE_URL;
-const dashboardEnv = {
-  ...process.env
-};
+const dashboardEnv = Object.fromEntries(
+  Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
+);
 
 if (dashboardApiBaseUrlOverride !== undefined) {
   if (dashboardApiBaseUrlOverride === '') {

@@ -61,12 +61,20 @@ test('live mode hides source banner and badges on key pages', async ({ page }) =
   const errors: string[] = [];
   await captureConsoleErrors(page, errors);
 
-  for (const route of ['/', '/overview', '/backtest'] as const) {
+  for (const [route, screenshotName] of [
+    ['/', 'cp07-home-live.png'],
+    ['/overview', 'cp07-overview-live.png'],
+    ['/backtest', 'cp07-backtest-live.png']
+  ] as const) {
     await page.goto(route);
     await expect(
       page.getByText('MOCK DATA — backend disconnected. Set `PMS_API_BASE_URL` to connect.')
     ).toHaveCount(0);
     await expect(page.getByTestId('source-badge')).toHaveCount(0);
+    await page.screenshot({
+      path: path.join(evidenceDir, screenshotName),
+      fullPage: true
+    });
   }
 
   expect(errors).toEqual([]);

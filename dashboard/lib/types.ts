@@ -1,5 +1,6 @@
 export type StatusResponse = {
   mode: string;
+  source: 'live' | 'mock';
   runner_started_at: string | null;
   running?: boolean;
   sensors: Array<{ name: string; status: string; last_signal_at: string | null }>;
