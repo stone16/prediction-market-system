@@ -7,8 +7,10 @@ from typing import Any, cast
 from uuid import uuid4
 
 from pms.actuator.risk import InsufficientLiquidityError
-from pms.core.enums import OrderStatus, Side
+from pms.core.enums import OrderStatus, Side, Venue
+from pms.core.exceptions import KalshiStubError
 from pms.core.models import MarketSignal, OrderState, Portfolio, TradeDecision
+from pms.core.venue_support import kalshi_stub_error
 from pms.research.specs import ExecutionModel
 
 
@@ -23,6 +25,10 @@ class BacktestExecutionSimulator:
         execution_model: ExecutionModel,
     ) -> OrderState:
         del portfolio
+        if signal.venue == Venue.KALSHI.value:
+            raise kalshi_stub_error("BacktestExecutionSimulator.execute(signal)")
+        if decision.venue == Venue.KALSHI.value:
+            raise kalshi_stub_error("BacktestExecutionSimulator.execute(decision)")
         submitted_at = signal.fetched_at + timedelta(milliseconds=execution_model.latency_ms)
         if signal.resolves_at is not None and submitted_at >= signal.resolves_at:
             return _unfilled_order_state(

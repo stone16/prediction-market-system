@@ -7,8 +7,10 @@ from typing import Any, cast
 from uuid import uuid4
 
 from pms.actuator.risk import InsufficientLiquidityError
-from pms.core.enums import OrderStatus, Side
+from pms.core.enums import OrderStatus, Side, Venue
+from pms.core.exceptions import KalshiStubError
 from pms.core.models import OrderState, Portfolio, TradeDecision
+from pms.core.venue_support import kalshi_stub_error
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,8 @@ class PaperActuator:
         decision: TradeDecision,
         portfolio: Portfolio | None = None,
     ) -> OrderState:
+        if decision.venue == Venue.KALSHI.value:
+            raise kalshi_stub_error("PaperActuator.execute")
         orderbook = self.orderbooks.get(decision.market_id, {"bids": [], "asks": []})
         fill_price = _best_fill_price(orderbook, decision)
         return _matched_order_state(decision, fill_price, "paper")

@@ -90,6 +90,23 @@ def test_venue_enum_retains_kalshi_member() -> None:
     assert Venue.KALSHI.value == "kalshi"
 
 
+def test_venue_support_normalizes_supported_inputs_and_rejects_invalid_ones() -> None:
+    from pms.core.venue_support import kalshi_stub_error, normalize_venue
+
+    assert normalize_venue("POLYMARKET", context="unit-test") == "polymarket"
+    assert normalize_venue(" kalshi ", context="unit-test") == "kalshi"
+
+    with pytest.raises(ValueError, match="missing venue"):
+        normalize_venue(None, context="unit-test")
+
+    with pytest.raises(ValueError, match="unsupported venue"):
+        normalize_venue("manifold", context="unit-test")
+
+    error = kalshi_stub_error("unit-test")
+    assert "Kalshi adapter is not implemented in v1" in str(error)
+    assert "Out of Scope §3" in str(error)
+
+
 def test_dispatcher_files_define_explicit_kalshi_stub_branches() -> None:
     for path in DISPATCHER_FILES:
         source = path.read_text(encoding="utf-8")
@@ -319,6 +336,113 @@ async def test_actuator_executor_rejects_kalshi_before_adapter_execution() -> No
     assert adapter.calls == 0
     assert executor.dedup_tokens.contains("decision-kalshi-cp06") is False
     assert await cast(InMemoryFeedbackStore, feedback_store).all() == []
+
+
+@pytest.mark.asyncio
+async def test_actuator_executor_returns_duplicate_state_without_calling_adapter() -> None:
+    @dataclass
+    class RecordingAdapter:
+        calls: int = 0
+
+        async def execute(
+            self,
+            decision: TradeDecision,
+            portfolio: Portfolio | None = None,
+        ) -> object:
+            del decision, portfolio
+            self.calls += 1
+            raise AssertionError("adapter should not run for duplicate decisions")
+
+    adapter = RecordingAdapter()
+    feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+    executor = ActuatorExecutor(
+        adapter=cast(Any, adapter),
+        risk=RiskManager(
+            RiskSettings(max_position_per_market=100.0, max_total_exposure=1_000.0)
+        ),
+        feedback=ActuatorFeedback(feedback_store),
+    )
+    executor.dedup_tokens.acquire("decision-kalshi-cp06")
+
+    state = await executor.execute(_decision(), _portfolio())
+
+    assert state.status == "invalid"
+    assert state.raw_status == "duplicate_decision"
+    assert adapter.calls == 0
+    assert (await cast(InMemoryFeedbackStore, feedback_store).all())[-1].category == (
+        "duplicate_decision"
+    )
+
+
+@pytest.mark.asyncio
+async def test_actuator_executor_returns_risk_rejection_without_calling_adapter() -> None:
+    @dataclass
+    class RecordingAdapter:
+        calls: int = 0
+
+        async def execute(
+            self,
+            decision: TradeDecision,
+            portfolio: Portfolio | None = None,
+        ) -> object:
+            del decision, portfolio
+            self.calls += 1
+            raise AssertionError("adapter should not run for risk-rejected decisions")
+
+    adapter = RecordingAdapter()
+    feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+    executor = ActuatorExecutor(
+        adapter=cast(Any, adapter),
+        risk=RiskManager(
+            RiskSettings(max_position_per_market=5.0, max_total_exposure=1_000.0)
+        ),
+        feedback=ActuatorFeedback(feedback_store),
+    )
+
+    state = await executor.execute(_decision(), _portfolio())
+
+    assert state.status == "invalid"
+    assert state.raw_status == "max_position_per_market"
+    assert adapter.calls == 0
+    assert executor.dedup_tokens.contains("decision-kalshi-cp06") is False
+    assert (await cast(InMemoryFeedbackStore, feedback_store).all())[-1].category == (
+        "max_position_per_market"
+    )
+
+
+@pytest.mark.asyncio
+async def test_actuator_executor_marks_venue_rejection_and_re_raises() -> None:
+    @dataclass
+    class FailingAdapter:
+        calls: int = 0
+
+        async def execute(
+            self,
+            decision: TradeDecision,
+            portfolio: Portfolio | None = None,
+        ) -> object:
+            del decision, portfolio
+            self.calls += 1
+            raise RuntimeError("venue rejected order")
+
+    adapter = FailingAdapter()
+    feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+    executor = ActuatorExecutor(
+        adapter=cast(Any, adapter),
+        risk=RiskManager(
+            RiskSettings(max_position_per_market=100.0, max_total_exposure=1_000.0)
+        ),
+        feedback=ActuatorFeedback(feedback_store),
+    )
+
+    with pytest.raises(RuntimeError, match="venue rejected order"):
+        await executor.execute(_decision(), _portfolio())
+
+    assert adapter.calls == 1
+    assert executor.dedup_tokens.contains("decision-kalshi-cp06") is False
+    assert (await cast(InMemoryFeedbackStore, feedback_store).all())[-1].category == (
+        "venue_rejection"
+    )
 
 
 @pytest.mark.asyncio

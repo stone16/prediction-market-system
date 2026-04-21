@@ -115,3 +115,18 @@ name = "Market selection: no aggregate import"
 type = "forbidden"
 source_modules = ["pms.market_selection"]
 forbidden_modules = ["pms.strategies.aggregate"]
+
+[[tool.importlinter.contracts]]
+name = "Kalshi stub helper stays at runtime boundaries"
+type = "protected"
+protected_modules = ["pms.core.venue_support"]
+allowed_importers = [
+    "pms.sensor.adapters.historical",
+    "pms.sensor.adapters.market_discovery",
+    "pms.market_selection.selector",
+    "pms.actuator.executor",
+    "pms.actuator.adapters.paper",
+    "pms.actuator.adapters.backtest",
+    "pms.research.execution",
+]
+as_packages = false

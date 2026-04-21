@@ -8,6 +8,11 @@ class Side(StrEnum):
     SELL = "SELL"
 
 
+class Venue(StrEnum):
+    POLYMARKET = "polymarket"
+    KALSHI = "kalshi"
+
+
 class OrderStatus(StrEnum):
     INVALID = "invalid"
     LIVE = "live"
@@ -42,4 +47,3 @@ class RunMode(StrEnum):
     BACKTEST = "backtest"
     PAPER = "paper"
     LIVE = "live"
-

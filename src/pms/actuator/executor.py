@@ -7,8 +7,10 @@ from uuid import uuid4
 
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
-from pms.core.enums import OrderStatus
+from pms.core.enums import OrderStatus, Venue
+from pms.core.exceptions import KalshiStubError
 from pms.core.models import OrderState, Portfolio, TradeDecision
+from pms.core.venue_support import kalshi_stub_error
 
 
 class ActuatorAdapter(Protocol):
@@ -48,6 +50,8 @@ class ActuatorExecutor:
         decision: TradeDecision,
         portfolio: Portfolio,
     ) -> OrderState:
+        if decision.venue == Venue.KALSHI.value:
+            raise kalshi_stub_error("ActuatorExecutor.execute")
         acquired = self.dedup_tokens.acquire(decision.decision_id)
         if not acquired:
             state = _rejected_order_state(decision, "duplicate_decision")

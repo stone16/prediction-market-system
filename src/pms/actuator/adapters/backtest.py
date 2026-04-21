@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from pms.actuator.adapters.paper import _best_fill_price, _matched_order_state
+from pms.core.enums import Venue
+from pms.core.exceptions import KalshiStubError
 from pms.core.models import OrderState, Portfolio, TradeDecision
+from pms.core.venue_support import kalshi_stub_error
 
 
 @dataclass
@@ -30,6 +33,8 @@ class BacktestActuator:
         decision: TradeDecision,
         portfolio: Portfolio | None = None,
     ) -> OrderState:
+        if decision.venue == Venue.KALSHI.value:
+            raise kalshi_stub_error("BacktestActuator.execute")
         orderbook = self._orderbooks.get(decision.market_id, {"bids": [], "asks": []})
         fill_price = _best_fill_price(orderbook, decision)
         return _matched_order_state(decision, fill_price, "backtest")
