@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
@@ -10,6 +11,7 @@ from pms.actuator.risk import RiskManager
 from pms.config import RiskSettings
 from pms.core.enums import OrderStatus
 from pms.core.models import OrderState, Portfolio, TradeDecision
+from pms.storage.feedback_store import FeedbackStore
 from tests.support.fake_stores import InMemoryFeedbackStore
 
 
@@ -81,7 +83,7 @@ async def test_actuator_executor_rejects_sub_min_order_without_adapter_calls() -
     executor = ActuatorExecutor(
         adapter=adapter,
         risk=RiskManager(RiskSettings(min_order_usdc=1.0)),
-        feedback=ActuatorFeedback(InMemoryFeedbackStore()),
+        feedback=ActuatorFeedback(cast(FeedbackStore, InMemoryFeedbackStore())),
     )
 
     state = await executor.execute(_decision(), _portfolio())
