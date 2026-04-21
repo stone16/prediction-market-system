@@ -19,12 +19,22 @@ from pms.controller.forecasters.llm import (
 )
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
+from pms.controller.factor_snapshot import NullFactorSnapshotReader
 from pms.controller.outcome_tokens import OutcomeTokens
 from pms.controller.pipeline import ControllerPipeline
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import MarketStatus
 from pms.core.models import MarketSignal, Portfolio
+from pms.strategies.projections import (
+    ActiveStrategy,
+    EvalSpec,
+    FactorCompositionStep,
+    ForecasterSpec,
+    MarketSelectionSpec,
+    RiskParams,
+    StrategyConfig,
+)
 
 
 def _signal(
@@ -124,6 +134,17 @@ class NoNoTokenResolver:
     ) -> OutcomeTokens:
         del market_id, signal_token_id
         return OutcomeTokens(yes_token_id="yes-token", no_token_id=None)
+
+
+class ResolvedNoTokenResolver:
+    async def resolve(
+        self,
+        *,
+        market_id: str,
+        signal_token_id: str | None,
+    ) -> OutcomeTokens:
+        del market_id, signal_token_id
+        return OutcomeTokens(yes_token_id="yes-token", no_token_id="no-token")
 
 
 class FixedSizer:
@@ -336,6 +357,122 @@ async def test_controller_pipeline_reports_missing_no_token_for_bearish_signal()
     assert pipeline.suppressed_zero_size == 0
     assert pipeline.last_diagnostic is not None
     assert pipeline.last_diagnostic.code == "missing_no_token"
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_uses_strategy_composition_for_positive_emission() -> None:
+    strategy = ActiveStrategy(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        config=StrategyConfig(
+            strategy_id="alpha",
+            factor_composition=(
+                FactorCompositionStep(
+                    factor_id="yes_price",
+                    role="weighted",
+                    param="",
+                    weight=1.0,
+                    threshold=None,
+                ),
+            ),
+            metadata=(),
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier",)),
+        forecaster=ForecasterSpec(forecasters=(("rules", ()),)),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=100.0,
+        ),
+    )
+    pipeline = ControllerPipeline(
+        strategy=strategy,
+        factor_reader=NullFactorSnapshotReader(),
+        forecasters=[ConstantForecaster(0.6)],
+        calibrator=NetcalCalibrator(),
+        sizer=FixedSizer(2.0),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is not None
+    opportunity, decision = emission
+    assert decision.strategy_id == "alpha"
+    assert decision.notional_usdc == pytest.approx(2.0)
+    assert decision.model_id == "ConstantForecaster"
+    assert opportunity.factor_snapshot_hash is not None
+    assert "yes_price" in opportunity.selected_factor_values
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_returns_none_when_strategy_composition_fails() -> None:
+    strategy = ActiveStrategy(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        config=StrategyConfig(
+            strategy_id="alpha",
+            factor_composition=(
+                FactorCompositionStep(
+                    factor_id="missing_factor",
+                    role="weighted",
+                    param="",
+                    weight=1.0,
+                    threshold=None,
+                ),
+            ),
+            metadata=(),
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier",)),
+        forecaster=ForecasterSpec(forecasters=(("rules", ()),)),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=100.0,
+        ),
+    )
+    pipeline = ControllerPipeline(
+        strategy=strategy,
+        factor_reader=NullFactorSnapshotReader(),
+        forecasters=[ConstantForecaster(0.6)],
+        calibrator=NetcalCalibrator(),
+        sizer=FixedSizer(2.0),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is None
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_uses_resolved_no_token_for_bearish_signal() -> None:
+    pipeline = ControllerPipeline(
+        forecasters=[ConstantForecaster(0.4)],
+        outcome_token_resolver=ResolvedNoTokenResolver(),
+        calibrator=NetcalCalibrator(),
+        sizer=FixedSizer(2.0),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(yes_price=0.6), portfolio=_portfolio())
+
+    assert emission is not None
+    opportunity, decision = emission
+    assert opportunity.side == "no"
+    assert decision.token_id == "no-token"
+    assert decision.outcome == "NO"
+    assert decision.limit_price == pytest.approx(0.4)
 
 
 @pytest.mark.asyncio
