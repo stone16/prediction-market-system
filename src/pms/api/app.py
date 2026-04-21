@@ -12,9 +12,10 @@ from enum import Enum
 from typing import Any, TypeVar, cast
 
 import asyncpg
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from pms.api.auth import require_api_token
 from pms.api.research_routes import (
     compute_backtest_live_comparison,
     enqueue_backtest_runs,
@@ -98,6 +99,7 @@ def create_app(
 
     app = FastAPI(title="PMS API", lifespan=lifespan)
     app.state.runner = active_runner
+    app.state.settings = active_runner.config
 
     @app.get("/status")
     async def status() -> dict[str, Any]:
@@ -153,7 +155,7 @@ def create_app(
         for decision in _latest(active_runner.state.decisions, limit):
             payload = cast(dict[str, Any], _jsonable(decision))
             payload["forecaster"] = _forecaster(decision)
-            payload["kelly_size"] = decision.size
+            payload["kelly_size"] = decision.notional_usdc
             payloads.append(payload)
         return payloads
 
@@ -232,7 +234,7 @@ def create_app(
             limit=limit,
         )
 
-    @app.post("/research/backtest")
+    @app.post("/research/backtest", dependencies=[Depends(require_api_token)])
     async def create_backtest_run(request: Request) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
@@ -263,7 +265,10 @@ def create_app(
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_backtest_strategy_runs(active_runner.pg_pool, run_id)
 
-    @app.post("/research/backtest/{run_id}/compare")
+    @app.post(
+        "/research/backtest/{run_id}/compare",
+        dependencies=[Depends(require_api_token)],
+    )
     async def compare_backtest_run(run_id: str, request: Request) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
@@ -278,21 +283,24 @@ def create_app(
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/feedback/{feedback_id}/resolve")
+    @app.post(
+        "/feedback/{feedback_id}/resolve",
+        dependencies=[Depends(require_api_token)],
+    )
     async def resolve_feedback(feedback_id: str) -> dict[str, Any]:
         resolved = await resolve_feedback_item(active_runner.feedback_store, feedback_id)
         if resolved is None:
             raise HTTPException(status_code=404, detail="Feedback not found")
         return cast(dict[str, Any], _jsonable(resolved))
 
-    @app.post("/config")
+    @app.post("/config", dependencies=[Depends(require_api_token)])
     async def update_config(update: ConfigUpdate) -> dict[str, str]:
         if update.mode == RunMode.LIVE and not active_runner.config.live_trading_enabled:
             raise HTTPException(status_code=400, detail=LIVE_DISABLED_DETAIL)
         active_runner.switch_mode(update.mode)
         return {"mode": active_runner.state.mode.value}
 
-    @app.post("/run/start")
+    @app.post("/run/start", dependencies=[Depends(require_api_token)])
     async def run_start() -> dict[str, Any]:
         if _is_runner_running(active_runner):
             raise HTTPException(status_code=409, detail=RUNNER_ALREADY_RUNNING_DETAIL)
@@ -303,7 +311,7 @@ def create_app(
             "runner_started_at": _jsonable(active_runner.state.runner_started_at),
         }
 
-    @app.post("/run/stop")
+    @app.post("/run/stop", dependencies=[Depends(require_api_token)])
     async def run_stop() -> dict[str, Any]:
         await active_runner.stop()
         return {"status": "stopped"}

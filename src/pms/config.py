@@ -79,6 +79,8 @@ class PMSSettings(BaseSettings):
     live_trading_enabled: bool = False
     auto_migrate_default_v2: bool = True
     factor_cadence_s: float = 1.0
+    api_host: str = "127.0.0.1"
+    api_token: str | None = None
     polymarket: PolymarketSettings = Field(default_factory=PolymarketSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
