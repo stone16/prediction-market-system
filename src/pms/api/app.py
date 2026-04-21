@@ -33,6 +33,7 @@ from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
 from pms.runner import Runner
+from pms.storage.schema_check import ensure_schema_current
 from pms.storage.market_data_store import PostgresMarketDataStore
 
 
@@ -65,23 +66,35 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        if auto_start and not _is_runner_running(active_runner):
-            logger.info("PMS_AUTO_START enabled — starting runner in %s mode", active_runner.state.mode.value)
-            await active_runner.start()
-        elif not auto_start:
-            await _ensure_runner_pool(active_runner)
-        if active_runner.pg_pool is not None:
-            await scan_orphaned_backtest_runs(active_runner.pg_pool)
         try:
+            pool_was_bound = active_runner.pg_pool is not None
+            startup_complete = False
+            await _ensure_runner_pool(active_runner)
+            if active_runner.pg_pool is not None:
+                await ensure_schema_current(active_runner.pg_pool)
+            if auto_start and not _is_runner_running(active_runner):
+                logger.info(
+                    "PMS_AUTO_START enabled — starting runner in %s mode",
+                    active_runner.state.mode.value,
+                )
+                await active_runner.start()
+            if active_runner.pg_pool is not None:
+                await scan_orphaned_backtest_runs(active_runner.pg_pool)
+            startup_complete = True
             yield
+        except Exception:
+            if not startup_complete and not pool_was_bound and not _is_runner_running(active_runner):
+                await _close_runner_pool(active_runner)
+            raise
         finally:
             # Always stop a running runner on shutdown — covers both auto_start
             # and runners launched by callers via POST /run/start, so sensor
             # resources (for example venue HTTP clients) close cleanly.
-            if _is_runner_running(active_runner):
-                await active_runner.stop()
-            else:
-                await _close_runner_pool(active_runner)
+            if startup_complete:
+                if _is_runner_running(active_runner):
+                    await active_runner.stop()
+                else:
+                    await _close_runner_pool(active_runner)
 
     app = FastAPI(title="PMS API", lifespan=lifespan)
     app.state.runner = active_runner

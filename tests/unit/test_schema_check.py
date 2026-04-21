@@ -98,3 +98,71 @@ def test_schema_check_reports_inconsistent_migration_graph(
     assert module.EXPECTED_SCHEMA_HEAD is None
     assert module.EXPECTED_SCHEMA_HEAD_ERROR is not None
     assert "broken graph" in str(module.EXPECTED_SCHEMA_HEAD_ERROR)
+
+    monkeypatch.undo()
+    importlib.reload(module)
+
+
+def test_load_expected_schema_head_requires_non_empty_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("pms.storage.schema_check")
+
+    class _BrokenScriptDirectory:
+        def get_current_head(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        module.ScriptDirectory,
+        "from_config",
+        lambda _config: _BrokenScriptDirectory(),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        module._load_expected_schema_head()
+
+    assert "current head revision" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_ensure_schema_current_reports_graph_error_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("pms.storage.schema_check")
+    monkeypatch.setattr(module, "EXPECTED_SCHEMA_HEAD", None)
+    monkeypatch.setattr(module, "EXPECTED_SCHEMA_HEAD_ERROR", RuntimeError("broken graph"))
+
+    with pytest.raises(module.SchemaVersionMismatchError) as exc_info:
+        await module.ensure_schema_current(_FakePool(_FakeConnection(result="0001_baseline")))
+
+    assert "migration graph inconsistent" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_ensure_schema_current_requires_initialized_version_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("pms.storage.schema_check")
+    monkeypatch.setattr(module, "EXPECTED_SCHEMA_HEAD", "0001_baseline")
+    monkeypatch.setattr(module, "EXPECTED_SCHEMA_HEAD_ERROR", None)
+    pool = _FakePool(_FakeConnection(result=None))
+
+    with pytest.raises(module.SchemaVersionMismatchError) as exc_info:
+        await module.ensure_schema_current(pool)
+
+    assert "schema not initialized" in str(exc_info.value)
+    assert pool.released == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_schema_current_requires_expected_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("pms.storage.schema_check")
+    monkeypatch.setattr(module, "EXPECTED_SCHEMA_HEAD", None)
+    monkeypatch.setattr(module, "EXPECTED_SCHEMA_HEAD_ERROR", None)
+
+    with pytest.raises(module.SchemaVersionMismatchError) as exc_info:
+        await module.ensure_schema_current(_FakePool(_FakeConnection(result="0001_baseline")))
+
+    assert "migration graph inconsistent" in str(exc_info.value)

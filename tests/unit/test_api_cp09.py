@@ -38,6 +38,13 @@ def _settings() -> PMSSettings:
     )
 
 
+def _stub_schema_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _noop_schema_check(_pool: object) -> None:
+        return
+
+    monkeypatch.setattr("pms.api.app.ensure_schema_current", _noop_schema_check)
+
+
 def _runner_with_state() -> Runner:
     pending = _feedback("fb-pending")
     runner = Runner(
@@ -261,7 +268,11 @@ async def test_api_run_start_stop_cycle(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_api_auto_start_lifespan(tmp_path: Path) -> None:
+async def test_api_auto_start_lifespan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_schema_check(monkeypatch)
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.BACKTEST,
@@ -285,7 +296,11 @@ async def test_api_auto_start_lifespan(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_api_auto_start_disabled_keeps_runner_idle(tmp_path: Path) -> None:
+async def test_api_auto_start_disabled_keeps_runner_idle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_schema_check(monkeypatch)
     runner = Runner(
         config=PMSSettings(mode=RunMode.BACKTEST, auto_migrate_default_v2=False),
         historical_data_path=FIXTURE_PATH,
@@ -299,8 +314,12 @@ async def test_api_auto_start_disabled_keeps_runner_idle(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_api_lifespan_stops_runner_started_via_api(tmp_path: Path) -> None:
+async def test_api_lifespan_stops_runner_started_via_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Regression for codex-bot C1: /run/start-triggered runner must also be stopped on shutdown."""
+    _stub_schema_check(monkeypatch)
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.BACKTEST,

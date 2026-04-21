@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 import os
 import socket
 import subprocess
@@ -124,7 +125,7 @@ def _wait_for_status_ok(process: subprocess.Popen[str], port: int) -> None:
 
 
 @contextmanager
-def _temporary_revision_file() -> object:
+def _temporary_revision_file() -> Iterator[str]:
     revision_id = f"0002_cp03_{uuid.uuid4().hex[:8]}"
     path = ALEMBIC_VERSIONS_DIR / f"{revision_id}.py"
     path.write_text(
