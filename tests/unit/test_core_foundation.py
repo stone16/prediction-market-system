@@ -78,8 +78,8 @@ def test_financial_entity_fields_use_float_boundary_types() -> None:
     expected: dict[type[Any], dict[str, object]] = {
         models.MarketSignal: {"yes_price": float, "volume_24h": float | None},
         models.TradeDecision: {
-            "price": float,
-            "size": float,
+            "notional_usdc": float,
+            "limit_price": float,
             "prob_estimate": float,
             "expected_edge": float,
         },
@@ -88,15 +88,16 @@ def test_financial_entity_fields_use_float_boundary_types() -> None:
             "target_size_usdc": float,
         },
         models.OrderState: {
-            "requested_size": float,
-            "filled_size": float,
-            "remaining_size": float,
+            "requested_notional_usdc": float,
+            "filled_notional_usdc": float,
+            "remaining_notional_usdc": float,
+            "filled_quantity": float,
             "fill_price": float | None,
         },
         models.FillRecord: {
             "fill_price": float,
-            "filled_contracts": float | None,
-            "fill_size": float,
+            "fill_notional_usdc": float,
+            "fill_quantity": float,
             "fee_bps": int | None,
             "fees": float | None,
         },
