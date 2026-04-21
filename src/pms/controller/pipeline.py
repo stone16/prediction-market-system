@@ -54,6 +54,7 @@ class ControllerPipeline:
     router: Router | None = None
     settings: PMSSettings = field(default_factory=PMSSettings)
     last_diagnostic: ControllerDiagnostic | None = field(init=False, default=None)
+    suppressed_zero_size: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         if self.strategy is not None:
@@ -221,6 +222,9 @@ class ControllerPipeline:
             market_price=decision_price,
             portfolio=active_portfolio,
         )
+        if size <= 0.0 or size < self.settings.risk.min_order_usdc:
+            self.suppressed_zero_size += 1
+            return None
         opportunity = Opportunity(
             opportunity_id=f"opportunity-{uuid.uuid4().hex}",
             market_id=signal.market_id,
