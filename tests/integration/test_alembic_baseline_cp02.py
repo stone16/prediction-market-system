@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -51,9 +52,55 @@ def _run_psql(database_url: str, *args: str) -> subprocess.CompletedProcess[str]
 
 
 def _run_pg_dump(database_url: str) -> str:
+    command = [
+        "pg_dump",
+        database_url,
+        "--schema-only",
+        "--no-owner",
+        "--no-privileges",
+    ]
     result = subprocess.run(
+        command,
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return result.stdout
+    if "server version mismatch" not in result.stderr:
+        result.check_returncode()
+
+    server_version = subprocess.run(
         [
-            "pg_dump",
+            "psql",
+            database_url,
+            "-At",
+            "-c",
+            "SHOW server_version",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    major_version = server_version.stdout.strip().split(".", 1)[0]
+    candidate_paths = [
+        shutil.which(f"pg_dump@{major_version}"),
+        shutil.which(f"pg_dump-{major_version}"),
+        f"/opt/homebrew/opt/postgresql@{major_version}/bin/pg_dump",
+        f"/usr/local/opt/postgresql@{major_version}/bin/pg_dump",
+        f"/opt/homebrew/opt/libpq/bin/pg_dump",
+    ]
+    pg_dump_binary = next(
+        (path for path in candidate_paths if path and Path(path).exists()),
+        None,
+    )
+    assert pg_dump_binary is not None, result.stderr
+
+    matched_result = subprocess.run(
+        [
+            pg_dump_binary,
             database_url,
             "--schema-only",
             "--no-owner",
@@ -64,7 +111,7 @@ def _run_pg_dump(database_url: str) -> str:
         capture_output=True,
         check=True,
     )
-    return result.stdout
+    return matched_result.stdout
 
 
 def _run_alembic(database_url: str, *args: str) -> subprocess.CompletedProcess[str]:

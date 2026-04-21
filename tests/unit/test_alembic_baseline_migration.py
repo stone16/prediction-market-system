@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 
 MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
@@ -26,6 +28,14 @@ def _load_migration_module() -> ModuleType:
     return module
 
 
+class _FakeConnection:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def exec_driver_sql(self, statement: str) -> None:
+        self.statements.append(statement)
+
+
 def test_baseline_migration_declares_expected_revision_metadata() -> None:
     module = _load_migration_module()
 
@@ -44,3 +54,33 @@ def test_baseline_migration_strips_outer_transaction_wrapper() -> None:
     assert not schema_sql.rstrip().endswith("COMMIT;")
     assert "CREATE TABLE IF NOT EXISTS markets" in schema_sql
     assert "CREATE TABLE IF NOT EXISTS backtest_live_comparisons" in schema_sql
+
+
+def test_baseline_migration_upgrade_executes_schema_sql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_migration_module()
+    fake_connection = _FakeConnection()
+    monkeypatch.setattr(module.op, "get_bind", lambda: fake_connection)
+
+    module.upgrade()
+
+    assert len(fake_connection.statements) == 1
+    assert "CREATE TABLE IF NOT EXISTS markets" in fake_connection.statements[0]
+    assert not fake_connection.statements[0].lstrip().startswith("BEGIN;")
+
+
+def test_baseline_migration_downgrade_drops_all_tables_in_reverse_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_migration_module()
+    fake_connection = _FakeConnection()
+    monkeypatch.setattr(module.op, "get_bind", lambda: fake_connection)
+
+    module.downgrade()
+
+    assert fake_connection.statements[0] == (
+        'DROP TABLE IF EXISTS "backtest_live_comparisons" CASCADE'
+    )
+    assert fake_connection.statements[-1] == 'DROP TABLE IF EXISTS "markets" CASCADE'
+    assert len(fake_connection.statements) == len(module._CREATED_TABLES)
