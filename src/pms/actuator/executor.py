@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
@@ -9,8 +10,13 @@ from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
 from pms.core.enums import OrderStatus, Venue
 from pms.core.exceptions import KalshiStubError
+from pms.core.interfaces import DedupStore
 from pms.core.models import OrderState, Portfolio, TradeDecision
 from pms.core.venue_support import kalshi_stub_error
+from pms.storage.dedup_store import InMemoryDedupStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class ActuatorAdapter(Protocol):
@@ -22,61 +28,82 @@ class ActuatorAdapter(Protocol):
 
 
 @dataclass
-class DedupTokenStore:
-    _tokens: set[str] = field(default_factory=set)
-
-    def acquire(self, token: str) -> bool:
-        if token in self._tokens:
-            return False
-        self._tokens.add(token)
-        return True
-
-    def release(self, token: str) -> None:
-        self._tokens.discard(token)
-
-    def contains(self, token: str) -> bool:
-        return token in self._tokens
-
-
-@dataclass(frozen=True)
 class ActuatorExecutor:
     adapter: ActuatorAdapter
     risk: RiskManager
     feedback: ActuatorFeedback
-    dedup_tokens: DedupTokenStore = field(default_factory=DedupTokenStore)
+    dedup_store: DedupStore = field(default_factory=InMemoryDedupStore)
 
     async def execute(
         self,
         decision: TradeDecision,
         portfolio: Portfolio,
     ) -> OrderState:
+        final_state: OrderState | None = None
+        release_outcome: str | None = None
+        acquired = False
         if decision.venue == Venue.KALSHI.value:
-            raise kalshi_stub_error("ActuatorExecutor.execute")
-        acquired = self.dedup_tokens.acquire(decision.decision_id)
+            error: KalshiStubError = kalshi_stub_error("ActuatorExecutor.execute")
+            raise error
+        acquired = await self.dedup_store.acquire(decision)
         if not acquired:
-            state = _rejected_order_state(decision, "duplicate_decision")
-            await self.feedback.generate(state, reason="duplicate_decision")
-            return state
+            final_state = _rejected_order_state(decision, "duplicate_decision")
+            await self.feedback.generate(final_state, reason="duplicate_decision")
+            return final_state
 
         try:
             risk_decision = self.risk.check(decision, portfolio)
             if not risk_decision.approved:
-                state = _rejected_order_state(decision, risk_decision.reason)
-                await self.feedback.generate(state, reason=risk_decision.reason)
-                return state
+                final_state = _rejected_order_state(decision, risk_decision.reason)
+                await self.feedback.generate(final_state, reason=risk_decision.reason)
+                return final_state
 
             try:
-                return await self.adapter.execute(decision, portfolio)
+                final_state = await self.adapter.execute(decision, portfolio)
+                return final_state
             except InsufficientLiquidityError:
-                state = _rejected_order_state(decision, "insufficient_liquidity")
-                await self.feedback.generate(state, reason="insufficient_liquidity")
-                return state
+                final_state = _rejected_order_state(decision, "insufficient_liquidity")
+                await self.feedback.generate(
+                    final_state,
+                    reason="insufficient_liquidity",
+                )
+                return final_state
             except Exception:
-                state = _rejected_order_state(decision, "venue_rejection")
-                await self.feedback.generate(state, reason="venue_rejection")
+                final_state = _rejected_order_state(decision, "venue_rejection")
+                release_outcome = "venue_rejection"
+                await self.feedback.generate(final_state, reason="venue_rejection")
                 raise
+        except BaseException:
+            if release_outcome is None and final_state is None:
+                release_outcome = "venue_rejection"
+            raise
         finally:
-            self.dedup_tokens.release(decision.decision_id)
+            if acquired:
+                await self._release_dedup_state(
+                    decision_id=decision.decision_id,
+                    order_state=final_state,
+                    fallback_outcome=release_outcome,
+                )
+
+    async def _release_dedup_state(
+        self,
+        *,
+        decision_id: str,
+        order_state: OrderState | None,
+        fallback_outcome: str | None,
+    ) -> None:
+        try:
+            outcome = fallback_outcome
+            if outcome is None and order_state is not None:
+                outcome = _dedup_release_outcome(order_state)
+            if outcome is None:
+                return
+            await self.dedup_store.release(decision_id, outcome)
+        except Exception:
+            logger.exception(
+                "Failed to release dedup state for decision_id=%s",
+                decision_id,
+            )
 
 
 def _rejected_order_state(decision: TradeDecision, reason: str) -> OrderState:
@@ -98,4 +125,35 @@ def _rejected_order_state(decision: TradeDecision, reason: str) -> OrderState:
         strategy_id=decision.strategy_id,
         strategy_version_id=decision.strategy_version_id,
         filled_quantity=0.0,
+    )
+
+
+def _dedup_release_outcome(order_state: OrderState) -> str:
+    status = order_state.status.lower()
+    raw_status = order_state.raw_status.lower()
+
+    if raw_status == "venue_rejection":
+        return "venue_rejection"
+    if status in {OrderStatus.MATCHED.value, "partial"}:
+        return "matched"
+    if status == OrderStatus.INVALID.value:
+        if raw_status == "insufficient_liquidity":
+            return "rejected"
+        return "invalid"
+    if status in {OrderStatus.CANCELED.value, "cancelled"}:
+        cancelled_outcomes = {
+            "ttl": "cancelled_ttl",
+            "cancelled_ttl": "cancelled_ttl",
+            "limit_invalidated": "cancelled_limit_invalidated",
+            "cancelled_limit_invalidated": "cancelled_limit_invalidated",
+            "session_end": "cancelled_session_end",
+            "cancelled_session_end": "cancelled_session_end",
+        }
+        cancelled_outcome = cancelled_outcomes.get(raw_status)
+        if cancelled_outcome is not None:
+            return cancelled_outcome
+
+    raise ValueError(
+        f"unsupported dedup release mapping for status={order_state.status!r} "
+        f"raw_status={order_state.raw_status!r}"
     )
