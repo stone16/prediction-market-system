@@ -101,6 +101,15 @@ class FailingForecaster:
         raise RuntimeError("forecast failed")
 
 
+class FixedSizer:
+    def __init__(self, size: float) -> None:
+        self._size = size
+
+    def size(self, *, prob: float, market_price: float, portfolio: Portfolio) -> float:
+        del prob, market_price, portfolio
+        return self._size
+
+
 def test_llm_forecaster_returns_neutral_tuple_without_calling_client() -> None:
     client = FakeClaudeClient()
     forecaster = LLMForecaster(
@@ -219,7 +228,7 @@ def test_llm_response_parsing_helpers_cover_json_text_and_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_controller_pipeline_averages_three_neutralized_forecasters_to_yes_price() -> None:
+async def test_controller_pipeline_suppresses_zero_size_decision_and_tracks_metric() -> None:
     llm_client = FakeClaudeClient()
     pipeline = ControllerPipeline(
         forecasters=[
@@ -237,16 +246,26 @@ async def test_controller_pipeline_averages_three_neutralized_forecasters_to_yes
 
     emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
 
-    assert emission is not None
-    opportunity, decision = emission
-    assert decision.market_id == "m-cp05"
-    assert decision.side == "BUY"
-    assert decision.prob_estimate == pytest.approx(0.4)
-    assert decision.expected_edge == pytest.approx(0.0)
-    assert decision.price == 0.4
-    assert decision.size == pytest.approx(0.0, abs=1e-12)
-    assert decision.opportunity_id == opportunity.opportunity_id
-    assert decision.stop_conditions
+    assert emission is None
+    assert pipeline.suppressed_zero_size == 1
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_suppresses_sub_min_order_decision_and_tracks_metric() -> None:
+    pipeline = ControllerPipeline(
+        forecasters=[
+            RulesForecaster(min_edge=0.01),
+            StatisticalForecaster(),
+        ],
+        calibrator=NetcalCalibrator(),
+        sizer=FixedSizer(0.5),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is None
+    assert pipeline.suppressed_zero_size == 1
 
 
 @pytest.mark.asyncio
