@@ -20,6 +20,7 @@ from pms.core.enums import Venue
 from pms.core.models import MarketSignal, Portfolio, TradeDecision
 from pms.research.execution import BacktestExecutionSimulator
 from pms.research.specs import ExecutionModel
+from pms.storage.dedup_store import InMemoryDedupStore
 from pms.storage.feedback_store import FeedbackStore
 from pms.strategies.projections import MarketSelectionSpec
 from tests.support.fake_stores import InMemoryFeedbackStore
@@ -44,10 +45,9 @@ def _decision(*, venue: str = "polymarket") -> TradeDecision:
         token_id="token-kalshi-cp06",
         venue=cast(Any, venue),
         side="BUY",
-        price=0.4,
-        size=10.0,
+        notional_usdc=10.0,
         order_type="limit",
-        max_slippage_bps=100,
+        max_slippage_bps=50,
         stop_conditions=["unit-test"],
         prob_estimate=0.6,
         expected_edge=0.2,
@@ -55,6 +55,9 @@ def _decision(*, venue: str = "polymarket") -> TradeDecision:
         opportunity_id="opp-kalshi-cp06",
         strategy_id="default",
         strategy_version_id="default-v1",
+        action="BUY",
+        limit_price=0.4,
+        outcome="YES",
     )
 
 
@@ -319,12 +322,14 @@ async def test_actuator_executor_rejects_kalshi_before_adapter_execution() -> No
 
     adapter = RecordingAdapter()
     feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+    dedup_store = InMemoryDedupStore()
     executor = ActuatorExecutor(
         adapter=cast(Any, adapter),
         risk=RiskManager(
             RiskSettings(max_position_per_market=100.0, max_total_exposure=1_000.0)
         ),
         feedback=ActuatorFeedback(feedback_store),
+        dedup_store=dedup_store,
     )
 
     with pytest.raises(
@@ -334,7 +339,7 @@ async def test_actuator_executor_rejects_kalshi_before_adapter_execution() -> No
         await executor.execute(_decision(venue="kalshi"), _portfolio())
 
     assert adapter.calls == 0
-    assert executor.dedup_tokens.contains("decision-kalshi-cp06") is False
+    assert dedup_store.contains("decision-kalshi-cp06") is False
     assert await cast(InMemoryFeedbackStore, feedback_store).all() == []
 
 
@@ -355,14 +360,16 @@ async def test_actuator_executor_returns_duplicate_state_without_calling_adapter
 
     adapter = RecordingAdapter()
     feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+    dedup_store = InMemoryDedupStore()
     executor = ActuatorExecutor(
         adapter=cast(Any, adapter),
         risk=RiskManager(
             RiskSettings(max_position_per_market=100.0, max_total_exposure=1_000.0)
         ),
         feedback=ActuatorFeedback(feedback_store),
+        dedup_store=dedup_store,
     )
-    executor.dedup_tokens.acquire("decision-kalshi-cp06")
+    await dedup_store.acquire(_decision())
 
     state = await executor.execute(_decision(), _portfolio())
 
@@ -391,12 +398,14 @@ async def test_actuator_executor_returns_risk_rejection_without_calling_adapter(
 
     adapter = RecordingAdapter()
     feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+    dedup_store = InMemoryDedupStore()
     executor = ActuatorExecutor(
         adapter=cast(Any, adapter),
         risk=RiskManager(
             RiskSettings(max_position_per_market=5.0, max_total_exposure=1_000.0)
         ),
         feedback=ActuatorFeedback(feedback_store),
+        dedup_store=dedup_store,
     )
 
     state = await executor.execute(_decision(), _portfolio())
@@ -404,7 +413,7 @@ async def test_actuator_executor_returns_risk_rejection_without_calling_adapter(
     assert state.status == "invalid"
     assert state.raw_status == "max_position_per_market"
     assert adapter.calls == 0
-    assert executor.dedup_tokens.contains("decision-kalshi-cp06") is False
+    assert dedup_store.contains("decision-kalshi-cp06") is True
     assert (await cast(InMemoryFeedbackStore, feedback_store).all())[-1].category == (
         "max_position_per_market"
     )
@@ -427,19 +436,21 @@ async def test_actuator_executor_marks_venue_rejection_and_re_raises() -> None:
 
     adapter = FailingAdapter()
     feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+    dedup_store = InMemoryDedupStore()
     executor = ActuatorExecutor(
         adapter=cast(Any, adapter),
         risk=RiskManager(
             RiskSettings(max_position_per_market=100.0, max_total_exposure=1_000.0)
         ),
         feedback=ActuatorFeedback(feedback_store),
+        dedup_store=dedup_store,
     )
 
     with pytest.raises(RuntimeError, match="venue rejected order"):
         await executor.execute(_decision(), _portfolio())
 
     assert adapter.calls == 1
-    assert executor.dedup_tokens.contains("decision-kalshi-cp06") is False
+    assert dedup_store.contains("decision-kalshi-cp06") is True
     assert (await cast(InMemoryFeedbackStore, feedback_store).all())[-1].category == (
         "venue_rejection"
     )

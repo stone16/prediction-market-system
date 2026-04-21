@@ -11,6 +11,7 @@ from pms.actuator.risk import RiskManager
 from pms.config import RiskSettings
 from pms.core.enums import OrderStatus
 from pms.core.models import OrderState, Portfolio, TradeDecision
+from pms.storage.dedup_store import InMemoryDedupStore
 from pms.storage.feedback_store import FeedbackStore
 from tests.support.fake_stores import InMemoryFeedbackStore
 
@@ -91,3 +92,25 @@ async def test_actuator_executor_rejects_sub_min_order_without_adapter_calls() -
     assert state.status == OrderStatus.INVALID.value
     assert state.raw_status == "min_order_usdc"
     assert adapter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_actuator_executor_default_dedup_store_soft_releases_rejections() -> None:
+    adapter = RecordingAdapter()
+    feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+    executor = ActuatorExecutor(
+        adapter=adapter,
+        risk=RiskManager(RiskSettings(min_order_usdc=1.0)),
+        feedback=ActuatorFeedback(feedback_store),
+    )
+
+    first = await executor.execute(_decision(), _portfolio())
+    second = await executor.execute(_decision(), _portfolio())
+
+    assert isinstance(executor.dedup_store, InMemoryDedupStore)
+    assert first.status == OrderStatus.INVALID.value
+    assert first.raw_status == "min_order_usdc"
+    assert second.status == OrderStatus.INVALID.value
+    assert second.raw_status == "duplicate_decision"
+    assert adapter.calls == 0
+    assert executor.dedup_store.contains("decision-cp14") is True
