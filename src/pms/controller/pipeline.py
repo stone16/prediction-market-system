@@ -25,6 +25,7 @@ from pms.controller.outcome_tokens import (
 )
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
+from pms.core.enums import TimeInForce
 from pms.core.interfaces import ICalibrator, IForecaster, ISizer
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
 from pms.factors.composition import apply_composition, evaluate_branch_probabilities
@@ -54,6 +55,7 @@ class ControllerPipeline:
     router: Router | None = None
     settings: PMSSettings = field(default_factory=PMSSettings)
     last_diagnostic: ControllerDiagnostic | None = field(init=False, default=None)
+    suppressed_zero_size: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         if self.strategy is not None:
@@ -175,17 +177,13 @@ class ControllerPipeline:
         expected_edge = prob_estimate - signal.yes_price
         active_portfolio = portfolio or _default_portfolio()
         sizer = _required(self.sizer, "sizer")
-        size = sizer.size(
-            prob=prob_estimate,
-            market_price=signal.yes_price,
-            portfolio=active_portfolio,
-        )
         now = datetime.now(tz=UTC)
         opportunity_side: Literal["yes", "no"] = (
             "yes" if expected_edge >= 0.0 else "no"
         )
         decision_token_id = signal.token_id
         decision_outcome: Literal["YES", "NO"] = "YES"
+        decision_probability = prob_estimate
         decision_price = signal.yes_price
         if expected_edge < 0.0:
             outcome_tokens = await self.outcome_token_resolver.resolve(
@@ -218,7 +216,19 @@ class ControllerPipeline:
                 return None
             decision_token_id = outcome_tokens.no_token_id
             decision_outcome = "NO"
+            decision_probability = max(0.0, 1.0 - prob_estimate)
             decision_price = max(0.0, 1.0 - signal.yes_price)
+        size = sizer.size(
+            prob=decision_probability,
+            market_price=decision_price,
+            portfolio=active_portfolio,
+        )
+        min_order_usdc = self.settings.risk.min_order_usdc
+        if self.strategy is not None:
+            min_order_usdc = self.strategy.risk.min_order_size_usdc
+        if size <= 0.0 or size < min_order_usdc:
+            self.suppressed_zero_size += 1
+            return None
         opportunity = Opportunity(
             opportunity_id=f"opportunity-{uuid.uuid4().hex}",
             market_id=signal.market_id,
@@ -243,19 +253,18 @@ class ControllerPipeline:
             token_id=decision_token_id,
             venue=signal.venue,
             side="BUY",
-            price=decision_price,
-            size=size,
+            limit_price=decision_price,
+            notional_usdc=size,
             order_type="limit",
             max_slippage_bps=self.settings.controller.max_slippage_bps,
             stop_conditions=router.stop_conditions(signal),
             prob_estimate=prob_estimate,
             expected_edge=expected_edge,
-            time_in_force=self.settings.controller.time_in_force,
+            time_in_force=TimeInForce(self.settings.controller.time_in_force.upper()),
             opportunity_id=opportunity.opportunity_id,
             strategy_id=self.strategy_id,
             strategy_version_id=self.strategy_version_id,
             action="BUY",
-            limit_price=decision_price,
             outcome=decision_outcome,
             model_id=_decision_model_id(model_ids),
         )

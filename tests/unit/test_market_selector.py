@@ -141,7 +141,7 @@ async def test_market_selector_builds_strategy_sets_before_merging(
                     "beta",
                     "beta-v2",
                     MarketSelectionSpec(
-                        venue="kalshi",
+                        venue="polymarket",
                         resolution_time_max_horizon_days=30,
                         volume_min_usdc=1000.0,
                     ),
@@ -159,7 +159,7 @@ async def test_market_selector_builds_strategy_sets_before_merging(
             min_volume_usdc: float,
         ) -> list[tuple[Market, list[Token]]]:
             self.calls.append((venue, max_horizon_days, min_volume_usdc))
-            if venue == "polymarket":
+            if venue == "polymarket" and max_horizon_days == 7:
                 return [
                     _eligible_market(
                         "market-a",
@@ -169,9 +169,9 @@ async def test_market_selector_builds_strategy_sets_before_merging(
                 ]
             return [
                 _eligible_market(
-                    "market-b",
-                    venue="kalshi",
-                    token_ids=("ka-yes", "ka-no"),
+                    "market-b-polymarket",
+                    venue="polymarket",
+                    token_ids=("pm-b-yes", "pm-b-no"),
                 )
             ]
 
@@ -182,7 +182,7 @@ async def test_market_selector_builds_strategy_sets_before_merging(
         def merge(self, selections: list[object]) -> object:
             self.selections = selections
             return merge_result_cls(
-                asset_ids=["ka-no", "ka-yes", "pm-no", "pm-yes"],
+                asset_ids=["pm-b-no", "pm-b-yes", "pm-no", "pm-yes"],
                 conflicts=[],
             )
 
@@ -200,7 +200,7 @@ async def test_market_selector_builds_strategy_sets_before_merging(
     assert fake_registry.calls == 1
     assert fake_store.calls == [
         ("polymarket", 7, 500.0),
-        ("kalshi", 30, 1000.0),
+        ("polymarket", 30, 1000.0),
     ]
     assert merge_policy.selections == [
         strategy_market_set_cls(
@@ -211,10 +211,10 @@ async def test_market_selector_builds_strategy_sets_before_merging(
         strategy_market_set_cls(
             strategy_id="beta",
             strategy_version_id="beta-v2",
-            asset_ids=frozenset({"ka-yes", "ka-no"}),
+            asset_ids=frozenset({"pm-b-yes", "pm-b-no"}),
         ),
     ]
-    assert result.asset_ids == ["ka-no", "ka-yes", "pm-no", "pm-yes"]
+    assert result.asset_ids == ["pm-b-no", "pm-b-yes", "pm-no", "pm-yes"]
     assert result.conflicts == []
 
 
@@ -245,7 +245,7 @@ async def test_market_selector_select_per_strategy_returns_pre_merge_strategy_se
                     "beta",
                     "beta-v2",
                     MarketSelectionSpec(
-                        venue="kalshi",
+                        venue="polymarket",
                         resolution_time_max_horizon_days=30,
                         volume_min_usdc=1000.0,
                     ),
@@ -268,13 +268,7 @@ async def test_market_selector_select_per_strategy_returns_pre_merge_strategy_se
                         token_ids=("pm-yes", "pm-no"),
                     )
                 ]
-            return [
-                _eligible_market(
-                    "market-b",
-                    venue="kalshi",
-                    token_ids=("ka-yes", "ka-no"),
-                )
-            ]
+            raise AssertionError(f"unexpected venue {venue}")
 
     class FailingMergePolicy:
         def merge(self, selections: list[object]) -> object:
@@ -298,7 +292,7 @@ async def test_market_selector_select_per_strategy_returns_pre_merge_strategy_se
         strategy_market_set_cls(
             strategy_id="beta",
             strategy_version_id="beta-v2",
-            asset_ids=frozenset({"ka-yes", "ka-no"}),
+            asset_ids=frozenset({"pm-yes", "pm-no"}),
         ),
     ]
 

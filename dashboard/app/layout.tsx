@@ -1,4 +1,8 @@
 import type { Metadata } from 'next';
+import { SourceBadgePortals } from '@/components/SourceBadgePortals';
+import { SourceBanner } from '@/components/SourceBanner';
+import { SourceProvider } from '@/components/SourceProvider';
+import { getDashboardSource } from '@/lib/dashboard-source';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -7,9 +11,17 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const source = getDashboardSource();
+
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body data-dashboard-source={source}>
+        <SourceProvider source={source}>
+          <SourceBanner />
+          <SourceBadgePortals />
+          {children}
+        </SourceProvider>
+      </body>
     </html>
   );
 }

@@ -23,6 +23,19 @@ def _run_psql(database_url: str, *args: str) -> None:
     )
 
 
+def _run_alembic(database_url: str, *args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env.pop("PMS_DATABASE_URL", None)
+    return subprocess.run(
+        ["uv", "run", "alembic", *args],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+
 async def _truncate_public_tables(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as connection:
         records = await connection.fetch(
@@ -30,6 +43,7 @@ async def _truncate_public_tables(pool: asyncpg.Pool) -> None:
             SELECT tablename
             FROM pg_tables
             WHERE schemaname = 'public'
+              AND tablename <> 'alembic_version'
             ORDER BY tablename
             """
         )
@@ -45,7 +59,8 @@ async def _truncate_public_tables(pool: asyncpg.Pool) -> None:
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def pg_pool() -> AsyncIterator[asyncpg.Pool]:
     assert PMS_TEST_DATABASE_URL is not None, "PMS_TEST_DATABASE_URL must be set"
-    _run_psql(PMS_TEST_DATABASE_URL, "-f", str(SCHEMA_PATH))
+    upgrade = _run_alembic(PMS_TEST_DATABASE_URL, "upgrade", "head")
+    assert upgrade.returncode == 0, upgrade.stderr
     pool = await asyncpg.create_pool(
         dsn=PMS_TEST_DATABASE_URL,
         min_size=1,

@@ -10,7 +10,7 @@ import pytest
 
 from pms.api.app import create_app
 from pms.config import PMSSettings, RiskSettings
-from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, RunMode, Side
+from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, RunMode, Side, TimeInForce
 from pms.core.models import (
     EvalRecord,
     Feedback,
@@ -21,6 +21,7 @@ from pms.core.models import (
 from pms.runner import Runner
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.schema_check import SchemaVersionMismatchError
 from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
 
@@ -36,6 +37,20 @@ def _settings() -> PMSSettings:
             max_total_exposure=10_000.0,
         ),
     )
+
+
+def _stub_schema_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _noop_schema_check(_pool: object) -> None:
+        return
+
+    monkeypatch.setattr("pms.api.app.ensure_schema_current", _noop_schema_check)
+
+
+def _stub_orphan_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _noop_scan(_pool: object) -> None:
+        return
+
+    monkeypatch.setattr("pms.api.app.scan_orphaned_backtest_runs", _noop_scan)
 
 
 def _runner_with_state() -> Runner:
@@ -83,17 +98,18 @@ def _decision() -> TradeDecision:
         token_id="yes-token",
         venue="polymarket",
         side=Side.BUY.value,
-        price=0.4,
-        size=12.5,
+        limit_price=0.4,
+        notional_usdc=12.5,
         order_type="limit",
         max_slippage_bps=100,
         stop_conditions=["min_volume:100.00"],
         prob_estimate=0.7,
         expected_edge=0.3,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id="opportunity-api",
         strategy_id="default",
         strategy_version_id="default-v1",
+        action=Side.BUY.value,
         model_id="model-a",
     )
 
@@ -109,7 +125,8 @@ def _fill() -> FillRecord:
         venue="polymarket",
         side=Side.BUY.value,
         fill_price=0.41,
-        fill_size=12.5,
+        fill_notional_usdc=12.5,
+        fill_quantity=12.5 / 0.41,
         executed_at=now,
         filled_at=now,
         status=OrderStatus.MATCHED.value,
@@ -261,7 +278,11 @@ async def test_api_run_start_stop_cycle(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_api_auto_start_lifespan(tmp_path: Path) -> None:
+async def test_api_auto_start_lifespan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_schema_check(monkeypatch)
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.BACKTEST,
@@ -285,7 +306,11 @@ async def test_api_auto_start_lifespan(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_api_auto_start_disabled_keeps_runner_idle(tmp_path: Path) -> None:
+async def test_api_auto_start_disabled_keeps_runner_idle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_schema_check(monkeypatch)
     runner = Runner(
         config=PMSSettings(mode=RunMode.BACKTEST, auto_migrate_default_v2=False),
         historical_data_path=FIXTURE_PATH,
@@ -299,8 +324,108 @@ async def test_api_auto_start_disabled_keeps_runner_idle(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_api_lifespan_stops_runner_started_via_api(tmp_path: Path) -> None:
+async def test_api_backtest_lifespan_skips_schema_check_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema_check_calls: list[object] = []
+
+    async def _record_schema_check(pool: object) -> None:
+        schema_check_calls.append(pool)
+
+    monkeypatch.setattr("pms.api.app.ensure_schema_current", _record_schema_check)
+    _stub_orphan_scan(monkeypatch)
+    runner = Runner(
+        config=PMSSettings(mode=RunMode.BACKTEST, auto_migrate_default_v2=False),
+        historical_data_path=FIXTURE_PATH,
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    app = create_app(runner, auto_start=False)
+
+    async with app.router.lifespan_context(app):
+        assert runner.pg_pool is not None
+
+    assert schema_check_calls == []
+
+
+@pytest.mark.asyncio
+async def test_api_backtest_lifespan_can_opt_into_schema_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema_check_calls: list[object] = []
+
+    async def _record_schema_check(pool: object) -> None:
+        schema_check_calls.append(pool)
+
+    monkeypatch.setattr("pms.api.app.ensure_schema_current", _record_schema_check)
+    _stub_orphan_scan(monkeypatch)
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.BACKTEST,
+            auto_migrate_default_v2=False,
+            enforce_schema_check=True,
+        ),
+        historical_data_path=FIXTURE_PATH,
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    app = create_app(runner, auto_start=False)
+
+    async with app.router.lifespan_context(app):
+        assert runner.pg_pool is not None
+
+    assert len(schema_check_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_api_lifespan_closes_owned_pool_when_schema_check_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TrackingPool:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    pool = _TrackingPool()
+
+    async def _fake_create_pool(*, dsn: str, min_size: int, max_size: int) -> _TrackingPool:
+        del dsn, min_size, max_size
+        return pool
+
+    async def _raise_schema_check(_pool: object) -> None:
+        raise SchemaVersionMismatchError("schema behind")
+
+    monkeypatch.setattr("pms.runner.asyncpg.create_pool", _fake_create_pool)
+    monkeypatch.setattr("pms.api.app.ensure_schema_current", _raise_schema_check)
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.BACKTEST,
+            auto_migrate_default_v2=False,
+            enforce_schema_check=True,
+        ),
+        historical_data_path=FIXTURE_PATH,
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    app = create_app(runner, auto_start=False)
+
+    with pytest.raises(SchemaVersionMismatchError, match="schema behind"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert pool.close_calls == 1
+    assert runner.pg_pool is None
+
+
+@pytest.mark.asyncio
+async def test_api_lifespan_stops_runner_started_via_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Regression for codex-bot C1: /run/start-triggered runner must also be stopped on shutdown."""
+    _stub_schema_check(monkeypatch)
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.BACKTEST,

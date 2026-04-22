@@ -16,6 +16,12 @@ Evaluator, with active-perception feedback.
 (Turbopack) dashboard on :3100, PostgreSQL (load-bearing since S1;
 outer + middle + inner rings all persisted), `uv` for Python deps.
 
+**Capability honesty:** implemented run modes are `backtest` and
+`paper`. `live` is not implemented in v1;
+`src/pms/actuator/adapters/polymarket.py:23-25` raises
+`NotImplementedError` after the `live_trading_enabled` guard. Kalshi
+is reserved in the venue enum but has no adapter in v1.
+
 **Branches:** feature branches only (`feat/…`, `fix/…`, `docs/…`).
 Never commit to `main` directly; changes land via PR.
 
@@ -41,6 +47,8 @@ feature work (see promoted rule: *Fresh-clone baseline verification*).
 
 Integration tests:
 ```bash
+export DATABASE_URL="${PMS_TEST_DATABASE_URL:-postgres://postgres:postgres@localhost:5432/pms_test}"
+uv run alembic upgrade head
 PMS_RUN_INTEGRATION=1 uv run pytest -m integration
 ```
 

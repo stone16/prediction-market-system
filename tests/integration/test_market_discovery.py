@@ -27,10 +27,11 @@ pytestmark = [
 ]
 
 
-def _gamma_market(condition_id: str) -> dict[str, Any]:
+def _gamma_market(condition_id: str, *, venue: str = "polymarket") -> dict[str, Any]:
     return {
         "id": condition_id,
         "conditionId": condition_id,
+        "venue": venue,
         "slug": f"market-{condition_id}",
         "question": f"Will {condition_id} settle?",
         "endDateIso": "2026-07-31",
@@ -103,3 +104,43 @@ async def test_market_discovery_live_gamma_poll_persists_valid_rows(
     assert sample_row["venue"] == "polymarket"
     assert sample_row["created_at"] <= datetime.now(tz=UTC)
     assert sample_row["last_seen_at"] <= datetime.now(tz=UTC)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_market_discovery_rejects_kalshi_rows(
+    pg_pool: Any,
+    db_conn: Any,
+) -> None:
+    from pms.core.exceptions import KalshiStubError
+
+    payload = [_gamma_market("ka-stub-row", venue="kalshi")]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=PostgresMarketDataStore(pg_pool),
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    with pytest.raises(
+        KalshiStubError,
+        match="Kalshi adapter is not implemented in v1",
+    ):
+        await sensor.poll_once()
+    await sensor.aclose()
+
+    market_count = await db_conn.fetchval(
+        "SELECT COUNT(*) FROM markets WHERE condition_id = 'ka-stub-row'"
+    )
+    token_count = await db_conn.fetchval(
+        "SELECT COUNT(*) FROM tokens WHERE condition_id = 'ka-stub-row'"
+    )
+
+    assert market_count == 0
+    assert token_count == 0

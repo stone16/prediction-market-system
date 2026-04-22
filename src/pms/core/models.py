@@ -10,7 +10,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
+
+from pms.core.enums import TimeInForce
 
 
 Venue = Literal["polymarket", "kalshi"]
@@ -68,33 +70,36 @@ class TradeDecision:
     token_id: str | None
     venue: Venue
     side: BookSide
-    price: float
-    size: float
+    notional_usdc: float
     order_type: str
     max_slippage_bps: int
     stop_conditions: list[str]
     prob_estimate: float
     expected_edge: float
-    time_in_force: str
+    time_in_force: TimeInForce
     opportunity_id: str
     strategy_id: str
     strategy_version_id: str
+    limit_price: float
     action: BookSide | None = None
-    limit_price: float | None = None
     outcome: Outcome = "YES"
     model_id: str | None = None
 
     def __post_init__(self) -> None:
-        action = self.side if self.action is None else self.action
-        if action != self.side:
-            msg = "TradeDecision.action must match TradeDecision.side"
+        if self.notional_usdc <= 0.0:
+            msg = "TradeDecision.notional_usdc must be > 0.0"
             raise ValueError(msg)
-        limit_price = self.price if self.limit_price is None else self.limit_price
-        if limit_price != self.price:
-            msg = "TradeDecision.limit_price must match TradeDecision.price"
+        if self.limit_price <= 0.0 or self.limit_price >= 1.0:
+            msg = "TradeDecision.limit_price must satisfy 0.0 < limit_price < 1.0"
             raise ValueError(msg)
-        object.__setattr__(self, "action", action)
-        object.__setattr__(self, "limit_price", limit_price)
+        raw_time_in_force = cast(object, self.time_in_force)
+        if not isinstance(raw_time_in_force, TimeInForce):
+            try:
+                normalized = TimeInForce(str(raw_time_in_force).upper())
+            except ValueError as exc:
+                msg = "TradeDecision.time_in_force must be one of GTC, IOC, or FOK"
+                raise ValueError(msg) from exc
+            object.__setattr__(self, "time_in_force", normalized)
 
 
 @dataclass(frozen=True)
@@ -105,15 +110,16 @@ class OrderState:
     market_id: str
     token_id: str | None
     venue: Venue
-    requested_size: float
-    filled_size: float
-    remaining_size: float
+    requested_notional_usdc: float
+    filled_notional_usdc: float
+    remaining_notional_usdc: float
     fill_price: float | None
     submitted_at: datetime
     last_updated_at: datetime
     raw_status: str
     strategy_id: str
     strategy_version_id: str
+    filled_quantity: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -126,7 +132,8 @@ class FillRecord:
     venue: Venue
     side: str
     fill_price: float
-    fill_size: float
+    fill_notional_usdc: float
+    fill_quantity: float
     executed_at: datetime
     filled_at: datetime
     status: str
@@ -134,7 +141,6 @@ class FillRecord:
     strategy_id: str
     strategy_version_id: str
     fill_id: str | None = None
-    filled_contracts: float | None = None
     fee_bps: int | None = None
     fees: float | None = None
     liquidity_side: str | None = None

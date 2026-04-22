@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side
+from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side, TimeInForce
 from pms.core.models import EvalRecord, Feedback, FillRecord, TradeDecision
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
@@ -37,14 +37,14 @@ def _decision(
         token_id="t-yes",
         venue="polymarket",
         side=Side.BUY.value,
-        price=price,
-        size=10.0,
+        limit_price=price,
+        notional_usdc=price * 10.0,
         order_type="limit",
         max_slippage_bps=100,
         stop_conditions=["min_volume:100.00"],
         prob_estimate=prob,
         expected_edge=prob - price,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id=f"op-{decision_id}",
         strategy_id=strategy_id,
         strategy_version_id=strategy_version_id,
@@ -71,7 +71,8 @@ def _fill(
         venue="polymarket",
         side=Side.BUY.value,
         fill_price=fill_price,
-        fill_size=10.0,
+        fill_notional_usdc=fill_price * 10.0,
+        fill_quantity=10.0,
         executed_at=now,
         filled_at=now,
         status=status,
@@ -167,14 +168,14 @@ def test_scorer_pnl_for_buy_no_uses_complementary_contract_outcome() -> None:
         token_id="t-no",
         venue="polymarket",
         side=Side.BUY.value,
-        price=0.38,
-        size=10.0,
+        limit_price=0.38,
+        notional_usdc=3.8,
         order_type="limit",
         max_slippage_bps=100,
         stop_conditions=["min_volume:100.00"],
         prob_estimate=0.62,
         expected_edge=0.24,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id="op-d-buy-no",
         strategy_id="default",
         strategy_version_id="default-v1",

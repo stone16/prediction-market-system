@@ -6,13 +6,14 @@ from collections.abc import Mapping
 from datetime import datetime
 import json
 import math
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from pms.research.specs import (
     BacktestDataset,
     BacktestExecutionConfig,
     BacktestSpec,
     ExecutionModel,
+    FillPolicy,
     RiskPolicy,
 )
 
@@ -76,6 +77,9 @@ def serialize_backtest_spec(spec: BacktestSpec) -> dict[str, object]:
             "latency_ms": _serialize_float(spec.execution_model.latency_ms),
             "staleness_ms": _serialize_float(spec.execution_model.staleness_ms),
             "fill_policy": spec.execution_model.fill_policy,
+            "order_ttl_ms": spec.execution_model.order_ttl_ms,
+            "price_invalidation_streak": spec.execution_model.price_invalidation_streak,
+            "replay_window_ms": spec.execution_model.replay_window_ms,
         },
         "risk_policy": {
             "max_position_notional_usdc": _serialize_float(
@@ -156,6 +160,18 @@ def _deserialize_execution_model(raw_value: object) -> ExecutionModel:
             field_name="ExecutionModel.staleness_ms",
         ),
         fill_policy=_coerce_fill_policy(payload["fill_policy"]),
+        order_ttl_ms=_coerce_int(
+            payload.get("order_ttl_ms", 60_000),
+            field_name="ExecutionModel.order_ttl_ms",
+        ),
+        price_invalidation_streak=_coerce_int(
+            payload.get("price_invalidation_streak", 10),
+            field_name="ExecutionModel.price_invalidation_streak",
+        ),
+        replay_window_ms=_coerce_int(
+            payload.get("replay_window_ms", 86_400_000),
+            field_name="ExecutionModel.replay_window_ms",
+        ),
     )
 
 
@@ -210,13 +226,16 @@ def _coerce_float(raw_value: object, *, field_name: str) -> float:
     return float(raw_value)
 
 
-def _coerce_fill_policy(
-    raw_value: object,
-) -> Literal["immediate_or_cancel", "limit_if_touched"]:
-    if raw_value not in ("immediate_or_cancel", "limit_if_touched"):
+def _coerce_fill_policy(raw_value: object) -> FillPolicy:
+    if raw_value not in (
+        "immediate_or_cancel",
+        "limit_if_touched",
+        "good_til_cancelled",
+        "fill_or_kill",
+    ):
         msg = "ExecutionModel.fill_policy must decode to a supported fill policy"
         raise TypeError(msg)
-    return raw_value
+    return cast(FillPolicy, str(raw_value))
 
 
 def _json_object(raw_value: object) -> dict[str, object]:

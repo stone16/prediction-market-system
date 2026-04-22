@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from datetime import UTC, datetime
 
 import pytest
@@ -47,6 +48,17 @@ def _portfolio() -> Portfolio:
     )
 
 
+def _expected_kelly_notional() -> float:
+    probability = Decimal("0.67")
+    market_price = Decimal("0.4")
+    payout_multiple = (Decimal("1.0") - market_price) / market_price
+    kelly_fraction = (
+        (probability * payout_multiple) - (Decimal("1.0") - probability)
+    ) / payout_multiple
+    scaled_fraction = kelly_fraction * Decimal("0.25")
+    return float(Decimal("1000.0") * scaled_fraction)
+
+
 @pytest.mark.asyncio
 async def test_controller_pipeline_on_signal_emits_opportunity_and_linked_decision() -> None:
     pipeline = ControllerPipeline(
@@ -73,11 +85,31 @@ async def test_controller_pipeline_on_signal_emits_opportunity_and_linked_decisi
         "yes_price": 0.4,
     }
     assert opportunity.rationale == "StaticForecaster:factor-value edge"
-    assert opportunity.target_size_usdc == decision.size
+    assert decision.notional_usdc == pytest.approx(_expected_kelly_notional())
+    assert opportunity.target_size_usdc == pytest.approx(decision.notional_usdc)
     assert opportunity.expiry == datetime(2026, 4, 30, tzinfo=UTC)
     assert opportunity.staleness_policy == "market_signal_freshness"
     assert decision.opportunity_id == opportunity.opportunity_id
     assert decision.model_id == "StaticForecaster"
     assert decision.strategy_id == "alpha"
     assert decision.strategy_version_id == "alpha-v1"
+    assert decision.limit_price == pytest.approx(0.4)
     assert decision.stop_conditions
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_decide_returns_notional_decision() -> None:
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    decision = await pipeline.decide(_signal(), portfolio=_portfolio())
+
+    assert decision is not None
+    assert decision.notional_usdc == pytest.approx(_expected_kelly_notional())
+    assert decision.limit_price == pytest.approx(0.4)

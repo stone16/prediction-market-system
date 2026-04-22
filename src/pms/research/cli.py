@@ -18,6 +18,7 @@ import asyncpg
 import yaml
 
 from pms.config import PMSSettings
+from pms.core.exceptions import PMSBootError
 from pms.research.report import EvaluationReportGenerator
 from pms.research.runner import BacktestRunner, CancelProbe
 from pms.research.sweep import (
@@ -27,6 +28,7 @@ from pms.research.sweep import (
     deserialize_backtest_spec,
     deserialize_execution_config,
 )
+from pms.storage.schema_check import ensure_schema_current
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +99,11 @@ def main() -> None:
             poll_interval=float(namespace.poll_interval),
             max_runs=_optional_int(namespace.max_runs),
         )
-        raise SystemExit(asyncio.run(_run_worker(worker_args)))
+        try:
+            raise SystemExit(asyncio.run(_run_worker(worker_args)))
+        except PMSBootError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from exc
 
     raise SystemExit(f"unknown command: {namespace.command}")
 
@@ -156,6 +162,7 @@ async def _run_worker(args: _WorkerArgs) -> int:
 
     handlers = _install_signal_handlers(loop, request_stop)
     try:
+        await ensure_schema_current(pool)
         runner = BacktestRunner(
             writable_pool=pool,
             readonly_pool=pool,

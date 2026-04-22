@@ -29,18 +29,18 @@ def _load_execution_model() -> type[Any]:
 
 
 @pytest.mark.parametrize(
-    ("price", "shares", "fee_rate", "expected_fee"),
+    ("notional_usdc", "fill_price", "fee_rate", "expected_fee"),
     [
-        (0.5, 100.0, 0.04, 1.0),
-        (0.25, 80.0, 0.04, 0.6),
-        (0.9, 50.0, 0.03, 0.135),
-        (0.1, 200.0, 0.072, 1.296),
-        (0.5, 1.0, 0.05, 0.0125),
+        (100.0, 0.25, 0.04, 3.0),
+        (100.0, 0.28, 0.04, 2.88),
+        (50.0, 0.25, 0.04, 1.5),
+        (50.0, 0.28, 0.04, 1.44),
+        (200.0, 0.10, 0.072, 12.96),
     ],
 )
-def test_execution_model_fee_curve_matches_polymarket_formula(
-    price: float,
-    shares: float,
+def test_execution_model_compute_fee_matches_notional_formula(
+    notional_usdc: float,
+    fill_price: float,
     fee_rate: float,
     expected_fee: float,
 ) -> None:
@@ -53,19 +53,13 @@ def test_execution_model_fee_curve_matches_polymarket_formula(
         fill_policy="immediate_or_cancel",
     )
 
-    assert execution_model.fee_curve(price=price, shares=shares) == pytest.approx(
-        expected_fee
-    )
+    assert execution_model.compute_fee(
+        notional_usdc=notional_usdc,
+        fill_price=fill_price,
+    ) == pytest.approx(expected_fee)
 
 
-def test_execution_model_is_frozen_dataclass() -> None:
-    execution_model_cls = _load_execution_model()
-
-    assert is_dataclass(execution_model_cls)
-    assert getattr(execution_model_cls, "__dataclass_params__").frozen is True
-
-
-def test_execution_model_fee_curve_returns_zero_at_probability_boundaries() -> None:
+def test_execution_model_compute_fee_returns_expected_boundary_values() -> None:
     execution_model_cls = _load_execution_model()
     execution_model = execution_model_cls(
         fee_rate=0.04,
@@ -75,8 +69,15 @@ def test_execution_model_fee_curve_returns_zero_at_probability_boundaries() -> N
         fill_policy="immediate_or_cancel",
     )
 
-    assert execution_model.fee_curve(price=0.0, shares=100.0) == pytest.approx(0.0)
-    assert execution_model.fee_curve(price=1.0, shares=100.0) == pytest.approx(0.0)
+    assert execution_model.compute_fee(notional_usdc=100.0, fill_price=0.0) == pytest.approx(4.0)
+    assert execution_model.compute_fee(notional_usdc=100.0, fill_price=1.0) == pytest.approx(0.0)
+
+
+def test_execution_model_is_frozen_dataclass() -> None:
+    execution_model_cls = _load_execution_model()
+
+    assert is_dataclass(execution_model_cls)
+    assert getattr(execution_model_cls, "__dataclass_params__").frozen is True
 
 
 def test_polymarket_paper_profile_is_idealized() -> None:
@@ -121,7 +122,7 @@ def test_polymarket_live_estimate_assignments_have_source_comments() -> None:
         ), field_name
 
 
-def test_paper_profile_round_trips_through_spec_codec_with_infinite_staleness() -> None:
+def test_paper_profile_round_trips_through_spec_codec_with_new_fields() -> None:
     from pms.research.spec_codec import deserialize_backtest_spec, serialize_backtest_spec
     from pms.research.specs import BacktestDataset, BacktestSpec, ExecutionModel
     from pms.strategies.projections import RiskParams
@@ -150,8 +151,14 @@ def test_paper_profile_round_trips_through_spec_codec_with_infinite_staleness() 
     execution_model_payload = cast(Mapping[str, object], payload["execution_model"])
 
     assert execution_model_payload["staleness_ms"] == ".inf"
+    assert execution_model_payload["order_ttl_ms"] == 60_000
+    assert execution_model_payload["price_invalidation_streak"] == 10
+    assert execution_model_payload["replay_window_ms"] == 86_400_000
     assert len(spec.config_hash) == 64
 
     decoded = deserialize_backtest_spec(payload)
 
     assert math.isinf(decoded.execution_model.staleness_ms)
+    assert decoded.execution_model.order_ttl_ms == 60_000
+    assert decoded.execution_model.price_invalidation_streak == 10
+    assert decoded.execution_model.replay_window_ms == 86_400_000

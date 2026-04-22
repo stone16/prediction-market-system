@@ -213,15 +213,40 @@ CREATE TABLE IF NOT EXISTS orders (
     order_id TEXT PRIMARY KEY,
     market_id TEXT NOT NULL,
     ts TIMESTAMPTZ NOT NULL,
+    requested_notional_usdc DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    filled_notional_usdc DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    remaining_notional_usdc DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    filled_quantity DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     strategy_id TEXT NOT NULL,
     strategy_version_id TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS order_intents (
+    decision_id TEXT PRIMARY KEY,
+    strategy_id TEXT NOT NULL CHECK (strategy_id != ''),
+    strategy_version_id TEXT NOT NULL CHECK (strategy_version_id != ''),
+    acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    released_at TIMESTAMPTZ,
+    worker_host TEXT,
+    worker_pid INTEGER,
+    outcome TEXT,
+    CONSTRAINT order_intents_outcome_check
+        CHECK (outcome IS NULL OR outcome IN ('matched', 'invalid', 'rejected', 'venue_rejection', 'cancelled_ttl', 'cancelled_limit_invalidated', 'cancelled_session_end'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_intents_strategy_acquired_at_desc
+    ON order_intents(strategy_id, acquired_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_order_intents_released_at_nulls_first
+    ON order_intents(released_at NULLS FIRST);
 
 CREATE TABLE IF NOT EXISTS fills (
     fill_id TEXT PRIMARY KEY,
     order_id TEXT NOT NULL,
     market_id TEXT NOT NULL,
     ts TIMESTAMPTZ NOT NULL,
+    fill_notional_usdc DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    fill_quantity DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     strategy_id TEXT NOT NULL,
     strategy_version_id TEXT NOT NULL
 );
@@ -563,8 +588,14 @@ CREATE INDEX IF NOT EXISTS idx_eval_records_strategy_identity
 CREATE INDEX IF NOT EXISTS idx_orders_strategy_identity
     ON orders(strategy_id, strategy_version_id);
 
+CREATE INDEX IF NOT EXISTS idx_orders_requested_notional_usdc
+    ON orders(requested_notional_usdc);
+
 CREATE INDEX IF NOT EXISTS idx_fills_strategy_identity
     ON fills(strategy_id, strategy_version_id);
+
+CREATE INDEX IF NOT EXISTS idx_fills_fill_notional_usdc
+    ON fills(fill_notional_usdc);
 
 CREATE INDEX IF NOT EXISTS idx_opportunities_strategy_identity
     ON opportunities(strategy_id, strategy_version_id);

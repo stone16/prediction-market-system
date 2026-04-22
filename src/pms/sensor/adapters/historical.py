@@ -9,7 +9,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
-from pms.core.models import MarketSignal, Venue
+from pms.core.enums import Venue
+from pms.core.exceptions import KalshiStubError
+from pms.core.models import MarketSignal, Venue as VenueValue
+from pms.core.venue_support import kalshi_stub_error, normalize_venue
 
 
 @dataclass(frozen=True)
@@ -65,10 +68,16 @@ def _read_rows(path: Path) -> Iterable[dict[str, Any]]:
 
 def _row_to_signal(row: dict[str, Any]) -> MarketSignal:
     fetched_at = _required_datetime(row, "fetched_at")
+    venue = normalize_venue(
+        row.get("venue"),
+        context="HistoricalSensor._row_to_signal",
+    )
+    if venue == Venue.KALSHI.value:
+        raise kalshi_stub_error("HistoricalSensor._row_to_signal")
     return MarketSignal(
         market_id=str(row["market_id"]),
         token_id=_optional_str(row.get("token_id")),
-        venue=cast(Venue, str(row["venue"])),
+        venue=cast(VenueValue, venue),
         title=str(row["title"]),
         yes_price=float(row["yes_price"]),
         volume_24h=_optional_float(row.get("volume_24h")),

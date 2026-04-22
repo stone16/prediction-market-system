@@ -8,7 +8,7 @@ from typing import Any, get_type_hints
 
 import pytest
 
-from pms.config import PMSSettings
+from pms.config import PMSSettings, RiskSettings
 from pms.core import interfaces, models
 from pms.core.enums import (
     FeedbackSource,
@@ -78,8 +78,8 @@ def test_financial_entity_fields_use_float_boundary_types() -> None:
     expected: dict[type[Any], dict[str, object]] = {
         models.MarketSignal: {"yes_price": float, "volume_24h": float | None},
         models.TradeDecision: {
-            "price": float,
-            "size": float,
+            "notional_usdc": float,
+            "limit_price": float,
             "prob_estimate": float,
             "expected_edge": float,
         },
@@ -88,15 +88,16 @@ def test_financial_entity_fields_use_float_boundary_types() -> None:
             "target_size_usdc": float,
         },
         models.OrderState: {
-            "requested_size": float,
-            "filled_size": float,
-            "remaining_size": float,
+            "requested_notional_usdc": float,
+            "filled_notional_usdc": float,
+            "remaining_notional_usdc": float,
+            "filled_quantity": float,
             "fill_price": float | None,
         },
         models.FillRecord: {
             "fill_price": float,
-            "filled_contracts": float | None,
-            "fill_size": float,
+            "fill_notional_usdc": float,
+            "fill_quantity": float,
             "fee_bps": int | None,
             "fees": float | None,
         },
@@ -163,6 +164,7 @@ def test_core_enums_use_stable_wire_values() -> None:
     assert [mode.value for mode in RunMode] == ["backtest", "paper", "live"]
     assert [side.value for side in Side] == ["BUY", "SELL"]
     assert "live" in {status.value for status in OrderStatus}
+    assert OrderStatus.CANCELED.value == OrderStatus.CANCELLED.value == "cancelled"
     assert "open" in {status.value for status in MarketStatus}
     assert [target.value for target in FeedbackTarget] == [
         "sensor",
@@ -205,7 +207,15 @@ def test_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert default_settings.mode is RunMode.BACKTEST
     assert default_settings.live_trading_enabled is False
-    assert default_settings.risk.max_position_usdc == 100.0
+    assert default_settings.risk.max_position_per_market == 100.0
+    assert set(RiskSettings.model_fields) == {
+        "max_position_per_market",
+        "max_total_exposure",
+        "max_drawdown_pct",
+        "max_open_positions",
+        "min_order_usdc",
+        "slippage_threshold_bps",
+    }
 
     monkeypatch.setenv("PMS_MODE", "paper")
     env_settings = PMSSettings()
@@ -233,7 +243,7 @@ def test_config_loads_optional_yaml_file(tmp_path: Path) -> None:
                 "polymarket:",
                 "  host: https://clob.example.test",
                 "risk:",
-                "  max_position_usdc: 25.0",
+                "  max_position_per_market: 25.0",
             ]
         ),
         encoding="utf-8",
@@ -244,4 +254,4 @@ def test_config_loads_optional_yaml_file(tmp_path: Path) -> None:
     assert settings.mode is RunMode.LIVE
     assert settings.live_trading_enabled is True
     assert settings.polymarket.host == "https://clob.example.test"
-    assert settings.risk.max_position_usdc == 25.0
+    assert settings.risk.max_position_per_market == 25.0

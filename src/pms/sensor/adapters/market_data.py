@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import time
+import traceback
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -14,6 +16,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from pms.core.enums import MarketStatus
+from pms.core.exceptions import SensorDataQualityError
 from pms.core.models import (
     BookLevel,
     BookSide,
@@ -29,6 +32,10 @@ from pms.storage.market_data_store import PostgresMarketDataStore
 
 logger = logging.getLogger(__name__)
 _POLYMARKET_MILLISECONDS_EPOCH_THRESHOLD = 10_000_000_000
+_MALFORMED_RATE_WINDOW_SIZE = 100
+_MALFORMED_RATE_THRESHOLD_DEFAULT = 0.5
+_MALFORMED_WARNING_RATE_LIMIT_S = 10.0
+_MALFORMED_PREVIEW_LIMIT = 200
 
 
 @dataclass
@@ -72,6 +79,12 @@ class MarketDataSensor:
         self._pending_reconnect_assets: set[str] = set()
         self._connected_once = False
         self._watchdog_timeout_count = 0
+        self._malformed_messages_total = 0
+        self._malformed_message_window: deque[bool] = deque(
+            maxlen=_MALFORMED_RATE_WINDOW_SIZE
+        )
+        self._malformed_rate_threshold = _MALFORMED_RATE_THRESHOLD_DEFAULT
+        self._last_malformed_warning_at_s = -_MALFORMED_WARNING_RATE_LIMIT_S
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._watchdog = SensorWatchdog(
             timeout_s=self._WATCHDOG_TIMEOUT_S,
@@ -89,6 +102,18 @@ class MarketDataSensor:
     @property
     def watchdog_timeout_count(self) -> int:
         return self._watchdog_timeout_count
+
+    @property
+    def malformed_messages_total(self) -> int:
+        return self._malformed_messages_total
+
+    @property
+    def malformed_rate_threshold(self) -> float:
+        return self._malformed_rate_threshold
+
+    @malformed_rate_threshold.setter
+    def malformed_rate_threshold(self, value: float) -> None:
+        self._malformed_rate_threshold = value
 
     def __aiter__(self) -> AsyncIterator[MarketSignal]:
         return self._iterate()
@@ -175,15 +200,38 @@ class MarketDataSensor:
         await self._watchdog.stop()
 
     async def _handle_raw_message(self, raw_message: str | bytes) -> list[MarketSignal]:
-        loaded = json.loads(raw_message)
+        try:
+            loaded = json.loads(raw_message)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            self._record_malformed_message(raw_message)
+            return []
+
         if isinstance(loaded, list):
             signals: list[MarketSignal] = []
             for item in loaded:
-                if isinstance(item, dict):
+                try:
+                    if not isinstance(item, dict):
+                        raise TypeError("market-data payload item must be a dict")
                     signals.extend(await self._handle_message(item))
+                except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+                    if not _is_malformed_payload_error(exc):
+                        raise
+                    self._record_malformed_message(raw_message)
+                    continue
+                self._record_message_quality(ok=True)
             return signals
+
         if isinstance(loaded, dict):
-            return await self._handle_message(loaded)
+            try:
+                signals = await self._handle_message(loaded)
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+                if not _is_malformed_payload_error(exc):
+                    raise
+                self._record_malformed_message(raw_message)
+                return []
+            self._record_message_quality(ok=True)
+            return signals
+
         logger.warning("unrecognised market-data payload: %s", loaded)
         return []
 
@@ -378,6 +426,32 @@ class MarketDataSensor:
     def _reset_book_state(self) -> None:
         self._books.clear()
 
+    def _record_malformed_message(self, raw_message: str | bytes) -> None:
+        self._malformed_messages_total += 1
+        self._log_malformed_message(raw_message)
+        self._record_message_quality(ok=False)
+
+    def _record_message_quality(self, *, ok: bool) -> None:
+        self._malformed_message_window.append(not ok)
+        if len(self._malformed_message_window) < _MALFORMED_RATE_WINDOW_SIZE:
+            return
+
+        malformed_rate = sum(self._malformed_message_window) / _MALFORMED_RATE_WINDOW_SIZE
+        if malformed_rate > self._malformed_rate_threshold:
+            raise SensorDataQualityError(
+                "malformed market-data rate exceeded quality threshold"
+            )
+
+    def _log_malformed_message(self, raw_message: str | bytes) -> None:
+        now_s = time.monotonic()
+        if now_s - self._last_malformed_warning_at_s < _MALFORMED_WARNING_RATE_LIMIT_S:
+            return
+        self._last_malformed_warning_at_s = now_s
+        logger.warning(
+            "malformed market-data payload: %s",
+            _sanitize_payload_preview(raw_message),
+        )
+
 
 def _subscription_payload(asset_ids: list[str]) -> dict[str, Any]:
     return {
@@ -552,3 +626,53 @@ def _apply_price_change(
         side_levels.pop(price, None)
         return
     side_levels[price] = size
+
+
+def _sanitize_payload_preview(raw_message: str | bytes) -> str:
+    if isinstance(raw_message, bytes):
+        text = raw_message.decode("utf-8", errors="replace")
+    else:
+        text = raw_message
+
+    first_line = text.splitlines()[0] if text.splitlines() else text
+    sanitized = "".join(ch for ch in first_line if ord(ch) >= 32 and ord(ch) != 127)
+    return sanitized[:_MALFORMED_PREVIEW_LIMIT]
+
+
+def _is_malformed_payload_error(exc: BaseException) -> bool:
+    if isinstance(exc, json.JSONDecodeError):
+        return True
+    if isinstance(exc, KeyError):
+        return True
+    if not isinstance(exc, (ValueError, TypeError)):
+        return False
+
+    malformed_frame_names = {
+        "_apply_price_change",
+        "_handle_book",
+        "_handle_last_trade_price",
+        "_handle_message",
+        "_handle_price_change",
+        "_handle_raw_message",
+        "_levels_to_map",
+        "_message_timestamp",
+        "_optional_float",
+        "_required_float",
+        "_required_side",
+        "_required_str",
+        "_timestamp_number",
+    }
+    persistence_frame_names = {
+        "write_book_snapshot",
+        "write_book_snapshot_mock",
+        "write_price_change",
+        "write_price_change_mock",
+        "write_trade",
+        "write_trade_mock",
+    }
+    frame_names = {frame.name for frame in traceback.extract_tb(exc.__traceback__)}
+    if frame_names & persistence_frame_names:
+        return False
+    if frame_names & malformed_frame_names:
+        return True
+    return False

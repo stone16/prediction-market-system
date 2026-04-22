@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from pms.core.models import (
@@ -75,6 +75,14 @@ class IController(Protocol):
     async def decide(
         self, signal: MarketSignal, portfolio: Portfolio | None = None
     ) -> TradeDecision | None: ...
+
+
+class DedupStore(Protocol):
+    async def acquire(self, decision: TradeDecision) -> bool: ...
+
+    async def release(self, decision_id: str, outcome: str) -> None: ...
+
+    async def retention_scan(self, older_than: timedelta) -> int: ...
 
 
 class IActuator(Protocol):

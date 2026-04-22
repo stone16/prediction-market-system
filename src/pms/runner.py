@@ -61,6 +61,7 @@ from pms.sensor.adapters.historical import HistoricalSensor
 from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
 from pms.sensor.stream import SensorStream
+from pms.storage.dedup_store import InMemoryDedupStore, PgDedupStore
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 from pms.storage.market_data_store import PostgresMarketDataStore
@@ -627,6 +628,7 @@ class Runner:
             self.feedback_store.bind_pool(self._pg_pool)
         if isinstance(self.opportunity_store, OpportunityStore):
             self.opportunity_store.bind_pool(self._pg_pool)
+        self.actuator_executor = self._build_executor(self.config.mode)
 
     def _unbind_runtime_stores(self) -> None:
         if isinstance(self._controller_factory, ControllerPipelineFactory):
@@ -637,13 +639,20 @@ class Runner:
             self.feedback_store.pool = None
         if isinstance(self.opportunity_store, OpportunityStore):
             self.opportunity_store.pool = None
+        self.actuator_executor = self._build_executor(self.config.mode)
 
     def _build_executor(self, mode: RunMode) -> ActuatorExecutor:
         return ActuatorExecutor(
             adapter=self._build_adapter(mode),
             risk=RiskManager(self.config.risk),
             feedback=ActuatorFeedback(self.feedback_store),
+            dedup_store=self._build_dedup_store(),
         )
+
+    def _build_dedup_store(self) -> PgDedupStore | InMemoryDedupStore:
+        if self._pg_pool is not None:
+            return PgDedupStore(self._pg_pool)
+        return InMemoryDedupStore()
 
     def _build_adapter(self, mode: RunMode) -> ActuatorAdapter:
         if mode == RunMode.BACKTEST:
@@ -1275,7 +1284,7 @@ def _fill_from_order(
 ) -> FillRecord | None:
     if order_state.status != OrderStatus.MATCHED.value or order_state.fill_price is None:
         return None
-    if order_state.filled_size <= 0.0:
+    if order_state.filled_notional_usdc <= 0.0:
         return None
     if order_state.fill_price <= 0.0:
         return None
@@ -1289,7 +1298,8 @@ def _fill_from_order(
         venue=order_state.venue,
         side=decision.action if decision.action is not None else decision.side,
         fill_price=order_state.fill_price,
-        fill_size=order_state.filled_size,
+        fill_notional_usdc=order_state.filled_notional_usdc,
+        fill_quantity=order_state.filled_quantity,
         executed_at=order_state.submitted_at,
         filled_at=order_state.last_updated_at,
         status=order_state.status,
@@ -1302,7 +1312,7 @@ def _fill_from_order(
 
 def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
     positions = list(portfolio.open_positions)
-    fill_size = fill.fill_size
+    fill_size = fill.fill_notional_usdc
     contracts = _filled_contracts(fill)
     for index, position in enumerate(positions):
         if _same_position(position, fill):
@@ -1341,9 +1351,7 @@ def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
 
 
 def _filled_contracts(fill: FillRecord) -> float:
-    if fill.filled_contracts is not None:
-        return fill.filled_contracts
-    return fill.fill_size / fill.fill_price
+    return fill.fill_quantity
 
 
 def _same_position(position: Position, fill: FillRecord) -> bool:

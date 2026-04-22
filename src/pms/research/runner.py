@@ -131,7 +131,7 @@ class _StrategyAccumulator:
             target_side: Literal["buy_yes", "buy_no"]
             target_side = "buy_yes" if opportunity_side == "yes" else "buy_no"
             self.targets[(signal.market_id, token_id, target_side, signal.fetched_at)] = float(
-                cast(float, getattr(decision, "size"))
+                cast(float, getattr(decision, "notional_usdc"))
             )
         resolved_outcome = _resolved_outcome(signal)
         if resolved_outcome is not None:
@@ -144,19 +144,25 @@ class _StrategyAccumulator:
         *,
         signal: MarketSignal,
         decision: object,
-        fill_price: float,
+        fill: FillRecord,
     ) -> None:
         self.fill_count += 1
         self.slippage_bps_values.append(
-            Decimal(str(_decision_slippage_bps(decision=decision, fill_price=fill_price)))
+            Decimal(
+                str(
+                    _decision_slippage_bps(
+                        decision=decision,
+                        fill_price=fill.fill_price,
+                    )
+                )
+            )
         )
         if _resolved_outcome(signal) is not None:
             self.fills_with_resolution += 1
         pnl_delta = _pnl_delta(
             signal=signal,
             decision_outcome=cast(str, getattr(decision, "outcome", "YES")),
-            decision_size=float(cast(float, getattr(decision, "size"))),
-            fill_price=fill_price,
+            fill=fill,
             execution_model=self.execution_model,
         )
         self.cumulative_pnl += pnl_delta
@@ -238,6 +244,9 @@ class BacktestRunner:
     def __post_init__(self) -> None:
         if self.replay_engine is None:
             self.replay_engine = MarketUniverseReplayEngine(pool=self.readonly_pool)
+        replay_target = getattr(self.execution_simulator, "replay_engine", None)
+        if replay_target is None and hasattr(self.execution_simulator, "replay_engine"):
+            setattr(self.execution_simulator, "replay_engine", self.replay_engine)
         if isinstance(self.controller_factory, ControllerPipelineFactory):
             market_data_store = PostgresMarketDataStore(self.readonly_pool)
             self.controller_factory.factor_reader = PostgresFactorSnapshotReader(
@@ -312,8 +321,49 @@ class BacktestRunner:
             strategy_version_id=strategy.strategy_version_id,
             execution_model=spec.execution_model,
         )
+        observed_order_totals: dict[str, tuple[float, float]] = {}
+        order_decisions: dict[str, TradeDecision] = {}
 
         async for signal in replay_engine.stream(spec, exec_config):
+            for advanced_state in await _advance_open_orders(
+                self.execution_simulator,
+                signal=signal,
+                execution_model=spec.execution_model,
+            ):
+                decision_for_fill = order_decisions.get(advanced_state.order_id)
+                if decision_for_fill is None:
+                    msg = f"missing cached decision for order_id={advanced_state.order_id}"
+                    raise AssertionError(msg)
+                prior_notional, prior_quantity = observed_order_totals.get(
+                    advanced_state.order_id,
+                    (0.0, 0.0),
+                )
+                observed_order_totals[advanced_state.order_id] = (
+                    advanced_state.filled_notional_usdc,
+                    advanced_state.filled_quantity,
+                )
+                fill = _fill_from_order(
+                    advanced_state,
+                    decision=decision_for_fill,
+                    signal=signal,
+                    prior_filled_notional_usdc=prior_notional,
+                    prior_filled_quantity=prior_quantity,
+                    execution_model=spec.execution_model,
+                )
+                if fill is None:
+                    continue
+                portfolio = _portfolio_with_fill(portfolio, fill)
+                accumulator.record_fill(
+                    signal=signal,
+                    decision=decision_for_fill,
+                    fill=fill,
+                )
+                if advanced_state.status in {
+                    OrderStatus.MATCHED.value,
+                    OrderStatus.CANCELLED.value,
+                    "rejected",
+                }:
+                    order_decisions.pop(advanced_state.order_id, None)
             emission = await pipeline.on_signal(signal, portfolio=portfolio)
             if emission is None:
                 continue
@@ -332,17 +382,47 @@ class BacktestRunner:
                 )
             except InsufficientLiquidityError:
                 continue
-            fill = _fill_from_order(order_state, decision, signal)
+            order_decisions[order_state.order_id] = cast(TradeDecision, decision)
+            prior_notional, prior_quantity = observed_order_totals.get(
+                order_state.order_id,
+                (0.0, 0.0),
+            )
+            observed_order_totals[order_state.order_id] = (
+                order_state.filled_notional_usdc,
+                order_state.filled_quantity,
+            )
+            fill = _fill_from_order(
+                order_state,
+                decision=cast(TradeDecision, decision),
+                signal=signal,
+                prior_filled_notional_usdc=prior_notional,
+                prior_filled_quantity=prior_quantity,
+                execution_model=spec.execution_model,
+            )
             if fill is None:
                 continue
             portfolio = _portfolio_with_fill(portfolio, fill)
-            fill_price = cast(float | None, getattr(order_state, "fill_price", None))
-            if fill_price is not None:
-                accumulator.record_fill(
-                    signal=signal,
-                    decision=decision,
-                    fill_price=fill_price,
-                )
+            accumulator.record_fill(
+                signal=signal,
+                decision=decision,
+                fill=fill,
+            )
+            if order_state.status in {
+                OrderStatus.MATCHED.value,
+                OrderStatus.CANCELLED.value,
+                "rejected",
+            }:
+                order_decisions.pop(order_state.order_id, None)
+
+        for final_state in await _cancel_open_orders(
+            self.execution_simulator,
+            session_end=spec.date_range_end,
+        ):
+            observed_order_totals[final_state.order_id] = (
+                final_state.filled_notional_usdc,
+                final_state.filled_quantity,
+            )
+            order_decisions.pop(final_state.order_id, None)
 
         accumulator.finished_at = datetime.now(tz=UTC)
         return accumulator
@@ -520,14 +600,22 @@ def _default_portfolio(strategy: ActiveStrategy) -> Portfolio:
 
 def _fill_from_order(
     order_state: OrderState,
-    decision: object,
+    decision: TradeDecision | None,
     signal: MarketSignal,
+    *,
+    prior_filled_notional_usdc: float,
+    prior_filled_quantity: float,
+    execution_model: ExecutionModel,
 ) -> FillRecord | None:
-    if order_state.status != OrderStatus.MATCHED.value or order_state.fill_price is None:
+    if decision is None:
         return None
-    if order_state.filled_size <= 0.0:
+    if order_state.status not in {OrderStatus.MATCHED.value, OrderStatus.PARTIAL.value}:
         return None
-    if order_state.fill_price <= 0.0:
+    if order_state.fill_price is None or order_state.fill_price <= 0.0:
+        return None
+    delta_notional = order_state.filled_notional_usdc - prior_filled_notional_usdc
+    delta_quantity = order_state.filled_quantity - prior_filled_quantity
+    if delta_notional <= 0.0 or delta_quantity <= 0.0:
         return None
 
     return FillRecord(
@@ -537,22 +625,28 @@ def _fill_from_order(
         market_id=order_state.market_id,
         token_id=order_state.token_id,
         venue=order_state.venue,
-        side=cast(str, getattr(decision, "side")),
+        side=decision.action if decision.action is not None else decision.side,
         fill_price=order_state.fill_price,
-        fill_size=order_state.filled_size,
+        fill_notional_usdc=delta_notional,
+        fill_quantity=delta_quantity,
         executed_at=order_state.submitted_at,
         filled_at=order_state.last_updated_at,
         status=order_state.status,
         anomaly_flags=[],
         strategy_id=order_state.strategy_id,
         strategy_version_id=order_state.strategy_version_id,
+        fees=execution_model.compute_fee(
+            notional_usdc=delta_notional,
+            fill_price=order_state.fill_price,
+        ),
+        fee_bps=int(execution_model.fee_rate * 10_000),
         resolved_outcome=_resolved_outcome(signal),
     )
 
 
 def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
     positions = list(portfolio.open_positions)
-    fill_size = fill.fill_size
+    fill_size = fill.fill_notional_usdc
     contracts = _filled_contracts(fill)
     for index, position in enumerate(positions):
         if _same_position(position, fill):
@@ -591,9 +685,7 @@ def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
 
 
 def _filled_contracts(fill: FillRecord) -> float:
-    if fill.filled_contracts is not None:
-        return fill.filled_contracts
-    return fill.fill_size / fill.fill_price
+    return fill.fill_quantity
 
 
 def _decision_slippage_bps(*, decision: object, fill_price: float) -> float:
@@ -640,36 +732,62 @@ def _pnl_delta(
     *,
     signal: MarketSignal,
     decision_outcome: str,
-    decision_size: float,
-    fill_price: float,
+    fill: FillRecord,
     execution_model: ExecutionModel,
 ) -> Decimal:
     resolved_outcome = _resolved_outcome(signal)
     if resolved_outcome is None:
         return Decimal("0")
 
-    notional = Decimal(str(decision_size))
-    fill_price_decimal = Decimal(str(fill_price))
+    notional = Decimal(str(fill.fill_notional_usdc))
+    fill_price_decimal = Decimal(str(fill.fill_price))
     resolved = Decimal(str(resolved_outcome))
     if decision_outcome == "YES":
-        if fill_price_decimal <= 0:
-            return Decimal("0")
-        shares = notional / fill_price_decimal
+        shares = Decimal(str(fill.fill_quantity))
         payout = shares * resolved
     else:
-        if fill_price_decimal <= 0:
-            return Decimal("0")
-        shares = notional / fill_price_decimal
+        shares = Decimal(str(fill.fill_quantity))
         payout = shares * (Decimal("1") - resolved)
     fee = Decimal(
         str(
-            execution_model.fee_curve(
-                price=float(fill_price_decimal),
-                shares=float(shares),
+            fill.fees
+            if fill.fees is not None
+            else execution_model.compute_fee(
+                notional_usdc=float(notional),
+                fill_price=float(fill_price_decimal),
             )
         )
     )
     return payout - notional - fee
+
+
+async def _advance_open_orders(
+    execution_simulator: BacktestExecutionSimulatorLike,
+    *,
+    signal: MarketSignal,
+    execution_model: ExecutionModel,
+) -> list[OrderState]:
+    method = getattr(execution_simulator, "advance", None)
+    if method is None:
+        return []
+    result = method(signal=signal, execution_model=execution_model)
+    if asyncio.iscoroutine(result):
+        return cast(list[OrderState], await result)
+    return cast(list[OrderState], result)
+
+
+async def _cancel_open_orders(
+    execution_simulator: BacktestExecutionSimulatorLike,
+    *,
+    session_end: datetime,
+) -> list[OrderState]:
+    method = getattr(execution_simulator, "cancel_open_orders", None)
+    if method is None:
+        return []
+    result = method(session_end=session_end)
+    if asyncio.iscoroutine(result):
+        return cast(list[OrderState], await result)
+    return cast(list[OrderState], result)
 
 
 def _failure_reason(exc: Exception) -> str:

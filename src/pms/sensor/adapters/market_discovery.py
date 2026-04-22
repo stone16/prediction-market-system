@@ -11,7 +11,11 @@ from typing import Any, Awaitable, Callable, cast
 import asyncpg
 import httpx
 
+from pms.core.enums import Venue
+from pms.core.exceptions import KalshiStubError
 from pms.core.models import Market, MarketSignal, Outcome, Token
+from pms.core.models import Venue as VenueValue
+from pms.core.venue_support import kalshi_stub_error, normalize_venue
 from pms.storage.market_data_store import PostgresMarketDataStore
 
 
@@ -118,12 +122,19 @@ def _gamma_market_to_market(row: dict[str, Any], fetched_at: datetime) -> Market
         msg = "Gamma market row is missing conditionId"
         raise KeyError(msg)
 
+    venue = normalize_venue(
+        _first_non_empty_value(row.get("venue"), Venue.POLYMARKET.value),
+        context="MarketDiscoverySensor._gamma_market_to_market",
+    )
+    if venue == Venue.KALSHI.value:
+        raise kalshi_stub_error("MarketDiscoverySensor._gamma_market_to_market")
+
     created_at = _optional_datetime(row.get("createdAt")) or fetched_at
     return Market(
         condition_id=condition_id,
         slug=str(row.get("slug") or condition_id),
         question=str(row.get("question") or ""),
-        venue="polymarket",
+        venue=cast(VenueValue, venue),
         resolves_at=_optional_datetime(row.get("endDateIso")),
         created_at=created_at,
         last_seen_at=fetched_at,

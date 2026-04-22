@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field, is_dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from hashlib import sha256
 import json
 import math
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, cast
 
 from pms.evaluation.metrics import StrategyVersionKey
 from pms.strategies.projections import RiskParams
 
 
 RiskPolicy: TypeAlias = RiskParams
+FillPolicy: TypeAlias = Literal[
+    "immediate_or_cancel",
+    "limit_if_touched",
+    "good_til_cancelled",
+    "fill_or_kill",
+]
 
 
 def _json_sort_key(value: Any) -> str:
@@ -72,7 +78,12 @@ def _hashable_execution_model(execution_model: object) -> Any:
     """Returns the execution_model fields that influence backtest output."""
     if not is_dataclass(execution_model) or isinstance(execution_model, type):
         return execution_model
-    return asdict(execution_model)
+    return {
+        item.name: value
+        for item in fields(execution_model)
+        if item.name != "latency_model"
+        if not callable(value := getattr(cast(Any, execution_model), item.name))
+    }
 
 
 def _compute_config_hash(*, spec: BacktestSpec) -> str:
@@ -115,10 +126,18 @@ class ExecutionModel:
     slippage_bps: float
     latency_ms: float
     staleness_ms: float
-    fill_policy: Literal["immediate_or_cancel", "limit_if_touched"]
+    fill_policy: FillPolicy
+    order_ttl_ms: int = 60_000
+    price_invalidation_streak: int = 10
+    replay_window_ms: int = 86_400_000
+    latency_model: Callable[[float], float] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
-    def fee_curve(self, *, price: float, shares: float) -> float:
-        return shares * self.fee_rate * price * (1.0 - price)
+    def compute_fee(self, *, notional_usdc: float, fill_price: float) -> float:
+        return notional_usdc * self.fee_rate * (1.0 - fill_price)
 
     @classmethod
     def polymarket_paper(cls) -> ExecutionModel:
@@ -209,5 +228,6 @@ __all__ = [
     "BacktestExecutionConfig",
     "BacktestSpec",
     "ExecutionModel",
+    "FillPolicy",
     "RiskPolicy",
 ]

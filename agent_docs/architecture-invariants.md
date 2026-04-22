@@ -328,8 +328,8 @@ input) before market-selection projections are applied. Boot order:
 **Statement.** The Sensor layer contains two distinct sensor types:
 
 - **`MarketDiscoverySensor`** — low-frequency, strategy-agnostic,
-  unconditional. Polls the venue's full-market endpoint (Polymarket
-  Gamma `/markets`, Kalshi markets list) on a coarse cadence.
+  unconditional. Polls the venue's full-market endpoint (for example
+  Polymarket Gamma `/markets`) on a coarse cadence.
   Writes to the outer ring `markets` and `tokens` tables. Has no
   subscription list; it scans everything the venue exposes.
 - **`MarketDataSensor`** — high-frequency, strategy-driven,

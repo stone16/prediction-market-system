@@ -25,6 +25,7 @@ const feedbackPath = path.join(dataDir, 'feedback.jsonl');
 export function mockStatus(): StatusResponse {
   return {
     mode: 'backtest',
+    source: 'mock',
     runner_started_at: '2026-04-14T00:00:00+00:00',
     running: false,
     sensors: [{ name: 'HistoricalSensor', status: 'idle', last_signal_at: '2026-04-07T22:39:00+00:00' }],

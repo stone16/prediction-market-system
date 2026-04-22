@@ -16,6 +16,7 @@ STRATEGY_TABLES = [
     "eval_records",
     "feedback",
     "fills",
+    "order_intents",
     "opportunities",
     "orders",
 ]

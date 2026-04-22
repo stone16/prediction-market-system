@@ -306,8 +306,8 @@ def test_trade_decision_asdict_exposes_normalized_order_intent_fields() -> None:
             token_id="yes-token",
             venue="polymarket",
             side="BUY",
-            price=0.4,
-            size=10.0,
+            limit_price=0.4,
+            notional_usdc=10.0,
             order_type="limit",
             max_slippage_bps=50,
             stop_conditions=[],
@@ -322,6 +322,6 @@ def test_trade_decision_asdict_exposes_normalized_order_intent_fields() -> None:
     )
 
     assert decision["side"] == "BUY"
-    assert decision["price"] == pytest.approx(0.4)
-    assert decision["action"] == "BUY"
     assert decision["limit_price"] == pytest.approx(0.4)
+    assert decision["notional_usdc"] == pytest.approx(10.0)
+    assert decision["action"] is None

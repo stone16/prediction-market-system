@@ -137,9 +137,10 @@ async def test_backtest_end_to_end_fixture_produces_decisions_and_eval_records(
     assert len(runner.state.signals) == 100
     assert len(runner.state.decisions) >= 10
     assert {fill.resolved_outcome for fill in runner.state.fills} <= {0.0, 1.0}
-    assert len(records) >= 5
+    assert len(records) == len(runner.state.fills)
     assert all(0.0 <= record.brier_score <= 1.0 for record in records)
-    locked_size = sum(fill.fill_size for fill in runner.state.fills)
+    assert {order.raw_status for order in runner.state.orders} <= {"matched", "ioc_unfilled"}
+    locked_size = sum(fill.fill_notional_usdc for fill in runner.state.fills)
     assert runner.portfolio.locked_usdc == pytest.approx(locked_size)
     assert runner.portfolio.free_usdc == pytest.approx(1000.0 - locked_size)
     assert sum(

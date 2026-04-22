@@ -8,13 +8,20 @@ class Side(StrEnum):
     SELL = "SELL"
 
 
+class Venue(StrEnum):
+    POLYMARKET = "polymarket"
+    KALSHI = "kalshi"
+
+
 class OrderStatus(StrEnum):
     INVALID = "invalid"
     LIVE = "live"
     DELAYED = "delayed"
     MATCHED = "matched"
+    PARTIAL = "partial"
     UNMATCHED = "unmatched"
-    CANCELED = "canceled"
+    CANCELLED = "cancelled"
+    CANCELED = CANCELLED
     CANCELED_MARKET_RESOLVED = "canceled_market_resolved"
 
 
@@ -43,3 +50,8 @@ class RunMode(StrEnum):
     PAPER = "paper"
     LIVE = "live"
 
+
+class TimeInForce(StrEnum):
+    GTC = "GTC"
+    IOC = "IOC"
+    FOK = "FOK"

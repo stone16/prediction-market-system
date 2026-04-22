@@ -14,20 +14,19 @@ mode: backtest                 # backtest | paper | live
 live_trading_enabled: false    # must be true to switch into live mode
 
 risk:
-  max_position_usdc: 100.0
   max_position_per_market: 100.0
   max_total_exposure: 1000.0
-  max_brier_score: 0.30
-  slippage_threshold_bps: 50.0
-  min_win_rate: 0.50
+  max_drawdown_pct: null
+  max_open_positions: null
   min_order_usdc: 1.0
+  slippage_threshold_bps: 50.0
 
 sensor:
   poll_interval_s: 5.0
 
 controller:
   min_volume: 0.0
-  max_slippage_bps: 100
+  max_slippage_bps: 50
   time_in_force: GTC
 
 polymarket:
