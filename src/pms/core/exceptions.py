@@ -7,3 +7,7 @@ class PMSBootError(RuntimeError):
 
 class KalshiStubError(NotImplementedError):
     """Raised when v1 runtime paths encounter the reserved Kalshi venue."""
+
+
+class SensorDataQualityError(RuntimeError):
+    """Raised when sensor input quality degrades beyond the configured threshold."""

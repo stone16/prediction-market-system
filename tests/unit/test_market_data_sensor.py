@@ -14,6 +14,7 @@ import pytest
 
 from pms.config import PMSSettings, SensorSettings
 from pms.core.enums import RunMode
+from pms.core.exceptions import SensorDataQualityError
 from pms.sensor.adapters.market_data import MarketDataSensor, _message_timestamp
 from pms.storage.market_data_store import PostgresMarketDataStore
 
@@ -393,6 +394,134 @@ async def test_market_data_sensor_propagates_programming_errors(
 
 
 @pytest.mark.asyncio
+async def test_market_data_sensor_skips_malformed_json_and_continues_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    fake_websocket = FakeWebSocket(
+        [
+            "not-valid-json",
+            json.dumps(
+                {
+                    "event_type": "book",
+                    "market": "m-malformed",
+                    "asset_id": "asset-malformed",
+                    "timestamp": "1757908892351",
+                    "hash": "book-malformed",
+                    "bids": [{"price": "0.48", "size": "30"}],
+                    "asks": [{"price": "0.52", "size": "25"}],
+                    "last_trade_price": "0.50",
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.connect",
+        lambda url: FakeConnect(fake_websocket),
+    )
+    sensor = MarketDataSensor(
+        store=store,
+        ws_url="ws://market-data.example.test",
+        asset_ids=["asset-malformed"],
+    )
+    sensor._heartbeat_interval_s = 1.0
+    iterator = cast(Any, sensor.__aiter__())
+
+    with caplog.at_level(logging.WARN):
+        signal = await asyncio.wait_for(anext(iterator), timeout=0.5)
+
+    await asyncio.wait_for(iterator.aclose(), timeout=0.5)
+    await sensor.aclose()
+
+    assert sensor.malformed_messages_total == 1
+    assert signal.market_id == "m-malformed"
+    assert "malformed market-data payload: not-valid-json" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_raises_quality_error_after_one_hundred_malformed_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store_mock()
+    sensor = MarketDataSensor(store=store)
+
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.time.monotonic",
+        lambda: 0.0,
+    )
+
+    with pytest.raises(SensorDataQualityError):
+        for _ in range(100):
+            await sensor._handle_raw_message("not-valid-json")
+
+    assert sensor.malformed_messages_total == 100
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_allows_malformed_rate_below_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    sensor = MarketDataSensor(store=store)
+    valid_message = json.dumps(
+        {
+            "event_type": "book",
+            "market": "m-threshold",
+            "asset_id": "asset-threshold",
+            "timestamp": "1757908892351",
+            "hash": "book-threshold",
+            "bids": [{"price": "0.48", "size": "30"}],
+            "asks": [{"price": "0.52", "size": "25"}],
+            "last_trade_price": "0.50",
+        }
+    )
+
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.time.monotonic",
+        lambda: 0.0,
+    )
+
+    for index in range(100):
+        if index % 5 < 2:
+            await sensor._handle_raw_message("not-valid-json")
+            continue
+        await sensor._handle_raw_message(valid_message)
+
+    assert sensor.malformed_messages_total == 40
+    assert sensor.malformed_rate_threshold == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_rate_limits_malformed_payload_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    sensor = MarketDataSensor(store=store)
+    sensor.malformed_rate_threshold = 1.1
+
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.time.monotonic",
+        lambda: 0.0,
+    )
+
+    with caplog.at_level(logging.WARN):
+        for _ in range(100):
+            await sensor._handle_raw_message("not-valid-json")
+
+    warnings = [
+        record for record in caplog.records if "malformed market-data payload" in record.message
+    ]
+    assert len(warnings) <= 2
+    assert sensor.malformed_messages_total == 100
+
+
+@pytest.mark.asyncio
 async def test_market_data_sensor_logs_unrecognized_payload_at_warn(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -412,6 +541,25 @@ async def test_market_data_sensor_logs_unrecognized_payload_at_warn(
     assert signals == []
     assert "mystery" in caplog.text
     assert '"foo": "bar"' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_logs_scalar_payload_at_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    sensor = MarketDataSensor(
+        store=store,
+        ws_url="ws://market-data.example.test",
+        asset_ids=["asset-yes"],
+    )
+
+    with caplog.at_level(logging.WARN):
+        signals = await sensor._handle_raw_message("123")
+    await sensor.aclose()
+
+    assert signals == []
+    assert "unrecognised market-data payload: 123" in caplog.text
 
 
 @pytest.mark.asyncio
