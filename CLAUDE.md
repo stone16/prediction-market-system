@@ -37,13 +37,13 @@ uv run pytest -q                         # full suite — see baseline below
 uv run mypy src/ tests/ --strict         # strict on every committed module
 ```
 
-**Baseline (as of 2026-04-18, feat/pms-active-perception-v1):** `pytest`
-246 passing, 54 skipped. The 54 skips are PostgreSQL-backed integration
+**Baseline (as of 2026-04-21, main @ 96f2a14):** `pytest`
+337 passing, 85 skipped. The 85 skips are PostgreSQL-backed integration
 checks gated on `PMS_RUN_INTEGRATION=1` and, where needed,
-`PMS_TEST_DATABASE_URL`. mypy strict must be clean. If the baseline
-fails on a fresh clone, fix the config — not the test — and commit
-with a `fix(tests):` or `fix(build):` prefix before starting feature
-work (see promoted rule: *Fresh-clone baseline verification*).
+`PMS_TEST_DATABASE_URL`. mypy strict must be clean (196 source files).
+If the baseline fails on a fresh clone, fix the config — not the test —
+and commit with a `fix(tests):` or `fix(build):` prefix before starting
+feature work (see promoted rule: *Fresh-clone baseline verification*).
 
 Integration tests:
 ```bash

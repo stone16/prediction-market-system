@@ -33,6 +33,7 @@ def _signal(
     fetched_at: datetime | None = None,
     asks: list[dict[str, float]] | None = None,
     bids: list[dict[str, float]] | None = None,
+    resolves_at: datetime | None = None,
 ) -> MarketSignal:
     return MarketSignal(
         market_id="sim-market",
@@ -41,7 +42,7 @@ def _signal(
         title="Will the simulator work?",
         yes_price=0.5,
         volume_24h=1_000.0,
-        resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
+        resolves_at=resolves_at or datetime(2026, 4, 30, tzinfo=UTC),
         orderbook={
             "bids": bids or [{"price": 0.24, "size": 200.0}],
             "asks": asks or [{"price": 0.25, "size": 200.0}],
@@ -251,6 +252,114 @@ async def test_simulator_uses_custom_latency_model_when_present() -> None:
 
     assert state.fill_price == pytest.approx(0.27)
     assert state.submitted_at == base_ts + timedelta(milliseconds=500)
+
+
+@pytest.mark.asyncio
+async def test_simulator_ioc_matches_using_book_price_with_latency_applied() -> None:
+    simulator = BacktestExecutionSimulator()
+
+    order_state = await simulator.execute(
+        signal=_signal(
+            bids=[{"price": 0.39, "size": 100.0}],
+            asks=[{"price": 0.41, "size": 100.0}],
+        ),
+        decision=_decision(limit_price=0.50, notional_usdc=10.0),
+        portfolio=_portfolio(),
+        execution_model=_execution_model(latency_ms=250.0),
+    )
+
+    assert order_state.status == OrderStatus.MATCHED.value
+    assert order_state.fill_price == pytest.approx(0.41)
+    assert order_state.submitted_at == datetime(2026, 4, 20, 12, 0, tzinfo=UTC) + timedelta(
+        milliseconds=250
+    )
+    assert order_state.last_updated_at == order_state.submitted_at
+
+
+@pytest.mark.asyncio
+async def test_simulator_applies_slippage_bps_to_fill_price() -> None:
+    simulator = BacktestExecutionSimulator()
+
+    order_state = await simulator.execute(
+        signal=_signal(
+            bids=[{"price": 0.39, "size": 100.0}],
+            asks=[{"price": 0.41, "size": 100.0}],
+        ),
+        decision=_decision(limit_price=0.50, notional_usdc=10.0),
+        portfolio=_portfolio(),
+        execution_model=_execution_model(slippage_bps=100.0),
+    )
+
+    assert order_state.status == OrderStatus.MATCHED.value
+    assert order_state.fill_price == pytest.approx(0.41 * 1.01)
+
+
+@pytest.mark.asyncio
+async def test_simulator_rejects_when_latency_exceeds_staleness_budget() -> None:
+    simulator = BacktestExecutionSimulator()
+
+    stale_state = await simulator.execute(
+        signal=_signal(
+            bids=[{"price": 0.39, "size": 100.0}],
+            asks=[{"price": 0.41, "size": 100.0}],
+        ),
+        decision=_decision(limit_price=0.50, notional_usdc=10.0),
+        portfolio=_portfolio(),
+        execution_model=ExecutionModel(
+            fee_rate=0.0,
+            slippage_bps=0.0,
+            latency_ms=250.0,
+            staleness_ms=100.0,
+            fill_policy="immediate_or_cancel",
+            order_ttl_ms=60_000,
+            price_invalidation_streak=3,
+            replay_window_ms=86_400_000,
+        ),
+    )
+
+    assert stale_state.status == OrderStatus.CANCELED.value
+    assert stale_state.fill_price is None
+    assert stale_state.raw_status == "stale_signal"
+
+
+@pytest.mark.asyncio
+async def test_simulator_limit_if_touched_leaves_order_unmatched_when_book_never_touches_limit(
+) -> None:
+    simulator = BacktestExecutionSimulator()
+
+    order_state = await simulator.execute(
+        signal=_signal(
+            bids=[{"price": 0.39, "size": 100.0}],
+            asks=[{"price": 0.41, "size": 100.0}],
+        ),
+        decision=_decision(limit_price=0.40, notional_usdc=10.0),
+        portfolio=_portfolio(),
+        execution_model=_execution_model(fill_policy="limit_if_touched"),
+    )
+
+    assert order_state.status == OrderStatus.UNMATCHED.value
+    assert order_state.fill_price is None
+    assert order_state.raw_status == "limit_not_touched"
+
+
+@pytest.mark.asyncio
+async def test_simulator_cancels_when_latency_pushes_execution_past_resolution() -> None:
+    simulator = BacktestExecutionSimulator()
+
+    order_state = await simulator.execute(
+        signal=_signal(
+            bids=[{"price": 0.39, "size": 100.0}],
+            asks=[{"price": 0.41, "size": 100.0}],
+            resolves_at=datetime(2026, 4, 20, 12, 0, 0, 100_000, tzinfo=UTC),
+        ),
+        decision=_decision(limit_price=0.50, notional_usdc=10.0),
+        portfolio=_portfolio(),
+        execution_model=_execution_model(latency_ms=250.0),
+    )
+
+    assert order_state.status == OrderStatus.CANCELED_MARKET_RESOLVED.value
+    assert order_state.fill_price is None
+    assert order_state.raw_status == "market_resolved_before_execution"
 
 
 @pytest.mark.asyncio
