@@ -349,7 +349,7 @@ def test_alembic_unit_split_migrates_legacy_rows_and_downgrades_cleanly() -> Non
         assert "idx_orders_requested_size" not in indexes
         assert "idx_fills_fill_size" not in indexes
 
-        downgrade = _run_alembic(temp_database_url, "downgrade", "-1")
+        downgrade = _run_alembic(temp_database_url, "downgrade", "0001_baseline")
         assert downgrade.returncode == 0, downgrade.stderr
 
         reverted_order_row = _fetch_value(

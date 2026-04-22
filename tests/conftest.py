@@ -210,7 +210,10 @@ async def _wait_for_postgres(dsn: str, *, timeout_s: float = 20.0) -> None:
 
 @pytest.fixture(scope="session")
 def compose_postgres_dsn() -> str:
-    dsn = os.environ.get("PMS_TEST_DATABASE_URL", DEFAULT_COMPOSE_POSTGRES_DSN)
+    configured_dsn = os.environ.get("PMS_TEST_DATABASE_URL")
+    dsn = configured_dsn or DEFAULT_COMPOSE_POSTGRES_DSN
+    if configured_dsn is not None:
+        return dsn
     parts = urlsplit(dsn)
     host = parts.hostname or "127.0.0.1"
     port = int(parts.port or 5432)

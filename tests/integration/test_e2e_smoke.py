@@ -6,14 +6,13 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 import warnings
 
 import asyncpg
-from alembic import command
-from alembic.config import Config
 import httpx
 import pytest
 import uvicorn
@@ -120,27 +119,18 @@ async def _drop_database(admin_database_url: str, database_name: str) -> None:
 
 
 def _run_alembic_upgrade(database_url: str) -> None:
-    previous_database_url = os.environ.get("DATABASE_URL")
-    previous_pms_database_url = os.environ.get("PMS_DATABASE_URL")
-    try:
-        os.environ["DATABASE_URL"] = database_url
-        os.environ.pop("PMS_DATABASE_URL", None)
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="No path_separator found in configuration.*prepend_sys_path.*",
-                category=DeprecationWarning,
-            )
-            command.upgrade(Config(str(ALEMBIC_INI)), "head")
-    finally:
-        if previous_database_url is None:
-            os.environ.pop("DATABASE_URL", None)
-        else:
-            os.environ["DATABASE_URL"] = previous_database_url
-        if previous_pms_database_url is None:
-            os.environ.pop("PMS_DATABASE_URL", None)
-        else:
-            os.environ["PMS_DATABASE_URL"] = previous_pms_database_url
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env.pop("PMS_DATABASE_URL", None)
+    result = subprocess.run(
+        ["uv", "run", "alembic", "-c", str(ALEMBIC_INI), "upgrade", "head"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 async def _seed_strategy(pool: asyncpg.Pool, *, strategy_id: str, strategy_version_id: str) -> None:

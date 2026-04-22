@@ -13,6 +13,8 @@ from urllib.request import urlopen
 
 import pytest
 
+from pms.storage.schema_check import EXPECTED_SCHEMA_HEAD
+
 
 ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_VERSIONS_DIR = ROOT / "alembic" / "versions"
@@ -126,6 +128,7 @@ def _wait_for_status_ok(process: subprocess.Popen[str], port: int) -> None:
 
 @contextmanager
 def _temporary_revision_file() -> Iterator[str]:
+    assert EXPECTED_SCHEMA_HEAD is not None
     revision_id = f"0002_cp03_{uuid.uuid4().hex[:8]}"
     path = ALEMBIC_VERSIONS_DIR / f"{revision_id}.py"
     path.write_text(
@@ -134,7 +137,7 @@ def _temporary_revision_file() -> Iterator[str]:
                 "from __future__ import annotations",
                 "",
                 f"revision = \"{revision_id}\"",
-                "down_revision = \"0001_baseline\"",
+                f"down_revision = \"{EXPECTED_SCHEMA_HEAD}\"",
                 "branch_labels = None",
                 "depends_on = None",
                 "",
@@ -202,7 +205,8 @@ def test_pms_api_boot_fails_when_schema_is_behind_head() -> None:
 
             assert process.returncode != 0
             assert "schema out of date" in stdout + stderr
-            assert "0001_baseline" in stdout + stderr
+            assert EXPECTED_SCHEMA_HEAD is not None
+            assert EXPECTED_SCHEMA_HEAD in stdout + stderr
             assert str(revision_id) in stdout + stderr
     finally:
         _run_psql(

@@ -94,7 +94,7 @@ def test_alembic_scaffold_commands_are_noops_without_migrations() -> None:
         assert current.returncode == 0, current.stderr
         assert upgrade.returncode == 0, upgrade.stderr
         assert downgrade.returncode == 0, downgrade.stderr
-        assert heads.stdout.strip() == ""
+        assert heads.stdout.strip().endswith("(head)")
         assert current.stdout.strip() == ""
     finally:
         _run_psql(
