@@ -29,48 +29,49 @@ class FillStore:
         fill_id = fill.fill_id or fill.trade_id
         async with self._pool().acquire() as connection:
             await _ensure_fill_payloads_table(connection)
-            await connection.execute(
-                """
-                INSERT INTO fills (
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    INSERT INTO fills (
+                        fill_id,
+                        order_id,
+                        market_id,
+                        ts,
+                        fill_notional_usdc,
+                        fill_quantity,
+                        strategy_id,
+                        strategy_version_id
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8
+                    )
+                    ON CONFLICT (fill_id) DO UPDATE
+                    SET order_id = EXCLUDED.order_id,
+                        market_id = EXCLUDED.market_id,
+                        ts = EXCLUDED.ts,
+                        fill_notional_usdc = EXCLUDED.fill_notional_usdc,
+                        fill_quantity = EXCLUDED.fill_quantity,
+                        strategy_id = EXCLUDED.strategy_id,
+                        strategy_version_id = EXCLUDED.strategy_version_id
+                    """,
                     fill_id,
-                    order_id,
-                    market_id,
-                    ts,
-                    fill_notional_usdc,
-                    fill_quantity,
-                    strategy_id,
-                    strategy_version_id
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8
+                    fill.order_id,
+                    fill.market_id,
+                    fill.filled_at,
+                    fill.fill_notional_usdc,
+                    fill.fill_quantity,
+                    fill.strategy_id,
+                    fill.strategy_version_id,
                 )
-                ON CONFLICT (fill_id) DO UPDATE
-                SET order_id = EXCLUDED.order_id,
-                    market_id = EXCLUDED.market_id,
-                    ts = EXCLUDED.ts,
-                    fill_notional_usdc = EXCLUDED.fill_notional_usdc,
-                    fill_quantity = EXCLUDED.fill_quantity,
-                    strategy_id = EXCLUDED.strategy_id,
-                    strategy_version_id = EXCLUDED.strategy_version_id
-                """,
-                fill_id,
-                fill.order_id,
-                fill.market_id,
-                fill.filled_at,
-                fill.fill_notional_usdc,
-                fill.fill_quantity,
-                fill.strategy_id,
-                fill.strategy_version_id,
-            )
-            await connection.execute(
-                """
-                INSERT INTO fill_payloads (fill_id, payload)
-                VALUES ($1, $2::jsonb)
-                ON CONFLICT (fill_id) DO UPDATE
-                SET payload = EXCLUDED.payload
-                """,
-                fill_id,
-                json.dumps(_fill_payload(fill)),
-            )
+                await connection.execute(
+                    """
+                    INSERT INTO fill_payloads (fill_id, payload)
+                    VALUES ($1, $2::jsonb)
+                    ON CONFLICT (fill_id) DO UPDATE
+                    SET payload = EXCLUDED.payload
+                    """,
+                    fill_id,
+                    json.dumps(_fill_payload(fill)),
+                )
 
     async def get(self, fill_id: str | None) -> FillRecord | None:
         if self.pool is None or fill_id is None:

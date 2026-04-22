@@ -162,9 +162,10 @@ async def test_simulator_limit_blocks_and_returns_partial_for_ioc() -> None:
         execution_model=_execution_model(),
     )
 
-    assert state.status == OrderStatus.PARTIAL.value
+    assert state.status == OrderStatus.CANCELLED.value
     assert state.filled_notional_usdc == pytest.approx(50.0)
     assert state.remaining_notional_usdc == pytest.approx(150.0)
+    assert state.raw_status == "ioc_partial_remainder_cancelled"
 
 
 @pytest.mark.asyncio
@@ -317,7 +318,7 @@ async def test_simulator_rejects_when_latency_exceeds_staleness_budget() -> None
         ),
     )
 
-    assert stale_state.status == OrderStatus.CANCELED.value
+    assert stale_state.status == OrderStatus.CANCELLED.value
     assert stale_state.fill_price is None
     assert stale_state.raw_status == "stale_signal"
 

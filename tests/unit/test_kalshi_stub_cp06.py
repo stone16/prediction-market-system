@@ -339,8 +339,48 @@ async def test_actuator_executor_rejects_kalshi_before_adapter_execution() -> No
         await executor.execute(_decision(venue="kalshi"), _portfolio())
 
     assert adapter.calls == 0
-    assert dedup_store.contains("decision-kalshi-cp06") is False
-    assert await cast(InMemoryFeedbackStore, feedback_store).all() == []
+    assert dedup_store.contains("decision-kalshi-cp06") is True
+    assert (await cast(InMemoryFeedbackStore, feedback_store).all())[-1].category == (
+        "venue_rejection"
+    )
+
+
+@pytest.mark.asyncio
+async def test_actuator_executor_checks_risk_before_kalshi_stub() -> None:
+    @dataclass
+    class RecordingAdapter:
+        calls: int = 0
+
+        async def execute(
+            self,
+            decision: TradeDecision,
+            portfolio: Portfolio | None = None,
+        ) -> object:
+            del decision, portfolio
+            self.calls += 1
+            raise AssertionError("adapter should not run for risk-rejected Kalshi decisions")
+
+    adapter = RecordingAdapter()
+    feedback_store = cast(FeedbackStore, InMemoryFeedbackStore())
+    dedup_store = InMemoryDedupStore()
+    executor = ActuatorExecutor(
+        adapter=cast(Any, adapter),
+        risk=RiskManager(
+            RiskSettings(max_position_per_market=5.0, max_total_exposure=1_000.0)
+        ),
+        feedback=ActuatorFeedback(feedback_store),
+        dedup_store=dedup_store,
+    )
+
+    state = await executor.execute(_decision(venue="kalshi"), _portfolio())
+
+    assert state.status == "invalid"
+    assert state.raw_status == "max_position_per_market"
+    assert adapter.calls == 0
+    assert dedup_store.contains("decision-kalshi-cp06") is True
+    assert (await cast(InMemoryFeedbackStore, feedback_store).all())[-1].category == (
+        "max_position_per_market"
+    )
 
 
 @pytest.mark.asyncio

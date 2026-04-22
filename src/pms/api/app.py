@@ -30,6 +30,7 @@ from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
 from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
 from pms.api.routes.strategies import list_strategy_metrics as list_strategy_metrics_items
 from pms.api.routes.strategies import list_strategies as list_strategies_items
+from pms.config import PMSSettings
 from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
@@ -67,11 +68,16 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        pool_was_bound = active_runner.pg_pool is not None
+        runner_pool_initialized = False
+        startup_complete = False
         try:
-            pool_was_bound = active_runner.pg_pool is not None
-            startup_complete = False
             await _ensure_runner_pool(active_runner)
-            if active_runner.pg_pool is not None:
+            runner_pool_initialized = active_runner.pg_pool is not None and not pool_was_bound
+            if (
+                active_runner.pg_pool is not None
+                and _should_enforce_schema_check(active_runner.config)
+            ):
                 await ensure_schema_current(active_runner.pg_pool)
             if auto_start and not _is_runner_running(active_runner):
                 logger.info(
@@ -83,10 +89,6 @@ def create_app(
                 await scan_orphaned_backtest_runs(active_runner.pg_pool)
             startup_complete = True
             yield
-        except Exception:
-            if not startup_complete and not pool_was_bound and not _is_runner_running(active_runner):
-                await _close_runner_pool(active_runner)
-            raise
         finally:
             # Always stop a running runner on shutdown — covers both auto_start
             # and runners launched by callers via POST /run/start, so sensor
@@ -96,6 +98,8 @@ def create_app(
                     await active_runner.stop()
                 else:
                     await _close_runner_pool(active_runner)
+            elif runner_pool_initialized and not _is_runner_running(active_runner):
+                await _close_runner_pool(active_runner)
 
     app = FastAPI(title="PMS API", lifespan=lifespan)
     app.state.runner = active_runner
@@ -412,6 +416,12 @@ async def _ensure_runner_pool(runner: Runner) -> None:
 
 async def _close_runner_pool(runner: Runner) -> None:
     await runner.close_pg_pool()
+
+
+def _should_enforce_schema_check(settings: PMSSettings) -> bool:
+    if settings.enforce_schema_check is not None:
+        return settings.enforce_schema_check
+    return settings.mode in {RunMode.PAPER, RunMode.LIVE}
 
 
 def _sensor_statuses(runner: Runner) -> list[dict[str, Any]]:

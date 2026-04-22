@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -14,6 +15,15 @@ from pms.core.models import Feedback
 from pms.runner import Runner
 from pms.storage.feedback_store import FeedbackStore
 from tests.support.fake_stores import InMemoryFeedbackStore
+
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        os.environ.get("PMS_RUN_INTEGRATION") != "1",
+        reason="set PMS_RUN_INTEGRATION=1 to run integration tests",
+    ),
+]
 
 
 def _feedback(feedback_id: str) -> Feedback:

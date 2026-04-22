@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 const evidenceDir = path.resolve(
   process.cwd(),
@@ -15,7 +15,7 @@ const evidenceDir = path.resolve(
 
 const sourceMode = process.env.PMS_CP07_SOURCE_MODE ?? 'live';
 
-async function captureConsoleErrors(page: Parameters<typeof test>[0]['page'], errors: string[]) {
+function captureConsoleErrors(page: Page, errors: string[]) {
   page.on('console', (message) => {
     if (message.type() === 'error') {
       errors.push(message.text());
@@ -34,7 +34,7 @@ test('mock mode shows source banner and badges on key pages', async ({ page }) =
   test.skip(sourceMode !== 'mock');
 
   const errors: string[] = [];
-  await captureConsoleErrors(page, errors);
+  captureConsoleErrors(page, errors);
   const mockStatusResponse = await page.request.get('/api/status');
 
   expect(mockStatusResponse.ok()).toBeTruthy();
@@ -63,7 +63,7 @@ test('live mode hides source banner and badges on key pages', async ({ page }) =
   test.skip(sourceMode !== 'live');
 
   const errors: string[] = [];
-  await captureConsoleErrors(page, errors);
+  captureConsoleErrors(page, errors);
   const liveStatusResponse = await page.request.get('/api/status');
 
   expect(liveStatusResponse.ok()).toBeTruthy();

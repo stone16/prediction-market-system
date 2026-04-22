@@ -81,6 +81,7 @@ def _run_pms_api(database_url: str, port: int) -> subprocess.Popen[str]:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["PMS_AUTO_START"] = "0"
+    env["PMS_ENFORCE_SCHEMA_CHECK"] = "1"
     env.pop("PMS_DATABASE_URL", None)
     return subprocess.Popen(
         [

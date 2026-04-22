@@ -12,6 +12,54 @@ from pms.storage.fill_store import _string_list
 from pms.storage.order_store import OrderStore, _json_object as order_json_object
 
 
+class _TransactionRecorder:
+    def __init__(self, connection: "_RecordingConnection") -> None:
+        self._connection = connection
+
+    async def __aenter__(self) -> "_TransactionRecorder":
+        self._connection.in_transaction = True
+        self._connection.transaction_entries += 1
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        del exc_type, exc, tb
+        self._connection.in_transaction = False
+
+
+class _RecordingConnection:
+    def __init__(self) -> None:
+        self.in_transaction = False
+        self.transaction_entries = 0
+        self.execute_flags: list[bool] = []
+
+    async def execute(self, query: str, *args: object) -> str:
+        del query, args
+        self.execute_flags.append(self.in_transaction)
+        return "OK"
+
+    def transaction(self) -> _TransactionRecorder:
+        return _TransactionRecorder(self)
+
+
+class _AcquireContext:
+    def __init__(self, connection: _RecordingConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self) -> _RecordingConnection:
+        return self._connection
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        del exc_type, exc, tb
+
+
+class _RecordingPool:
+    def __init__(self, connection: _RecordingConnection) -> None:
+        self._connection = connection
+
+    def acquire(self) -> _AcquireContext:
+        return _AcquireContext(self._connection)
+
+
 def _order_state() -> OrderState:
     return OrderState(
         order_id="order-unit-cp10-1",
@@ -97,3 +145,25 @@ def test_payload_helpers_cover_dict_and_error_branches() -> None:
 
     with pytest.raises(RuntimeError, match="fill payload must be a JSON object"):
         fill_json_object(123)
+
+
+@pytest.mark.asyncio
+async def test_order_store_insert_wraps_shell_and_payload_writes_in_transaction() -> None:
+    connection = _RecordingConnection()
+    store = OrderStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    await store.insert(_order_state())
+
+    assert connection.transaction_entries == 1
+    assert connection.execute_flags == [False, True, True]
+
+
+@pytest.mark.asyncio
+async def test_fill_store_insert_wraps_shell_and_payload_writes_in_transaction() -> None:
+    connection = _RecordingConnection()
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    await store.insert(_fill_record())
+
+    assert connection.transaction_entries == 1
+    assert connection.execute_flags == [False, True, True]

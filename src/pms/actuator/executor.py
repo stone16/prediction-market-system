@@ -43,9 +43,6 @@ class ActuatorExecutor:
         final_state: OrderState | None = None
         release_outcome: str | None = None
         acquired = False
-        if decision.venue == Venue.KALSHI.value:
-            error: KalshiStubError = kalshi_stub_error("ActuatorExecutor.execute")
-            raise error
         acquired = await self.dedup_store.acquire(decision)
         if not acquired:
             final_state = _rejected_order_state(decision, "duplicate_decision")
@@ -58,6 +55,13 @@ class ActuatorExecutor:
                 final_state = _rejected_order_state(decision, risk_decision.reason)
                 await self.feedback.generate(final_state, reason=risk_decision.reason)
                 return final_state
+
+            if decision.venue == Venue.KALSHI.value:
+                final_state = _rejected_order_state(decision, "venue_rejection")
+                release_outcome = "venue_rejection"
+                await self.feedback.generate(final_state, reason="venue_rejection")
+                error: KalshiStubError = kalshi_stub_error("ActuatorExecutor.execute")
+                raise error
 
             try:
                 final_state = await self.adapter.execute(decision, portfolio)
@@ -130,7 +134,7 @@ def _rejected_order_state(decision: TradeDecision, reason: str) -> OrderState:
 
 
 def _dedup_release_outcome(order_state: OrderState) -> str:
-    status = order_state.status.lower()
+    status = _normalize_order_status(order_state.status)
     raw_status = order_state.raw_status.lower()
 
     if raw_status == "venue_rejection":
@@ -143,7 +147,7 @@ def _dedup_release_outcome(order_state: OrderState) -> str:
         if raw_status == "insufficient_liquidity":
             return "rejected"
         return "invalid"
-    if status in {OrderStatus.CANCELED.value, "cancelled"}:
+    if status == OrderStatus.CANCELLED.value:
         cancelled_outcomes = {
             "ttl": "cancelled_ttl",
             "cancelled_ttl": "cancelled_ttl",
@@ -155,8 +159,17 @@ def _dedup_release_outcome(order_state: OrderState) -> str:
         cancelled_outcome = cancelled_outcomes.get(raw_status)
         if cancelled_outcome is not None:
             return cancelled_outcome
+    if status == OrderStatus.CANCELED_MARKET_RESOLVED.value:
+        return "cancelled_market_resolved"
 
     raise ValueError(
         f"unsupported dedup release mapping for status={order_state.status!r} "
         f"raw_status={order_state.raw_status!r}"
     )
+
+
+def _normalize_order_status(status: str) -> str:
+    normalized = status.lower()
+    if normalized == "canceled":
+        return OrderStatus.CANCELLED.value
+    return normalized

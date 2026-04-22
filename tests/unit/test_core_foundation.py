@@ -164,6 +164,7 @@ def test_core_enums_use_stable_wire_values() -> None:
     assert [mode.value for mode in RunMode] == ["backtest", "paper", "live"]
     assert [side.value for side in Side] == ["BUY", "SELL"]
     assert "live" in {status.value for status in OrderStatus}
+    assert OrderStatus.CANCELED.value == OrderStatus.CANCELLED.value == "cancelled"
     assert "open" in {status.value for status in MarketStatus}
     assert [target.value for target in FeedbackTarget] == [
         "sensor",

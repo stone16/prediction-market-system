@@ -89,7 +89,7 @@ class BacktestExecutionSimulator:
             return _order_state(
                 order_id=f"backtest-sim-{uuid4().hex}",
                 decision=decision,
-                status=OrderStatus.CANCELED.value,
+                status=OrderStatus.CANCELLED.value,
                 submitted_at=submitted_at,
                 last_updated_at=submitted_at,
                 requested_notional_usdc=decision.notional_usdc,
@@ -226,7 +226,7 @@ class BacktestExecutionSimulator:
         return _order_state(
             order_id=order_id,
             decision=decision,
-            status=OrderStatus.PARTIAL.value,
+            status=OrderStatus.CANCELLED.value,
             submitted_at=submitted_at,
             last_updated_at=submitted_at,
             requested_notional_usdc=decision.notional_usdc,
@@ -234,7 +234,7 @@ class BacktestExecutionSimulator:
             remaining_notional_usdc=fill.remaining_notional_usdc,
             filled_quantity=fill.filled_quantity,
             fill_price=fill.fill_price,
-            raw_status="partially_filled",
+            raw_status="ioc_partial_remainder_cancelled",
         )
 
     async def advance(

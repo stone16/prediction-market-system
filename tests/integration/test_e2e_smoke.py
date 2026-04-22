@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 import json
 import os
@@ -434,10 +435,19 @@ async def test_e2e_smoke_compose_alembic_api_backtest_metrics(
 
         _write_evidence(lines=evidence_lines, metrics_payload=cast(dict[str, Any], metrics_payload))
     finally:
-        if server is not None:
-            server.should_exit = True
-        if server_task is not None:
-            await asyncio.wait_for(server_task, timeout=10.0)
-        if api_pool is not None:
-            await api_pool.close()
-        await _drop_database(admin_database_url, database_name)
+        try:
+            if server is not None:
+                server.should_exit = True
+            if server_task is not None:
+                try:
+                    await asyncio.wait_for(server_task, timeout=10.0)
+                except (TimeoutError, asyncio.TimeoutError):
+                    server_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await server_task
+        finally:
+            try:
+                if api_pool is not None:
+                    await api_pool.close()
+            finally:
+                await _drop_database(admin_database_url, database_name)

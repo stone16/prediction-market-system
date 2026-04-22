@@ -9,7 +9,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
@@ -210,6 +210,10 @@ async def _wait_for_postgres(dsn: str, *, timeout_s: float = 20.0) -> None:
 
 @pytest.fixture(scope="session")
 def compose_postgres_dsn() -> str:
+    return _resolve_compose_postgres_dsn()
+
+
+def _resolve_compose_postgres_dsn() -> str:
     configured_dsn = os.environ.get("PMS_TEST_DATABASE_URL")
     dsn = configured_dsn or DEFAULT_COMPOSE_POSTGRES_DSN
     if configured_dsn is not None:
@@ -219,36 +223,62 @@ def compose_postgres_dsn() -> str:
     port = int(parts.port or 5432)
     if host not in {"127.0.0.1", "localhost"} or port != 5432:
         return dsn
+    try:
+        asyncio.run(_wait_for_postgres(dsn, timeout_s=1.0))
+        return dsn
+    except RuntimeError:
+        pass
 
     container_id = _compose_postgres_container_id()
     port_open = _is_tcp_port_open(host, port)
     if not container_id:
         compatible_container_id = _compatible_running_postgres_container_id()
         if compatible_container_id is not None:
-            asyncio.run(_wait_for_postgres(dsn))
-            return dsn
-        up = _run_compose("up", "-d", "postgres")
-        if up.returncode != 0:
-            if port_open:
+            container_id = compatible_container_id
+        else:
+            up = _run_compose("up", "-d", "postgres")
+            if up.returncode != 0:
+                if port_open:
+                    raise RuntimeError(
+                        "compose collision: localhost:5432 is already bound and "
+                        "docker compose could not start postgres; refusing to run "
+                        f"CP20 smoke against the wrong PostgreSQL. stderr={up.stderr!r}"
+                    )
                 raise RuntimeError(
-                    "compose collision: localhost:5432 is already bound and "
-                    "docker compose could not start postgres; refusing to run "
-                    f"CP20 smoke against the wrong PostgreSQL. stderr={up.stderr!r}"
+                    "docker compose up -d postgres failed: "
+                    f"stdout={up.stdout!r} stderr={up.stderr!r}"
                 )
-            raise RuntimeError(
-                "docker compose up -d postgres failed: "
-                f"stdout={up.stdout!r} stderr={up.stderr!r}"
-            )
-        container_id = _compose_postgres_container_id()
-        if not container_id:
-            raise RuntimeError("docker compose up reported success but postgres has no container id")
+            container_id = _compose_postgres_container_id()
+            if not container_id:
+                raise RuntimeError(
+                    "docker compose up reported success but postgres has no container id"
+                )
 
     binding = _compose_postgres_port_binding()
-    if binding is None or not binding.endswith(":5432"):
+    if binding is None:
         raise RuntimeError(
-            "compose postgres is not exposing port 5432 as expected; "
-            f"observed binding={binding!r}"
+            f"compose postgres is not exposing a host port; observed binding={binding!r}"
         )
 
-    asyncio.run(_wait_for_postgres(dsn))
-    return dsn
+    resolved_dsn = _replace_port(dsn, _published_port(binding))
+    asyncio.run(_wait_for_postgres(resolved_dsn))
+    return resolved_dsn
+
+
+def _replace_port(dsn: str, port: int) -> str:
+    parts = urlsplit(dsn)
+    userinfo = ""
+    if parts.username is not None:
+        userinfo = parts.username
+        if parts.password is not None:
+            userinfo = f"{userinfo}:{parts.password}"
+        userinfo = f"{userinfo}@"
+    host = parts.hostname or "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{userinfo}{host}:{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def _published_port(binding: str) -> int:
+    return int(binding.rsplit(":", 1)[-1])

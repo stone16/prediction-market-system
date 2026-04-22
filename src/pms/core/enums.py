@@ -21,7 +21,7 @@ class OrderStatus(StrEnum):
     PARTIAL = "partial"
     UNMATCHED = "unmatched"
     CANCELLED = "cancelled"
-    CANCELED = "canceled"
+    CANCELED = CANCELLED
     CANCELED_MARKET_RESOLVED = "canceled_market_resolved"
 
 

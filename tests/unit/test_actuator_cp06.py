@@ -28,6 +28,7 @@ def _decision(
     *,
     decision_id: str = "d-cp06",
     market_id: str = "m-cp06",
+    token_id: str | None = None,
     side: Literal["BUY", "SELL"] = Side.BUY.value,
     notional_usdc: float = 10.0,
     limit_price: float = 0.4,
@@ -37,7 +38,7 @@ def _decision(
     return TradeDecision(
         decision_id=decision_id,
         market_id=market_id,
-        token_id="t-yes" if outcome == "YES" else "t-no",
+        token_id=token_id or ("t-yes" if outcome == "YES" else "t-no"),
         venue="polymarket",
         side=side,
         notional_usdc=notional_usdc,
@@ -253,7 +254,12 @@ async def test_backtest_actuator_replays_fill_from_fixture() -> None:
     actuator = BacktestActuator(fixture_path)
 
     state = await actuator.execute(
-        _decision(market_id="pm-synthetic-000", notional_usdc=10.0, limit_price=0.31),
+        _decision(
+            market_id="pm-synthetic-000",
+            token_id="yes-token-000",
+            notional_usdc=10.0,
+            limit_price=0.31,
+        ),
         _portfolio(),
     )
 
@@ -295,6 +301,11 @@ async def test_actuator_feedback_appends_controller_feedback() -> None:
         ("cancelled", "ttl", "cancelled_ttl"),
         ("canceled", "limit_invalidated", "cancelled_limit_invalidated"),
         ("cancelled", "session_end", "cancelled_session_end"),
+        (
+            OrderStatus.CANCELED_MARKET_RESOLVED.value,
+            "market_resolved_before_execution",
+            "cancelled_market_resolved",
+        ),
     ],
 )
 async def test_executor_releases_mapped_outcome_from_returned_order_state(

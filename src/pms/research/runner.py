@@ -18,7 +18,7 @@ from pms.actuator.risk import InsufficientLiquidityError
 from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
 from pms.controller.outcome_tokens import MarketDataOutcomeTokenResolver
-from pms.core.enums import OrderStatus, TimeInForce
+from pms.core.enums import OrderStatus
 from pms.core.models import (
     FillRecord,
     MarketSignal,
@@ -330,6 +330,10 @@ class BacktestRunner:
                 signal=signal,
                 execution_model=spec.execution_model,
             ):
+                decision_for_fill = order_decisions.get(advanced_state.order_id)
+                if decision_for_fill is None:
+                    msg = f"missing cached decision for order_id={advanced_state.order_id}"
+                    raise AssertionError(msg)
                 prior_notional, prior_quantity = observed_order_totals.get(
                     advanced_state.order_id,
                     (0.0, 0.0),
@@ -340,7 +344,7 @@ class BacktestRunner:
                 )
                 fill = _fill_from_order(
                     advanced_state,
-                    decision=order_decisions.get(advanced_state.order_id),
+                    decision=decision_for_fill,
                     signal=signal,
                     prior_filled_notional_usdc=prior_notional,
                     prior_filled_quantity=prior_quantity,
@@ -351,8 +355,7 @@ class BacktestRunner:
                 portfolio = _portfolio_with_fill(portfolio, fill)
                 accumulator.record_fill(
                     signal=signal,
-                    decision=order_decisions.get(advanced_state.order_id)
-                    or _fallback_decision(advanced_state, strategy),
+                    decision=decision_for_fill,
                     fill=fill,
                 )
                 if advanced_state.status in {
@@ -785,27 +788,6 @@ async def _cancel_open_orders(
     if asyncio.iscoroutine(result):
         return cast(list[OrderState], await result)
     return cast(list[OrderState], result)
-
-
-def _fallback_decision(order_state: OrderState, strategy: ActiveStrategy) -> TradeDecision:
-    return TradeDecision(
-        decision_id=order_state.decision_id,
-        market_id=order_state.market_id,
-        token_id=order_state.token_id,
-        venue=order_state.venue,
-        side="BUY",
-        notional_usdc=max(order_state.filled_notional_usdc, order_state.requested_notional_usdc),
-        order_type="limit",
-        max_slippage_bps=0,
-        stop_conditions=[],
-        prob_estimate=0.0,
-        expected_edge=0.0,
-        time_in_force=TimeInForce.GTC,
-        opportunity_id=order_state.decision_id,
-        strategy_id=strategy.strategy_id,
-        strategy_version_id=strategy.strategy_version_id,
-        limit_price=order_state.fill_price or 0.5,
-    )
 
 
 def _failure_reason(exc: Exception) -> str:

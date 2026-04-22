@@ -78,6 +78,7 @@ class PMSSettings(BaseSettings):
     mode: RunMode = RunMode.BACKTEST
     live_trading_enabled: bool = False
     auto_migrate_default_v2: bool = True
+    enforce_schema_check: bool | None = None
     factor_cadence_s: float = 1.0
     api_host: str = "127.0.0.1"
     api_token: str | None = None

@@ -28,51 +28,52 @@ class OrderStore:
     async def insert(self, order: OrderState) -> None:
         async with self._pool().acquire() as connection:
             await _ensure_order_payloads_table(connection)
-            await connection.execute(
-                """
-                INSERT INTO orders (
-                    order_id,
-                    market_id,
-                    ts,
-                    requested_notional_usdc,
-                    filled_notional_usdc,
-                    remaining_notional_usdc,
-                    filled_quantity,
-                    strategy_id,
-                    strategy_version_id
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    INSERT INTO orders (
+                        order_id,
+                        market_id,
+                        ts,
+                        requested_notional_usdc,
+                        filled_notional_usdc,
+                        remaining_notional_usdc,
+                        filled_quantity,
+                        strategy_id,
+                        strategy_version_id
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9
+                    )
+                    ON CONFLICT (order_id) DO UPDATE
+                    SET market_id = EXCLUDED.market_id,
+                        ts = EXCLUDED.ts,
+                        requested_notional_usdc = EXCLUDED.requested_notional_usdc,
+                        filled_notional_usdc = EXCLUDED.filled_notional_usdc,
+                        remaining_notional_usdc = EXCLUDED.remaining_notional_usdc,
+                        filled_quantity = EXCLUDED.filled_quantity,
+                        strategy_id = EXCLUDED.strategy_id,
+                        strategy_version_id = EXCLUDED.strategy_version_id
+                    """,
+                    order.order_id,
+                    order.market_id,
+                    order.submitted_at,
+                    order.requested_notional_usdc,
+                    order.filled_notional_usdc,
+                    order.remaining_notional_usdc,
+                    order.filled_quantity,
+                    order.strategy_id,
+                    order.strategy_version_id,
                 )
-                ON CONFLICT (order_id) DO UPDATE
-                SET market_id = EXCLUDED.market_id,
-                    ts = EXCLUDED.ts,
-                    requested_notional_usdc = EXCLUDED.requested_notional_usdc,
-                    filled_notional_usdc = EXCLUDED.filled_notional_usdc,
-                    remaining_notional_usdc = EXCLUDED.remaining_notional_usdc,
-                    filled_quantity = EXCLUDED.filled_quantity,
-                    strategy_id = EXCLUDED.strategy_id,
-                    strategy_version_id = EXCLUDED.strategy_version_id
-                """,
-                order.order_id,
-                order.market_id,
-                order.submitted_at,
-                order.requested_notional_usdc,
-                order.filled_notional_usdc,
-                order.remaining_notional_usdc,
-                order.filled_quantity,
-                order.strategy_id,
-                order.strategy_version_id,
-            )
-            await connection.execute(
-                """
-                INSERT INTO order_payloads (order_id, payload)
-                VALUES ($1, $2::jsonb)
-                ON CONFLICT (order_id) DO UPDATE
-                SET payload = EXCLUDED.payload
-                """,
-                order.order_id,
-                json.dumps(_order_payload(order)),
-            )
+                await connection.execute(
+                    """
+                    INSERT INTO order_payloads (order_id, payload)
+                    VALUES ($1, $2::jsonb)
+                    ON CONFLICT (order_id) DO UPDATE
+                    SET payload = EXCLUDED.payload
+                    """,
+                    order.order_id,
+                    json.dumps(_order_payload(order)),
+                )
 
     async def get(self, order_id: str) -> OrderState | None:
         if self.pool is None:
