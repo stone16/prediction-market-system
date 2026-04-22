@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import socket
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -15,6 +16,9 @@ import pytest
 
 
 class _TestAsyncpgConnection:
+    def __init__(self, pool: "_TestAsyncpgPool") -> None:
+        self._pool = pool
+
     async def execute(self, query: str, *args: object) -> str:
         del query, args
         return "INSERT 0 1"
@@ -23,7 +27,17 @@ class _TestAsyncpgConnection:
         del query, args
         return []
 
-    async def fetchrow(self, query: str, *args: object) -> None:
+    async def fetchrow(
+        self,
+        query: str,
+        *args: object,
+    ) -> dict[str, object] | None:
+        if "INSERT INTO order_intents" in query:
+            decision_id = str(args[0])
+            if decision_id in self._pool.order_intents:
+                return None
+            self._pool.order_intents.add(decision_id)
+            return {"decision_id": decision_id}
         del query, args
         return None
 
@@ -48,8 +62,7 @@ class _TestAsyncpgConnectionContext:
         self._pool = pool
 
     async def __aenter__(self) -> _TestAsyncpgConnection:
-        del self._pool
-        return _TestAsyncpgConnection()
+        return _TestAsyncpgConnection(self._pool)
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         return None
@@ -59,6 +72,7 @@ class _TestAsyncpgConnectionContext:
 class _TestAsyncpgPool:
     close_calls: int = 0
     closed: bool = False
+    order_intents: set[str] = field(default_factory=set)
 
     async def close(self) -> None:
         self.close_calls += 1
@@ -118,6 +132,61 @@ def _compose_postgres_port_binding() -> str | None:
     return binding or None
 
 
+def _inspect_container_env(container_id: str) -> set[str]:
+    result = subprocess.run(
+        ["docker", "inspect", container_id, "--format", "{{json .Config.Env}}"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"docker inspect {container_id} failed: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+    env_list = json.loads(result.stdout)
+    if not isinstance(env_list, list) or not all(isinstance(item, str) for item in env_list):
+        raise RuntimeError(
+            f"docker inspect {container_id} returned invalid env payload: {result.stdout!r}"
+        )
+    return set(env_list)
+
+
+def _compatible_running_postgres_container_id() -> str | None:
+    result = subprocess.run(
+        [
+            "docker",
+            "ps",
+            "--filter",
+            "publish=5432",
+            "--filter",
+            "label=com.docker.compose.service=postgres",
+            "--format",
+            "{{.ID}}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "docker ps lookup for compose postgres failed: "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+    for container_id in (line.strip() for line in result.stdout.splitlines() if line.strip()):
+        env = _inspect_container_env(container_id)
+        expected = {
+            "POSTGRES_USER=postgres",
+            "POSTGRES_PASSWORD=postgres",
+            "POSTGRES_DB=pms_test",
+        }
+        if expected.issubset(env):
+            return container_id
+    return None
+
+
 def _is_tcp_port_open(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
@@ -151,6 +220,10 @@ def compose_postgres_dsn() -> str:
     container_id = _compose_postgres_container_id()
     port_open = _is_tcp_port_open(host, port)
     if not container_id:
+        compatible_container_id = _compatible_running_postgres_container_id()
+        if compatible_container_id is not None:
+            asyncio.run(_wait_for_postgres(dsn))
+            return dsn
         up = _run_compose("up", "-d", "postgres")
         if up.returncode != 0:
             if port_open:

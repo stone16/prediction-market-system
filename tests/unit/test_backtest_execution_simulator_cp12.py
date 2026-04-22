@@ -8,6 +8,7 @@ import pytest
 
 from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.risk import InsufficientLiquidityError
+from pms.core.enums import TimeInForce
 from pms.core.models import MarketSignal, Portfolio, TradeDecision
 from pms.research.execution import BacktestExecutionSimulator
 from pms.research.specs import ExecutionModel
@@ -54,7 +55,7 @@ def _decision(*, notional_usdc: float = 100.0, limit_price: float = 0.25) -> Tra
         stop_conditions=["cp12"],
         prob_estimate=0.7,
         expected_edge=0.2,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id="opportunity-cp12",
         strategy_id="alpha",
         strategy_version_id="alpha-v1",

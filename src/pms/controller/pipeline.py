@@ -25,6 +25,7 @@ from pms.controller.outcome_tokens import (
 )
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
+from pms.core.enums import TimeInForce
 from pms.core.interfaces import ICalibrator, IForecaster, ISizer
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
 from pms.factors.composition import apply_composition, evaluate_branch_probabilities
@@ -222,7 +223,10 @@ class ControllerPipeline:
             market_price=decision_price,
             portfolio=active_portfolio,
         )
-        if size <= 0.0 or size < self.settings.risk.min_order_usdc:
+        min_order_usdc = self.settings.risk.min_order_usdc
+        if self.strategy is not None:
+            min_order_usdc = self.strategy.risk.min_order_size_usdc
+        if size <= 0.0 or size < min_order_usdc:
             self.suppressed_zero_size += 1
             return None
         opportunity = Opportunity(
@@ -256,7 +260,7 @@ class ControllerPipeline:
             stop_conditions=router.stop_conditions(signal),
             prob_estimate=prob_estimate,
             expected_edge=expected_edge,
-            time_in_force=self.settings.controller.time_in_force,
+            time_in_force=TimeInForce(self.settings.controller.time_in_force.upper()),
             opportunity_id=opportunity.opportunity_id,
             strategy_id=self.strategy_id,
             strategy_version_id=self.strategy_version_id,

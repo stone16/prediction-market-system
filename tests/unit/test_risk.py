@@ -7,6 +7,7 @@ import pytest
 from pms.actuator.risk import RiskDecision, RiskManager
 from pms.config import RiskSettings
 from pms.controller.pipeline import _default_portfolio
+from pms.core.enums import TimeInForce
 from pms.core.models import Portfolio, Position, TradeDecision
 
 
@@ -29,7 +30,7 @@ def _decision(
         stop_conditions=["unit-test"],
         prob_estimate=0.6,
         expected_edge=0.1,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id="opportunity-risk",
         strategy_id="strategy-risk",
         strategy_version_id="strategy-risk-v1",

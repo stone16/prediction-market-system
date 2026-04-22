@@ -147,15 +147,16 @@ async def test_runner_forwards_opportunity_id_to_actuator() -> None:
             market_id=decision.market_id,
             token_id=decision.token_id,
             venue=decision.venue,
-            requested_size=decision.size,
-            filled_size=0.0,
-            remaining_size=decision.size,
+            requested_notional_usdc=decision.notional_usdc,
+            filled_notional_usdc=0.0,
+            remaining_notional_usdc=decision.notional_usdc,
             fill_price=None,
             submitted_at=datetime(2026, 4, 19, tzinfo=UTC),
             last_updated_at=datetime(2026, 4, 19, tzinfo=UTC),
             raw_status="rejected",
             strategy_id=decision.strategy_id,
             strategy_version_id=decision.strategy_version_id,
+            filled_quantity=0.0,
         )
 
     opportunity_store = InMemoryOpportunityStore()

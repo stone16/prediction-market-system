@@ -16,7 +16,7 @@ from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import RiskSettings
-from pms.core.enums import Venue
+from pms.core.enums import TimeInForce, Venue
 from pms.core.models import MarketSignal, Portfolio, TradeDecision
 from pms.research.execution import BacktestExecutionSimulator
 from pms.research.specs import ExecutionModel
@@ -51,7 +51,7 @@ def _decision(*, venue: str = "polymarket") -> TradeDecision:
         stop_conditions=["unit-test"],
         prob_estimate=0.6,
         expected_edge=0.2,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id="opp-kalshi-cp06",
         strategy_id="default",
         strategy_version_id="default-v1",

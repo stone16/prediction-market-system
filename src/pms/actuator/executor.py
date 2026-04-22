@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from uuid import uuid4
 
 from pms.actuator.feedback import ActuatorFeedback
@@ -19,6 +19,7 @@ from pms.storage.dedup_store import InMemoryDedupStore
 logger = logging.getLogger(__name__)
 
 
+@runtime_checkable
 class ActuatorAdapter(Protocol):
     async def execute(
         self,
@@ -136,6 +137,8 @@ def _dedup_release_outcome(order_state: OrderState) -> str:
         return "venue_rejection"
     if status in {OrderStatus.MATCHED.value, "partial"}:
         return "matched"
+    if status == "rejected":
+        return "rejected"
     if status == OrderStatus.INVALID.value:
         if raw_status == "insufficient_liquidity":
             return "rejected"

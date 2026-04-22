@@ -18,7 +18,9 @@ class OrderStatus(StrEnum):
     LIVE = "live"
     DELAYED = "delayed"
     MATCHED = "matched"
+    PARTIAL = "partial"
     UNMATCHED = "unmatched"
+    CANCELLED = "cancelled"
     CANCELED = "canceled"
     CANCELED_MARKET_RESOLVED = "canceled_market_resolved"
 
@@ -47,3 +49,9 @@ class RunMode(StrEnum):
     BACKTEST = "backtest"
     PAPER = "paper"
     LIVE = "live"
+
+
+class TimeInForce(StrEnum):
+    GTC = "GTC"
+    IOC = "IOC"
+    FOK = "FOK"

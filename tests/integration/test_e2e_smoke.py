@@ -414,7 +414,7 @@ async def test_e2e_smoke_compose_alembic_api_backtest_metrics(
             ws="none",
         )
         server = uvicorn.Server(config)
-        server.install_signal_handlers = lambda: None
+        setattr(server, "install_signal_handlers", lambda: None)
         server_task = asyncio.create_task(server.serve())
 
         async with httpx.AsyncClient() as client:

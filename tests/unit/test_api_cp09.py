@@ -10,7 +10,7 @@ import pytest
 
 from pms.api.app import create_app
 from pms.config import PMSSettings, RiskSettings
-from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, RunMode, Side
+from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, RunMode, Side, TimeInForce
 from pms.core.models import (
     EvalRecord,
     Feedback,
@@ -90,17 +90,18 @@ def _decision() -> TradeDecision:
         token_id="yes-token",
         venue="polymarket",
         side=Side.BUY.value,
-        price=0.4,
-        size=12.5,
+        limit_price=0.4,
+        notional_usdc=12.5,
         order_type="limit",
         max_slippage_bps=100,
         stop_conditions=["min_volume:100.00"],
         prob_estimate=0.7,
         expected_edge=0.3,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id="opportunity-api",
         strategy_id="default",
         strategy_version_id="default-v1",
+        action=Side.BUY.value,
         model_id="model-a",
     )
 
@@ -116,7 +117,8 @@ def _fill() -> FillRecord:
         venue="polymarket",
         side=Side.BUY.value,
         fill_price=0.41,
-        fill_size=12.5,
+        fill_notional_usdc=12.5,
+        fill_quantity=12.5 / 0.41,
         executed_at=now,
         filled_at=now,
         status=OrderStatus.MATCHED.value,

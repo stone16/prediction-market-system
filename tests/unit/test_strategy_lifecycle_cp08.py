@@ -12,7 +12,7 @@ from typing import Any, cast
 import pytest
 
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
-from pms.core.enums import RunMode
+from pms.core.enums import RunMode, TimeInForce
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
 from pms.market_selection.merge import StrategyMarketSet
 from pms.runner import ControllerReleaseCancelPoint, Runner
@@ -277,14 +277,14 @@ def _opportunity_and_decision(
         token_id=signal.token_id,
         venue=signal.venue,
         side="BUY",
-        price=signal.yes_price,
-        size=5.0,
+        limit_price=signal.yes_price,
+        notional_usdc=5.0,
         order_type="limit",
         max_slippage_bps=10,
         stop_conditions=[],
         prob_estimate=0.55,
         expected_edge=0.13,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id=opportunity.opportunity_id,
         strategy_id=strategy_id,
         strategy_version_id=f"{strategy_id}-v1",

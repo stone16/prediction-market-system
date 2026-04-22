@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from pms.core.models import MarketSignal
+from pms.core.models import FillRecord, MarketSignal
 from pms.research.runner import _pnl_delta
 from pms.research.specs import ExecutionModel
 
@@ -26,11 +26,28 @@ def _signal(*, resolved_outcome: float) -> MarketSignal:
 
 
 def test_pnl_delta_for_buy_no_uses_no_fill_price_directly() -> None:
+    fill = FillRecord(
+        trade_id="trade-pnl-no",
+        order_id="order-pnl-no",
+        decision_id="decision-pnl-no",
+        market_id="market-pnl-no",
+        token_id="token-no",
+        venue="polymarket",
+        side="BUY",
+        fill_price=0.38,
+        fill_notional_usdc=10.0,
+        fill_quantity=10.0 / 0.38,
+        executed_at=datetime(2026, 4, 20, tzinfo=UTC),
+        filled_at=datetime(2026, 4, 20, tzinfo=UTC),
+        status="matched",
+        anomaly_flags=[],
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+    )
     pnl = _pnl_delta(
         signal=_signal(resolved_outcome=0.0),
         decision_outcome="NO",
-        decision_size=10.0,
-        fill_price=0.38,
+        fill=fill,
         execution_model=ExecutionModel.polymarket_paper(),
     )
 

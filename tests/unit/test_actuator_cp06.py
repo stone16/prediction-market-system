@@ -17,7 +17,7 @@ from pms.actuator.adapters.polymarket import PolymarketActuator
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
 from pms.config import PMSSettings, RiskSettings
-from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side
+from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side, TimeInForce
 from pms.core.models import LiveTradingDisabledError, OrderState, Portfolio, TradeDecision
 from pms.storage.dedup_store import InMemoryDedupStore
 from pms.storage.feedback_store import FeedbackStore
@@ -46,7 +46,7 @@ def _decision(
         stop_conditions=["unit-test"],
         prob_estimate=0.6,
         expected_edge=0.2,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id=f"op-{decision_id}",
         strategy_id="default",
         strategy_version_id="default-v1",

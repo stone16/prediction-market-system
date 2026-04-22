@@ -7,7 +7,7 @@ import pytest
 
 from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.executor import _rejected_order_state
-from pms.core.enums import Side
+from pms.core.enums import Side, TimeInForce
 from pms.core.models import MarketSignal, Portfolio, TradeDecision
 from pms.evaluation.adapters.scoring import Scorer
 from pms.runner import _fill_from_order
@@ -25,14 +25,14 @@ def _decision(
         token_id="t-yes",
         venue="polymarket",
         side=Side.BUY.value,
-        price=0.4,
-        size=10.0,
+        limit_price=0.4,
+        notional_usdc=10.0,
         order_type="limit",
         max_slippage_bps=100,
         stop_conditions=["min_volume:100.00"],
         prob_estimate=0.7,
         expected_edge=0.3,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id=f"op-{decision_id}",
         strategy_id=strategy_id,
         strategy_version_id=strategy_version_id,

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import fields
+from typing import Any
 
 import pytest
 
+from pms.core.enums import TimeInForce
 from pms.core.models import FillRecord, OrderState, TradeDecision
 
 
-def _trade_decision_kwargs(*, notional_usdc: float, limit_price: float) -> dict[str, object]:
+def _trade_decision_kwargs(
+    *,
+    notional_usdc: float,
+    limit_price: float,
+) -> dict[str, Any]:
     return {
         "decision_id": "decision-1",
         "market_id": "market-1",
@@ -20,7 +26,7 @@ def _trade_decision_kwargs(*, notional_usdc: float, limit_price: float) -> dict[
         "stop_conditions": ["halt-on-resolution"],
         "prob_estimate": 0.61,
         "expected_edge": 0.11,
-        "time_in_force": "GTC",
+        "time_in_force": TimeInForce.GTC,
         "opportunity_id": "opp-1",
         "strategy_id": "strategy-1",
         "strategy_version_id": "strategy-version-1",

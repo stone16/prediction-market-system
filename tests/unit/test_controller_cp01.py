@@ -89,7 +89,21 @@ def _active_strategy(
 
 
 @pytest.mark.asyncio
-async def test_controller_pipeline_factory_builds_distinct_per_strategy_pipelines() -> None:
+async def test_controller_pipeline_factory_builds_distinct_per_strategy_pipelines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pms.controller.forecasters.rules.RulesForecaster.predict",
+        lambda self, signal: (0.65, 0.9, "test-rules"),
+    )
+    monkeypatch.setattr(
+        "pms.controller.forecasters.statistical.StatisticalForecaster.predict",
+        lambda self, signal: (0.65, 0.9, "test-stats"),
+    )
+    monkeypatch.setattr(
+        "pms.controller.forecasters.llm.LLMForecaster.predict",
+        lambda self, signal: (0.65, 0.9, "test-llm"),
+    )
     factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
     factory = factory_cls(settings=PMSSettings())
     strategies = [

@@ -33,7 +33,7 @@ class LLMSettings(BaseModel):
 
 class ControllerSettings(BaseModel):
     min_volume: float = 0.0
-    max_slippage_bps: int = 100
+    max_slippage_bps: int = 50
     time_in_force: str = "GTC"
 
 

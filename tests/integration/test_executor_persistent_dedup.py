@@ -12,7 +12,7 @@ from pms.actuator.executor import ActuatorExecutor
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import RiskSettings
-from pms.core.enums import OrderStatus
+from pms.core.enums import OrderStatus, TimeInForce
 from pms.core.models import Portfolio, TradeDecision
 from pms.runner import Runner
 from pms.storage.dedup_store import InMemoryDedupStore, PgDedupStore
@@ -48,7 +48,7 @@ def _decision(decision_id: str = "decision-executor-persistent-dedup") -> TradeD
         stop_conditions=["executor-persistent-dedup"],
         prob_estimate=0.6,
         expected_edge=0.2,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id=f"op-{decision_id}",
         strategy_id="strategy-a",
         strategy_version_id="strategy-a-v1",

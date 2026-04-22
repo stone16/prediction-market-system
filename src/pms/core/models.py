@@ -10,7 +10,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
+
+from pms.core.enums import TimeInForce
 
 
 Venue = Literal["polymarket", "kalshi"]
@@ -74,7 +76,7 @@ class TradeDecision:
     stop_conditions: list[str]
     prob_estimate: float
     expected_edge: float
-    time_in_force: str
+    time_in_force: TimeInForce
     opportunity_id: str
     strategy_id: str
     strategy_version_id: str
@@ -90,6 +92,14 @@ class TradeDecision:
         if self.limit_price <= 0.0 or self.limit_price >= 1.0:
             msg = "TradeDecision.limit_price must satisfy 0.0 < limit_price < 1.0"
             raise ValueError(msg)
+        raw_time_in_force = cast(object, self.time_in_force)
+        if not isinstance(raw_time_in_force, TimeInForce):
+            try:
+                normalized = TimeInForce(str(raw_time_in_force).upper())
+            except ValueError as exc:
+                msg = "TradeDecision.time_in_force must be one of GTC, IOC, or FOK"
+                raise ValueError(msg) from exc
+            object.__setattr__(self, "time_in_force", normalized)
 
 
 @dataclass(frozen=True)

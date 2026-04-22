@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+import inspect
+from typing import Any, Protocol, cast
 
 import asyncpg
 
@@ -13,20 +17,18 @@ class PgDedupStore:
     pool: asyncpg.Pool
 
     async def acquire(self, decision: TradeDecision) -> bool:
-        connection = await self.pool.acquire()
-        try:
+        async with _acquire_connection(self.pool) as acquired_connection:
+            connection = cast(asyncpg.Connection, acquired_connection)
             return await _insert_order_intent(
                 connection,
                 decision,
                 worker_host=_worker_host(),
                 worker_pid=_worker_pid(),
             )
-        finally:
-            await self.pool.release(connection)
 
     async def release(self, decision_id: str, outcome: str) -> None:
-        connection = await self.pool.acquire()
-        try:
+        async with _acquire_connection(self.pool) as acquired_connection:
+            connection = cast(asyncpg.Connection, acquired_connection)
             await connection.execute(
                 """
                 UPDATE order_intents
@@ -36,12 +38,10 @@ class PgDedupStore:
                 decision_id,
                 outcome,
             )
-        finally:
-            await self.pool.release(connection)
 
     async def retention_scan(self, older_than: timedelta) -> int:
-        connection = await self.pool.acquire()
-        try:
+        async with _acquire_connection(self.pool) as acquired_connection:
+            connection = cast(asyncpg.Connection, acquired_connection)
             cutoff = datetime.now(tz=UTC) - older_than
             rows = await connection.fetch(
                 """
@@ -53,8 +53,6 @@ class PgDedupStore:
                 cutoff,
             )
             return len(rows)
-        finally:
-            await self.pool.release(connection)
 
 
 @dataclass(slots=True)
@@ -111,6 +109,40 @@ class _DedupEntry:
     worker_host: str | None = None
     worker_pid: int | None = None
     outcome: str | None = None
+
+
+class _AsyncAcquireContext(Protocol):
+    async def __aenter__(self) -> object: ...
+
+    async def __aexit__(
+        self,
+        exc_type: Any,
+        exc: Any,
+        tb: Any,
+    ) -> None: ...
+
+
+@asynccontextmanager
+async def _acquire_connection(pool: asyncpg.Pool) -> AsyncIterator[object]:
+    acquired = pool.acquire()
+    if hasattr(acquired, "__aenter__") and hasattr(acquired, "__aexit__"):
+        async with cast(_AsyncAcquireContext, acquired) as managed_connection:
+            yield managed_connection
+        return
+
+    if not inspect.isawaitable(acquired):
+        msg = "pool.acquire() must return an awaitable or async context manager"
+        raise TypeError(msg)
+
+    raw_connection: object = await acquired
+    try:
+        yield raw_connection
+    finally:
+        release = getattr(pool, "release", None)
+        if callable(release):
+            released = release(raw_connection)
+            if inspect.isawaitable(released):
+                await cast(Any, released)
 
 
 async def _insert_order_intent(

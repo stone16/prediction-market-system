@@ -12,6 +12,7 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
+from pms.core.enums import TimeInForce
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
 from pms.evaluation.metrics import StrategyVersionKey
 from pms.research.runner import BacktestRunner
@@ -124,14 +125,14 @@ class BlockingPipeline:
             token_id=signal.token_id,
             venue=signal.venue,
             side="BUY",
-            price=signal.yes_price,
-            size=10.0,
+            limit_price=signal.yes_price,
+            notional_usdc=10.0,
             order_type="limit",
             max_slippage_bps=50,
             stop_conditions=[],
             prob_estimate=0.7,
             expected_edge=0.2,
-            time_in_force="GTC",
+            time_in_force=TimeInForce.IOC,
             opportunity_id=opportunity.opportunity_id,
             strategy_id=self._strategy_id,
             strategy_version_id=self._strategy_version_id,
@@ -182,7 +183,7 @@ def _signal() -> MarketSignal:
         token_id="yes-token",
         venue="polymarket",
         title="Will CP04b runner tests pass?",
-        yes_price=0.4,
+        yes_price=0.41,
         volume_24h=1000.0,
         resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
         orderbook={

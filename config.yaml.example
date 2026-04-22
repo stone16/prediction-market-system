@@ -26,7 +26,7 @@ sensor:
 
 controller:
   min_volume: 0.0
-  max_slippage_bps: 100
+  max_slippage_bps: 50
   time_in_force: GTC
 
 polymarket:

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 import pytest
 
+from pms.core.enums import TimeInForce
 import pms.storage.dedup_store as dedup_store_module
 from pms.core.models import TradeDecision
 from pms.storage.dedup_store import InMemoryDedupStore, PgDedupStore
@@ -40,7 +41,7 @@ def _decision(decision_id: str = "d1") -> TradeDecision:
         stop_conditions=["integration-test"],
         prob_estimate=0.6,
         expected_edge=0.1,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id=f"op-{decision_id}",
         strategy_id="strategy-a",
         strategy_version_id="strategy-a-v1",

@@ -9,7 +9,7 @@ from pms.actuator.executor import ActuatorExecutor
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import RiskSettings
-from pms.core.enums import OrderStatus
+from pms.core.enums import OrderStatus, TimeInForce
 from pms.core.models import OrderState, Portfolio, TradeDecision
 from pms.storage.dedup_store import InMemoryDedupStore
 from pms.storage.feedback_store import FeedbackStore
@@ -29,7 +29,7 @@ def _decision(*, notional_usdc: float = 0.5) -> TradeDecision:
         stop_conditions=["cp14"],
         prob_estimate=0.5,
         expected_edge=0.0,
-        time_in_force="GTC",
+        time_in_force=TimeInForce.GTC,
         opportunity_id="opportunity-cp14",
         strategy_id="strategy-cp14",
         strategy_version_id="strategy-cp14-v1",
