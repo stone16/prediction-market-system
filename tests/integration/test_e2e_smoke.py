@@ -9,6 +9,7 @@ import socket
 from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
+import warnings
 
 import asyncpg
 from alembic import command
@@ -21,6 +22,7 @@ from pms.api.app import create_app
 from pms.config import DatabaseSettings, PMSSettings
 from pms.core.models import BookLevel, BookSnapshot, Market, Token
 from pms.research.runner import BacktestRunner
+from pms.runner import Runner
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
@@ -38,6 +40,12 @@ ALEMBIC_INI = ROOT / "alembic.ini"
 EVIDENCE_DIR = ROOT / ".harness" / "pms-correctness-bundle-v1" / "checkpoints" / "20" / "evidence"
 MARKET_ID = "cp20-smoke-market"
 TOKEN_ID = "cp20-smoke-market-yes"
+
+warnings.filterwarnings(
+    "ignore",
+    message="No path_separator found in configuration.*prepend_sys_path.*",
+    category=DeprecationWarning,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -117,7 +125,13 @@ def _run_alembic_upgrade(database_url: str) -> None:
     try:
         os.environ["DATABASE_URL"] = database_url
         os.environ.pop("PMS_DATABASE_URL", None)
-        command.upgrade(Config(str(ALEMBIC_INI)), "head")
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="No path_separator found in configuration.*prepend_sys_path.*",
+                category=DeprecationWarning,
+            )
+            command.upgrade(Config(str(ALEMBIC_INI)), "head")
     finally:
         if previous_database_url is None:
             os.environ.pop("DATABASE_URL", None)
@@ -384,17 +398,24 @@ async def test_e2e_smoke_compose_alembic_api_backtest_metrics(
         evidence_lines.append(f"seeded run_id={run_id}")
 
         app = create_app(
-            runner=None,
+            runner=Runner(
+                config=PMSSettings(
+                    database=DatabaseSettings(dsn=database_url),
+                    auto_migrate_default_v2=False,
+                )
+            ),
             auto_start=False,
         )
-        app.state.runner.config = PMSSettings(
-            database=DatabaseSettings(dsn=database_url),
-            auto_migrate_default_v2=False,
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            ws="none",
         )
-        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
         server = uvicorn.Server(config)
         server.install_signal_handlers = lambda: None
-        server_task = asyncio.create_task(cast("asyncio.coroutine[Any, Any, None]", server.serve()))
+        server_task = asyncio.create_task(server.serve())
 
         async with httpx.AsyncClient() as client:
             status_payload = await _wait_for_status(client, port=port)
