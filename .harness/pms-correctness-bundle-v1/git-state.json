@@ -1,0 +1,297 @@
+{
+  "task_id": "pms-correctness-bundle-v1",
+  "task_start_sha": "d54061df4956bfafb6c551e5680180b02a355f20",
+  "phase": "done",
+  "checkpoints": {
+    "01": {
+      "baseline_sha": "d54061df4956bfafb6c551e5680180b02a355f20",
+      "iterations": {
+        "1": {
+          "end_sha": "bb20dfe5a36122f0891b9f814c32f2a7e33c5c87"
+        }
+      },
+      "final_sha": "bb20dfe5a36122f0891b9f814c32f2a7e33c5c87"
+    },
+    "02": {
+      "baseline_sha": "bb20dfe5a36122f0891b9f814c32f2a7e33c5c87",
+      "iterations": {
+        "1": {
+          "end_sha": "ce4e31fde8093694ae119e9df93f4b4937109cf5"
+        }
+      },
+      "final_sha": "ce4e31fde8093694ae119e9df93f4b4937109cf5"
+    },
+    "03": {
+      "baseline_sha": "ce4e31fde8093694ae119e9df93f4b4937109cf5",
+      "iterations": {},
+      "final_sha": "ce16fb7af352c8c1d4d3e911e867ba979a500fd6"
+    },
+    "04": {
+      "baseline_sha": "ce16fb7af352c8c1d4d3e911e867ba979a500fd6",
+      "iterations": {},
+      "final_sha": "5014421e59a50869e3f217d25e91c88b12046465"
+    },
+    "05": {
+      "baseline_sha": "5014421e59a50869e3f217d25e91c88b12046465",
+      "iterations": {},
+      "final_sha": "c37ca035bf5c9a6a8ff5a33da1afc6679dfad5d5"
+    },
+    "06": {
+      "baseline_sha": "c37ca035bf5c9a6a8ff5a33da1afc6679dfad5d5",
+      "iterations": {
+        "1": {
+          "end_sha": "ea3e1d7f9c8b1fa69619160943d97922a1b030d9"
+        }
+      },
+      "final_sha": "ea3e1d7f9c8b1fa69619160943d97922a1b030d9",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/06/iter-1/evaluation.md",
+      "evaluator_session_id": "3ccffbaf-f05f-4deb-aeae-59e951df1b58",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/06/iter-1/evaluator-session-id.txt"
+    },
+    "07": {
+      "baseline_sha": "ea3e1d7f9c8b1fa69619160943d97922a1b030d9",
+      "iterations": {
+        "1": {
+          "end_sha": "dacb420ec7cf0132869506083cd17f4f01ff80ef"
+        }
+      },
+      "final_sha": "dacb420ec7cf0132869506083cd17f4f01ff80ef",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/07/iter-1/evaluation.md",
+      "evaluator_session_id": "209ccab8-c312-4ef9-8aa5-effd563ede29",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/07/iter-1/evaluator-session-id.txt"
+    },
+    "08": {
+      "baseline_sha": "dacb420ec7cf0132869506083cd17f4f01ff80ef",
+      "iterations": {
+        "1": {
+          "end_sha": "58b87cdf4b28de969efd5463dc821828e1665f8a"
+        }
+      },
+      "final_sha": "58b87cdf4b28de969efd5463dc821828e1665f8a",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/08/iter-1/evaluation.md",
+      "evaluator_session_id": "c8e4fd22-43d9-4342-bfba-1d11b532aca9",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/08/iter-1/evaluator-session-id.txt"
+    },
+    "09": {
+      "baseline_sha": "58b87cdf4b28de969efd5463dc821828e1665f8a",
+      "iterations": {
+        "1": {
+          "end_sha": "c29abd3d52d6ea19f91db5e7d6ac34fe93df8fe9"
+        }
+      },
+      "final_sha": "c29abd3d52d6ea19f91db5e7d6ac34fe93df8fe9",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/09/iter-1/evaluation.md",
+      "evaluator_session_id": "73447693-dfa8-4f2d-a17e-8250d965b5c2",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/09/iter-1/evaluator-session-id.txt"
+    },
+    "10": {
+      "baseline_sha": "c29abd3d52d6ea19f91db5e7d6ac34fe93df8fe9",
+      "iterations": {
+        "1": {
+          "end_sha": "a68183e7aa379f4334c44f7ff9364697775cbd0d"
+        }
+      },
+      "final_sha": "a68183e7aa379f4334c44f7ff9364697775cbd0d",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/10/iter-1/evaluation.md",
+      "evaluator_session_id": "5e8b9450-44f6-4ded-b823-34edc3c4a03b",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/10/iter-1/evaluator-session-id.txt"
+    },
+    "11": {
+      "baseline_sha": "a68183e7aa379f4334c44f7ff9364697775cbd0d",
+      "iterations": {
+        "1": {
+          "end_sha": "770646c83758c3a66ae759d67f46c79ffe13fe05"
+        }
+      },
+      "final_sha": "770646c83758c3a66ae759d67f46c79ffe13fe05",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/11/iter-1/evaluation.md",
+      "evaluator_session_id": "ecad91a2-283a-4171-98d5-5110998d8c55",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/11/iter-1/evaluator-session-id.txt"
+    },
+    "12": {
+      "baseline_sha": "770646c83758c3a66ae759d67f46c79ffe13fe05",
+      "iterations": {
+        "1": {
+          "end_sha": "1787af0968824604364f4248e7af15841fa2b695"
+        }
+      },
+      "final_sha": "1787af0968824604364f4248e7af15841fa2b695",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/12/iter-1/evaluation.md",
+      "evaluator_session_id": "aa3dc09c-c4fc-4c9a-9067-f71679d48766",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/12/iter-1/evaluator-session-id.txt"
+    },
+    "13": {
+      "baseline_sha": "1787af0968824604364f4248e7af15841fa2b695",
+      "iterations": {
+        "1": {
+          "end_sha": "3c972be44d55aa03622c75d140a323df28f67af3"
+        }
+      },
+      "final_sha": "3c972be44d55aa03622c75d140a323df28f67af3",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/13/iter-1/evaluation.md",
+      "evaluator_session_id": "eeadd52a-ea52-4f8b-bf27-8306bce37200",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/13/iter-1/evaluator-session-id.txt"
+    },
+    "14": {
+      "baseline_sha": "3c972be44d55aa03622c75d140a323df28f67af3",
+      "iterations": {
+        "1": {
+          "end_sha": "6ab5267e6f9e7b54de8cb2a318d06e83f8f1041d"
+        }
+      },
+      "final_sha": "6ab5267e6f9e7b54de8cb2a318d06e83f8f1041d",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/14/iter-1/evaluation.md",
+      "evaluator_session_id": "c8b79668-f2f6-461d-a146-3afbec3c99d6",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/14/iter-1/evaluator-session-id.txt"
+    },
+    "15": {
+      "baseline_sha": "6ab5267e6f9e7b54de8cb2a318d06e83f8f1041d",
+      "iterations": {
+        "1": {
+          "end_sha": "59265023a8ea047bcc0d06c596ea2ec62f0e438b"
+        }
+      },
+      "final_sha": "59265023a8ea047bcc0d06c596ea2ec62f0e438b",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/15/iter-1/evaluation.md",
+      "evaluator_session_id": "2f85dcb4-2671-4397-82d7-3f6b2909941b",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/15/iter-1/evaluator-session-id.txt"
+    },
+    "16": {
+      "baseline_sha": "59265023a8ea047bcc0d06c596ea2ec62f0e438b",
+      "iterations": {
+        "1": {
+          "end_sha": "abc340c30e49abba9223927661eddb86195c33cd"
+        }
+      },
+      "final_sha": "abc340c30e49abba9223927661eddb86195c33cd",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/16/iter-1/evaluation.md",
+      "evaluator_session_id": "eb9331e5-5075-475f-9384-0b731480f62f",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/16/iter-1/evaluator-session-id.txt"
+    },
+    "17": {
+      "baseline_sha": "abc340c30e49abba9223927661eddb86195c33cd",
+      "iterations": {
+        "1": {
+          "end_sha": "0a5f0ddf1efabc19eb5bf9539552ebab88a0e1fe"
+        }
+      },
+      "final_sha": "0a5f0ddf1efabc19eb5bf9539552ebab88a0e1fe",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/17/iter-1/evaluation.md",
+      "evaluator_session_id": "c89cc1c8-74f0-4bf9-932b-abc4872333c4",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/17/iter-1/evaluator-session-id.txt"
+    },
+    "18": {
+      "baseline_sha": "0a5f0ddf1efabc19eb5bf9539552ebab88a0e1fe",
+      "iterations": {
+        "1": {
+          "end_sha": "ab54dd930f9ca6b530401ad58eba8e12fa67cdda"
+        }
+      },
+      "final_sha": "ab54dd930f9ca6b530401ad58eba8e12fa67cdda",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/18/iter-1/evaluation.md",
+      "evaluator_session_id": "53cb843d-5ce5-40e5-a0a5-0a03b8d44d01",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/18/iter-1/evaluator-session-id.txt"
+    },
+    "19": {
+      "baseline_sha": "ab54dd930f9ca6b530401ad58eba8e12fa67cdda",
+      "iterations": {
+        "1": {
+          "end_sha": "ae71985688da918ca5050a455e4eac1b5cf210c5"
+        }
+      },
+      "final_sha": "ae71985688da918ca5050a455e4eac1b5cf210c5",
+      "final_evaluation": ".harness/pms-correctness-bundle-v1/checkpoints/19/iter-1/evaluation.md",
+      "evaluator_session_id": "cf149104-976b-4878-af93-4b0c05594ac4",
+      "evaluator_session_file": ".harness/pms-correctness-bundle-v1/checkpoints/19/iter-1/evaluator-session-id.txt"
+    },
+    "20": {
+      "baseline_sha": "ae71985688da918ca5050a455e4eac1b5cf210c5",
+      "iterations": {
+        "1": {
+          "end_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+        }
+      },
+      "final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+    },
+    "21": {
+      "baseline_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+      "iterations": {
+        "1": {
+          "end_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+        }
+      },
+      "final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+    },
+    "22": {
+      "baseline_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+      "iterations": {
+        "1": {
+          "end_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+        }
+      },
+      "final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+    },
+    "23": {
+      "baseline_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+      "iterations": {
+        "1": {
+          "end_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+        }
+      },
+      "final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+    },
+    "24": {
+      "baseline_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+      "iterations": {
+        "1": {
+          "end_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+        }
+      },
+      "final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+    },
+    "25": {
+      "baseline_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+      "iterations": {
+        "1": {
+          "end_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+        }
+      },
+      "final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+    },
+    "26": {
+      "baseline_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+      "iterations": {
+        "1": {
+          "end_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+        }
+      },
+      "final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+    },
+    "27": {
+      "baseline_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+      "iterations": {
+        "1": {
+          "end_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+        }
+      },
+      "final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+    },
+    "28": {
+      "baseline_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+      "iterations": {
+        "1": {
+          "end_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+        }
+      },
+      "final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54"
+    }
+  },
+  "e2e_baseline_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+  "e2e_final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+  "review_loop_status": "",
+  "full_verify_baseline_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+  "full_verify_final_sha": "6317c08296659d2d9ced1f104b7db1a4dd519c54",
+  "full_verify_status": "COMPLETE",
+  "pr_url": "https://github.com/stone16/prediction-market-system/pull/20",
+  "full_verify_started_at": "1776836400"
+}
