@@ -1493,6 +1493,85 @@ th {
   margin: 0;
 }
 
+.share-shell {
+  min-height: 100vh;
+  padding: 64px 40px 80px;
+  background: linear-gradient(180deg, rgb(216 79 63 / 8%), transparent 180px), var(--paper);
+}
+
+.share-hero {
+  max-width: 840px;
+  margin: 0 auto 32px;
+  padding: 32px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+.share-hero h1 {
+  margin: 8px 0 12px;
+  font-size: var(--text-54);
+  line-height: 1.1;
+}
+
+.share-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.share-grid {
+  max-width: 840px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.share-card {
+  padding: 24px;
+  min-height: 220px;
+}
+
+.share-card h2 {
+  margin-top: 0;
+}
+
+.share-stats {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+}
+
+.share-stats div {
+  display: grid;
+  gap: 6px;
+}
+
+.share-stats dt {
+  color: var(--muted);
+  font-size: var(--text-11);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.share-stats dd {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-18);
+}
+
+.share-debug {
+  margin: 20px 0 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+}
+
 @keyframes accept-spin {
   to {
     transform: rotate(360deg);
@@ -1593,6 +1672,18 @@ th {
     right: 0;
     top: auto;
     width: 100%;
+  }
+
+  .share-shell {
+    padding: 32px 20px 48px;
+  }
+
+  .share-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .share-hero h1 {
+    font-size: var(--text-30);
   }
 }
 

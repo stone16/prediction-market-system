@@ -81,40 +81,42 @@ async def _seed_strategy(
     metadata_json: dict[str, object] | None = None,
     secret_api_key: str | None = None,
 ) -> None:
-    await connection.execute(
-        """
-        INSERT INTO strategies (
+    async with connection.transaction():
+        await connection.execute("SET CONSTRAINTS ALL DEFERRED")
+        await connection.execute(
+            """
+            INSERT INTO strategies (
+                strategy_id,
+                active_version_id,
+                metadata_json,
+                title,
+                description,
+                archived,
+                share_enabled
+            ) VALUES (
+                $1, $2, $3::jsonb, $4, $5, $6, $7
+            )
+            """,
             strategy_id,
-            active_version_id,
-            metadata_json,
+            strategy_version_id,
+            json.dumps(metadata_json or {}, sort_keys=True, separators=(",", ":")),
             title,
             description,
             archived,
-            share_enabled
-        ) VALUES (
-            $1, $2, $3::jsonb, $4, $5, $6, $7
+            share_enabled,
         )
-        """,
-        strategy_id,
-        strategy_version_id,
-        json.dumps(metadata_json or {}, sort_keys=True, separators=(",", ":")),
-        title,
-        description,
-        archived,
-        share_enabled,
-    )
-    await connection.execute(
-        """
-        INSERT INTO strategy_versions (
+        await connection.execute(
+            """
+            INSERT INTO strategy_versions (
+                strategy_version_id,
+                strategy_id,
+                config_json
+            ) VALUES ($1, $2, $3::jsonb)
+            """,
             strategy_version_id,
             strategy_id,
-            config_json
-        ) VALUES ($1, $2, $3::jsonb)
-        """,
-        strategy_version_id,
-        strategy_id,
-        _config_json(strategy_id, secret_api_key=secret_api_key),
-    )
+            _config_json(strategy_id, secret_api_key=secret_api_key),
+        )
 
 
 async def _seed_eval_record(
@@ -276,7 +278,7 @@ async def test_share_route_returns_safe_allowlist_projection_and_hides_secrets(
         "description": "Buy dislocations when liquidity is deep.",
         "brier_overall": 0.125,
         "trade_count": 2,
-        "version_id_short": "alpha-v12",
+        "version_id_short": "alpha-v1",
     }
     assert b"SECRET_AK" not in response.content
     assert b"SECRET_PK" not in response.content
@@ -317,4 +319,3 @@ async def test_share_route_returns_neutral_404_for_unknown_archived_and_unshared
         assert response.json() == {
             "detail": "This strategy doesn't exist or has been unshared"
         }
-

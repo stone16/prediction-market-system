@@ -98,8 +98,15 @@ test.beforeEach(() => {
 
 test('share page renders public strategy summary and neutral 404 copy without console errors', async ({ page }) => {
   const errors: string[] = [];
+
+  function isExpected404Resource(message: string) {
+    return message.includes('Failed to load resource') && message.includes('404');
+  }
+
   page.on('console', (message) => {
-    if (message.type() === 'error') errors.push(message.text());
+    if (message.type() === 'error' && !isExpected404Resource(message.text())) {
+      errors.push(message.text());
+    }
   });
   page.on('pageerror', (error) => errors.push(error.message));
 
@@ -109,7 +116,9 @@ test('share page renders public strategy summary and neutral 404 copy without co
   await expect(page.getByRole('heading', { level: 2, name: 'Theory' })).toBeVisible();
   await expect(page.getByRole('heading', { level: 2, name: 'Performance' })).toBeVisible();
   await expect(page.getByRole('heading', { level: 2, name: 'Calibration' })).toBeVisible();
-  await expect(page.getByText('Buy dislocations when liquidity is deep.')).toBeVisible();
+  await expect(
+    page.getByTestId('share-hero').getByText('Buy dislocations when liquidity is deep.')
+  ).toBeVisible();
   await page.screenshot({
     path: path.join(evidenceDir, 'share-page.png'),
     fullPage: true

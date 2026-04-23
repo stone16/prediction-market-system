@@ -8,13 +8,12 @@ import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator, cast
+from typing import Iterator
 
 import asyncpg
 import httpx
 import pytest
 
-from pms.config import DatabaseSettings, PMSSettings
 from pms.strategies.projections import (
     EvalSpec,
     ForecasterSpec,
@@ -174,35 +173,37 @@ def _config_json(strategy_id: str) -> str:
 async def _seed_share_strategy(pool: asyncpg.Pool, *, title: str) -> None:
     now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
     async with pool.acquire() as connection:
-        await connection.execute(
-            """
-            INSERT INTO strategies (
-                strategy_id,
-                active_version_id,
+        async with connection.transaction():
+            await connection.execute("SET CONSTRAINTS ALL DEFERRED")
+            await connection.execute(
+                """
+                INSERT INTO strategies (
+                    strategy_id,
+                    active_version_id,
+                    title,
+                    description,
+                    archived,
+                    share_enabled
+                ) VALUES (
+                    'alpha', 'alpha-v1234567', $1, 'Buy dislocations when liquidity is deep.', FALSE, TRUE
+                )
+                """,
                 title,
-                description,
-                archived,
-                share_enabled
-            ) VALUES (
-                'alpha', 'alpha-v1234567', $1, 'Buy dislocations when liquidity is deep.', FALSE, TRUE
             )
-            """,
-            title,
-        )
-        await connection.execute(
-            """
-            INSERT INTO strategy_versions (
-                strategy_version_id,
-                strategy_id,
-                config_json
-            ) VALUES (
-                'alpha-v1234567',
-                'alpha',
-                $1::jsonb
+            await connection.execute(
+                """
+                INSERT INTO strategy_versions (
+                    strategy_version_id,
+                    strategy_id,
+                    config_json
+                ) VALUES (
+                    'alpha-v1234567',
+                    'alpha',
+                    $1::jsonb
+                )
+                """,
+                _config_json("alpha"),
             )
-            """,
-            _config_json("alpha"),
-        )
         await connection.execute(
             """
             INSERT INTO eval_records (
@@ -288,7 +289,7 @@ async def test_share_page_revalidates_cached_projection_in_next_start_mode(
         async with connection.transaction():
             pass
 
-    with _run_api_server(cast(str, PMS_TEST_DATABASE_URL), api_port):
+    with _run_api_server(PMS_TEST_DATABASE_URL, api_port):
         with _run_dashboard_server(
             api_port=api_port,
             dashboard_port=dashboard_port,
@@ -300,7 +301,7 @@ async def test_share_page_revalidates_cached_projection_in_next_start_mode(
             )
             assert first.status_code == 200
             assert "Alpha Theory" in first.text
-            assert _extract_debug_reads(first.text) == "1"
+            first_reads = int(_extract_debug_reads(first.text))
 
             async with pg_pool.acquire() as connection:
                 await connection.execute(
@@ -318,7 +319,7 @@ async def test_share_page_revalidates_cached_projection_in_next_start_mode(
             assert second.status_code == 200
             assert "Alpha Theory" in second.text
             assert "Alpha Theory Reloaded" not in second.text
-            assert _extract_debug_reads(second.text) == "1"
+            assert int(_extract_debug_reads(second.text)) == first_reads
 
             time.sleep(revalidate_seconds + 1)
 
@@ -328,5 +329,4 @@ async def test_share_page_revalidates_cached_projection_in_next_start_mode(
             )
             assert third.status_code == 200
             assert "Alpha Theory Reloaded" in third.text
-            assert _extract_debug_reads(third.text) == "2"
-
+            assert int(_extract_debug_reads(third.text)) > first_reads

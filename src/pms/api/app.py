@@ -42,6 +42,7 @@ from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
 from pms.api.routes.markets import list_markets as list_markets_items
 from pms.api.routes.positions import list_positions as list_positions_items
+from pms.api.routes.share import SHARE_NOT_FOUND_DETAIL, get_shared_strategy
 from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
 from pms.api.routes.strategies import list_strategy_metrics as list_strategy_metrics_items
 from pms.api.routes.strategies import list_strategies as list_strategies_items
@@ -354,6 +355,15 @@ def create_app(
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_strategy_metrics_items(active_runner.pg_pool)
+
+    @app.get("/share/{strategy_id}")
+    async def share_strategy(strategy_id: str) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await get_shared_strategy(active_runner.pg_pool, strategy_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail=SHARE_NOT_FOUND_DETAIL)
+        return payload.model_dump(mode="json")
 
     @app.get("/factors/catalog")
     async def factors_catalog() -> dict[str, Any]:

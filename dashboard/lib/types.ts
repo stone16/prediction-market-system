@@ -207,6 +207,15 @@ export type StrategyMetricsResponse = {
   strategies: StrategyMetricsRow[];
 };
 
+export type ShareProjection = {
+  strategy_id: string;
+  title: string | null;
+  description: string | null;
+  brier_overall: number | null;
+  trade_count: number;
+  version_id_short: string | null;
+};
+
 export type FactorCatalogEntry = {
   factor_id: string;
   name: string;

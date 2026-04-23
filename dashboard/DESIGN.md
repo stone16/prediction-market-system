@@ -328,6 +328,12 @@ Every new surface must specify all five states:
 | `/positions` | Skeleton 3 rows | "No open positions..." | Cached | n/a | Full-page error |
 | `/performance` | Skeleton charts | "Need at least 5 settled trades..." | n/a | n/a | Retry button |
 | `/share/{id}` | Skeleton title + body | 404 or archived message | n/a | n/a | Generic 500 (no stack trace) |
+
+### Share Cache Notes
+
+- Public share data revalidates on a 60-second server-side cache window by default.
+- Test runs may shorten the window with `PMS_SHARE_REVALIDATE_SECONDS` so `next build && next start` verification stays mechanical.
+- `PMS_SHARE_DEBUG_RENDER=1` may expose a small read counter in the rendered page for cache assertions only; keep it disabled outside tests.
 | Accept idea | Button "Accepting..." disabled | n/a | n/a | Toast: "First trade placed · View →" | Toast w/ reason + retry |
 | Onboarding dismiss | Instant | n/a | n/a | Subtle fade, no toast | n/a |
 | Runner Start/Stop | Pill "Starting..." disabled | n/a | n/a | Pill transitions to ●Live green | Modal with error + retry |

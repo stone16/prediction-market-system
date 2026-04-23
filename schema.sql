@@ -114,7 +114,11 @@ CREATE TABLE IF NOT EXISTS strategies (
     strategy_id TEXT PRIMARY KEY,
     active_version_id TEXT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    title TEXT,
+    description TEXT,
+    archived BOOLEAN NOT NULL DEFAULT FALSE,
+    share_enabled BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 -- strategy_versions: immutable hash-keyed version rows (Invariant 3)

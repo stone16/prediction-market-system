@@ -1,9 +1,5 @@
 import type { Metadata } from 'next';
-import { ConnectionBanner } from '@/components/ConnectionBanner';
-import { EventLogDrawer } from '@/components/EventLogDrawer';
-import { OnboardingPanel } from '@/components/OnboardingPanel';
-import { SourceBadgePortals } from '@/components/SourceBadgePortals';
-import { SourceBanner } from '@/components/SourceBanner';
+import { GlobalChrome } from '@/components/GlobalChrome';
 import { ConnectionProvider } from '@/lib/ConnectionContext';
 import { OnboardingProvider } from '@/lib/OnboardingContext';
 import { SourceProvider } from '@/components/SourceProvider';
@@ -24,11 +20,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <ConnectionProvider>
           <SourceProvider source={source}>
             <OnboardingProvider>
-              <SourceBanner />
-              <ConnectionBanner />
-              <SourceBadgePortals />
-              <OnboardingPanel />
-              <EventLogDrawer />
+              <GlobalChrome />
               {children}
             </OnboardingProvider>
           </SourceProvider>
