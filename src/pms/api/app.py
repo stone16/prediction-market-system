@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections import defaultdict
@@ -14,6 +15,7 @@ from typing import Any, TypeVar, cast
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from pms.api.auth import require_api_token
@@ -26,6 +28,7 @@ from pms.api.routes.decisions import (
     get_decision as get_decision_item,
     list_decisions as list_decisions_items,
 )
+from pms.api.routes.events import encode_sse_event
 from pms.api.research_routes import (
     compute_backtest_live_comparison,
     enqueue_backtest_runs,
@@ -290,6 +293,40 @@ def create_app(
             cast(dict[str, Any], _jsonable(item))
             for item in await list_feedback_items(active_runner.feedback_store, resolved=resolved)
         ]
+
+    @app.get("/stream/events")
+    async def stream_events(
+        request: Request,
+        last_event_id: int | None = Query(default=None, ge=0),
+    ) -> StreamingResponse:
+        async def event_generator() -> AsyncIterator[str]:
+            replay, subscriber = await active_runner.event_bus.subscribe(
+                last_event_id=last_event_id
+            )
+            try:
+                for event in replay:
+                    yield encode_sse_event(event)
+
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        event = await asyncio.wait_for(subscriber.get(), timeout=10.0)
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    yield encode_sse_event(event)
+            finally:
+                await active_runner.event_bus.unsubscribe(subscriber)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache",
+                "connection": "keep-alive",
+            },
+        )
 
     @app.get("/subscriptions")
     async def subscriptions() -> dict[str, Any]:

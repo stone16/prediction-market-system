@@ -45,7 +45,7 @@ function sseBody() {
       fill_id: 'fill-cp10'
     })}`,
     '',
-  ].join('\n');
+  ].join('\n') + '\n';
 }
 
 test.beforeEach(() => {
@@ -109,6 +109,7 @@ test('event log drawer shows streamed entries and remains pinned after reload', 
   });
 
   await page.goto('/');
+  await page.getByRole('button', { name: 'Dismiss onboarding' }).click();
   await page.getByRole('button', { name: 'Event log' }).click();
 
   await expect(page.getByText('Signal market-cp10 @ 41.0¢')).toBeVisible();

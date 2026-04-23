@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { EventLogDrawer } from '@/components/EventLogDrawer';
 
 type EventPayload = {
@@ -58,6 +58,11 @@ describe('EventLogDrawer', () => {
     window.localStorage.clear();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
   test('coalesces burst updates with requestAnimationFrame and keeps the latest 20 entries', async () => {
     const rafCallbacks: FrameRequestCallback[] = [];
     const rafSpy = vi
@@ -103,6 +108,10 @@ describe('EventLogDrawer', () => {
   test('persists the pinned state and shows an unavailable message after stream errors', async () => {
     window.localStorage.setItem('pms.eventlog.pinned', 'true');
     render(<EventLogDrawer />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     expect(screen.getByRole('complementary', { name: 'Event log' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Unpin event log' })).toBeInTheDocument();

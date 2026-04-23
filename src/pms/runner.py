@@ -49,6 +49,7 @@ from pms.evaluation.metrics import (
     StrategyVersionKey,
 )
 from pms.evaluation.spool import EvalSpool
+from pms.event_stream import RuntimeEventBus
 from pms.factors.catalog import ensure_factor_catalog
 from pms.factors.definitions import REGISTERED
 from pms.factors.service import FactorService
@@ -180,6 +181,7 @@ class Runner:
         open_positions=[],
     ))
     sensor_stream: SensorStream = field(default_factory=SensorStream)
+    event_bus: RuntimeEventBus = field(default_factory=RuntimeEventBus)
     controller: IController | None = None
     state: RunnerState = field(init=False)
     actuator_executor: ActuatorExecutor = field(init=False)
@@ -717,6 +719,12 @@ class Runner:
                 _append_bounded(self.state.signals, signal)
                 if self.config.mode == RunMode.PAPER:
                     self._paper_orderbooks[signal.market_id] = signal.orderbook
+                await self.event_bus.publish(
+                    "sensor.signal",
+                    _signal_event_summary(signal),
+                    created_at=signal.fetched_at,
+                    market_id=signal.market_id,
+                )
                 for strategy_id, runtime in tuple(self._controller_runtimes.items()):
                     if not _matches_strategy_scope(runtime.asset_ids, signal):
                         continue
@@ -778,6 +786,13 @@ class Runner:
                             expires_at=expires_at,
                         )
                         _append_bounded(self.state.decisions, decision)
+                        await self.event_bus.publish(
+                            "controller.decision",
+                            _decision_event_summary(decision),
+                            created_at=created_at,
+                            market_id=decision.market_id,
+                            decision_id=decision.decision_id,
+                        )
                         await self._enqueue_decision(decision, signal=signal)
                 finally:
                     queue.task_done()
@@ -788,6 +803,10 @@ class Runner:
                 "controller pipeline failed for %s: %s",
                 strategy_id,
                 error,
+            )
+            await self.event_bus.publish(
+                "error",
+                f"controller pipeline failed for {strategy_id}: {error}",
             )
             if self._controller_pipeline_error is None:
                 self._controller_pipeline_error = error
@@ -824,6 +843,14 @@ class Runner:
                 fill = _fill_from_order(order_state, decision, signal)
                 if fill is not None:
                     _append_bounded(self.state.fills, fill)
+                    await self.event_bus.publish(
+                        "actuator.fill",
+                        _fill_event_summary(fill),
+                        created_at=fill.filled_at,
+                        market_id=fill.market_id,
+                        decision_id=fill.decision_id,
+                        fill_id=fill.fill_id or fill.order_id,
+                    )
                     try:
                         await self.fill_store.insert(fill)
                     except Exception as error:  # noqa: BLE001
@@ -831,6 +858,12 @@ class Runner:
                     self.portfolio = _portfolio_with_fill(self.portfolio, fill)
                     self._evaluator_spool.enqueue(fill, decision)
             except Exception as error:
+                await self.event_bus.publish(
+                    "error",
+                    f"actuator execution failed: {error}",
+                    market_id=decision.market_id,
+                    decision_id=decision.decision_id,
+                )
                 logger.warning("actuator execution failed: %s", error)
             finally:
                 self._decision_queue.task_done()
@@ -1477,6 +1510,18 @@ def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
 
 def _filled_contracts(fill: FillRecord) -> float:
     return fill.fill_quantity
+
+
+def _signal_event_summary(signal: MarketSignal) -> str:
+    return f"Signal {signal.market_id} @ {(signal.yes_price * 100):.1f}¢"
+
+
+def _decision_event_summary(decision: TradeDecision) -> str:
+    return f"Accepted {decision.side} ${decision.notional_usdc:.2f} on {decision.market_id}"
+
+
+def _fill_event_summary(fill: FillRecord) -> str:
+    return f"Filled {fill.side} ${fill.fill_notional_usdc:.2f} on {fill.market_id}"
 
 
 def _same_position(position: Position, fill: FillRecord) -> bool:

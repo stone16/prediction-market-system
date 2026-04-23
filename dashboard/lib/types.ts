@@ -62,6 +62,16 @@ export type DecisionOpportunity = {
   composition_trace: Record<string, unknown>;
 };
 
+export type EventLogEntry = {
+  event_id: number;
+  event_type: string;
+  created_at: string;
+  summary: string;
+  market_id?: string | null;
+  decision_id?: string | null;
+  fill_id?: string | null;
+};
+
 export type MetricsAggregate = {
   brier_overall: number | null;
   brier_by_category: Record<string, number>;

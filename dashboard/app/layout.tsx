@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { ConnectionBanner } from '@/components/ConnectionBanner';
+import { EventLogDrawer } from '@/components/EventLogDrawer';
 import { OnboardingPanel } from '@/components/OnboardingPanel';
 import { SourceBadgePortals } from '@/components/SourceBadgePortals';
 import { SourceBanner } from '@/components/SourceBanner';
@@ -27,6 +28,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
               <ConnectionBanner />
               <SourceBadgePortals />
               <OnboardingPanel />
+              <EventLogDrawer />
               {children}
             </OnboardingProvider>
           </SourceProvider>
