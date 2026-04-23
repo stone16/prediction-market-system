@@ -195,6 +195,14 @@ class Market:
     created_at: datetime
     last_seen_at: datetime
     volume_24h: float | None = None
+    yes_price: float | None = None
+    no_price: float | None = None
+    best_bid: float | None = None
+    best_ask: float | None = None
+    last_trade_price: float | None = None
+    liquidity: float | None = None
+    spread_bps: int | None = None
+    price_updated_at: datetime | None = None
 
 
 @dataclass(frozen=True)
