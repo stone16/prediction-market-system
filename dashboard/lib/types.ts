@@ -102,6 +102,46 @@ export type MarketsListResponse = {
   total: number;
 };
 
+export type PositionRow = {
+  market_id: string;
+  token_id: string | null;
+  venue: string;
+  side: string;
+  shares_held: number;
+  avg_entry_price: number;
+  unrealized_pnl: number;
+  locked_usdc: number;
+};
+
+export type PositionsResponse = {
+  positions: PositionRow[];
+};
+
+export type TradeRow = {
+  trade_id: string;
+  fill_id: string;
+  order_id: string;
+  decision_id: string;
+  market_id: string;
+  question: string;
+  token_id: string | null;
+  venue: string;
+  side: string;
+  fill_price: number;
+  fill_notional_usdc: number;
+  fill_quantity: number;
+  executed_at: string;
+  filled_at: string;
+  status: string;
+  strategy_id: string;
+  strategy_version_id: string;
+};
+
+export type TradesResponse = {
+  trades: TradeRow[];
+  limit: number;
+};
+
 export type StrategyRow = {
   strategy_id: string;
   active_version_id: string | null;

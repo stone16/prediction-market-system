@@ -160,6 +160,20 @@ textarea:focus-visible {
   padding: 8px 12px;
 }
 
+.nav-tour-button {
+  align-items: center;
+  background: rgb(255 255 255 / 75%);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  height: 38px;
+  justify-content: center;
+  width: 38px;
+}
+
 .page {
   margin: 0 auto;
   max-width: 1180px;
@@ -253,6 +267,11 @@ h3 {
 
 .card {
   position: relative;
+}
+
+.table-primary-cell {
+  display: grid;
+  gap: 4px;
 }
 
 .layer-card {
@@ -977,6 +996,64 @@ th {
   color: #fff;
   min-height: 44px;
   padding: var(--space-3) var(--space-4);
+}
+
+.onboarding-backdrop {
+  align-items: flex-start;
+  background: rgb(12 15 17 / 48%);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 80px 24px 32px;
+  position: fixed;
+  z-index: 40;
+}
+
+.onboarding-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 70px rgb(12 15 17 / 18%);
+  max-width: 42rem;
+  padding: 24px;
+  width: min(42rem, 100%);
+}
+
+.onboarding-panel__header {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.onboarding-panel__close {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 1.75rem;
+  line-height: 1;
+  padding: 0;
+}
+
+.onboarding-steps {
+  display: grid;
+  gap: 16px;
+  margin: 24px 0 0;
+  padding-left: 20px;
+}
+
+.onboarding-step {
+  padding-left: 8px;
+}
+
+.onboarding-step__meta {
+  margin-bottom: 8px;
+}
+
+.onboarding-step__body {
+  display: grid;
+  gap: 6px;
 }
 
 .connection-banner {

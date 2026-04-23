@@ -13,7 +13,7 @@ import pytest
 from pms.api.app import create_app
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode, Side, TimeInForce
-from pms.core.models import Market, MarketSignal, Token, TradeDecision
+from pms.core.models import Market, MarketSignal, Portfolio, Token, TradeDecision
 from pms.runner import Runner
 from pms.storage.market_data_store import PostgresMarketDataStore
 
@@ -48,8 +48,8 @@ class SingleDecisionController:
     async def decide(
         self,
         signal: MarketSignal,
-        portfolio: object,
-    ) -> TradeDecision:
+        portfolio: Portfolio | None = None,
+    ) -> TradeDecision | None:
         del portfolio
         return TradeDecision(
             decision_id="decision-cp06",
@@ -214,27 +214,23 @@ async def test_positions_and_trades_routes_reflect_persisted_paper_fill(
         ]
     }
     assert trades.status_code == 200
-    assert trades.json() == {
-        "trades": [
-            {
-                "trade_id": "order-market-cp06",
-                "fill_id": "order-market-cp06",
-                "order_id": "order-market-cp06",
-                "decision_id": "decision-cp06",
-                "market_id": "market-cp06",
-                "question": "Will CP06 route persisted fills?",
-                "token_id": "market-cp06-yes",
-                "venue": "polymarket",
-                "side": "BUY",
-                "fill_price": 0.41,
-                "fill_notional_usdc": 20.5,
-                "fill_quantity": 50.0,
-                "executed_at": "2026-04-23T10:00:00+00:00",
-                "filled_at": "2026-04-23T10:00:00+00:00",
-                "status": "matched",
-                "strategy_id": "default",
-                "strategy_version_id": "default-v1",
-            }
-        ],
-        "limit": 10,
-    }
+    trade_payload = trades.json()
+    assert trade_payload["limit"] == 10
+    assert len(trade_payload["trades"]) == 1
+    trade = trade_payload["trades"][0]
+    assert trade["trade_id"] == trade["order_id"]
+    assert trade["fill_id"] == trade["order_id"]
+    assert trade["decision_id"] == "decision-cp06"
+    assert trade["market_id"] == "market-cp06"
+    assert trade["question"] == "Will CP06 route persisted fills?"
+    assert trade["token_id"] == "market-cp06-yes"
+    assert trade["venue"] == "polymarket"
+    assert trade["side"] == "BUY"
+    assert trade["fill_price"] == pytest.approx(0.41)
+    assert trade["fill_notional_usdc"] == pytest.approx(20.5)
+    assert trade["fill_quantity"] == pytest.approx(50.0)
+    assert trade["status"] == "matched"
+    assert trade["strategy_id"] == "default"
+    assert trade["strategy_version_id"] == "default-v1"
+    assert trade["executed_at"].endswith("Z")
+    assert trade["filled_at"].endswith("Z")

@@ -12,9 +12,13 @@ import type {
   Feedback,
   MarketRow,
   MetricsResponse,
+  PositionRow,
+  PositionsResponse,
   Signal,
   SignalDepth,
   StatusResponse,
+  TradeRow,
+  TradesResponse,
   StrategyMetricsResponse,
   StrategiesResponse
 } from './types';
@@ -70,6 +74,81 @@ export function mockDecisions(): Decision[] {
     price: 0.42 + (index % 5) / 100,
     side: 'BUY'
   }));
+}
+
+export function mockPositions(): PositionsResponse {
+  const positions: PositionRow[] = [
+    {
+      market_id: 'market-000',
+      token_id: 'market-000-yes',
+      venue: 'polymarket',
+      side: 'BUY',
+      shares_held: 50.0,
+      avg_entry_price: 0.41,
+      unrealized_pnl: 0.0,
+      locked_usdc: 20.5
+    },
+    {
+      market_id: 'market-003',
+      token_id: 'market-003-yes',
+      venue: 'polymarket',
+      side: 'BUY',
+      shares_held: 32.0,
+      avg_entry_price: 0.53,
+      unrealized_pnl: 0.0,
+      locked_usdc: 16.96
+    }
+  ];
+
+  return { positions };
+}
+
+export function mockTrades(limit = 20): TradesResponse {
+  const rows: TradeRow[] = [
+    {
+      trade_id: 'trade-000',
+      fill_id: 'fill-000',
+      order_id: 'order-000',
+      decision_id: 'decision-000',
+      market_id: 'market-000',
+      question: 'Will market 000 settle above consensus?',
+      token_id: 'market-000-yes',
+      venue: 'polymarket',
+      side: 'BUY',
+      fill_price: 0.41,
+      fill_notional_usdc: 20.5,
+      fill_quantity: 50.0,
+      executed_at: '2026-04-23T09:00:00Z',
+      filled_at: '2026-04-23T09:00:00Z',
+      status: 'matched',
+      strategy_id: 'default',
+      strategy_version_id: 'default-v1'
+    },
+    {
+      trade_id: 'trade-001',
+      fill_id: 'fill-001',
+      order_id: 'order-001',
+      decision_id: 'decision-001',
+      market_id: 'market-003',
+      question: 'Will market 003 settle above consensus?',
+      token_id: 'market-003-yes',
+      venue: 'polymarket',
+      side: 'BUY',
+      fill_price: 0.53,
+      fill_notional_usdc: 16.96,
+      fill_quantity: 32.0,
+      executed_at: '2026-04-23T08:30:00Z',
+      filled_at: '2026-04-23T08:30:00Z',
+      status: 'matched',
+      strategy_id: 'default',
+      strategy_version_id: 'default-v1'
+    }
+  ];
+
+  return {
+    trades: rows.slice(0, limit),
+    limit
+  };
 }
 
 export function mockMetrics(): MetricsResponse {

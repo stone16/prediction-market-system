@@ -28,9 +28,11 @@ from pms.api.routes.factors import list_factor_catalog, list_factor_series
 from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
 from pms.api.routes.markets import list_markets as list_markets_items
+from pms.api.routes.positions import list_positions as list_positions_items
 from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
 from pms.api.routes.strategies import list_strategy_metrics as list_strategy_metrics_items
 from pms.api.routes.strategies import list_strategies as list_strategies_items
+from pms.api.routes.trades import list_trades as list_trades_items
 from pms.config import PMSSettings
 from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, MarketSignal, TradeDecision
@@ -149,6 +151,20 @@ def create_app(
             limit=limit,
             offset=offset,
         )
+        return payload.model_dump(mode="json")
+
+    @app.get("/positions", dependencies=[Depends(require_api_token)])
+    async def positions() -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await list_positions_items(active_runner.fill_store)
+        return payload.model_dump(mode="json")
+
+    @app.get("/trades", dependencies=[Depends(require_api_token)])
+    async def trades(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await list_trades_items(active_runner.fill_store, limit=limit)
         return payload.model_dump(mode="json")
 
     @app.get("/signals/{market_id}/depth")

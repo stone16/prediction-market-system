@@ -338,21 +338,21 @@ async def test_runner_close_pg_pool_unbinds_eval_and_feedback_stores(
         feedback_store=FeedbackStore(),
         fill_store=FillStore(),
     )
+    eval_store = runner.eval_store
+    feedback_store = runner.feedback_store
+    fill_store = runner.fill_store
 
     runner.bind_pg_pool(cast(Any, fake_pool))
 
-    assert isinstance(runner.eval_store, EvalStore)
-    assert isinstance(runner.feedback_store, FeedbackStore)
-    assert isinstance(runner.fill_store, FillStore)
-    assert runner.eval_store.pool is fake_pool
-    assert runner.feedback_store.pool is fake_pool
-    assert runner.fill_store.pool is fake_pool
+    assert eval_store.pool is fake_pool
+    assert feedback_store.pool is fake_pool
+    assert fill_store.pool is fake_pool
 
     await runner.close_pg_pool()
 
-    assert runner.eval_store.pool is None
-    assert runner.feedback_store.pool is None  # type: ignore[unreachable]
-    assert runner.fill_store.pool is None  # type: ignore[unreachable]
+    assert getattr(eval_store, "pool", None) is None
+    assert getattr(feedback_store, "pool", None) is None
+    assert getattr(fill_store, "pool", None) is None
 
 
 @pytest.mark.asyncio

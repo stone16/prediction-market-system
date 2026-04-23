@@ -145,9 +145,7 @@ class _FlakyFillStore(_RecordingFillStore):
 
 
 def _mark_controller_done(runner: Runner) -> None:
-    future = asyncio.get_running_loop().create_future()
-    future.set_result(None)
-    runner._controller_task = future  # noqa: SLF001
+    runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
 
 
 async def _run_actuator_loop(runner: Runner) -> None:

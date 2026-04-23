@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import asyncpg
 
-from pms.core.models import FillRecord, Venue
+from pms.core.models import FillRecord, Position, Venue
 
 
 _CREATE_FILL_PAYLOADS_TABLE = """
@@ -102,11 +102,93 @@ class FillStore:
             return None
         return _fill_from_row(row)
 
+    async def read_positions(self) -> list[Position]:
+        async with self._pool().acquire() as connection:
+            await _ensure_fill_payloads_table(connection)
+            rows = await connection.fetch(
+                """
+                SELECT
+                    fills.market_id,
+                    fill_payloads.payload->>'token_id' AS token_id,
+                    fill_payloads.payload->>'venue' AS venue,
+                    fill_payloads.payload->>'side' AS side,
+                    SUM(fills.fill_quantity) AS shares_held,
+                    CASE
+                        WHEN SUM(fills.fill_quantity) = 0 THEN 0.0
+                        ELSE SUM(fills.fill_notional_usdc) / SUM(fills.fill_quantity)
+                    END AS avg_entry_price,
+                    SUM(fills.fill_notional_usdc) AS locked_usdc
+                FROM fills
+                INNER JOIN fill_payloads
+                    ON fill_payloads.fill_id = fills.fill_id
+                GROUP BY
+                    fills.market_id,
+                    fill_payloads.payload->>'token_id',
+                    fill_payloads.payload->>'venue',
+                    fill_payloads.payload->>'side'
+                ORDER BY MAX(fills.ts) DESC, fills.market_id ASC
+                """
+            )
+        return [_position_from_row(row) for row in rows]
+
+    async def read_trades(self, *, limit: int) -> list["StoredTradeRow"]:
+        async with self._pool().acquire() as connection:
+            await _ensure_fill_payloads_table(connection)
+            rows = await connection.fetch(
+                """
+                SELECT
+                    fills.fill_id,
+                    fills.order_id,
+                    fills.market_id,
+                    fills.ts,
+                    fills.fill_notional_usdc,
+                    fills.fill_quantity,
+                    fills.strategy_id,
+                    fills.strategy_version_id,
+                    fill_payloads.payload,
+                    COALESCE(markets.question, fills.market_id) AS question
+                FROM fills
+                LEFT JOIN fill_payloads
+                    ON fill_payloads.fill_id = fills.fill_id
+                LEFT JOIN markets
+                    ON markets.condition_id = fills.market_id
+                ORDER BY fills.ts DESC, fills.fill_id DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [
+            _trade_from_row(row)
+            for row in rows
+            if row["payload"] is not None
+        ]
+
     def _pool(self) -> asyncpg.Pool:
         if self.pool is None:
             msg = "FillStore pool is not bound"
             raise RuntimeError(msg)
         return self.pool
+
+
+@dataclass(frozen=True)
+class StoredTradeRow:
+    trade_id: str
+    fill_id: str
+    order_id: str
+    decision_id: str
+    market_id: str
+    question: str
+    token_id: str | None
+    venue: Venue
+    side: str
+    fill_price: float
+    fill_notional_usdc: float
+    fill_quantity: float
+    executed_at: datetime
+    filled_at: datetime
+    status: str
+    strategy_id: str
+    strategy_version_id: str
 
 
 async def _ensure_fill_payloads_table(connection: asyncpg.Connection) -> None:
@@ -159,6 +241,42 @@ def _fill_from_row(row: asyncpg.Record) -> FillRecord:
         liquidity_side=cast(str | None, payload.get("liquidity_side")),
         transaction_ref=cast(str | None, payload.get("transaction_ref")),
         resolved_outcome=cast(float | None, payload.get("resolved_outcome")),
+    )
+
+
+def _position_from_row(row: asyncpg.Record) -> Position:
+    return Position(
+        market_id=cast(str, row["market_id"]),
+        token_id=cast(str | None, row["token_id"]),
+        venue=cast(Venue, row["venue"]),
+        side=cast(str, row["side"]),
+        shares_held=float(cast(float, row["shares_held"])),
+        avg_entry_price=float(cast(float, row["avg_entry_price"])),
+        unrealized_pnl=0.0,
+        locked_usdc=float(cast(float, row["locked_usdc"])),
+    )
+
+
+def _trade_from_row(row: asyncpg.Record) -> StoredTradeRow:
+    payload = _json_object(row["payload"])
+    return StoredTradeRow(
+        trade_id=cast(str, payload["trade_id"]),
+        fill_id=cast(str, row["fill_id"]),
+        order_id=cast(str, row["order_id"]),
+        decision_id=cast(str, payload["decision_id"]),
+        market_id=cast(str, row["market_id"]),
+        question=cast(str, row["question"]),
+        token_id=cast(str | None, payload.get("token_id")),
+        venue=cast(Venue, payload["venue"]),
+        side=cast(str, payload["side"]),
+        fill_price=cast(float, payload["fill_price"]),
+        fill_notional_usdc=cast(float, row["fill_notional_usdc"]),
+        fill_quantity=cast(float, row["fill_quantity"]),
+        executed_at=datetime.fromisoformat(cast(str, payload["executed_at"])),
+        filled_at=cast(datetime, row["ts"]),
+        status=cast(str, payload["status"]),
+        strategy_id=cast(str, row["strategy_id"]),
+        strategy_version_id=cast(str, row["strategy_version_id"]),
     )
 
 

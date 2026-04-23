@@ -1,17 +1,22 @@
+'use client';
+
 import Link from 'next/link';
+import { useOnboarding } from '@/lib/OnboardingContext';
 
 const navItems = [
   { href: '/markets', label: 'Markets' },
   { href: '/overview', label: 'Watchlist' },
   { href: '/decisions', label: 'Ideas' },
-  { href: '/backtest', label: 'Trades' },
-  { href: '/strategies', label: 'Positions' },
+  { href: '/trades', label: 'Trades' },
+  { href: '/positions', label: 'Positions' },
   { href: '/metrics', label: 'Performance' },
   { href: '/strategies', label: 'Strategies' },
   { href: '/backtest', label: 'Backtest' }
 ] as const;
 
 export function Nav() {
+  const { openOnboarding } = useOnboarding();
+
   return (
     <nav className="nav" aria-label="Dashboard navigation">
       <Link href="/" className="brand">
@@ -24,6 +29,14 @@ export function Nav() {
             {item.label}
           </Link>
         ))}
+        <button
+          aria-label="Redo tour"
+          className="nav-tour-button"
+          onClick={openOnboarding}
+          type="button"
+        >
+          ?
+        </button>
       </div>
     </nav>
   );

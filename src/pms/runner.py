@@ -64,6 +64,7 @@ from pms.sensor.stream import SensorStream
 from pms.storage.dedup_store import InMemoryDedupStore, PgDedupStore
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.fill_store import FillStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.opportunity_store import OpportunityStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
@@ -155,6 +156,7 @@ class Runner:
     sensors: Sequence[ISensor] | None = None
     eval_store: EvalStore = field(default_factory=EvalStore)
     feedback_store: FeedbackStore = field(default_factory=FeedbackStore)
+    fill_store: FillStore = field(default_factory=FillStore)
     opportunity_store: OpportunityStore = field(default_factory=OpportunityStore)
     portfolio: Portfolio = field(default_factory=lambda: Portfolio(
         total_usdc=1000.0,
@@ -626,6 +628,8 @@ class Runner:
             self.eval_store.bind_pool(self._pg_pool)
         if isinstance(self.feedback_store, FeedbackStore):
             self.feedback_store.bind_pool(self._pg_pool)
+        if isinstance(self.fill_store, FillStore):
+            self.fill_store.bind_pool(self._pg_pool)
         if isinstance(self.opportunity_store, OpportunityStore):
             self.opportunity_store.bind_pool(self._pg_pool)
         self.actuator_executor = self._build_executor(self.config.mode)
@@ -637,6 +641,8 @@ class Runner:
             self.eval_store.pool = None
         if isinstance(self.feedback_store, FeedbackStore):
             self.feedback_store.pool = None
+        if isinstance(self.fill_store, FillStore):
+            self.fill_store.pool = None
         if isinstance(self.opportunity_store, OpportunityStore):
             self.opportunity_store.pool = None
         self.actuator_executor = self._build_executor(self.config.mode)
@@ -758,6 +764,10 @@ class Runner:
                 fill = _fill_from_order(order_state, decision, signal)
                 if fill is not None:
                     _append_bounded(self.state.fills, fill)
+                    try:
+                        await self.fill_store.insert(fill)
+                    except Exception as error:  # noqa: BLE001
+                        logger.warning("fill persistence failed: %s", error)
                     self.portfolio = _portfolio_with_fill(self.portfolio, fill)
                     self._evaluator_spool.enqueue(fill, decision)
             except Exception as error:
