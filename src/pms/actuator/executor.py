@@ -39,11 +39,14 @@ class ActuatorExecutor:
         self,
         decision: TradeDecision,
         portfolio: Portfolio,
+        *,
+        dedup_acquired: bool = False,
     ) -> OrderState:
         final_state: OrderState | None = None
         release_outcome: str | None = None
-        acquired = False
-        acquired = await self.dedup_store.acquire(decision)
+        acquired = dedup_acquired
+        if not acquired:
+            acquired = await self.dedup_store.acquire(decision)
         if not acquired:
             final_state = _rejected_order_state(decision, "duplicate_decision")
             await self.feedback.generate(final_state, reason="duplicate_decision")

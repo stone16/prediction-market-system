@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -140,6 +140,17 @@ class DetachedControllerRuntime:
     task: asyncio.Task[None] | None
 
 
+@dataclass(frozen=True)
+class ActuatorWorkItem:
+    decision: TradeDecision
+    signal: MarketSignal | None
+    dedup_acquired: bool = False
+
+    def __iter__(self) -> Iterator[TradeDecision | MarketSignal | None]:
+        yield self.decision
+        yield self.signal
+
+
 @dataclass
 class RunnerState:
     mode: RunMode
@@ -173,7 +184,7 @@ class Runner:
     state: RunnerState = field(init=False)
     actuator_executor: ActuatorExecutor = field(init=False)
     _evaluator_spool: EvalSpool = field(init=False)
-    _decision_queue: asyncio.Queue[tuple[TradeDecision, MarketSignal]] = field(
+    _decision_queue: asyncio.Queue[ActuatorWorkItem] = field(
         init=False,
     )
     _stop_event: asyncio.Event = field(init=False)
@@ -263,6 +274,9 @@ class Runner:
     @property
     def pg_pool(self) -> asyncpg.Pool | None:
         return self._pg_pool
+
+    async def enqueue_accepted_decision(self, decision: TradeDecision) -> None:
+        await self._enqueue_decision(decision, signal=None, dedup_acquired=True)
 
     async def ensure_pg_pool(self) -> None:
         if self._pg_pool is not None:
@@ -701,6 +715,8 @@ class Runner:
 
             try:
                 _append_bounded(self.state.signals, signal)
+                if self.config.mode == RunMode.PAPER:
+                    self._paper_orderbooks[signal.market_id] = signal.orderbook
                 for strategy_id, runtime in tuple(self._controller_runtimes.items()):
                     if not _matches_strategy_scope(runtime.asset_ids, signal):
                         continue
@@ -762,7 +778,7 @@ class Runner:
                             expires_at=expires_at,
                         )
                         _append_bounded(self.state.decisions, decision)
-                        await self._decision_queue.put((decision, signal))
+                        await self._enqueue_decision(decision, signal=signal)
                 finally:
                     queue.task_done()
         except asyncio.CancelledError:
@@ -789,16 +805,20 @@ class Runner:
             if self._should_stop_actuator():
                 return
             try:
-                decision, signal = await asyncio.wait_for(self._decision_queue.get(), 0.05)
+                raw_work_item = await asyncio.wait_for(self._decision_queue.get(), 0.05)
             except TimeoutError:
                 continue
 
             try:
-                if self.config.mode == RunMode.PAPER:
+                work_item = _coerce_actuator_work_item(raw_work_item)
+                decision = work_item.decision
+                signal = work_item.signal
+                if self.config.mode == RunMode.PAPER and signal is not None:
                     self._paper_orderbooks[decision.market_id] = signal.orderbook
                 order_state = await self.actuator_executor.execute(
                     decision,
                     self.portfolio,
+                    dedup_acquired=work_item.dedup_acquired,
                 )
                 _append_bounded(self.state.orders, order_state)
                 fill = _fill_from_order(order_state, decision, signal)
@@ -832,6 +852,21 @@ class Runner:
                 await self._sweep_expired_decisions_once()
             except Exception as error:  # noqa: BLE001
                 logger.warning("decision expiry sweep failed: %s", error)
+
+    async def _enqueue_decision(
+        self,
+        decision: TradeDecision,
+        *,
+        signal: MarketSignal | None,
+        dedup_acquired: bool = False,
+    ) -> None:
+        await self._decision_queue.put(
+            ActuatorWorkItem(
+                decision=decision,
+                signal=signal,
+                dedup_acquired=dedup_acquired,
+            )
+        )
 
     async def _sweep_expired_decisions_once(
         self,
@@ -1370,7 +1405,7 @@ def _default_active_strategy(settings: PMSSettings) -> ActiveStrategy:
 def _fill_from_order(
     order_state: OrderState,
     decision: TradeDecision,
-    signal: MarketSignal,
+    signal: MarketSignal | None,
 ) -> FillRecord | None:
     if order_state.status != OrderStatus.MATCHED.value or order_state.fill_price is None:
         return None
@@ -1453,11 +1488,36 @@ def _same_position(position: Position, fill: FillRecord) -> bool:
     )
 
 
-def _resolved_outcome(signal: MarketSignal) -> float | None:
+def _resolved_outcome(signal: MarketSignal | None) -> float | None:
+    if signal is None:
+        return None
     raw_outcome = signal.external_signal.get("resolved_outcome")
     if raw_outcome is not None:
         return min(max(float(raw_outcome), 0.0), 1.0)
     return None
+
+
+def _coerce_actuator_work_item(
+    work_item: object,
+) -> ActuatorWorkItem:
+    if isinstance(work_item, ActuatorWorkItem):
+        return work_item
+    if isinstance(work_item, tuple) and len(work_item) == 2:
+        decision, signal = work_item
+        return ActuatorWorkItem(
+            decision=cast(TradeDecision, decision),
+            signal=cast(MarketSignal | None, signal),
+            dedup_acquired=False,
+        )
+    if isinstance(work_item, tuple) and len(work_item) == 3:
+        decision, signal, dedup_acquired = work_item
+        return ActuatorWorkItem(
+            decision=cast(TradeDecision, decision),
+            signal=cast(MarketSignal | None, signal),
+            dedup_acquired=bool(dedup_acquired),
+        )
+    msg = f"unsupported actuator work item: {type(work_item)!r}"
+    raise TypeError(msg)
 
 
 def _raw_factor_steps(

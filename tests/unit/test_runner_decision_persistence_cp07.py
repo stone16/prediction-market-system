@@ -173,9 +173,10 @@ async def test_controller_pipeline_persists_decision_before_enqueuing_it() -> No
         "opportunity-cp07"
     ]
     assert [item.decision_id for item in runner.state.decisions] == ["decision-cp07"]
-    decision, signal = runner._decision_queue.get_nowait()  # noqa: SLF001
-    assert decision.decision_id == "decision-cp07"
-    assert signal.market_id == "market-cp07"
+    work_item = runner._decision_queue.get_nowait()  # noqa: SLF001
+    assert work_item.decision.decision_id == "decision-cp07"
+    assert work_item.signal is not None
+    assert work_item.signal.market_id == "market-cp07"
 
     decision_store = cast(_RecordingDecisionStore, runner.decision_store)
     assert decision_store.calls == [("decision-cp07", "snapshot-cp07", "pending")]

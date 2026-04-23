@@ -11,7 +11,7 @@ import pytest
 from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, OrderStatus, RunMode, Side, TimeInForce
 from pms.core.models import MarketSignal, OrderState, Portfolio, TradeDecision
-from pms.runner import Runner
+from pms.runner import ActuatorWorkItem, Runner
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -107,8 +107,10 @@ class _ExecutorDouble:
         self,
         decision: TradeDecision,
         portfolio: Portfolio,
+        *,
+        dedup_acquired: bool = False,
     ) -> OrderState:
-        del portfolio
+        del portfolio, dedup_acquired
         self.calls.append(decision.market_id)
         return _matched_order(decision)
 
@@ -161,7 +163,9 @@ async def test_actuator_loop_persists_fill_after_appending_runner_state() -> Non
     _mark_controller_done(runner)
 
     decision = _decision(market_id="market-cp06-a")
-    await runner._decision_queue.put((decision, _signal(market_id="market-cp06-a")))  # noqa: SLF001
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(decision, _signal(market_id="market-cp06-a"))
+    )
 
     await _run_actuator_loop(runner)
 
@@ -184,10 +188,16 @@ async def test_actuator_loop_logs_fill_store_failures_and_continues(
     _mark_controller_done(runner)
 
     await runner._decision_queue.put(  # noqa: SLF001
-        (_decision(market_id="market-cp06-a"), _signal(market_id="market-cp06-a"))
+        ActuatorWorkItem(
+            _decision(market_id="market-cp06-a"),
+            _signal(market_id="market-cp06-a"),
+        )
     )
     await runner._decision_queue.put(  # noqa: SLF001
-        (_decision(market_id="market-cp06-b"), _signal(market_id="market-cp06-b"))
+        ActuatorWorkItem(
+            _decision(market_id="market-cp06-b"),
+            _signal(market_id="market-cp06-b"),
+        )
     )
 
     caplog.set_level(logging.WARNING, logger="pms.runner")

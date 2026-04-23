@@ -13,9 +13,19 @@ from typing import Any, TypeVar, cast
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from pms.api.auth import require_api_token
+from pms.api.routes.decisions import (
+    AcceptDecisionRequest,
+    DecisionMarketChangedError,
+    DecisionNotFoundError,
+    DecisionRiskRejectedError,
+    accept_decision as accept_decision_item,
+    get_decision as get_decision_item,
+    list_decisions as list_decisions_items,
+)
 from pms.api.research_routes import (
     compute_backtest_live_comparison,
     enqueue_backtest_runs,
@@ -39,6 +49,7 @@ from pms.core.models import EvalRecord, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
 from pms.runner import Runner
 from pms.storage.schema_check import ensure_schema_current
+from pms.storage.decision_store import DecisionStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 
 
@@ -185,8 +196,22 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return cast(dict[str, Any], _jsonable(payload))
 
-    @app.get("/decisions")
-    async def decisions(limit: int = 50) -> list[dict[str, Any]]:
+    @app.get("/decisions", dependencies=[Depends(require_api_token)])
+    async def decisions(
+        limit: int = Query(default=50, ge=1, le=200),
+        status: str | None = None,
+        include: str | None = None,
+    ) -> list[dict[str, Any]]:
+        include_opportunity = include == "opportunity"
+        if _should_use_durable_decisions(active_runner):
+            rows = await list_decisions_items(
+                cast(Any, active_runner.decision_store),
+                limit=limit,
+                status=status,
+                include_opportunity=include_opportunity,
+            )
+            return [item.model_dump(mode="json") for item in rows]
+
         payloads: list[dict[str, Any]] = []
         for decision in _latest(active_runner.state.decisions, limit):
             payload = cast(dict[str, Any], _jsonable(decision))
@@ -194,6 +219,62 @@ def create_app(
             payload["kelly_size"] = decision.notional_usdc
             payloads.append(payload)
         return payloads
+
+    @app.get("/decisions/{decision_id}", dependencies=[Depends(require_api_token)])
+    async def decision_detail(
+        decision_id: str,
+        include: str | None = None,
+    ) -> dict[str, Any]:
+        if _should_use_durable_decisions(active_runner):
+            row = await get_decision_item(
+                cast(Any, active_runner.decision_store),
+                decision_id=decision_id,
+                include_opportunity=include == "opportunity",
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Decision not found")
+            return row.model_dump(mode="json")
+
+        for decision in active_runner.state.decisions:
+            if decision.decision_id != decision_id:
+                continue
+            payload = cast(dict[str, Any], _jsonable(decision))
+            payload["forecaster"] = _forecaster(decision)
+            payload["kelly_size"] = decision.notional_usdc
+            return payload
+        raise HTTPException(status_code=404, detail="Decision not found")
+
+    @app.post(
+        "/decisions/{decision_id}/accept",
+        dependencies=[Depends(require_api_token)],
+    )
+    async def accept_decision(
+        decision_id: str,
+        body: AcceptDecisionRequest,
+    ) -> Any:
+        try:
+            payload = await accept_decision_item(
+                cast(Any, active_runner.decision_store),
+                decision_id=decision_id,
+                factor_snapshot_hash=body.factor_snapshot_hash,
+                dedup_store=cast(Any, active_runner.actuator_executor.dedup_store),
+                risk=cast(Any, active_runner.actuator_executor.risk),
+                portfolio=active_runner.portfolio,
+                enqueue=active_runner.enqueue_accepted_decision,
+            )
+        except DecisionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DecisionMarketChangedError as exc:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": str(exc),
+                    "current_factor_snapshot_hash": exc.current_factor_snapshot_hash,
+                },
+            )
+        except DecisionRiskRejectedError as exc:
+            raise HTTPException(status_code=422, detail=exc.reason) from exc
+        return payload.model_dump(mode="json")
 
     @app.get("/metrics")
     async def metrics() -> dict[str, Any]:
@@ -428,6 +509,15 @@ def _max_drawdown(records: list[EvalRecord]) -> float:
         peak_equity = max(peak_equity, cumulative_pnl)
         max_drawdown = max(max_drawdown, peak_equity - cumulative_pnl)
     return float(max_drawdown)
+
+
+def _should_use_durable_decisions(runner: Runner) -> bool:
+    store = runner.decision_store
+    if not hasattr(store, "read_decisions") or not hasattr(store, "get_decision"):
+        return False
+    if isinstance(store, DecisionStore) and store.pool is None:
+        return False
+    return True
 
 
 def _is_runner_running(runner: Runner) -> bool:

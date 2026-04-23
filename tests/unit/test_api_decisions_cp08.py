@@ -197,7 +197,7 @@ def _runner(
     enqueue = AsyncMock()
     runner.decision_store = cast(Any, store)
     runner.portfolio = _portfolio()
-    runner.enqueue_accepted_decision = enqueue  # type: ignore[attr-defined]
+    setattr(runner, "enqueue_accepted_decision", enqueue)
     runner.actuator_executor = cast(
         Any,
         SimpleNamespace(
