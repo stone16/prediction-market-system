@@ -635,7 +635,7 @@ A user browsing `/markets` can:
 
 ## Checkpoints
 
-### Checkpoint CP01: Alembic `0006_markets_price_fields`
+### Checkpoint 01: Alembic `0006_markets_price_fields`
 
 - Scope: Add migration `alembic/versions/0006_markets_price_fields.py`
   per §3 Migration `0006`. Include upgrade (8 columns + partial index) and
@@ -660,7 +660,7 @@ A user browsing `/markets` can:
   `src/pms/core/models.py`
 - Effort estimate: S
 
-### Checkpoint CP02: Alembic `0007_market_price_snapshots` + `0008_market_subscriptions`
+### Checkpoint 02: Alembic `0007_market_price_snapshots` + `0008_market_subscriptions`
 
 - Scope: Migrations per §3 `0007` and `0008`. Pair them in one CP
   because they are both new tables with no sensor/API consumers until
@@ -684,7 +684,7 @@ A user browsing `/markets` can:
   (new), `alembic/versions/0008_market_subscriptions.py` (new)
 - Effort estimate: S
 
-### Checkpoint CP03: Gamma row price extraction + `write_market` UPSERT of new columns
+### Checkpoint 03: Gamma row price extraction + `write_market` UPSERT of new columns
 
 - Scope: Extend `_gamma_market_to_market` at
   `src/pms/sensor/adapters/market_discovery.py:119` to parse the 8 price
@@ -729,7 +729,7 @@ A user browsing `/markets` can:
   (a) return `(None, None)`, (b) raise and skip the whole row, (c) return
   `(None, None)` + warning log. See comment in the file.
 
-### Checkpoint CP04: `write_price_snapshot` per Discovery poll + snapshot_lag metric
+### Checkpoint 04: `write_price_snapshot` per Discovery poll + snapshot_lag metric
 
 - Scope: Add `PostgresMarketDataStore.write_price_snapshot(condition_id,
   snapshot_at, yes_price, ..., volume_24h) -> None` that INSERTs into
@@ -760,7 +760,7 @@ A user browsing `/markets` can:
   `src/pms/sensor/adapters/market_discovery.py`
 - Effort estimate: S
 
-### Checkpoint CP05: `/markets` response surfaces price fields + subscription_source
+### Checkpoint 05: `/markets` response surfaces price fields + subscription_source
 
 - Scope: Extend `MarketCatalogRow` + `MarketRow` pydantic models and
   `read_markets` SQL to return the 8 price fields from `markets` plus a
@@ -791,7 +791,7 @@ A user browsing `/markets` can:
   `src/pms/storage/market_data_store.py`
 - Effort estimate: S
 
-### Checkpoint CP06: Subscribe/unsubscribe endpoints + market_subscription_store
+### Checkpoint 06: Subscribe/unsubscribe endpoints + market_subscription_store
 
 - Scope: New `POST/DELETE /markets/{token_id}/subscribe` endpoints per
   §4. New `src/pms/storage/market_subscription_store.py` module with
@@ -818,7 +818,7 @@ A user browsing `/markets` can:
   `src/pms/storage/market_subscription_store.py` (new)
 - Effort estimate: S
 
-### Checkpoint CP07: MarketSelector reads user subscriptions + appends to MergeResult
+### Checkpoint 07: MarketSelector reads user subscriptions + appends to MergeResult
 
 - Scope: Extend `MarketSelector.select()` at
   `src/pms/market_selection/selector.py:28-63` (architectural choice
@@ -862,7 +862,7 @@ A user browsing `/markets` can:
   `src/pms/storage/market_subscription_store.py` (consumer)
 - Effort estimate: M
 
-### Checkpoint CP08: `GET /markets/{condition_id}/price-history` endpoint
+### Checkpoint 08: `GET /markets/{condition_id}/price-history` endpoint
 
 - Scope: New endpoint per §4. SQL: `SELECT ... FROM market_price_snapshots
   WHERE condition_id=$1 AND snapshot_at >= $2 ORDER BY snapshot_at ASC
@@ -882,7 +882,7 @@ A user browsing `/markets` can:
   `src/pms/storage/market_data_store.py`
 - Effort estimate: S
 
-### Checkpoint CP09: `MarketsTable` 8-column rewrite + `FreshnessDot` + `PriceBar` + `SubscribeStar`
+### Checkpoint 09: `MarketsTable` 8-column rewrite + `FreshnessDot` + `PriceBar` + `SubscribeStar`
 
 - Scope: Per §5. Rewrite `MarketsTable.tsx` to the new column set. Drop
   the Market ID column (primary) and the Token IDs column entirely;
@@ -918,7 +918,7 @@ A user browsing `/markets` can:
   `dashboard/lib/types.ts` (extend `MarketRow`)
 - Effort estimate: M
 
-### Checkpoint CP10: `MarketDetailDrawer` shell + URL sync + token IDs with click-to-copy
+### Checkpoint 10: `MarketDetailDrawer` shell + URL sync + token IDs with click-to-copy
 
 - Scope: Right-slide drawer opened by clicking a row. URL updates to
   `?detail=<condition_id>` without triggering route change (use
@@ -947,7 +947,7 @@ A user browsing `/markets` can:
   `dashboard/components/MarketsPageClient.tsx` (wire)
 - Effort estimate: M
 
-### Checkpoint CP11: `PriceHistoryChart` (Recharts) + drawer metrics + subscribe toggle wiring
+### Checkpoint 11: `PriceHistoryChart` (Recharts) + drawer metrics + subscribe toggle wiring
 
 - Scope: Inside the drawer, fetch `GET /markets/{id}/price-history`,
   render a YES-only line chart using **Recharts** (matching
@@ -987,7 +987,7 @@ A user browsing `/markets` can:
   safe style), (c) flip + undo toast for 3s (Gmail style). Note: whichever
   is chosen, a user-visible notification on failure is mandatory per R11.
 
-### Checkpoint CP12: `/markets` filter query params + SQL WHERE
+### Checkpoint 12: `/markets` filter query params + SQL WHERE
 
 - Scope: Backend-only. Extend `read_markets` SQL in
   `src/pms/storage/market_data_store.py:79-130` to accept the 7 filter
@@ -1016,7 +1016,7 @@ A user browsing `/markets` can:
   `src/pms/api/routes/markets.py`
 - Effort estimate: M
 
-### Checkpoint CP13: `MarketsFilterPopover` + `MarketsFilterChips` + `useMarketsFilters` hook + page wiring
+### Checkpoint 13: `MarketsFilterPopover` + `MarketsFilterChips` + `useMarketsFilters` hook + page wiring
 
 - Scope: Frontend-only. `MarketsFilterPopover` component with 7 filter
   controls per §4 query params (free-text search is separate, in the top
@@ -1042,7 +1042,7 @@ A user browsing `/markets` can:
   `dashboard/components/MarketsPageClient.tsx` (wire)
 - Effort estimate: M
 
-### Checkpoint CP14: Pagination controls + page size + e2e happy-path
+### Checkpoint 14: Pagination controls + page size + e2e happy-path
 
 - Scope: `MarketsPagination` component with «, 1, 2, 3, ..., N, »
   controls, page-number input, page-size selector (20 / 50 / 100,
