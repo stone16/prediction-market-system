@@ -1,5 +1,16 @@
 import Link from 'next/link';
 
+const navItems = [
+  { href: '/signals', label: 'Markets' },
+  { href: '/overview', label: 'Watchlist' },
+  { href: '/decisions', label: 'Ideas' },
+  { href: '/backtest', label: 'Trades' },
+  { href: '/strategies', label: 'Positions' },
+  { href: '/metrics', label: 'Performance' },
+  { href: '/strategies', label: 'Strategies' },
+  { href: '/backtest', label: 'Backtest' }
+] as const;
+
 export function Nav() {
   return (
     <nav className="nav" aria-label="Dashboard navigation">
@@ -8,13 +19,11 @@ export function Nav() {
         PMS Console
       </Link>
       <div className="nav-links">
-        <Link href="/">Overview</Link>
-        <Link href="/signals">Signals</Link>
-        <Link href="/factors">Factors</Link>
-        <Link href="/strategies">Strategies</Link>
-        <Link href="/decisions">Decisions</Link>
-        <Link href="/metrics">Metrics</Link>
-        <Link href="/backtest">Backtest</Link>
+        {navItems.map((item) => (
+          <Link href={item.href} key={item.label}>
+            {item.label}
+          </Link>
+        ))}
       </div>
     </nav>
   );
