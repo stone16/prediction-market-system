@@ -10,6 +10,7 @@ import type {
   FactorCatalogResponse,
   FactorSeriesResponse,
   Feedback,
+  MarketRow,
   MetricsResponse,
   Signal,
   SignalDepth,
@@ -41,6 +42,19 @@ export function mockSignals(): Signal[] {
     title: `Synthetic market ${String(index).padStart(3, '0')}`,
     yes_price: 0.3 + (index % 30) / 100,
     fetched_at: new Date(Date.UTC(2026, 3, 1, index % 24, 0, 0)).toISOString()
+  }));
+}
+
+export function mockMarkets(): MarketRow[] {
+  return Array.from({ length: 20 }, (_, index) => ({
+    market_id: `market-${String(index).padStart(3, '0')}`,
+    question: `Will market ${String(index).padStart(3, '0')} settle above consensus?`,
+    venue: 'polymarket',
+    volume_24h: 2400 - index * 73.5,
+    updated_at: new Date(Date.UTC(2026, 3, 23, 12, index, 0)).toISOString(),
+    yes_token_id: `market-${String(index).padStart(3, '0')}-yes`,
+    no_token_id: `market-${String(index).padStart(3, '0')}-no`,
+    subscribed: index % 3 === 0
   }));
 }
 

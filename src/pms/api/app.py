@@ -27,6 +27,7 @@ from pms.api.research_routes import (
 from pms.api.routes.factors import list_factor_catalog, list_factor_series
 from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
+from pms.api.routes.markets import list_markets as list_markets_items
 from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
 from pms.api.routes.strategies import list_strategy_metrics as list_strategy_metrics_items
 from pms.api.routes.strategies import list_strategies as list_strategies_items
@@ -135,6 +136,21 @@ def create_app(
             for signal in _latest(active_runner.state.signals, limit)
         ]
 
+    @app.get("/markets")
+    async def markets(
+        limit: int = Query(default=20, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await list_markets_items(
+            PostgresMarketDataStore(active_runner.pg_pool),
+            current_asset_ids=_current_subscription_asset_ids(active_runner),
+            limit=limit,
+            offset=offset,
+        )
+        return payload.model_dump(mode="json")
+
     @app.get("/signals/{market_id}/depth")
     async def signal_depth(
         market_id: str,
@@ -181,23 +197,15 @@ def create_app(
     @app.get("/subscriptions")
     async def subscriptions() -> dict[str, Any]:
         subscription_controller = active_runner.subscription_controller
-        if (
-            active_runner.state.runner_started_at is None
-            or active_runner.state.mode == RunMode.BACKTEST
-            or subscription_controller is None
-        ):
-            response = SubscriptionStateResponse(
-                asset_ids=[],
-                count=0,
-                last_updated_at=None,
-            )
-            return response.model_dump(mode="json")
-
-        asset_ids = sorted(subscription_controller.current_asset_ids)
+        asset_ids = sorted(_current_subscription_asset_ids(active_runner))
         response = SubscriptionStateResponse(
             asset_ids=asset_ids,
             count=len(asset_ids),
-            last_updated_at=_jsonable(subscription_controller.last_updated_at),
+            last_updated_at=(
+                _jsonable(subscription_controller.last_updated_at)
+                if subscription_controller is not None and asset_ids
+                else None
+            ),
         )
         return response.model_dump(mode="json")
 
@@ -422,6 +430,18 @@ def _should_enforce_schema_check(settings: PMSSettings) -> bool:
     if settings.enforce_schema_check is not None:
         return settings.enforce_schema_check
     return settings.mode in {RunMode.PAPER, RunMode.LIVE}
+
+
+def _current_subscription_asset_ids(runner: Runner) -> frozenset[str]:
+    subscription_controller = runner.subscription_controller
+    if (
+        runner.state.runner_started_at is None
+        or runner.state.mode == RunMode.BACKTEST
+        or subscription_controller is None
+        or not _is_runner_running(runner)
+    ):
+        return frozenset()
+    return subscription_controller.current_asset_ids
 
 
 def _sensor_statuses(runner: Runner) -> list[dict[str, Any]]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
@@ -15,6 +16,17 @@ from pms.core.models import (
     Trade,
     Venue,
 )
+
+
+@dataclass(frozen=True)
+class MarketCatalogRow:
+    market_id: str
+    question: str
+    venue: Venue
+    volume_24h: float | None
+    updated_at: datetime
+    yes_token_id: str | None
+    no_token_id: str | None
 
 
 class PostgresMarketDataStore:
@@ -63,6 +75,59 @@ class PostgresMarketDataStore:
             )
             for row in rows
         ]
+
+    async def read_markets(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        now: datetime | None = None,
+    ) -> tuple[list[MarketCatalogRow], int]:
+        query = """
+        SELECT
+            markets.condition_id AS market_id,
+            markets.question,
+            markets.venue,
+            markets.volume_24h,
+            markets.last_seen_at AS updated_at,
+            MAX(CASE WHEN tokens.outcome = 'YES' THEN tokens.token_id END) AS yes_token_id,
+            MAX(CASE WHEN tokens.outcome = 'NO' THEN tokens.token_id END) AS no_token_id,
+            COUNT(*) OVER() AS total_count
+        FROM markets
+        LEFT JOIN tokens
+            ON tokens.condition_id = markets.condition_id
+        WHERE (markets.resolves_at IS NULL OR markets.resolves_at > $1)
+        GROUP BY
+            markets.condition_id,
+            markets.question,
+            markets.venue,
+            markets.volume_24h,
+            markets.last_seen_at
+        ORDER BY
+            COALESCE(markets.volume_24h, 0) DESC,
+            markets.last_seen_at DESC,
+            markets.condition_id ASC
+        LIMIT $2
+        OFFSET $3
+        """
+        reference_now = now or datetime.now(tz=UTC)
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query, reference_now, limit, offset)
+        if not rows:
+            return [], 0
+        total = cast(int, rows[0]["total_count"])
+        return [
+            MarketCatalogRow(
+                market_id=cast(str, row["market_id"]),
+                question=cast(str, row["question"]),
+                venue=cast(Venue, row["venue"]),
+                volume_24h=cast(float | None, row["volume_24h"]),
+                updated_at=cast(datetime, row["updated_at"]),
+                yes_token_id=cast(str | None, row["yes_token_id"]),
+                no_token_id=cast(str | None, row["no_token_id"]),
+            )
+            for row in rows
+        ], total
 
     async def read_eligible_markets(
         self,

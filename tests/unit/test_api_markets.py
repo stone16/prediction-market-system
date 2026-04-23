@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -26,7 +26,7 @@ def _record(
     return StoredMarketRow(
         market_id=market_id,
         question=question,
-        venue=venue,
+        venue=cast(Any, venue),
         volume_24h=volume_24h,
         updated_at=timestamp,
         yes_token_id=yes_token_id,
@@ -85,7 +85,7 @@ async def test_list_markets_paginates_and_marks_subscribed_rows() -> None:
     assert payload.limit == 2
     assert payload.offset == 2
     assert payload.total == 5
-    assert payload.markets == [
+    assert [row.model_dump(mode="json") for row in payload.markets] == [
         {
             "market_id": "market-2",
             "question": "Will market 2 resolve?",

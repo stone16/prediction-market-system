@@ -134,7 +134,7 @@ async def test_get_markets_returns_20_active_rows_with_subscription_state(
         store,
         market_id="market-expired",
         question="Should not be returned",
-        resolves_at=now - timedelta(minutes=1),
+        resolves_at=now - timedelta(days=2),
         created_at=now - timedelta(days=14),
         updated_at=now - timedelta(days=1),
         volume_24h=9_999.0,

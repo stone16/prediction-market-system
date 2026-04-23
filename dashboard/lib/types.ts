@@ -84,6 +84,24 @@ export type SignalDepth = {
   stale: boolean;
 };
 
+export type MarketRow = {
+  market_id: string;
+  question: string;
+  venue: string;
+  volume_24h: number | null;
+  updated_at: string;
+  yes_token_id: string | null;
+  no_token_id: string | null;
+  subscribed: boolean;
+};
+
+export type MarketsListResponse = {
+  markets: MarketRow[];
+  limit: number;
+  offset: number;
+  total: number;
+};
+
 export type StrategyRow = {
   strategy_id: string;
   active_version_id: string | null;

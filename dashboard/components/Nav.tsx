@@ -1,7 +1,7 @@
 import Link from 'next/link';
 
 const navItems = [
-  { href: '/signals', label: 'Markets' },
+  { href: '/markets', label: 'Markets' },
   { href: '/overview', label: 'Watchlist' },
   { href: '/decisions', label: 'Ideas' },
   { href: '/backtest', label: 'Trades' },
