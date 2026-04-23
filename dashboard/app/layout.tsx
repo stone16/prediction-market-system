@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
+import { ConnectionBanner } from '@/components/ConnectionBanner';
 import { SourceBadgePortals } from '@/components/SourceBadgePortals';
 import { SourceBanner } from '@/components/SourceBanner';
+import { ConnectionProvider } from '@/lib/ConnectionContext';
 import { SourceProvider } from '@/components/SourceProvider';
 import { getDashboardSource } from '@/lib/dashboard-source';
 import './globals.css';
@@ -16,11 +18,14 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="en">
       <body data-dashboard-source={source}>
-        <SourceProvider source={source}>
-          <SourceBanner />
-          <SourceBadgePortals />
-          {children}
-        </SourceProvider>
+        <ConnectionProvider>
+          <SourceProvider source={source}>
+            <SourceBanner />
+            <ConnectionBanner />
+            <SourceBadgePortals />
+            {children}
+          </SourceProvider>
+        </ConnectionProvider>
       </body>
     </html>
   );
