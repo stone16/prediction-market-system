@@ -68,7 +68,10 @@ class MarketDiscoverySensor:
                 backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)
 
     async def poll_once(self) -> None:
-        response = await self.http_client.get("/markets")
+        response = await self.http_client.get(
+            "/markets",
+            params={"active": "true", "closed": "false", "limit": "500"},
+        )
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list):

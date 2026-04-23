@@ -104,6 +104,33 @@ async def test_market_discovery_sensor_polls_gamma_once_and_writes_markets_and_t
 
 
 @pytest.mark.asyncio
+async def test_market_discovery_sensor_requests_active_open_markets_with_page_limit() -> None:
+    store = _store_mock()
+    captured_params: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        captured_params.update(dict(request.url.params))
+        return httpx.Response(200, json=[])
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    assert captured_params.get("active") == "true"
+    assert captured_params.get("closed") == "false"
+    assert captured_params.get("limit") == "500"
+
+
+@pytest.mark.asyncio
 async def test_market_discovery_sensor_preserves_zero_volume_rows() -> None:
     store = _store_mock()
     store_mock = cast(StoreMock, store)
