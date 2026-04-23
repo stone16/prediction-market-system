@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1 --port 3100",
     "build": "next build",
+    "lint": "tsc --noEmit",
     "start": "next start --hostname 127.0.0.1 --port 3100",
     "test": "vitest",
     "test:ci": "vitest run --coverage",

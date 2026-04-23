@@ -116,7 +116,7 @@ describe('upstreamResponse', () => {
         get: () => null
       },
       text: async () => JSON.stringify({ ok: true })
-    } as Response);
+    } as unknown as Response);
 
     const response = await upstreamResponse('/status');
 
