@@ -1,0 +1,27 @@
+191d3e6 test(dashboard): add red vitest scaffold for cp01
+a95ffe0 build(dashboard): complete vitest setup for cp01
+3aafb20 feat(dashboard): add cathedral design foundations
+86cb131 fix(dashboard): narrow dashboard error handling
+e8f68e6 test(cathedral): add cp04 red markets coverage
+f78af59 feat(cathedral): add cp04 markets browse surface
+f208571 test(cathedral): add cp05 red proxy auth coverage
+ad21630 fix(dashboard): forward proxy auth token
+df086c4 test(dashboard): cover proxy fallback branches
+1855853 test(cathedral): add cp06 red persistence coverage
+c9f69b2 feat(cathedral): add cp06 positions trades onboarding
+3a5441c test(cathedral): cover cp06 fill store read models
+0930ee5 test(cathedral): add cp07 red decision durability coverage
+88a1b52 feat(cathedral): persist cp07 decision lifecycle state
+aa0ddec test(cathedral): add cp08 red accept coverage
+4c22e7b feat(cathedral): add cp08 decision accept flow
+84a0129 test(cathedral): add cp09 red ideas coverage
+a106d3c feat(cathedral): add cp09 ideas accept surface
+8f389ac test(cathedral): add cp10 red event stream coverage
+85e76f7 feat(cathedral): add cp10 event log stream
+4ea4b95 test(cathedral): add cp11 red share coverage
+a1ffa09 feat(cathedral): add cp11 public share surface
+e838c8c test(cathedral): add cp12 red hero coverage
+01eb94d feat(cathedral): land cp12 today dashboard
+4558c54 fix(cathedral): stabilize closeout regressions
+3a8ca4e fix(cathedral): satisfy runner typing
+e649245 (HEAD -> feat/pms-cathedral-v1) fix(dashboard): add runnable lint gate

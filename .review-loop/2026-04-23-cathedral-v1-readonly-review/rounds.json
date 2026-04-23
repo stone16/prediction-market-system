@@ -1,0 +1,28 @@
+{
+  "session": {
+    "id": "2026-04-23-cathedral-v1-readonly-review",
+    "scope": "task-diff",
+    "scope_detail": "845d6bd18562ed83c798820b8cae233271ed1028..e6492454c6be39481eb6984adfe82817bc5bdd98",
+    "peer": "codex",
+    "started_at": "2026-04-23T12:27:48Z",
+    "completed_at": "2026-04-23T12:27:48Z",
+    "status": "read_only_complete",
+    "total_rounds": 1
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "peer_findings": [],
+      "peer_output": "NO_FINDINGS: no additional correctness regression found in 845d6bd18562ed83c798820b8cae233271ed1028..e6492454c6be39481eb6984adfe82817bc5bdd98 after the closeout fixes.",
+      "claude_actions": []
+    }
+  ],
+  "summary": {
+    "total_findings": 0,
+    "accepted": 0,
+    "rejected_then_resolved": 0,
+    "escalated": 0,
+    "reported": 0,
+    "files_modified": []
+  }
+}

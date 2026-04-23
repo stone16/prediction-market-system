@@ -28,7 +28,7 @@ CLAUDE.md, contributors expected to follow) → `retired` (resolved).
 | domain-math-piecewise                | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 2 |
 | lifecycle-cleanup-exit-paths         | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 3 |
 | document-instead-of-fix              | 1           | medium   | active     | pms-v1     | pms-v1      | Proposal 4 |
-| cross-checkpoint-integration         | 5           | medium   | proposed   | pms-v1     | pms-research-backtest-v1 | Proposal 5 |
+| cross-checkpoint-integration         | 6           | medium   | proposed   | pms-v1     | cathedral-v1 | Proposal 5 |
 | magnitude-overrun-tests              | 2           | low      | monitoring | pms-v1     | pms-factor-panel-v1 | Proposal 6 |
 | rule-conflict-precedence             | 1           | low      | active     | pms-v1     | pms-v1      | Proposal 7 |
 | runtime-behaviour-vs-design-intent   | 1           | high     | active     | pms-v1     | pms-v1      | Principle |
@@ -40,7 +40,7 @@ CLAUDE.md, contributors expected to follow) → `retired` (resolved).
 | private-helper-boundary-drift        | 1           | medium   | observation| pms-market-data-v1 | pms-market-data-v1 | Observation |
 | skipped-full-verify-pre-merge        | 1           | medium   | observation| pms-factor-panel-v1 | pms-factor-panel-v1 | Observation |
 | empty-harness-phase-artifacts        | 1           | low      | observation| pms-factor-panel-v1 | pms-factor-panel-v1 | Observation |
-| generated-artifact-drift             | 1           | low      | observation| pms-research-backtest-v1 | pms-research-backtest-v1 | Observation |
+| generated-artifact-drift             | 2           | low      | monitoring | pms-research-backtest-v1 | cathedral-v1 | Observation |
 
 Active rules are codified in `/CLAUDE.md` at the repo root (Phase 3D).
 Cross-checkpoint integration remains `proposed` because the harness-side
@@ -111,3 +111,4 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 | pms-strategy-aggregate-v1 | 2026-04-17 | 7   | 7          | 7     | 0       | [2026-04-17-pms-strategy-aggregate-v1.md](./2026-04-17-pms-strategy-aggregate-v1.md) |
 | pms-factor-panel-v1 | 2026-04-18 | 8   | 7          | 9     | 0       | [2026-04-18-pms-factor-panel-v1.md](./2026-04-18-pms-factor-panel-v1.md) |
 | pms-research-backtest-v1 | 2026-04-20 | 13  | 11         | 15    | 0       | [2026-04-20-pms-research-backtest-v1.md](./2026-04-20-pms-research-backtest-v1.md) |
+| cathedral-v1 | 2026-04-23 | 12  | 11         | 13    | 0       | [2026-04-23-cathedral-v1.md](./2026-04-23-cathedral-v1.md) |
