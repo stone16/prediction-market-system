@@ -6,9 +6,9 @@ from typing import cast
 import asyncpg
 import pytest
 
-from pms.core.models import FillRecord, OrderState
+from pms.core.models import FillRecord, OrderState, Position
 from pms.storage.fill_store import FillStore, _json_object as fill_json_object
-from pms.storage.fill_store import _string_list
+from pms.storage.fill_store import StoredTradeRow, _string_list
 from pms.storage.order_store import OrderStore, _json_object as order_json_object
 
 
@@ -31,11 +31,17 @@ class _RecordingConnection:
         self.in_transaction = False
         self.transaction_entries = 0
         self.execute_flags: list[bool] = []
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetch_rows: list[object] = []
 
     async def execute(self, query: str, *args: object) -> str:
         del query, args
         self.execute_flags.append(self.in_transaction)
         return "OK"
+
+    async def fetch(self, query: str, *args: object) -> list[object]:
+        self.fetch_calls.append((query, args))
+        return list(self.fetch_rows)
 
     def transaction(self) -> _TransactionRecorder:
         return _TransactionRecorder(self)
@@ -167,3 +173,102 @@ async def test_fill_store_insert_wraps_shell_and_payload_writes_in_transaction()
 
     assert connection.transaction_entries == 1
     assert connection.execute_flags == [False, True, True]
+
+
+@pytest.mark.asyncio
+async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
+    connection = _RecordingConnection()
+    connection.fetch_rows = [
+        {
+            "market_id": "market-unit-cp10-1",
+            "token_id": "token-unit-cp10-1",
+            "venue": "polymarket",
+            "side": "yes",
+            "shares_held": 400.0,
+            "avg_entry_price": 0.25,
+            "locked_usdc": 100.0,
+        }
+    ]
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    positions = await store.read_positions()
+
+    assert positions == [
+        Position(
+            market_id="market-unit-cp10-1",
+            token_id="token-unit-cp10-1",
+            venue="polymarket",
+            side="yes",
+            shares_held=400.0,
+            avg_entry_price=0.25,
+            unrealized_pnl=0.0,
+            locked_usdc=100.0,
+        )
+    ]
+    assert "GROUP BY" in connection.fetch_calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_fill_store_read_trades_maps_joined_market_rows_and_skips_missing_payloads() -> None:
+    connection = _RecordingConnection()
+    connection.fetch_rows = [
+        {
+            "fill_id": "fill-unit-cp10-1",
+            "order_id": "order-unit-cp10-1",
+            "market_id": "market-unit-cp10-1",
+            "ts": datetime(2026, 4, 21, 10, 0, tzinfo=UTC),
+            "fill_notional_usdc": 100.0,
+            "fill_quantity": 400.0,
+            "strategy_id": "default",
+            "strategy_version_id": "default-v2",
+            "question": "Will CP10 fill rows persist?",
+            "payload": {
+                "trade_id": "trade-unit-cp10-1",
+                "decision_id": "decision-unit-cp10-1",
+                "token_id": "token-unit-cp10-1",
+                "venue": "polymarket",
+                "side": "yes",
+                "fill_price": 0.25,
+                "executed_at": "2026-04-21T10:00:00+00:00",
+                "status": "filled",
+            },
+        },
+        {
+            "fill_id": "fill-unit-cp10-2",
+            "order_id": "order-unit-cp10-2",
+            "market_id": "market-unit-cp10-2",
+            "ts": datetime(2026, 4, 21, 10, 0, tzinfo=UTC),
+            "fill_notional_usdc": 50.0,
+            "fill_quantity": 200.0,
+            "strategy_id": "default",
+            "strategy_version_id": "default-v2",
+            "question": "skip me",
+            "payload": None,
+        },
+    ]
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    trades = await store.read_trades(limit=10)
+
+    assert trades == [
+        StoredTradeRow(
+            trade_id="trade-unit-cp10-1",
+            fill_id="fill-unit-cp10-1",
+            order_id="order-unit-cp10-1",
+            decision_id="decision-unit-cp10-1",
+            market_id="market-unit-cp10-1",
+            question="Will CP10 fill rows persist?",
+            token_id="token-unit-cp10-1",
+            venue="polymarket",
+            side="yes",
+            fill_price=0.25,
+            fill_notional_usdc=100.0,
+            fill_quantity=400.0,
+            executed_at=datetime(2026, 4, 21, 10, 0, tzinfo=UTC),
+            filled_at=datetime(2026, 4, 21, 10, 0, tzinfo=UTC),
+            status="filled",
+            strategy_id="default",
+            strategy_version_id="default-v2",
+        )
+    ]
+    assert connection.fetch_calls[0][1] == (10,)
