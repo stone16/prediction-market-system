@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, test, vi } from 'vitest';
 import { AcceptIdeaButton } from '@/components/AcceptIdeaButton';
 import type { Decision } from '@/lib/types';
@@ -122,23 +122,24 @@ describe('AcceptIdeaButton', () => {
     const button = screen.getByRole('button', { name: 'Accept' });
     fireEvent.click(button);
 
-    await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledTimes(2);
-      expect(fetchSpy).toHaveBeenLastCalledWith('/api/pms/decisions/decision-cp09?include=opportunity');
-      expect(onRefetched).toHaveBeenCalledWith(refetched);
-      expect(onToast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tone: 'error',
-          message: 'Market changed... refresh loaded'
-        })
-      );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
     });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenLastCalledWith('/api/pms/decisions/decision-cp09?include=opportunity');
+    expect(onRefetched).toHaveBeenCalledWith(refetched);
+    expect(onToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tone: 'error',
+        message: 'Market changed... refresh loaded'
+      })
+    );
 
     expect(button).toBeDisabled();
-    vi.advanceTimersByTime(500);
-
-    await waitFor(() => {
-      expect(button).not.toBeDisabled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
     });
+    expect(button).not.toBeDisabled();
   });
 });

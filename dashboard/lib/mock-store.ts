@@ -66,13 +66,43 @@ export function mockDecisions(): Decision[] {
   return Array.from({ length: 18 }, (_, index) => ({
     decision_id: `decision-${index}`,
     market_id: `pm-synthetic-${String(index).padStart(3, '0')}`,
+    token_id: `yes-token-${String(index).padStart(3, '0')}`,
+    venue: 'polymarket',
     forecaster: index % 2 === 0 ? 'StatisticalForecaster' : 'RulesForecaster',
     prob_estimate: 0.56 + (index % 4) / 100,
     expected_edge: 0.08 + (index % 3) / 100,
     kelly_size: 12 + index,
+    notional_usdc: 12 + index,
     resolved_outcome: index % 3 === 0 ? 1 : 0,
     price: 0.42 + (index % 5) / 100,
-    side: 'BUY'
+    limit_price: 0.42 + (index % 5) / 100,
+    side: 'BUY',
+    action: 'BUY',
+    status: 'pending',
+    factor_snapshot_hash: `snapshot-${index}`,
+    created_at: new Date(Date.UTC(2026, 3, 23, 10, index, 0)).toISOString(),
+    expires_at: new Date(Date.UTC(2026, 3, 23, 10, index + 15, 0)).toISOString(),
+    opportunity: {
+      opportunity_id: `opportunity-${index}`,
+      market_id: `pm-synthetic-${String(index).padStart(3, '0')}`,
+      token_id: `yes-token-${String(index).padStart(3, '0')}`,
+      side: 'yes',
+      selected_factor_values: {
+        edge: 0.08 + (index % 3) / 100,
+        liquidity: 0.04 + (index % 4) / 100,
+        urgency: 0.02 + (index % 2) / 100
+      },
+      expected_edge: 0.08 + (index % 3) / 100,
+      rationale: `Market ${String(index).padStart(3, '0')} is priced below the blended forecast while liquidity remains usable.`,
+      target_size_usdc: 12 + index,
+      expiry: new Date(Date.UTC(2026, 3, 23, 10, index + 15, 0)).toISOString(),
+      staleness_policy: 'mock',
+      strategy_id: 'default',
+      strategy_version_id: 'default-v1',
+      created_at: new Date(Date.UTC(2026, 3, 23, 10, index, 0)).toISOString(),
+      factor_snapshot_hash: `snapshot-${index}`,
+      composition_trace: { mode: 'mock', rank: index + 1 }
+    }
   }));
 }
 

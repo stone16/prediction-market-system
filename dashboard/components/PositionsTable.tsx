@@ -18,7 +18,7 @@ export function PositionsTable({ rows }: PositionsTableProps) {
       <EmptyState
         title="No open positions yet."
         body="Accept an idea, then return here to inspect the current cost basis and exposure."
-        cta={{ href: '/decisions', label: 'Browse ideas' }}
+        cta={{ href: '/ideas', label: 'Browse ideas' }}
       />
     );
   }

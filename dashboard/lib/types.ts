@@ -25,13 +25,41 @@ export type Feedback = {
 export type Decision = {
   decision_id: string;
   market_id: string;
+  token_id?: string | null;
+  venue?: string;
   forecaster: string;
   prob_estimate: number;
   expected_edge: number;
   kelly_size: number;
+  notional_usdc?: number;
   resolved_outcome?: number | null;
   price?: number;
+  limit_price?: number;
   side?: string;
+  action?: string | null;
+  status?: 'pending' | 'accepted' | 'rejected' | 'expired' | string;
+  factor_snapshot_hash?: string | null;
+  created_at?: string;
+  expires_at?: string;
+  opportunity?: DecisionOpportunity | null;
+};
+
+export type DecisionOpportunity = {
+  opportunity_id: string;
+  market_id: string;
+  token_id: string;
+  side: string;
+  selected_factor_values: Record<string, number>;
+  expected_edge: number;
+  rationale: string;
+  target_size_usdc: number;
+  expiry: string | null;
+  staleness_policy: string;
+  strategy_id: string;
+  strategy_version_id: string;
+  created_at: string;
+  factor_snapshot_hash: string | null;
+  composition_trace: Record<string, unknown>;
 };
 
 export type MetricsAggregate = {

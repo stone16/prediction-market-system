@@ -6,7 +6,7 @@ import { useOnboarding } from '@/lib/OnboardingContext';
 const navItems = [
   { href: '/markets', label: 'Markets' },
   { href: '/overview', label: 'Watchlist' },
-  { href: '/decisions', label: 'Ideas' },
+  { href: '/ideas', label: 'Ideas' },
   { href: '/trades', label: 'Trades' },
   { href: '/positions', label: 'Positions' },
   { href: '/metrics', label: 'Performance' },

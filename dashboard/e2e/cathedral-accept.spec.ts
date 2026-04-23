@@ -59,7 +59,10 @@ const idea = {
   }
 };
 
-async function seedIdeaRoutes(page: Page, options: { conflict?: boolean } = {}) {
+async function seedIdeaRoutes(
+  page: Page,
+  options: { conflict?: boolean; acceptDelayMs?: number } = {}
+) {
   let accepted = false;
   const networkLog: string[] = [];
 
@@ -89,6 +92,9 @@ async function seedIdeaRoutes(page: Page, options: { conflict?: boolean } = {}) 
         })
       });
       return;
+    }
+    if ((options.acceptDelayMs ?? 0) > 0) {
+      await new Promise((resolve) => setTimeout(resolve, options.acceptDelayMs ?? 0));
     }
     accepted = true;
     await route.fulfill({
@@ -143,7 +149,7 @@ test('accepting an idea shows pending, success toast, and a trade row', async ({
   });
   page.on('pageerror', (error) => errors.push(error.message));
 
-  await seedIdeaRoutes(page);
+  await seedIdeaRoutes(page, { acceptDelayMs: 250 });
   await page.goto('/ideas');
 
   await expect(page.getByRole('heading', { name: 'Ideas' })).toBeVisible();

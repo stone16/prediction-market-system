@@ -28,7 +28,7 @@ export function TradesTable({ rows }: TradesTableProps) {
       <EmptyState
         title="No trades yet."
         body="The fill ledger stays empty until the controller emits an idea and the actuator matches it."
-        cta={{ href: '/decisions', label: 'Browse ideas' }}
+        cta={{ href: '/ideas', label: 'Browse ideas' }}
       />
     );
   }
