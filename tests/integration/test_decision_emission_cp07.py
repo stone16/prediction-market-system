@@ -48,7 +48,7 @@ class SingleOpportunityController:
         portfolio: Portfolio | None = None,
     ) -> tuple[Opportunity, TradeDecision] | None:
         del portfolio
-        created_at = datetime(2026, 4, 23, 10, 0, tzinfo=UTC)
+        created_at = datetime.now(UTC)
         opportunity = Opportunity(
             opportunity_id="opportunity-cp07",
             market_id=signal.market_id,

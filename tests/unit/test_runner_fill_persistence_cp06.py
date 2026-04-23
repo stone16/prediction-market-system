@@ -115,6 +115,20 @@ class _ExecutorDouble:
         return _matched_order(decision)
 
 
+class _LegacyExecutorDouble:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def execute(
+        self,
+        decision: TradeDecision,
+        portfolio: Portfolio,
+    ) -> OrderState:
+        del portfolio
+        self.calls.append(decision.market_id)
+        return _matched_order(decision)
+
+
 class _EvaluatorSpoolDouble:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
@@ -218,3 +232,27 @@ async def test_actuator_loop_logs_fill_store_failures_and_continues(
         ("market-cp06-b", "decision-market-cp06-b"),
     ]
     assert "fill persistence failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_actuator_loop_supports_legacy_executor_without_dedup_kwarg() -> None:
+    runner = _runner()
+    runner.actuator_executor = cast(Any, _LegacyExecutorDouble())
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.fill_store = cast(Any, _RecordingFillStore(runner))
+    _mark_controller_done(runner)
+
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(
+            _decision(market_id="market-cp06-legacy"),
+            _signal(market_id="market-cp06-legacy"),
+            dedup_acquired=True,
+        )
+    )
+
+    await _run_actuator_loop(runner)
+
+    assert [fill.market_id for fill in runner.state.fills] == ["market-cp06-legacy"]
+    assert cast(_LegacyExecutorDouble, runner.actuator_executor).calls == [
+        "market-cp06-legacy"
+    ]

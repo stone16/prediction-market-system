@@ -31,19 +31,20 @@ test('cathedral nav labels render without console errors', async ({ page }) => {
 
   await page.setViewportSize({ width: 1440, height: 1024 });
   await page.goto('/');
+  const navigation = page.getByRole('navigation', { name: 'Dashboard navigation' });
 
   await expect(
-    page.getByRole('link', {
+    navigation.getByRole('link', {
       name: 'Markets'
     })
   ).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Watchlist' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Ideas' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Trades' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Positions' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Performance' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Strategies' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Backtest' })).toBeVisible();
+  await expect(navigation.getByRole('link', { name: 'Watchlist' })).toBeVisible();
+  await expect(navigation.getByRole('link', { name: 'Ideas' })).toBeVisible();
+  await expect(navigation.getByRole('link', { name: 'Trades' })).toBeVisible();
+  await expect(navigation.getByRole('link', { name: 'Positions' })).toBeVisible();
+  await expect(navigation.getByRole('link', { name: 'Performance' })).toBeVisible();
+  await expect(navigation.getByRole('link', { name: 'Strategies' })).toBeVisible();
+  await expect(navigation.getByRole('link', { name: 'Backtest' })).toBeVisible();
 
   await page.screenshot({
     fullPage: true,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import suppress
@@ -834,7 +835,8 @@ class Runner:
                 signal = work_item.signal
                 if self.config.mode == RunMode.PAPER and signal is not None:
                     self._paper_orderbooks[decision.market_id] = signal.orderbook
-                order_state = await self.actuator_executor.execute(
+                order_state = await _execute_actuator_work_item(
+                    self.actuator_executor,
                     decision,
                     self.portfolio,
                     dedup_acquired=work_item.dedup_acquired,
@@ -1563,6 +1565,39 @@ def _coerce_actuator_work_item(
         )
     msg = f"unsupported actuator work item: {type(work_item)!r}"
     raise TypeError(msg)
+
+
+async def _execute_actuator_work_item(
+    executor: Any,
+    decision: TradeDecision,
+    portfolio: Portfolio,
+    *,
+    dedup_acquired: bool,
+) -> OrderState:
+    if dedup_acquired and _executor_accepts_dedup_acquired(executor):
+        return await executor.execute(
+            decision,
+            portfolio,
+            dedup_acquired=True,
+        )
+    return await executor.execute(decision, portfolio)
+
+
+def _executor_accepts_dedup_acquired(executor: Any) -> bool:
+    execute = getattr(executor, "execute", None)
+    if execute is None:
+        return False
+    try:
+        parameters = inspect.signature(execute).parameters.values()
+    except (TypeError, ValueError):
+        return True
+
+    for parameter in parameters:
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "dedup_acquired":
+            return True
+    return False
 
 
 def _raw_factor_steps(
