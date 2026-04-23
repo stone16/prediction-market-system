@@ -12,12 +12,18 @@ export async function upstreamResponse(pathname: string, init?: RequestInit) {
   const baseUrl = process.env.PMS_API_BASE_URL;
   if (!baseUrl) return null;
   const url = new URL(pathname, baseUrl);
+  const headers = new Headers(init?.headers);
+  const apiToken = process.env.PMS_API_TOKEN;
+  if (apiToken) {
+    headers.set('Authorization', `Bearer ${apiToken}`);
+  }
   let response: Response;
   let body: string;
   try {
     response = await fetch(url, {
       cache: 'no-store',
-      ...init
+      ...init,
+      headers
     });
     body = await response.text();
   } catch (error) {
