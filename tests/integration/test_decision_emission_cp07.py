@@ -151,7 +151,7 @@ async def test_runner_persists_pending_decision_rows_on_emission(
     runner = Runner(
         config=_settings(),
         sensors=[OneShotSensor(_signal())],
-        controller=SingleOpportunityController(),
+        controller=cast(Any, SingleOpportunityController()),
     )
     runner.bind_pg_pool(pg_pool)
     runner.actuator_executor = cast(Any, RejectingExecutor())

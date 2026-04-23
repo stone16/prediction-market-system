@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
@@ -62,6 +62,7 @@ from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
 from pms.sensor.stream import SensorStream
 from pms.storage.dedup_store import InMemoryDedupStore, PgDedupStore
+from pms.storage.decision_store import DecisionStore
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 from pms.storage.fill_store import FillStore
@@ -87,6 +88,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_BACKTEST_FIXTURE = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
 RUNNER_STATE_LIMIT = 1000
 RESELECTION_INTERVAL_S = 300.0
+DECISION_PENDING_TTL = timedelta(minutes=15)
+DECISION_SWEEP_INTERVAL_S = 5.0
 RAW_FACTOR_COMPOSITION_ROLES = frozenset(
     {
         "weighted",
@@ -156,6 +159,7 @@ class Runner:
     sensors: Sequence[ISensor] | None = None
     eval_store: EvalStore = field(default_factory=EvalStore)
     feedback_store: FeedbackStore = field(default_factory=FeedbackStore)
+    decision_store: DecisionStore = field(default_factory=DecisionStore)
     fill_store: FillStore = field(default_factory=FillStore)
     opportunity_store: OpportunityStore = field(default_factory=OpportunityStore)
     portfolio: Portfolio = field(default_factory=lambda: Portfolio(
@@ -180,6 +184,7 @@ class Runner:
     _task: asyncio.Task[None] | None = field(init=False, default=None)
     _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
     _owns_pg_pool: bool = field(init=False, default=False)
+    _decision_expiry_task: asyncio.Task[None] | None = field(init=False, default=None)
     _market_selector: MarketSelectorLike | None = field(init=False, default=None)
     _subscription_controller: SubscriptionControllerLike | None = field(
         init=False,
@@ -313,6 +318,8 @@ class Runner:
         tasks.extend(self._controller_pipeline_tasks.values())
         if self._actuator_task is not None:
             tasks.append(self._actuator_task)
+        if self._decision_expiry_task is not None:
+            tasks.append(self._decision_expiry_task)
         if self._reselection_task is not None:
             tasks.append(self._reselection_task)
         if self.evaluator_task is not None:
@@ -357,6 +364,8 @@ class Runner:
             await self._evaluator_spool.start()
             self._controller_task = asyncio.create_task(self._controller_loop())
             self._actuator_task = asyncio.create_task(self._actuator_loop())
+            if self._pg_pool is not None:
+                self._decision_expiry_task = asyncio.create_task(self._decision_expiry_loop())
         except Exception:
             await self._cleanup_after_start_failure()
             raise
@@ -368,6 +377,9 @@ class Runner:
         factor_task = self._factor_service_task
         if factor_task is not None and not factor_task.done():
             factor_task.cancel()
+        decision_expiry_task = self._decision_expiry_task
+        if decision_expiry_task is not None and not decision_expiry_task.done():
+            decision_expiry_task.cancel()
         reselection_task = self._reselection_task
         self._reselection_requested.set()
         self._clear_discovery_poll_complete_hook()
@@ -393,6 +405,7 @@ class Runner:
                         self._controller_task,
                         *self._controller_pipeline_tasks.values(),
                         self._actuator_task,
+                        decision_expiry_task,
                     )
                     if task
                 ),
@@ -424,6 +437,7 @@ class Runner:
         self._factor_service_task = None
         self._controller_task = None
         self._actuator_task = None
+        self._decision_expiry_task = None
         self._market_selector = None
         self._subscription_controller = None
         self._strategy_registry = None
@@ -477,6 +491,11 @@ class Runner:
         await self._decision_queue.join()
         if self._actuator_task is not None:
             await self._actuator_task
+        if (
+            self._decision_expiry_task is not None
+            and self.config.mode == RunMode.BACKTEST
+        ):
+            await self._decision_expiry_task
         await self._evaluator_spool.join()
 
     async def wait_for_signals(self, count: int) -> None:
@@ -628,6 +647,8 @@ class Runner:
             self.eval_store.bind_pool(self._pg_pool)
         if isinstance(self.feedback_store, FeedbackStore):
             self.feedback_store.bind_pool(self._pg_pool)
+        if isinstance(self.decision_store, DecisionStore):
+            self.decision_store.bind_pool(self._pg_pool)
         if isinstance(self.fill_store, FillStore):
             self.fill_store.bind_pool(self._pg_pool)
         if isinstance(self.opportunity_store, OpportunityStore):
@@ -641,6 +662,8 @@ class Runner:
             self.eval_store.pool = None
         if isinstance(self.feedback_store, FeedbackStore):
             self.feedback_store.pool = None
+        if isinstance(self.decision_store, DecisionStore):
+            self.decision_store.pool = None
         if isinstance(self.fill_store, FillStore):
             self.fill_store.pool = None
         if isinstance(self.opportunity_store, OpportunityStore):
@@ -701,6 +724,7 @@ class Runner:
                     continue
 
                 try:
+                    opportunity: Opportunity | None = None
                     decision: TradeDecision | None = None
                     if isinstance(runtime.controller, OpportunityAwareController):
                         emission = await runtime.controller.on_signal(
@@ -721,6 +745,22 @@ class Runner:
                             portfolio=self.portfolio,
                         )
                     if decision is not None:
+                        created_at = _decision_created_at(signal, opportunity)
+                        expires_at = _decision_expires_at(
+                            signal,
+                            opportunity,
+                            created_at=created_at,
+                        )
+                        await self.decision_store.insert(
+                            decision,
+                            factor_snapshot_hash=(
+                                opportunity.factor_snapshot_hash
+                                if opportunity is not None
+                                else None
+                            ),
+                            created_at=created_at,
+                            expires_at=expires_at,
+                        )
                         _append_bounded(self.state.decisions, decision)
                         await self._decision_queue.put((decision, signal))
                 finally:
@@ -775,6 +815,33 @@ class Runner:
             finally:
                 self._decision_queue.task_done()
 
+    async def _decision_expiry_loop(self) -> None:
+        while True:
+            if self._should_stop_decision_expiry():
+                return
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=DECISION_SWEEP_INTERVAL_S,
+                )
+            except TimeoutError:
+                pass
+            if self._should_stop_decision_expiry():
+                return
+            try:
+                await self._sweep_expired_decisions_once()
+            except Exception as error:  # noqa: BLE001
+                logger.warning("decision expiry sweep failed: %s", error)
+
+    async def _sweep_expired_decisions_once(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        return await self.decision_store.expire_pending(
+            before=now or datetime.now(tz=UTC)
+        )
+
     async def _metrics_by_strategy(
         self,
     ) -> dict[StrategyVersionKey, tuple[StrategyMetricsSnapshot, EvalSpec]]:
@@ -827,6 +894,11 @@ class Runner:
         )
         return controller_done and self._decision_queue.empty()
 
+    def _should_stop_decision_expiry(self) -> bool:
+        if self._stop_event.is_set():
+            return True
+        return self.config.mode == RunMode.BACKTEST and self._should_stop_actuator()
+
     def _should_stop_controller_pipeline(self, strategy_id: str) -> bool:
         queue = self._controller_signal_queues.get(strategy_id)
         if queue is None:
@@ -855,6 +927,9 @@ class Runner:
         stop_error: BaseException | None = None
         if self._factor_service_task is not None and not self._factor_service_task.done():
             self._factor_service_task.cancel()
+        decision_expiry_task = self._decision_expiry_task
+        if decision_expiry_task is not None and not decision_expiry_task.done():
+            decision_expiry_task.cancel()
         for task in self._controller_pipeline_tasks.values():
             if not task.done():
                 task.cancel()
@@ -868,7 +943,11 @@ class Runner:
             await asyncio.gather(
                 *(
                     task
-                    for task in (self._factor_service_task, *self._controller_pipeline_tasks.values())
+                    for task in (
+                        self._factor_service_task,
+                        *self._controller_pipeline_tasks.values(),
+                        decision_expiry_task,
+                    )
                     if task is not None
                 ),
                 return_exceptions=True,
@@ -902,6 +981,7 @@ class Runner:
         self._factor_service_task = None
         self._controller_task = None
         self._actuator_task = None
+        self._decision_expiry_task = None
         self._market_selector = None
         self._subscription_controller = None
         self._strategy_registry = None
@@ -1393,3 +1473,27 @@ def _raw_factor_steps(
             continue
         raw_steps.append(step)
     return tuple(raw_steps)
+
+
+def _decision_created_at(
+    signal: MarketSignal,
+    opportunity: Opportunity | None,
+) -> datetime:
+    del signal
+    if opportunity is not None:
+        return opportunity.created_at
+    return datetime.now(tz=UTC)
+
+
+def _decision_expires_at(
+    signal: MarketSignal,
+    opportunity: Opportunity | None,
+    *,
+    created_at: datetime,
+) -> datetime:
+    candidates = [created_at + DECISION_PENDING_TTL]
+    if opportunity is not None and opportunity.expiry is not None:
+        candidates.append(opportunity.expiry)
+    elif signal.resolves_at is not None:
+        candidates.append(signal.resolves_at)
+    return min(candidates)
