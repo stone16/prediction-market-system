@@ -1575,12 +1575,15 @@ async def _execute_actuator_work_item(
     dedup_acquired: bool,
 ) -> OrderState:
     if dedup_acquired and _executor_accepts_dedup_acquired(executor):
-        return await executor.execute(
-            decision,
-            portfolio,
-            dedup_acquired=True,
+        return cast(
+            OrderState,
+            await executor.execute(
+                decision,
+                portfolio,
+                dedup_acquired=True,
+            ),
         )
-    return await executor.execute(decision, portfolio)
+    return cast(OrderState, await executor.execute(decision, portfolio))
 
 
 def _executor_accepts_dedup_acquired(executor: Any) -> bool:
