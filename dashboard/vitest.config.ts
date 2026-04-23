@@ -12,6 +12,7 @@ export default defineConfig({
     setupFiles: ['./vitest.setup.ts'],
     exclude: ['e2e/**', 'node_modules/**', '.next/**'],
     coverage: {
+      all: false,
       provider: 'v8',
       reporter: ['text', 'lcov'],
     },
