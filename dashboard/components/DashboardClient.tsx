@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { FeedbackPanel } from './FeedbackPanel';
-import { LayerCard } from './LayerCard';
 import { RunControls } from './RunControls';
+import { Today } from './Today';
 import { useConnection } from '@/lib/ConnectionContext';
 import { apiGet } from '@/lib/api';
 import type { Feedback, MetricsResponse, StatusResponse } from '@/lib/types';
@@ -116,80 +116,17 @@ export function DashboardClient() {
   }, [load]);
 
   const status = data.status;
-  const metrics = data.metrics;
-  const sensorStatus = status?.sensors[0]?.status ?? 'unknown';
 
   return (
     <>
-      <section className="hero">
-        <div>
-          <p className="eyebrow">Cybernetic trading loop</p>
-          <h1>Cybernetic Console</h1>
-          <p className="lede">
-            Live state for sensor intake, controller decisions, actuator fills, and evaluator feedback.
-          </p>
-        </div>
-        <div className="status-strip" aria-label="run summary">
-          <div>
-            <span>Mode</span>
-            {status?.mode ?? 'loading'}
-          </div>
-          <div>
-            <span>Started</span>
-            {status?.runner_started_at ?? 'not started'}
-          </div>
-          <div>
-            <span>Brier</span>
-            {metrics?.brier_overall?.toFixed(3) ?? 'n/a'}
-          </div>
-        </div>
-      </section>
-
-      <RunControls
-        running={status?.running ?? false}
-        mode={status?.mode ?? null}
-        onChange={() => void load()}
-      />
-
-      <section className="grid-four" aria-label="layer status">
-        <LayerCard
-          disconnected={false}
-          label="last signal heartbeat"
-          metric={status?.sensors[0]?.last_signal_at ? 'fresh' : 'none'}
-          name="Sensor"
-          status={sensorStatus}
-        />
-        <LayerCard
-          disconnected={false}
-          label="decisions total"
-          metric={String(status?.controller.decisions_total ?? 0)}
-          name="Controller"
-          status="ready"
-        />
-        <LayerCard
-          disconnected={false}
-          label="fills total"
-          metric={String(status?.actuator.fills_total ?? 0)}
-          name="Actuator"
-          status={status?.actuator.mode ?? 'unknown'}
-        />
-        <LayerCard
-          disconnected={false}
-          label="eval records"
-          metric={String(status?.evaluator.eval_records_total ?? 0)}
-          name="Evaluator"
-          status="scoring"
-        />
-      </section>
+      <Today feedback={data.feedback} metrics={data.metrics} status={status} />
 
       <section className="section-grid">
-        <div className="card summary-card">
-          <h2>Loop Health</h2>
-          <p className="lede">
-            Pending feedback stays visible until a human resolves it. The panel updates in place after each
-            action.
-          </p>
-        </div>
+        <RunControls
+          running={status?.running ?? false}
+          mode={status?.mode ?? null}
+          onChange={() => void load()}
+        />
         <FeedbackPanel
           items={data.feedback}
           onResolved={(feedbackId) =>

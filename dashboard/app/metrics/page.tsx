@@ -36,7 +36,7 @@ export default function MetricsPage() {
       <section className="page">
         <div className="hero">
           <div>
-            <p className="eyebrow">Evaluator</p>
+            <p className="eyebrow">Performance</p>
             <h1>Metric Review</h1>
             <p className="lede">Brier, calibration, and P&amp;L traces for the current run.</p>
           </div>

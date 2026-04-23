@@ -192,6 +192,7 @@ test.beforeEach(() => {
 
 test('cathedral happy path runs from today hero through first trade', async ({ page }) => {
   const errors: string[] = [];
+  const nav = page.getByRole('navigation', { name: 'Dashboard navigation' });
   page.on('console', (message) => {
     if (message.type() === 'error') errors.push(message.text());
   });
@@ -206,11 +207,11 @@ test('cathedral happy path runs from today hero through first trade', async ({ p
   await expect(page.getByTestId('today-feed')).toBeVisible();
   await page.screenshot({ path: path.join(evidenceDir, 'today-home.png'), fullPage: true });
 
-  await page.getByRole('link', { name: 'Markets' }).click();
+  await nav.getByRole('link', { name: 'Markets', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Markets' })).toBeVisible();
   await expect(page.getByText('Will market-cp12 settle above consensus?')).toBeVisible();
 
-  await page.getByRole('link', { name: 'Ideas' }).click();
+  await nav.getByRole('link', { name: 'Ideas', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Ideas' })).toBeVisible();
   await page.getByRole('button', { name: 'Accept' }).click();
   await expect(page.getByRole('link', { name: 'First trade placed · View in /trades' })).toBeVisible();

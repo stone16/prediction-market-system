@@ -97,6 +97,7 @@ export type MetricsPerStrategyRow = {
 };
 
 export type MetricsResponse = MetricsAggregate & {
+  'pms.ui.first_trade_time_seconds'?: number | null;
   per_strategy: MetricsPerStrategyRow[];
   ops_view: MetricsAggregate;
 };

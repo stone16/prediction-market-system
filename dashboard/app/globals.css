@@ -249,10 +249,111 @@ h3 {
   margin-bottom: 5px;
 }
 
-.grid-four {
+.today-hero {
+  align-items: stretch;
+}
+
+.today-strip {
   display: grid;
-  gap: 16px;
+  gap: 12px;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 24px;
+}
+
+.today-pill {
+  background: rgb(255 255 255 / 76%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+}
+
+.today-pill span,
+.today-frame-stats span,
+.today-card-kicker,
+.today-card-meta {
+  color: var(--muted);
+  display: block;
+  font-size: var(--text-11);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.today-pill strong,
+.today-frame-stats strong {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 22px;
+  line-height: 1.1;
+  margin-top: 8px;
+}
+
+.today-frame {
+  background:
+    radial-gradient(circle at top right, rgb(45 138 166 / 12%), transparent 42%),
+    linear-gradient(180deg, rgb(255 255 255 / 96%), rgb(244 248 242 / 94%));
+  padding: 20px;
+}
+
+.today-frame-topline {
+  align-items: start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.today-frame-stats {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 18px 0;
+}
+
+.today-feed {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 24px 0 18px;
+}
+
+.today-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 240px;
+  padding: 20px;
+}
+
+.today-card h2 {
+  margin-top: 6px;
+}
+
+.today-card p.muted {
+  margin: 14px 0 18px;
+}
+
+.today-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.today-card-meta span {
+  background: rgb(23 25 22 / 6%);
+  border: 1px solid rgb(23 25 22 / 10%);
+  border-radius: var(--radius-pill);
+  padding: 6px 10px;
+}
+
+.today-card-link {
+  color: var(--green);
+  font-size: var(--text-18);
+  font-weight: var(--weight-bold);
+  margin-top: 18px;
+}
+
+.today-card-link:hover {
+  color: var(--coral);
 }
 
 .card,
@@ -272,18 +373,6 @@ h3 {
 .table-primary-cell {
   display: grid;
   gap: 4px;
-}
-
-.layer-card {
-  min-height: 178px;
-  padding: 18px;
-}
-
-.layer-top {
-  align-items: start;
-  display: flex;
-  gap: 12px;
-  justify-content: space-between;
 }
 
 .badge {
@@ -1609,6 +1698,8 @@ th {
   }
 
   .hero,
+  .today-strip,
+  .today-feed,
   .section-grid,
   .depth-grid,
   .depth-stats,
@@ -1621,7 +1712,6 @@ th {
     grid-template-columns: 1fr;
   }
 
-  .grid-four,
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1688,9 +1778,12 @@ th {
 }
 
 @media (max-width: 560px) {
-  .grid-four,
   .summary-grid,
   .status-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .today-frame-stats {
     grid-template-columns: 1fr;
   }
 

@@ -33,7 +33,7 @@ export function mockStatus(): StatusResponse {
     source: 'mock',
     runner_started_at: '2026-04-14T00:00:00+00:00',
     running: false,
-    sensors: [{ name: 'HistoricalSensor', status: 'idle', last_signal_at: '2026-04-07T22:39:00+00:00' }],
+    sensors: [{ name: 'Historical feed', status: 'idle', last_signal_at: '2026-04-07T22:39:00+00:00' }],
     controller: { decisions_total: mockDecisions().length },
     actuator: { fills_total: 18, mode: 'backtest' },
     evaluator: { eval_records_total: 18, brier_overall: 0.18 }
@@ -205,6 +205,7 @@ export function mockMetrics(): MetricsResponse {
   };
   return {
     ...opsView,
+    'pms.ui.first_trade_time_seconds': 58,
     per_strategy: [
       {
         strategy_id: 'alpha',

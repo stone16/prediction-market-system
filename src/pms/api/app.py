@@ -62,6 +62,7 @@ LIVE_DISABLED_DETAIL = (
     "Live trading is disabled. Set live_trading_enabled=true in config."
 )
 RUNNER_ALREADY_RUNNING_DETAIL = "Runner is already running."
+FIRST_TRADE_TIME_SECONDS_METRIC = "pms.ui.first_trade_time_seconds"
 logger = logging.getLogger(__name__)
 
 
@@ -286,7 +287,11 @@ def create_app(
             await active_runner.eval_store.all(),
             key=lambda record: (record.recorded_at, record.decision_id),
         )
-        return _metrics_payload(records)
+        first_trade_time_seconds = await _first_trade_time_seconds(active_runner.pg_pool)
+        return _metrics_payload(
+            records,
+            first_trade_time_seconds=first_trade_time_seconds,
+        )
 
     @app.get("/feedback")
     async def feedback(resolved: bool | None = None) -> list[dict[str, Any]]:
@@ -482,7 +487,11 @@ def _latest(items: Sequence[T], limit: int) -> list[T]:
     return list(items[-bounded_limit:])
 
 
-def _metrics_payload(records: list[EvalRecord]) -> dict[str, Any]:
+def _metrics_payload(
+    records: list[EvalRecord],
+    *,
+    first_trade_time_seconds: float | None = None,
+) -> dict[str, Any]:
     collector = MetricsCollector(records)
     ops_view = _metrics_aggregate_payload(records, collector.global_ops_snapshot())
     strategy_snapshots = collector.snapshot_by_strategy()
@@ -509,9 +518,45 @@ def _metrics_payload(records: list[EvalRecord]) -> dict[str, Any]:
         )
 
     payload = dict(ops_view)
+    payload[FIRST_TRADE_TIME_SECONDS_METRIC] = first_trade_time_seconds
     payload["per_strategy"] = per_strategy
     payload["ops_view"] = ops_view
     return payload
+
+
+async def _first_trade_time_seconds(pg_pool: asyncpg.Pool | None) -> float | None:
+    if pg_pool is None:
+        return None
+
+    async with pg_pool.acquire() as connection:
+        fill_payloads_table_exists = await connection.fetchval(
+            "SELECT to_regclass('public.fill_payloads') IS NOT NULL"
+        )
+        if not fill_payloads_table_exists:
+            return None
+
+        seconds = await connection.fetchval(
+            """
+            WITH first_fills AS (
+                SELECT
+                    decisions.decision_id,
+                    EXTRACT(EPOCH FROM MIN(fills.ts) - decisions.created_at) AS elapsed_seconds
+                FROM decisions
+                INNER JOIN fill_payloads
+                    ON fill_payloads.payload->>'decision_id' = decisions.decision_id
+                INNER JOIN fills
+                    ON fills.fill_id = fill_payloads.fill_id
+                WHERE fills.ts >= decisions.created_at
+                GROUP BY decisions.decision_id, decisions.created_at
+            )
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY elapsed_seconds)
+            FROM first_fills
+            """
+        )
+
+    if seconds is None:
+        return None
+    return float(seconds)
 
 
 def _metrics_aggregate_payload(

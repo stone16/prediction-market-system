@@ -7,7 +7,7 @@ import { getDashboardSource } from '@/lib/dashboard-source';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'PMS Cybernetic Console',
+  title: 'PMS Today',
   description: 'Prediction market system dashboard'
 };
 

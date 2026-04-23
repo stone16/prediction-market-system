@@ -14,7 +14,7 @@ export default function DecisionsPage() {
       <section className="page">
         <div className="hero">
           <div>
-            <p className="eyebrow">Controller</p>
+            <p className="eyebrow">Ideas</p>
             <h1>Decision Ledger</h1>
             <p className="lede">
               Recent trade decisions with forecaster attribution and Kelly sizing.
