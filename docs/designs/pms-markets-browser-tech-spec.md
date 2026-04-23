@@ -2,7 +2,7 @@
 task_id: pms-markets-browser-v1
 title: "PMS Markets Browser v1 — prices, filters, detail drawer, subscriptions"
 version: 2
-status: draft
+status: approved
 branch: feat/pms-markets-browser-v1
 created: 2026-04-23T21:10:00+08:00
 updated: 2026-04-24T00:20:00+08:00
