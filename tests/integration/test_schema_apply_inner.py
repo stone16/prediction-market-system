@@ -13,6 +13,7 @@ import pytest
 SCHEMA_PATH = Path("schema.sql")
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
 STRATEGY_TABLES = [
+    "decisions",
     "eval_records",
     "feedback",
     "fills",
@@ -223,7 +224,7 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
             SELECT table_name, column_name, is_nullable
             FROM information_schema.columns
             WHERE table_schema = 'public'
-              AND table_name IN ('feedback', 'eval_records', 'orders', 'fills', 'opportunities')
+              AND table_name IN ('decisions', 'feedback', 'eval_records', 'orders', 'fills', 'opportunities')
               AND column_name IN ('strategy_id', 'strategy_version_id')
             ORDER BY table_name ASC, column_name ASC
             """,
@@ -234,6 +235,8 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
         ]
 
         assert actual_columns == [
+            ("decisions", "strategy_id", "NO"),
+            ("decisions", "strategy_version_id", "NO"),
             ("eval_records", "strategy_id", "NO"),
             ("eval_records", "strategy_version_id", "NO"),
             ("feedback", "strategy_id", "NO"),

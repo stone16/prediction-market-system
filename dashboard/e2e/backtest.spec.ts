@@ -403,9 +403,29 @@ test('backtest list view exports YAML and redirects after enqueue', async ({ pag
     ['run', 'python', '-c', 'import sys, yaml; yaml.safe_load(open(sys.argv[1]).read())', downloadPath],
     { stdio: 'pipe' }
   );
+  await page.route('**/api/pms/research/backtest', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        run_ids: [completedRunId],
+        unique_run_count: 1,
+        runs: [
+          {
+            run_id: completedRunId,
+            spec_hash: 'spec-completed',
+            inserted: false
+          }
+        ]
+      })
+    });
+  });
 
   await page.getByTestId('run-sweep-here').click();
-  await expect(page).toHaveURL(/\/backtest\/[0-9a-f-]+$/);
+  await expect(page).toHaveURL(new RegExp(`/backtest/${completedRunId}$`));
   await expect(page.getByTestId('backtest-run-view')).toBeVisible();
 });
 

@@ -1,0 +1,67 @@
+
+> pms-dashboard@0.1.0 build
+> next build
+
+▲ Next.js 16.2.3 (Turbopack)
+
+  Creating an optimized production build ...
+✓ Compiled successfully in 4.7s
+  Running TypeScript ...
+  Finished TypeScript in 2.6s ...
+  Collecting page data using 11 workers ...
+  Generating static pages using 11 workers (0/31) ...
+  Generating static pages using 11 workers (7/31) 
+  Generating static pages using 11 workers (15/31) 
+  Generating static pages using 11 workers (23/31) 
+✓ Generating static pages using 11 workers (31/31) in 206ms
+  Finalizing page optimization ...
+
+Route (app)
+┌ ○ /
+├ ○ /_not-found
+├ ƒ /api/pms/config
+├ ƒ /api/pms/decisions
+├ ƒ /api/pms/decisions/[id]
+├ ƒ /api/pms/decisions/[id]/accept
+├ ƒ /api/pms/factors
+├ ƒ /api/pms/factors/catalog
+├ ƒ /api/pms/feedback
+├ ƒ /api/pms/feedback/[feedbackId]/resolve
+├ ƒ /api/pms/markets
+├ ƒ /api/pms/metrics
+├ ƒ /api/pms/positions
+├ ƒ /api/pms/research/backtest
+├ ƒ /api/pms/research/backtest/[runId]
+├ ƒ /api/pms/research/backtest/[runId]/compare
+├ ƒ /api/pms/research/backtest/[runId]/strategies
+├ ƒ /api/pms/run/start
+├ ƒ /api/pms/run/stop
+├ ƒ /api/pms/share/[id]
+├ ƒ /api/pms/signals
+├ ƒ /api/pms/signals/[marketId]/depth
+├ ƒ /api/pms/status
+├ ƒ /api/pms/strategies
+├ ƒ /api/pms/strategies/metrics
+├ ƒ /api/pms/stream/events
+├ ƒ /api/pms/trades
+├ ƒ /api/status
+├ ○ /backtest
+├ ƒ /backtest/[run_id]
+├ ƒ /backtest/[run_id]/[strategy_id]
+├ ƒ /backtest/[run_id]/compare
+├ ○ /decisions
+├ ƒ /factors
+├ ○ /ideas
+├ ○ /markets
+├ ○ /metrics
+├ ○ /overview
+├ ○ /positions
+├ ƒ /share/[strategy_id]
+├ ƒ /signals
+├ ○ /strategies
+└ ○ /trades
+
+
+○  (Static)   prerendered as static content
+ƒ  (Dynamic)  server-rendered on demand
+

@@ -137,8 +137,10 @@ async def test_runner_forwards_opportunity_id_to_actuator() -> None:
     async def fake_execute(
         decision: TradeDecision,
         portfolio: Portfolio | None = None,
+        *,
+        dedup_acquired: bool = False,
     ) -> OrderState:
-        del portfolio
+        del portfolio, dedup_acquired
         captured_decisions.append(decision)
         return OrderState(
             order_id=f"order-{decision.decision_id}",

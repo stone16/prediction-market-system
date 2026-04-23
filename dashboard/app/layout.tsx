@@ -1,12 +1,13 @@
 import type { Metadata } from 'next';
-import { SourceBadgePortals } from '@/components/SourceBadgePortals';
-import { SourceBanner } from '@/components/SourceBanner';
+import { GlobalChrome } from '@/components/GlobalChrome';
+import { ConnectionProvider } from '@/lib/ConnectionContext';
+import { OnboardingProvider } from '@/lib/OnboardingContext';
 import { SourceProvider } from '@/components/SourceProvider';
 import { getDashboardSource } from '@/lib/dashboard-source';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'PMS Cybernetic Console',
+  title: 'PMS Today',
   description: 'Prediction market system dashboard'
 };
 
@@ -16,11 +17,14 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="en">
       <body data-dashboard-source={source}>
-        <SourceProvider source={source}>
-          <SourceBanner />
-          <SourceBadgePortals />
-          {children}
-        </SourceProvider>
+        <ConnectionProvider>
+          <SourceProvider source={source}>
+            <OnboardingProvider>
+              <GlobalChrome />
+              {children}
+            </OnboardingProvider>
+          </SourceProvider>
+        </ConnectionProvider>
       </body>
     </html>
   );

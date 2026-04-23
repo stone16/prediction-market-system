@@ -122,6 +122,29 @@ async def test_get_routes_remain_open_when_api_token_is_configured() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/positions", "/trades"])
+async def test_protected_read_routes_require_bearer_token_when_configured(
+    path: str,
+) -> None:
+    app = _app(api_token="expected-token")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        missing = await client.get(path)
+        wrong = await client.get(
+            path,
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+
+    assert missing.status_code == 401
+    assert missing.json() == {"detail": "Missing or invalid API token."}
+    assert wrong.status_code == 401
+    assert wrong.json() == {"detail": "Missing or invalid API token."}
+
+
+@pytest.mark.asyncio
 async def test_mutating_routes_remain_open_when_api_token_is_unset() -> None:
     app = _app(api_token=None)
 

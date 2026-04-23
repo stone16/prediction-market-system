@@ -27,7 +27,7 @@ export function SignalsPageClient({ marketId }: SignalsPageClientProps) {
       <section className="page">
         <div className="hero">
           <div>
-            <p className="eyebrow">Sensor</p>
+            <p className="eyebrow">Markets</p>
             <h1>Signal Stream</h1>
             <p className="lede">
               Inspect the persisted YES-side ladder for a market while keeping the latest signal

@@ -37,6 +37,12 @@ uv run pytest -q                         # full suite — see baseline below
 uv run mypy src/ tests/ --strict         # strict on every committed module
 ```
 
+For dashboard work, also run:
+
+```bash
+(cd dashboard && npm run test)           # Vitest suite
+```
+
 **Baseline (as of 2026-04-21, main @ 96f2a14):** `pytest`
 337 passing, 85 skipped. The 85 skips are PostgreSQL-backed integration
 checks gated on `PMS_RUN_INTEGRATION=1` and, where needed,

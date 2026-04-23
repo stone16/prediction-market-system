@@ -18,6 +18,10 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("active_version_id", "text"),
         ("created_at", "timestamp with time zone"),
         ("metadata_json", "jsonb"),
+        ("title", "text"),
+        ("description", "text"),
+        ("archived", "boolean"),
+        ("share_enabled", "boolean"),
     ],
     "strategy_versions": [
         ("strategy_version_id", "text"),

@@ -1,0 +1,40 @@
+
+ RUN  v3.2.4 /Users/stometa/dev/prediction-market-system/dashboard
+
+ ✓ __tests__/seed.test.ts (1 test) 18ms
+stderr | __tests__/upstream.test.ts > upstreamResponse > returns a 503 response when the upstream fetch fails
+PMS upstream unavailable at http://127.0.0.1:8001/status TypeError: Failed to fetch
+    at /Users/stometa/dev/prediction-market-system/dashboard/__tests__/upstream.test.ts:99:49
+    at file:///Users/stometa/dev/prediction-market-system/dashboard/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11
+    at file:///Users/stometa/dev/prediction-market-system/dashboard/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26
+    at file:///Users/stometa/dev/prediction-market-system/dashboard/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/stometa/dev/prediction-market-system/dashboard/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)
+    at runTest (file:///Users/stometa/dev/prediction-market-system/dashboard/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at runSuite (file:///Users/stometa/dev/prediction-market-system/dashboard/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)
+    at runSuite (file:///Users/stometa/dev/prediction-market-system/dashboard/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)
+
+ ✓ __tests__/upstream.test.ts (6 tests) 44ms
+ ✓ __tests__/use-theme-colors.test.tsx (1 test) 348ms
+   ✓ useThemeColors reads dashboard semantic tokens from css variables  347ms
+ ✓ __tests__/dashboard-client.test.tsx (3 tests) 208ms
+ ✓ __tests__/accept-idea-button.test.tsx (3 tests) 664ms
+   ✓ AcceptIdeaButton > disables and marks aria-busy while the accept request is in flight  615ms
+ ✓ __tests__/markets-table.test.tsx (2 tests) 516ms
+   ✓ MarketsTable > renders the empty state when rows are empty  413ms
+ ✓ __tests__/why-popover.test.tsx (2 tests) 763ms
+   ✓ WhyPopover > renders factor contributions and dismisses on Escape and click outside  649ms
+ ✓ __tests__/empty-state.test.tsx (2 tests) 352ms
+ ✓ __tests__/today.test.tsx (1 test) 538ms
+   ✓ Today renders the new dashboard hero and feed links  537ms
+ ✓ __tests__/event-log-drawer.test.tsx (2 tests) 691ms
+   ✓ EventLogDrawer > coalesces burst updates with requestAnimationFrame and keeps the latest 20 entries  662ms
+ ✓ __tests__/onboarding-panel.test.tsx (4 tests) 552ms
+   ✓ OnboardingPanel > renders on first mount and includes the activate default strategy step  484ms
+
+ Test Files  11 passed (11)
+      Tests  27 passed (27)
+   Start at  20:26:16
+   Duration  3.79s (transform 1000ms, setup 4.66s, collect 2.37s, tests 4.69s, environment 18.21s, prepare 3.10s)
+

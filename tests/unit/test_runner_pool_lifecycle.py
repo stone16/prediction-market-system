@@ -326,8 +326,10 @@ async def test_runner_bind_pg_pool_publicly_without_taking_ownership(
 async def test_runner_close_pg_pool_unbinds_eval_and_feedback_stores(
     tmp_path: Path,
 ) -> None:
+    from pms.storage.decision_store import DecisionStore
     from pms.storage.eval_store import EvalStore
     from pms.storage.feedback_store import FeedbackStore
+    from pms.storage.fill_store import FillStore
 
     fake_pool = FakePool()
     runner = _runner(
@@ -335,19 +337,27 @@ async def test_runner_close_pg_pool_unbinds_eval_and_feedback_stores(
         sensors=[HoldingSensor()],
         eval_store=EvalStore(),
         feedback_store=FeedbackStore(),
+        decision_store=DecisionStore(),
+        fill_store=FillStore(),
     )
+    eval_store = runner.eval_store
+    feedback_store = runner.feedback_store
+    decision_store = runner.decision_store
+    fill_store = runner.fill_store
 
     runner.bind_pg_pool(cast(Any, fake_pool))
 
-    assert isinstance(runner.eval_store, EvalStore)
-    assert isinstance(runner.feedback_store, FeedbackStore)
-    assert runner.eval_store.pool is fake_pool
-    assert runner.feedback_store.pool is fake_pool
+    assert eval_store.pool is fake_pool
+    assert feedback_store.pool is fake_pool
+    assert decision_store.pool is fake_pool
+    assert fill_store.pool is fake_pool
 
     await runner.close_pg_pool()
 
-    assert runner.eval_store.pool is None
-    assert runner.feedback_store.pool is None  # type: ignore[unreachable]
+    assert getattr(eval_store, "pool", None) is None
+    assert getattr(feedback_store, "pool", None) is None
+    assert getattr(decision_store, "pool", None) is None
+    assert getattr(fill_store, "pool", None) is None
 
 
 @pytest.mark.asyncio

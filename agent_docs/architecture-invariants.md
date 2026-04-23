@@ -427,6 +427,49 @@ tag, so every aggregate query naturally partitions on it.
 
 ---
 
+## Invariant 9 — Public projections are allowlist-only
+
+**Statement.** Any unauthenticated or publicly shareable read surface
+must return data through an explicit allowlist projection helper.
+Aggregates, registry rows, and raw JSON columns are never serialized
+directly to public callers.
+
+**Rationale.** Public share pages are a product feature, but the
+underlying strategy registry and runtime state can accumulate fields
+that are operationally sensitive: API credentials, raw metadata,
+private notes, or future fields added for internal use. If a public
+endpoint serializes an aggregate or `SELECT *` row directly, a future
+refactor can leak secrets without changing the endpoint's apparent
+intent. Allowlist-only helpers make "default deny" the mechanical
+behavior.
+
+**Runtime evidence.** Landed in Cathedral CP11.
+- `src/pms/api/routes/share.py::public_strategy_projection()` — public
+  share helper enumerates exactly the allowed fields.
+- `src/pms/api/app.py:/share/{strategy_id}` — public route returns only
+  the projection helper result and maps unknown / archived / unshared
+  rows to the same neutral 404.
+- `tests/unit/test_share_projection_cp11.py` — projection payload keys
+  stay bounded even when extra row fields exist.
+- `tests/integration/test_share_route_cp11.py` — response body excludes
+  secret markers such as `api_key`, `private_key`, and `metadata_json`.
+
+**Anti-patterns.**
+- Public route calling `model_dump()` on a Strategy-like aggregate.
+- `SELECT *` for a public response.
+- Forwarding `metadata_json`, `config_json`, or credentials to a public
+  page because "the frontend will ignore them".
+
+**Enforcement.**
+- Code review: any new public endpoint must name its projection helper
+  explicitly.
+- Tests: public routes must assert the exact key set and the absence of
+  known secret field names in serialized output.
+- Specs: public-read checkpoints fail evaluation if they do not state
+  the allowlist fields mechanically.
+
+---
+
 ## Cross-invariant matrix
 
 | Invariant | Sensor | Controller | Actuator | Evaluator | Schema |
@@ -439,6 +482,7 @@ tag, so every aggregate query naturally partitions on it.
 | 6. Active perception | subscription sink | selector home | — | — | — |
 | 7. Two-layer sensor | ✓ | — | — | — | outer ring |
 | 8. Onion-concentric storage | writes outer | reads middle + writes inner | writes inner | reads + writes inner | all rings |
+| 9. Public allowlist projections | — | may feed public projection inputs | — | may feed public metrics | public reads |
 
 ---
 

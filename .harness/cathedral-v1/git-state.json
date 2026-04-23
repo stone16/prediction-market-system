@@ -1,0 +1,140 @@
+{
+  "task_id": "cathedral-v1",
+  "task_start_sha": "845d6bd18562ed83c798820b8cae233271ed1028",
+  "phase": "done",
+  "checkpoints": {
+    "01": {
+      "baseline_sha": "845d6bd18562ed83c798820b8cae233271ed1028",
+      "iterations": {
+        "1": {
+          "end_sha": "a95ffe0ad371278911a4233568e88747f2c5f633"
+        }
+      },
+      "final_sha": "a95ffe0ad371278911a4233568e88747f2c5f633",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/01/iter-1/evaluation.md"
+    },
+    "02": {
+      "baseline_sha": "a95ffe0ad371278911a4233568e88747f2c5f633",
+      "iterations": {
+        "1": {
+          "end_sha": "3aafb20c2b31bd375be89f94cdbfec7380ddc29e"
+        }
+      },
+      "final_sha": "3aafb20c2b31bd375be89f94cdbfec7380ddc29e",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/02/iter-1/evaluation.md"
+    },
+    "03": {
+      "baseline_sha": "3aafb20c2b31bd375be89f94cdbfec7380ddc29e",
+      "iterations": {
+        "1": {
+          "end_sha": "86cb1317e71995612c401a42b39a87b7944cb18d"
+        }
+      },
+      "final_sha": "86cb1317e71995612c401a42b39a87b7944cb18d",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/03/iter-1/evaluation.md"
+    },
+    "04": {
+      "baseline_sha": "86cb1317e71995612c401a42b39a87b7944cb18d",
+      "iterations": {
+        "1": {
+          "end_sha": "f78af591b9d88d4bada0e400b9c223a5de242acb"
+        }
+      },
+      "final_sha": "f78af591b9d88d4bada0e400b9c223a5de242acb",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/04/iter-1/evaluation.md"
+    },
+    "05": {
+      "baseline_sha": "f78af591b9d88d4bada0e400b9c223a5de242acb",
+      "iterations": {
+        "1": {
+          "end_sha": "df086c433ce0d557619ce52509238912a46321da"
+        }
+      },
+      "final_sha": "df086c433ce0d557619ce52509238912a46321da",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/05/iter-1/evaluation.md"
+    },
+    "06": {
+      "baseline_sha": "df086c433ce0d557619ce52509238912a46321da",
+      "iterations": {
+        "1": {
+          "end_sha": "c9f69b2c599b5352bf772b25aedd91e7bb5eb2c1"
+        },
+        "2": {
+          "end_sha": "3a5441c71a8e8c17c77e3cb0774e581501a897e6"
+        }
+      },
+      "final_sha": "3a5441c71a8e8c17c77e3cb0774e581501a897e6",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/06/iter-2/evaluation.md"
+    },
+    "07": {
+      "baseline_sha": "3a5441c71a8e8c17c77e3cb0774e581501a897e6",
+      "iterations": {
+        "1": {
+          "end_sha": "88a1b52f55b19899e5d31d73dc938d40fd74812e"
+        }
+      },
+      "final_sha": "88a1b52f55b19899e5d31d73dc938d40fd74812e",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/07/iter-1/evaluation.md"
+    },
+    "08": {
+      "baseline_sha": "88a1b52f55b19899e5d31d73dc938d40fd74812e",
+      "iterations": {
+        "1": {
+          "end_sha": "4c22e7b4c8a5280cfeac18bec1e110cde7916368"
+        }
+      },
+      "final_sha": "4c22e7b4c8a5280cfeac18bec1e110cde7916368",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/08/iter-1/evaluation.md"
+    },
+    "09": {
+      "baseline_sha": "4c22e7b4c8a5280cfeac18bec1e110cde7916368",
+      "iterations": {
+        "1": {
+          "end_sha": "a106d3cbaff96e4157df17bc1be08890f63f3f45"
+        }
+      },
+      "final_sha": "a106d3cbaff96e4157df17bc1be08890f63f3f45",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/09/iter-1/evaluation.md"
+    },
+    "10": {
+      "baseline_sha": "a106d3cbaff96e4157df17bc1be08890f63f3f45",
+      "iterations": {
+        "1": {
+          "end_sha": "85e76f7a287c236f94c1142481b72155efbf0e80"
+        }
+      },
+      "final_sha": "85e76f7a287c236f94c1142481b72155efbf0e80",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/10/iter-1/evaluation.md"
+    },
+    "11": {
+      "baseline_sha": "85e76f7a287c236f94c1142481b72155efbf0e80",
+      "iterations": {
+        "1": {
+          "end_sha": "a1ffa09c578c30822dbae1098ad6d27026bea0b7"
+        }
+      },
+      "final_sha": "a1ffa09c578c30822dbae1098ad6d27026bea0b7",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/11/iter-1/evaluation.md"
+    },
+    "12": {
+      "baseline_sha": "a1ffa09c578c30822dbae1098ad6d27026bea0b7",
+      "iterations": {
+        "1": {
+          "end_sha": "01eb94de8652c7dd3c20cb76ce5b477939832702"
+        }
+      },
+      "final_sha": "01eb94de8652c7dd3c20cb76ce5b477939832702",
+      "final_evaluation": ".harness/cathedral-v1/checkpoints/12/iter-1/evaluation.md"
+    }
+  },
+  "e2e_baseline_sha": "01eb94de8652c7dd3c20cb76ce5b477939832702",
+  "e2e_final_sha": "e6492454c6be39481eb6984adfe82817bc5bdd98",
+  "review_loop_status": "COMPLETE",
+  "review_loop_session_id": "2026-04-23-cathedral-v1-readonly-review",
+  "review_loop_summary_file": ".review-loop/2026-04-23-cathedral-v1-readonly-review/summary.md",
+  "review_loop_rounds_file": ".review-loop/2026-04-23-cathedral-v1-readonly-review/rounds.json",
+  "full_verify_baseline_sha": "e6492454c6be39481eb6984adfe82817bc5bdd98",
+  "full_verify_final_sha": "e6492454c6be39481eb6984adfe82817bc5bdd98",
+  "full_verify_status": "COMPLETE",
+  "pr_url": "https://github.com/stone16/prediction-market-system/pull/21"
+}

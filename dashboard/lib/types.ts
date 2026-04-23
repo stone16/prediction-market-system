@@ -25,13 +25,51 @@ export type Feedback = {
 export type Decision = {
   decision_id: string;
   market_id: string;
+  token_id?: string | null;
+  venue?: string;
   forecaster: string;
   prob_estimate: number;
   expected_edge: number;
   kelly_size: number;
+  notional_usdc?: number;
   resolved_outcome?: number | null;
   price?: number;
+  limit_price?: number;
   side?: string;
+  action?: string | null;
+  status?: 'pending' | 'accepted' | 'rejected' | 'expired' | string;
+  factor_snapshot_hash?: string | null;
+  created_at?: string;
+  expires_at?: string;
+  opportunity?: DecisionOpportunity | null;
+};
+
+export type DecisionOpportunity = {
+  opportunity_id: string;
+  market_id: string;
+  token_id: string;
+  side: string;
+  selected_factor_values: Record<string, number>;
+  expected_edge: number;
+  rationale: string;
+  target_size_usdc: number;
+  expiry: string | null;
+  staleness_policy: string;
+  strategy_id: string;
+  strategy_version_id: string;
+  created_at: string;
+  factor_snapshot_hash: string | null;
+  composition_trace: Record<string, unknown>;
+};
+
+export type EventLogEntry = {
+  event_id: number;
+  event_type: string;
+  created_at: string;
+  summary: string;
+  market_id?: string | null;
+  decision_id?: string | null;
+  fill_id?: string | null;
 };
 
 export type MetricsAggregate = {
@@ -59,6 +97,7 @@ export type MetricsPerStrategyRow = {
 };
 
 export type MetricsResponse = MetricsAggregate & {
+  'pms.ui.first_trade_time_seconds'?: number | null;
   per_strategy: MetricsPerStrategyRow[];
   ops_view: MetricsAggregate;
 };
@@ -82,6 +121,64 @@ export type SignalDepth = {
   asks: DepthLevel[];
   last_update_ts: string | null;
   stale: boolean;
+};
+
+export type MarketRow = {
+  market_id: string;
+  question: string;
+  venue: string;
+  volume_24h: number | null;
+  updated_at: string;
+  yes_token_id: string | null;
+  no_token_id: string | null;
+  subscribed: boolean;
+};
+
+export type MarketsListResponse = {
+  markets: MarketRow[];
+  limit: number;
+  offset: number;
+  total: number;
+};
+
+export type PositionRow = {
+  market_id: string;
+  token_id: string | null;
+  venue: string;
+  side: string;
+  shares_held: number;
+  avg_entry_price: number;
+  unrealized_pnl: number;
+  locked_usdc: number;
+};
+
+export type PositionsResponse = {
+  positions: PositionRow[];
+};
+
+export type TradeRow = {
+  trade_id: string;
+  fill_id: string;
+  order_id: string;
+  decision_id: string;
+  market_id: string;
+  question: string;
+  token_id: string | null;
+  venue: string;
+  side: string;
+  fill_price: number;
+  fill_notional_usdc: number;
+  fill_quantity: number;
+  executed_at: string;
+  filled_at: string;
+  status: string;
+  strategy_id: string;
+  strategy_version_id: string;
+};
+
+export type TradesResponse = {
+  trades: TradeRow[];
+  limit: number;
 };
 
 export type StrategyRow = {
@@ -109,6 +206,15 @@ export type StrategyMetricsRow = {
 
 export type StrategyMetricsResponse = {
   strategies: StrategyMetricsRow[];
+};
+
+export type ShareProjection = {
+  strategy_id: string;
+  title: string | null;
+  description: string | null;
+  brier_overall: number | null;
+  trade_count: number;
+  version_id_short: string | null;
 };
 
 export type FactorCatalogEntry = {

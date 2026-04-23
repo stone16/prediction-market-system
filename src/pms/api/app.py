@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections import defaultdict
@@ -13,9 +14,21 @@ from typing import Any, TypeVar, cast
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from pms.api.auth import require_api_token
+from pms.api.routes.decisions import (
+    AcceptDecisionRequest,
+    DecisionMarketChangedError,
+    DecisionNotFoundError,
+    DecisionRiskRejectedError,
+    accept_decision as accept_decision_item,
+    get_decision as get_decision_item,
+    list_decisions as list_decisions_items,
+)
+from pms.api.routes.events import encode_sse_event
 from pms.api.research_routes import (
     compute_backtest_live_comparison,
     enqueue_backtest_runs,
@@ -27,15 +40,20 @@ from pms.api.research_routes import (
 from pms.api.routes.factors import list_factor_catalog, list_factor_series
 from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
+from pms.api.routes.markets import list_markets as list_markets_items
+from pms.api.routes.positions import list_positions as list_positions_items
+from pms.api.routes.share import SHARE_NOT_FOUND_DETAIL, get_shared_strategy
 from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
 from pms.api.routes.strategies import list_strategy_metrics as list_strategy_metrics_items
 from pms.api.routes.strategies import list_strategies as list_strategies_items
+from pms.api.routes.trades import list_trades as list_trades_items
 from pms.config import PMSSettings
 from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
 from pms.runner import Runner
 from pms.storage.schema_check import ensure_schema_current
+from pms.storage.decision_store import DecisionStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 
 
@@ -44,6 +62,7 @@ LIVE_DISABLED_DETAIL = (
     "Live trading is disabled. Set live_trading_enabled=true in config."
 )
 RUNNER_ALREADY_RUNNING_DETAIL = "Runner is already running."
+FIRST_TRADE_TIME_SECONDS_METRIC = "pms.ui.first_trade_time_seconds"
 logger = logging.getLogger(__name__)
 
 
@@ -135,6 +154,35 @@ def create_app(
             for signal in _latest(active_runner.state.signals, limit)
         ]
 
+    @app.get("/markets")
+    async def markets(
+        limit: int = Query(default=20, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await list_markets_items(
+            PostgresMarketDataStore(active_runner.pg_pool),
+            current_asset_ids=_current_subscription_asset_ids(active_runner),
+            limit=limit,
+            offset=offset,
+        )
+        return payload.model_dump(mode="json")
+
+    @app.get("/positions", dependencies=[Depends(require_api_token)])
+    async def positions() -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await list_positions_items(active_runner.fill_store)
+        return payload.model_dump(mode="json")
+
+    @app.get("/trades", dependencies=[Depends(require_api_token)])
+    async def trades(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await list_trades_items(active_runner.fill_store, limit=limit)
+        return payload.model_dump(mode="json")
+
     @app.get("/signals/{market_id}/depth")
     async def signal_depth(
         market_id: str,
@@ -153,8 +201,22 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return cast(dict[str, Any], _jsonable(payload))
 
-    @app.get("/decisions")
-    async def decisions(limit: int = 50) -> list[dict[str, Any]]:
+    @app.get("/decisions", dependencies=[Depends(require_api_token)])
+    async def decisions(
+        limit: int = Query(default=50, ge=1, le=200),
+        status: str | None = None,
+        include: str | None = None,
+    ) -> list[dict[str, Any]]:
+        include_opportunity = include == "opportunity"
+        if _should_use_durable_decisions(active_runner):
+            rows = await list_decisions_items(
+                cast(Any, active_runner.decision_store),
+                limit=limit,
+                status=status,
+                include_opportunity=include_opportunity,
+            )
+            return [item.model_dump(mode="json") for item in rows]
+
         payloads: list[dict[str, Any]] = []
         for decision in _latest(active_runner.state.decisions, limit):
             payload = cast(dict[str, Any], _jsonable(decision))
@@ -163,13 +225,73 @@ def create_app(
             payloads.append(payload)
         return payloads
 
+    @app.get("/decisions/{decision_id}", dependencies=[Depends(require_api_token)])
+    async def decision_detail(
+        decision_id: str,
+        include: str | None = None,
+    ) -> dict[str, Any]:
+        if _should_use_durable_decisions(active_runner):
+            row = await get_decision_item(
+                cast(Any, active_runner.decision_store),
+                decision_id=decision_id,
+                include_opportunity=include == "opportunity",
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Decision not found")
+            return row.model_dump(mode="json")
+
+        for decision in active_runner.state.decisions:
+            if decision.decision_id != decision_id:
+                continue
+            payload = cast(dict[str, Any], _jsonable(decision))
+            payload["forecaster"] = _forecaster(decision)
+            payload["kelly_size"] = decision.notional_usdc
+            return payload
+        raise HTTPException(status_code=404, detail="Decision not found")
+
+    @app.post(
+        "/decisions/{decision_id}/accept",
+        dependencies=[Depends(require_api_token)],
+    )
+    async def accept_decision(
+        decision_id: str,
+        body: AcceptDecisionRequest,
+    ) -> Any:
+        try:
+            payload = await accept_decision_item(
+                cast(Any, active_runner.decision_store),
+                decision_id=decision_id,
+                factor_snapshot_hash=body.factor_snapshot_hash,
+                dedup_store=cast(Any, active_runner.actuator_executor.dedup_store),
+                risk=cast(Any, active_runner.actuator_executor.risk),
+                portfolio=active_runner.portfolio,
+                enqueue=active_runner.enqueue_accepted_decision,
+            )
+        except DecisionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DecisionMarketChangedError as exc:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": str(exc),
+                    "current_factor_snapshot_hash": exc.current_factor_snapshot_hash,
+                },
+            )
+        except DecisionRiskRejectedError as exc:
+            raise HTTPException(status_code=422, detail=exc.reason) from exc
+        return payload.model_dump(mode="json")
+
     @app.get("/metrics")
     async def metrics() -> dict[str, Any]:
         records = sorted(
             await active_runner.eval_store.all(),
             key=lambda record: (record.recorded_at, record.decision_id),
         )
-        return _metrics_payload(records)
+        first_trade_time_seconds = await _first_trade_time_seconds(active_runner.pg_pool)
+        return _metrics_payload(
+            records,
+            first_trade_time_seconds=first_trade_time_seconds,
+        )
 
     @app.get("/feedback")
     async def feedback(resolved: bool | None = None) -> list[dict[str, Any]]:
@@ -178,26 +300,52 @@ def create_app(
             for item in await list_feedback_items(active_runner.feedback_store, resolved=resolved)
         ]
 
+    @app.get("/stream/events")
+    async def stream_events(
+        request: Request,
+        last_event_id: int | None = Query(default=None, ge=0),
+    ) -> StreamingResponse:
+        async def event_generator() -> AsyncIterator[str]:
+            replay, subscriber = await active_runner.event_bus.subscribe(
+                last_event_id=last_event_id
+            )
+            try:
+                for event in replay:
+                    yield encode_sse_event(event)
+
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        event = await asyncio.wait_for(subscriber.get(), timeout=10.0)
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    yield encode_sse_event(event)
+            finally:
+                await active_runner.event_bus.unsubscribe(subscriber)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache",
+                "connection": "keep-alive",
+            },
+        )
+
     @app.get("/subscriptions")
     async def subscriptions() -> dict[str, Any]:
         subscription_controller = active_runner.subscription_controller
-        if (
-            active_runner.state.runner_started_at is None
-            or active_runner.state.mode == RunMode.BACKTEST
-            or subscription_controller is None
-        ):
-            response = SubscriptionStateResponse(
-                asset_ids=[],
-                count=0,
-                last_updated_at=None,
-            )
-            return response.model_dump(mode="json")
-
-        asset_ids = sorted(subscription_controller.current_asset_ids)
+        asset_ids = sorted(_current_subscription_asset_ids(active_runner))
         response = SubscriptionStateResponse(
             asset_ids=asset_ids,
             count=len(asset_ids),
-            last_updated_at=_jsonable(subscription_controller.last_updated_at),
+            last_updated_at=(
+                _jsonable(subscription_controller.last_updated_at)
+                if subscription_controller is not None and asset_ids
+                else None
+            ),
         )
         return response.model_dump(mode="json")
 
@@ -212,6 +360,15 @@ def create_app(
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_strategy_metrics_items(active_runner.pg_pool)
+
+    @app.get("/share/{strategy_id}")
+    async def share_strategy(strategy_id: str) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await get_shared_strategy(active_runner.pg_pool, strategy_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail=SHARE_NOT_FOUND_DETAIL)
+        return payload.model_dump(mode="json")
 
     @app.get("/factors/catalog")
     async def factors_catalog() -> dict[str, Any]:
@@ -330,7 +487,11 @@ def _latest(items: Sequence[T], limit: int) -> list[T]:
     return list(items[-bounded_limit:])
 
 
-def _metrics_payload(records: list[EvalRecord]) -> dict[str, Any]:
+def _metrics_payload(
+    records: list[EvalRecord],
+    *,
+    first_trade_time_seconds: float | None = None,
+) -> dict[str, Any]:
     collector = MetricsCollector(records)
     ops_view = _metrics_aggregate_payload(records, collector.global_ops_snapshot())
     strategy_snapshots = collector.snapshot_by_strategy()
@@ -357,9 +518,45 @@ def _metrics_payload(records: list[EvalRecord]) -> dict[str, Any]:
         )
 
     payload = dict(ops_view)
+    payload[FIRST_TRADE_TIME_SECONDS_METRIC] = first_trade_time_seconds
     payload["per_strategy"] = per_strategy
     payload["ops_view"] = ops_view
     return payload
+
+
+async def _first_trade_time_seconds(pg_pool: asyncpg.Pool | None) -> float | None:
+    if pg_pool is None:
+        return None
+
+    async with pg_pool.acquire() as connection:
+        fill_payloads_table_exists = await connection.fetchval(
+            "SELECT to_regclass('public.fill_payloads') IS NOT NULL"
+        )
+        if not fill_payloads_table_exists:
+            return None
+
+        seconds = await connection.fetchval(
+            """
+            WITH first_fills AS (
+                SELECT
+                    decisions.decision_id,
+                    EXTRACT(EPOCH FROM MIN(fills.ts) - decisions.created_at) AS elapsed_seconds
+                FROM decisions
+                INNER JOIN fill_payloads
+                    ON fill_payloads.payload->>'decision_id' = decisions.decision_id
+                INNER JOIN fills
+                    ON fills.fill_id = fill_payloads.fill_id
+                WHERE fills.ts >= decisions.created_at
+                GROUP BY decisions.decision_id, decisions.created_at
+            )
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY elapsed_seconds)
+            FROM first_fills
+            """
+        )
+
+    if seconds is None:
+        return None
+    return float(seconds)
 
 
 def _metrics_aggregate_payload(
@@ -406,6 +603,15 @@ def _max_drawdown(records: list[EvalRecord]) -> float:
     return float(max_drawdown)
 
 
+def _should_use_durable_decisions(runner: Runner) -> bool:
+    store = runner.decision_store
+    if not hasattr(store, "read_decisions") or not hasattr(store, "get_decision"):
+        return False
+    if isinstance(store, DecisionStore) and store.pool is None:
+        return False
+    return True
+
+
 def _is_runner_running(runner: Runner) -> bool:
     return any(not task.done() for task in runner.tasks)
 
@@ -422,6 +628,18 @@ def _should_enforce_schema_check(settings: PMSSettings) -> bool:
     if settings.enforce_schema_check is not None:
         return settings.enforce_schema_check
     return settings.mode in {RunMode.PAPER, RunMode.LIVE}
+
+
+def _current_subscription_asset_ids(runner: Runner) -> frozenset[str]:
+    subscription_controller = runner.subscription_controller
+    if (
+        runner.state.runner_started_at is None
+        or runner.state.mode == RunMode.BACKTEST
+        or subscription_controller is None
+        or not _is_runner_running(runner)
+    ):
+        return frozenset()
+    return subscription_controller.current_asset_ids
 
 
 def _sensor_statuses(runner: Runner) -> list[dict[str, Any]]:

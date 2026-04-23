@@ -114,7 +114,11 @@ CREATE TABLE IF NOT EXISTS strategies (
     strategy_id TEXT PRIMARY KEY,
     active_version_id TEXT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    title TEXT,
+    description TEXT,
+    archived BOOLEAN NOT NULL DEFAULT FALSE,
+    share_enabled BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 -- strategy_versions: immutable hash-keyed version rows (Invariant 3)
@@ -208,6 +212,29 @@ CREATE TABLE IF NOT EXISTS eval_records (
     strategy_id TEXT NOT NULL,
     strategy_version_id TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS decisions (
+    decision_id TEXT PRIMARY KEY,
+    opportunity_id TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected', 'expired')),
+    factor_snapshot_hash TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT decisions_strategy_tags_nonempty
+        CHECK (strategy_id != '' AND strategy_version_id != '')
+);
+
+CREATE INDEX IF NOT EXISTS idx_decisions_status_created
+    ON decisions(status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_decisions_strategy_version
+    ON decisions(strategy_id, strategy_version_id);
+
+CREATE INDEX IF NOT EXISTS idx_decisions_opportunity
+    ON decisions(opportunity_id);
 
 CREATE TABLE IF NOT EXISTS orders (
     order_id TEXT PRIMARY KEY,

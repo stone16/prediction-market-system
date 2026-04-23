@@ -30,7 +30,7 @@ export default function StrategiesPage() {
       <section className="page">
         <div className="hero">
           <div>
-            <p className="eyebrow">Controller</p>
+            <p className="eyebrow">Lineup</p>
             <h1>Strategies</h1>
             <p className="lede">
               Comparative Brier, P&amp;L, fill-rate, slippage, and drawdown rollups by active

@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { FeedbackPanel } from './FeedbackPanel';
-import { LayerCard } from './LayerCard';
 import { RunControls } from './RunControls';
+import { Today } from './Today';
+import { useConnection } from '@/lib/ConnectionContext';
 import { apiGet } from '@/lib/api';
 import type { Feedback, MetricsResponse, StatusResponse } from '@/lib/types';
 
@@ -11,38 +12,65 @@ type DashboardData = {
   status: StatusResponse | null;
   metrics: MetricsResponse | null;
   feedback: Feedback[];
-  disconnected: boolean;
 };
 
 const initialData: DashboardData = {
   status: null,
   metrics: null,
-  feedback: [],
-  disconnected: false
+  feedback: []
 };
+
+type ApiGetter = typeof apiGet;
+
+export async function loadDashboardData(get: ApiGetter = apiGet) {
+  const [status, metrics, feedback] = await Promise.all([
+    get<StatusResponse>('/status'),
+    get<MetricsResponse>('/metrics'),
+    get<Feedback[]>('/feedback?resolved=false')
+  ]);
+
+  return { feedback, metrics, status };
+}
+
+function isRecoverableDashboardLoadError(error: unknown) {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return true;
+  }
+
+  return (
+    error instanceof TypeError &&
+    (error.message === 'Failed to fetch' ||
+      error.message === 'NetworkError when attempting to fetch resource')
+  );
+}
 
 export function DashboardClient() {
   const [data, setData] = useState<DashboardData>(initialData);
   const cancelledRef = useRef(false);
   const loadGenerationRef = useRef(0);
+  const { markConnected, markDisconnected } = useConnection();
 
   const load = useCallback(async () => {
     const generation = ++loadGenerationRef.current;
+
     try {
-      const [status, metrics, feedback] = await Promise.all([
-        apiGet<StatusResponse>('/status'),
-        apiGet<MetricsResponse>('/metrics'),
-        apiGet<Feedback[]>('/feedback?resolved=false')
-      ]);
+      const nextData = await loadDashboardData();
       if (!cancelledRef.current && generation === loadGenerationRef.current) {
-        setData({ status, metrics, feedback, disconnected: false });
+        setData(nextData);
+        markConnected();
       }
-    } catch {
+
+      return;
+    } catch (error) {
+      if (!isRecoverableDashboardLoadError(error)) {
+        throw error;
+      }
+
       if (!cancelledRef.current && generation === loadGenerationRef.current) {
-        setData((current) => ({ ...current, disconnected: true }));
+        markDisconnected();
       }
     }
-  }, []);
+  }, [markConnected, markDisconnected]);
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -88,80 +116,17 @@ export function DashboardClient() {
   }, [load]);
 
   const status = data.status;
-  const metrics = data.metrics;
-  const sensorStatus = status?.sensors[0]?.status ?? 'unknown';
 
   return (
     <>
-      <section className="hero">
-        <div>
-          <p className="eyebrow">Cybernetic trading loop</p>
-          <h1>Cybernetic Console</h1>
-          <p className="lede">
-            Live state for sensor intake, controller decisions, actuator fills, and evaluator feedback.
-          </p>
-        </div>
-        <div className="status-strip" aria-label="run summary">
-          <div>
-            <span>Mode</span>
-            {status?.mode ?? 'loading'}
-          </div>
-          <div>
-            <span>Started</span>
-            {status?.runner_started_at ?? 'not started'}
-          </div>
-          <div>
-            <span>Brier</span>
-            {metrics?.brier_overall?.toFixed(3) ?? 'n/a'}
-          </div>
-        </div>
-      </section>
-
-      <RunControls
-        running={status?.running ?? false}
-        mode={status?.mode ?? null}
-        onChange={() => void load()}
-      />
-
-      <section className="grid-four" aria-label="layer status">
-        <LayerCard
-          disconnected={data.disconnected}
-          label="last signal heartbeat"
-          metric={status?.sensors[0]?.last_signal_at ? 'fresh' : 'none'}
-          name="Sensor"
-          status={sensorStatus}
-        />
-        <LayerCard
-          disconnected={data.disconnected}
-          label="decisions total"
-          metric={String(status?.controller.decisions_total ?? 0)}
-          name="Controller"
-          status="ready"
-        />
-        <LayerCard
-          disconnected={data.disconnected}
-          label="fills total"
-          metric={String(status?.actuator.fills_total ?? 0)}
-          name="Actuator"
-          status={status?.actuator.mode ?? 'unknown'}
-        />
-        <LayerCard
-          disconnected={data.disconnected}
-          label="eval records"
-          metric={String(status?.evaluator.eval_records_total ?? 0)}
-          name="Evaluator"
-          status="scoring"
-        />
-      </section>
+      <Today feedback={data.feedback} metrics={data.metrics} status={status} />
 
       <section className="section-grid">
-        <div className="card summary-card">
-          <h2>Loop Health</h2>
-          <p className="lede">
-            Pending feedback stays visible until a human resolves it. The panel updates in place after each
-            action.
-          </p>
-        </div>
+        <RunControls
+          running={status?.running ?? false}
+          mode={status?.mode ?? null}
+          onChange={() => void load()}
+        />
         <FeedbackPanel
           items={data.feedback}
           onResolved={(feedbackId) =>

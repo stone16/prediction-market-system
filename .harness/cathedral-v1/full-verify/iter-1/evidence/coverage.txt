@@ -1,0 +1,129 @@
+ssssssssssssssssssssssssssssssssssssssssss.sssssssssssssssssssssssssssss [  9%]
+s....ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss. [ 19%]
+........................................................................ [ 29%]
+........................................................................ [ 39%]
+........................................................................ [ 48%]
+........................................................................ [ 58%]
+........................................................................ [ 68%]
+........................................................................ [ 78%]
+........................................................................ [ 87%]
+........................................................................ [ 97%]
+..................                                                       [100%]
+================================ tests coverage ================================
+_______________ coverage: platform darwin, python 3.11.5-final-0 _______________
+
+Name                                                      Stmts   Miss  Cover
+-----------------------------------------------------------------------------
+src/pms/__init__.py                                           0      0   100%
+src/pms/actuator/__init__.py                                  0      0   100%
+src/pms/actuator/adapters/__init__.py                         0      0   100%
+src/pms/actuator/adapters/backtest.py                        25      0   100%
+src/pms/actuator/adapters/backtest_fixtures.py               38      6    84%
+src/pms/actuator/adapters/paper.py                           55      3    95%
+src/pms/actuator/adapters/polymarket.py                      11      1    91%
+src/pms/actuator/executor.py                                102      4    96%
+src/pms/actuator/feedback.py                                 14      0   100%
+src/pms/actuator/risk.py                                     35      1    97%
+src/pms/api/__init__.py                                       3      0   100%
+src/pms/api/__main__.py                                      27      1    96%
+src/pms/api/app.py                                          374     95    75%
+src/pms/api/auth.py                                          39     19    51%
+src/pms/api/research_routes.py                              186     75    60%
+src/pms/api/routes/__init__.py                                0      0   100%
+src/pms/api/routes/decisions.py                             115     14    88%
+src/pms/api/routes/events.py                                  6      0   100%
+src/pms/api/routes/factors.py                                41     15    63%
+src/pms/api/routes/feedback.py                               12      0   100%
+src/pms/api/routes/markets.py                                28      0   100%
+src/pms/api/routes/positions.py                              21      0   100%
+src/pms/api/routes/share.py                                  41     10    76%
+src/pms/api/routes/signals.py                                90     65    28%
+src/pms/api/routes/strategies.py                             74     32    57%
+src/pms/api/routes/trades.py                                 31      0   100%
+src/pms/config.py                                            80      5    94%
+src/pms/controller/__init__.py                                0      0   100%
+src/pms/controller/calibrators/__init__.py                    0      0   100%
+src/pms/controller/calibrators/netcal.py                     32      6    81%
+src/pms/controller/diagnostics.py                            17      0   100%
+src/pms/controller/factor_snapshot.py                        45      7    84%
+src/pms/controller/factory.py                                43      2    95%
+src/pms/controller/forecasters/__init__.py                    0      0   100%
+src/pms/controller/forecasters/llm.py                        86      4    95%
+src/pms/controller/forecasters/rules.py                      12      2    83%
+src/pms/controller/forecasters/statistical.py                15      1    93%
+src/pms/controller/outcome_tokens.py                         28      4    86%
+src/pms/controller/pipeline.py                              186      7    96%
+src/pms/controller/router.py                                 16      0   100%
+src/pms/controller/sizers/__init__.py                         0      0   100%
+src/pms/controller/sizers/kelly.py                           29      1    97%
+src/pms/core/__init__.py                                      0      0   100%
+src/pms/core/enums.py                                        40      0   100%
+src/pms/core/exceptions.py                                    4      0   100%
+src/pms/core/interfaces.py                                   22      0   100%
+src/pms/core/models.py                                      233      3    99%
+src/pms/core/venue_support.py                                14      0   100%
+src/pms/evaluation/__init__.py                                0      0   100%
+src/pms/evaluation/adapters/__init__.py                       0      0   100%
+src/pms/evaluation/adapters/scoring.py                       39      5    87%
+src/pms/evaluation/feedback.py                               43      0   100%
+src/pms/evaluation/metrics.py                                61      0   100%
+src/pms/evaluation/spool.py                                  56      0   100%
+src/pms/event_stream.py                                      49      3    94%
+src/pms/factors/__init__.py                                   4      0   100%
+src/pms/factors/base.py                                      24      0   100%
+src/pms/factors/catalog.py                                   53     13    75%
+src/pms/factors/composition.py                              130      2    98%
+src/pms/factors/definitions/__init__.py                      10      0   100%
+src/pms/factors/definitions/fair_value_spread.py             15      0   100%
+src/pms/factors/definitions/metaculus_prior.py               12      0   100%
+src/pms/factors/definitions/no_count.py                      12      0   100%
+src/pms/factors/definitions/orderbook_imbalance.py           27      3    89%
+src/pms/factors/definitions/subset_pricing_violation.py      16      0   100%
+src/pms/factors/definitions/yes_count.py                     12      0   100%
+src/pms/factors/service.py                                   96      8    92%
+src/pms/market_selection/__init__.py                          4      0   100%
+src/pms/market_selection/merge.py                            22      0   100%
+src/pms/market_selection/selector.py                         33      0   100%
+src/pms/market_selection/subscription_controller.py          26      0   100%
+src/pms/research/__init__.py                                 10      0   100%
+src/pms/research/cache.py                                    74      8    89%
+src/pms/research/cli.py                                     232    154    34%
+src/pms/research/comparison.py                              160    101    37%
+src/pms/research/entities.py                                 92     22    76%
+src/pms/research/execution.py                               222     28    87%
+src/pms/research/policies.py                                 52      3    94%
+src/pms/research/replay.py                                  411    121    71%
+src/pms/research/report.py                                  158     93    41%
+src/pms/research/runner.py                                  329     98    70%
+src/pms/research/spec_codec.py                               96     30    69%
+src/pms/research/specs.py                                   129      9    93%
+src/pms/research/sweep.py                                   137     84    39%
+src/pms/runner.py                                           941    116    88%
+src/pms/sensor/__init__.py                                    0      0   100%
+src/pms/sensor/adapters/__init__.py                           0      0   100%
+src/pms/sensor/adapters/historical.py                        82     11    87%
+src/pms/sensor/adapters/market_data.py                      400     60    85%
+src/pms/sensor/adapters/market_discovery.py                 142     22    85%
+src/pms/sensor/stream.py                                     83      5    94%
+src/pms/sensor/watchdog.py                                   37      0   100%
+src/pms/storage/__init__.py                                   0      0   100%
+src/pms/storage/alembic_config.py                            20      1    95%
+src/pms/storage/decision_store.py                           106      9    92%
+src/pms/storage/dedup_store.py                               86     22    74%
+src/pms/storage/eval_store.py                                45     25    44%
+src/pms/storage/feedback_store.py                            58     30    48%
+src/pms/storage/fill_store.py                                88     11    88%
+src/pms/storage/market_data_store.py                        114     42    63%
+src/pms/storage/opportunity_store.py                         41     11    73%
+src/pms/storage/order_store.py                               49     11    78%
+src/pms/storage/schema_check.py                              45      0   100%
+src/pms/storage/strategy_registry.py                        203     13    94%
+src/pms/storage/strategy_tags.py                             10      7    30%
+src/pms/strategies/__init__.py                                3      0   100%
+src/pms/strategies/aggregate.py                              40      2    95%
+src/pms/strategies/defaults.py                                3      0   100%
+src/pms/strategies/projections.py                            66      4    94%
+src/pms/strategies/versioning.py                             56      6    89%
+-----------------------------------------------------------------------------
+TOTAL                                                      7834   1576    80%
+600 passed, 138 skipped in 18.07s

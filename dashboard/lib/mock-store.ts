@@ -10,10 +10,15 @@ import type {
   FactorCatalogResponse,
   FactorSeriesResponse,
   Feedback,
+  MarketRow,
   MetricsResponse,
+  PositionRow,
+  PositionsResponse,
   Signal,
   SignalDepth,
   StatusResponse,
+  TradeRow,
+  TradesResponse,
   StrategyMetricsResponse,
   StrategiesResponse
 } from './types';
@@ -28,7 +33,7 @@ export function mockStatus(): StatusResponse {
     source: 'mock',
     runner_started_at: '2026-04-14T00:00:00+00:00',
     running: false,
-    sensors: [{ name: 'HistoricalSensor', status: 'idle', last_signal_at: '2026-04-07T22:39:00+00:00' }],
+    sensors: [{ name: 'Historical feed', status: 'idle', last_signal_at: '2026-04-07T22:39:00+00:00' }],
     controller: { decisions_total: mockDecisions().length },
     actuator: { fills_total: 18, mode: 'backtest' },
     evaluator: { eval_records_total: 18, brier_overall: 0.18 }
@@ -44,18 +49,136 @@ export function mockSignals(): Signal[] {
   }));
 }
 
+export function mockMarkets(): MarketRow[] {
+  return Array.from({ length: 20 }, (_, index) => ({
+    market_id: `market-${String(index).padStart(3, '0')}`,
+    question: `Will market ${String(index).padStart(3, '0')} settle above consensus?`,
+    venue: 'polymarket',
+    volume_24h: 2400 - index * 73.5,
+    updated_at: new Date(Date.UTC(2026, 3, 23, 12, index, 0)).toISOString(),
+    yes_token_id: `market-${String(index).padStart(3, '0')}-yes`,
+    no_token_id: `market-${String(index).padStart(3, '0')}-no`,
+    subscribed: index % 3 === 0
+  }));
+}
+
 export function mockDecisions(): Decision[] {
   return Array.from({ length: 18 }, (_, index) => ({
     decision_id: `decision-${index}`,
     market_id: `pm-synthetic-${String(index).padStart(3, '0')}`,
+    token_id: `yes-token-${String(index).padStart(3, '0')}`,
+    venue: 'polymarket',
     forecaster: index % 2 === 0 ? 'StatisticalForecaster' : 'RulesForecaster',
     prob_estimate: 0.56 + (index % 4) / 100,
     expected_edge: 0.08 + (index % 3) / 100,
     kelly_size: 12 + index,
+    notional_usdc: 12 + index,
     resolved_outcome: index % 3 === 0 ? 1 : 0,
     price: 0.42 + (index % 5) / 100,
-    side: 'BUY'
+    limit_price: 0.42 + (index % 5) / 100,
+    side: 'BUY',
+    action: 'BUY',
+    status: 'pending',
+    factor_snapshot_hash: `snapshot-${index}`,
+    created_at: new Date(Date.UTC(2026, 3, 23, 10, index, 0)).toISOString(),
+    expires_at: new Date(Date.UTC(2026, 3, 23, 10, index + 15, 0)).toISOString(),
+    opportunity: {
+      opportunity_id: `opportunity-${index}`,
+      market_id: `pm-synthetic-${String(index).padStart(3, '0')}`,
+      token_id: `yes-token-${String(index).padStart(3, '0')}`,
+      side: 'yes',
+      selected_factor_values: {
+        edge: 0.08 + (index % 3) / 100,
+        liquidity: 0.04 + (index % 4) / 100,
+        urgency: 0.02 + (index % 2) / 100
+      },
+      expected_edge: 0.08 + (index % 3) / 100,
+      rationale: `Market ${String(index).padStart(3, '0')} is priced below the blended forecast while liquidity remains usable.`,
+      target_size_usdc: 12 + index,
+      expiry: new Date(Date.UTC(2026, 3, 23, 10, index + 15, 0)).toISOString(),
+      staleness_policy: 'mock',
+      strategy_id: 'default',
+      strategy_version_id: 'default-v1',
+      created_at: new Date(Date.UTC(2026, 3, 23, 10, index, 0)).toISOString(),
+      factor_snapshot_hash: `snapshot-${index}`,
+      composition_trace: { mode: 'mock', rank: index + 1 }
+    }
   }));
+}
+
+export function mockPositions(): PositionsResponse {
+  const positions: PositionRow[] = [
+    {
+      market_id: 'market-000',
+      token_id: 'market-000-yes',
+      venue: 'polymarket',
+      side: 'BUY',
+      shares_held: 50.0,
+      avg_entry_price: 0.41,
+      unrealized_pnl: 0.0,
+      locked_usdc: 20.5
+    },
+    {
+      market_id: 'market-003',
+      token_id: 'market-003-yes',
+      venue: 'polymarket',
+      side: 'BUY',
+      shares_held: 32.0,
+      avg_entry_price: 0.53,
+      unrealized_pnl: 0.0,
+      locked_usdc: 16.96
+    }
+  ];
+
+  return { positions };
+}
+
+export function mockTrades(limit = 20): TradesResponse {
+  const rows: TradeRow[] = [
+    {
+      trade_id: 'trade-000',
+      fill_id: 'fill-000',
+      order_id: 'order-000',
+      decision_id: 'decision-000',
+      market_id: 'market-000',
+      question: 'Will market 000 settle above consensus?',
+      token_id: 'market-000-yes',
+      venue: 'polymarket',
+      side: 'BUY',
+      fill_price: 0.41,
+      fill_notional_usdc: 20.5,
+      fill_quantity: 50.0,
+      executed_at: '2026-04-23T09:00:00Z',
+      filled_at: '2026-04-23T09:00:00Z',
+      status: 'matched',
+      strategy_id: 'default',
+      strategy_version_id: 'default-v1'
+    },
+    {
+      trade_id: 'trade-001',
+      fill_id: 'fill-001',
+      order_id: 'order-001',
+      decision_id: 'decision-001',
+      market_id: 'market-003',
+      question: 'Will market 003 settle above consensus?',
+      token_id: 'market-003-yes',
+      venue: 'polymarket',
+      side: 'BUY',
+      fill_price: 0.53,
+      fill_notional_usdc: 16.96,
+      fill_quantity: 32.0,
+      executed_at: '2026-04-23T08:30:00Z',
+      filled_at: '2026-04-23T08:30:00Z',
+      status: 'matched',
+      strategy_id: 'default',
+      strategy_version_id: 'default-v1'
+    }
+  ];
+
+  return {
+    trades: rows.slice(0, limit),
+    limit
+  };
 }
 
 export function mockMetrics(): MetricsResponse {
@@ -82,6 +205,7 @@ export function mockMetrics(): MetricsResponse {
   };
   return {
     ...opsView,
+    'pms.ui.first_trade_time_seconds': 58,
     per_strategy: [
       {
         strategy_id: 'alpha',

@@ -39,6 +39,13 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
 
@@ -62,3 +69,9 @@ jobs:
 
       - name: Run import-linter
         run: uv run lint-imports
+
+      - name: Run dashboard Vitest suite
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run test:ci

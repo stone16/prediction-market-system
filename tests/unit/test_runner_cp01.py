@@ -215,8 +215,10 @@ async def test_runner_creates_one_controller_task_per_active_strategy_and_fans_o
     async def fake_execute(
         decision: Any,
         portfolio: Portfolio | None = None,
+        *,
+        dedup_acquired: bool = False,
     ) -> OrderState:
-        del portfolio
+        del portfolio, dedup_acquired
         return OrderState(
             order_id=f"order-{decision.decision_id}",
             decision_id=decision.decision_id,

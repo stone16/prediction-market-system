@@ -1,0 +1,33 @@
+[2m[WebServer] [22mINFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+[2m[WebServer] [22mINFO  [alembic.runtime.migration] Will assume transactional DDL.
+[2m[WebServer] [22mINFO:     Started server process [85532]
+[2m[WebServer] [22mINFO:     Waiting for application startup.
+[2m[WebServer] [22mINFO:     Application startup complete.
+[2m[WebServer] [22mINFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+[2m[WebServer] [22m(node:88725) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[2m[WebServer] [22m(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 19 tests using 1 worker
+
+  ✓   1 e2e/backtest.spec.ts:385:5 › backtest list view exports YAML and redirects after enqueue (2.3s)
+  ✓   2 e2e/backtest.spec.ts:432:5 › run detail supports sorting, inline expansion, and bookmarkable details (1.2s)
+  ✓   3 e2e/backtest.spec.ts:456:5 › compare workspace computes and renders the four result panels (2.2s)
+  ✓   4 e2e/cathedral-accept.spec.ts:145:5 › accepting an idea shows pending, success toast, and a trade row (1.0s)
+  ✓   5 e2e/cathedral-accept.spec.ts:173:5 › 409 conflict shows market-changed toast and refetches the idea (1.1s)
+  ✓   6 e2e/cathedral.spec.ts:193:5 › cathedral happy path runs from today hero through first trade (1.1s)
+  ✓   7 e2e/event-log-drawer.spec.ts:55:5 › event log drawer shows streamed entries and remains pinned after reload (923ms)
+  ✓   8 e2e/factors.spec.ts:44:5 › factors page renders seeded factor rows without console errors (892ms)
+  ✓   9 e2e/markets-page.spec.ts:20:5 › markets page renders a populated table, then an empty state, without console errors (774ms)
+  ✓  10 e2e/metrics.spec.ts:42:5 › metrics page shows per-strategy breakdown before ops view (1.1s)
+  ✓  11 e2e/nav-ia.spec.ts:20:5 › cathedral nav labels render without console errors (527ms)
+  ✓  12 e2e/onboarding-ledger.spec.ts:20:5 › onboarding persists across dismiss and returns after localStorage reset (829ms)
+  ✓  13 e2e/onboarding-ledger.spec.ts:59:5 › positions and trades pages render populated and empty states without console errors (919ms)
+  ✓  14 e2e/share-page.spec.ts:99:5 › share page renders public strategy summary and neutral 404 copy without console errors (1.2s)
+  ✓  15 e2e/signals_real_depth.spec.ts:50:5 › signals page renders persisted depth without console errors (503ms)
+  -  16 e2e/source-indicators.spec.ts:33:5 › mock mode shows source banner and badges on key pages
+  ✓  17 e2e/source-indicators.spec.ts:62:5 › live mode hides source banner and badges on key pages (1.1s)
+  ✓  18 e2e/strategies.spec.ts:99:5 › strategies page renders comparative metrics without console errors (792ms)
+  ✓  19 e2e/visual-foundations.spec.ts:22:5 › visual foundations render across the existing desktop routes without console errors (1.2s)
+
+  1 skipped
+  18 passed (25.0s)
