@@ -18,7 +18,10 @@ from pms.core.models import Market, MarketSignal, Outcome, Token
 from pms.core.models import Venue as VenueValue
 from pms.core.venue_support import kalshi_stub_error, normalize_venue
 from pms.metrics import (
+    MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC,
     SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC,
+    SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC,
+    increment_metric,
     set_metric,
 )
 from pms.storage.market_data_store import PostgresMarketDataStore
@@ -93,6 +96,27 @@ class MarketDiscoverySensor:
                 market = _gamma_market_to_market(row, fetched_at)
                 await self.store.write_market(market)
                 written_markets.append(market)
+                try:
+                    await self.store.write_price_snapshot(
+                        condition_id=market.condition_id,
+                        snapshot_at=fetched_at,
+                        yes_price=market.yes_price,
+                        no_price=market.no_price,
+                        best_bid=market.best_bid,
+                        best_ask=market.best_ask,
+                        last_trade_price=market.last_trade_price,
+                        liquidity=market.liquidity,
+                        volume_24h=market.volume_24h,
+                    )
+                    increment_metric(
+                        SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC
+                    )
+                except asyncpg.PostgresError as error:
+                    logger.warning(
+                        "discovery write_price_snapshot failed for %s: %s",
+                        market.condition_id,
+                        error,
+                    )
                 tokens = _gamma_market_to_tokens(row, market.condition_id)
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
                 logger.warning("skipping malformed Gamma market row: %s", error)
@@ -124,6 +148,7 @@ class MarketDiscoverySensor:
                     continue
 
         _record_price_fields_populated_ratio(written_markets)
+        await _record_snapshot_lag_seconds_max(self.store)
 
     async def aclose(self) -> None:
         await self.http_client.aclose()
@@ -310,6 +335,15 @@ def _record_price_fields_populated_ratio(markets: list[Market]) -> None:
     )
     total = len(markets) * _DISCOVERY_PRICE_FIELD_COUNT
     set_metric(SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC, populated / total)
+
+
+async def _record_snapshot_lag_seconds_max(store: PostgresMarketDataStore) -> None:
+    try:
+        lag_seconds = await store.read_snapshot_lag_seconds_max()
+    except asyncpg.PostgresError as error:
+        logger.warning("discovery snapshot_lag metric failed: %s", error)
+        return
+    set_metric(MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC, lag_seconds)
 
 
 def _market_price_field_values(market: Market) -> tuple[object | None, ...]:

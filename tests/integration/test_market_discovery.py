@@ -89,10 +89,22 @@ def _freeze_discovery_now(monkeypatch: pytest.MonkeyPatch, now: datetime) -> Non
         fixed_now: ClassVar[datetime]
 
         @classmethod
-        def now(cls, tz: Any = None) -> datetime:
+        def now(cls, tz: Any = None) -> FixedDateTime:
             if tz is None:
-                return cls.fixed_now.replace(tzinfo=None)
-            return cls.fixed_now.astimezone(tz)
+                value = cls.fixed_now.replace(tzinfo=None)
+            else:
+                value = cls.fixed_now.astimezone(tz)
+            return cls(
+                value.year,
+                value.month,
+                value.day,
+                value.hour,
+                value.minute,
+                value.second,
+                value.microsecond,
+                tzinfo=value.tzinfo,
+                fold=value.fold,
+            )
 
     FixedDateTime.fixed_now = now
     monkeypatch.setattr("pms.sensor.adapters.market_discovery.datetime", FixedDateTime)
@@ -308,48 +320,49 @@ async def test_discovery_poll_continues_after_snapshot_write_failure(
     payload = _priced_gamma_markets("pm-snapshot-failure", 3)
     set_metric(SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC, 0.0)
 
-    await db_conn.execute(
-        """
-        INSERT INTO markets (
-            condition_id,
-            slug,
-            question,
-            venue,
-            created_at,
-            last_seen_at,
-            price_updated_at
-        ) VALUES (
-            $1,
-            $1,
-            'Will the snapshot failure preserve lag?',
-            'polymarket',
-            $2,
-            $2,
-            $2
+    async with pg_pool.acquire() as seed_connection:
+        await seed_connection.execute(
+            """
+            INSERT INTO markets (
+                condition_id,
+                slug,
+                question,
+                venue,
+                created_at,
+                last_seen_at,
+                price_updated_at
+            ) VALUES (
+                $1,
+                $1,
+                'Will the snapshot failure preserve lag?',
+                'polymarket',
+                $2,
+                $2,
+                $2
+            )
+            """,
+            failing_condition_id,
+            previous_snapshot_at,
         )
-        """,
-        failing_condition_id,
-        previous_snapshot_at,
-    )
-    await db_conn.execute(
-        """
-        INSERT INTO market_price_snapshots (
-            condition_id,
-            snapshot_at,
-            yes_price,
-            no_price,
-            best_bid,
-            best_ask,
-            last_trade_price,
-            liquidity,
-            volume_24h
-        ) VALUES (
-            $1, $2, 0.50, 0.50, 0.49, 0.51, 0.50, 100.0, 10.0
+        await seed_connection.execute(
+            """
+            INSERT INTO market_price_snapshots (
+                condition_id,
+                snapshot_at,
+                yes_price,
+                no_price,
+                best_bid,
+                best_ask,
+                last_trade_price,
+                liquidity,
+                volume_24h
+            ) VALUES (
+                $1, $2, 0.50, 0.50, 0.49, 0.51, 0.50, 100.0, 10.0
+            )
+            """,
+            failing_condition_id,
+            previous_snapshot_at,
         )
-        """,
-        failing_condition_id,
-        previous_snapshot_at,
-    )
 
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/markets"

@@ -289,6 +289,73 @@ class PostgresMarketDataStore:
                 market.price_updated_at,
             )
 
+    async def write_price_snapshot(
+        self,
+        *,
+        condition_id: str,
+        snapshot_at: datetime,
+        yes_price: float | None,
+        no_price: float | None,
+        best_bid: float | None,
+        best_ask: float | None,
+        last_trade_price: float | None,
+        liquidity: float | None,
+        volume_24h: float | None,
+    ) -> None:
+        query = """
+        INSERT INTO market_price_snapshots (
+            condition_id,
+            snapshot_at,
+            yes_price,
+            no_price,
+            best_bid,
+            best_ask,
+            last_trade_price,
+            liquidity,
+            volume_24h
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        """
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                query,
+                condition_id,
+                snapshot_at,
+                yes_price,
+                no_price,
+                best_bid,
+                best_ask,
+                last_trade_price,
+                liquidity,
+                volume_24h,
+            )
+
+    async def read_snapshot_lag_seconds_max(self) -> float:
+        query = """
+        WITH latest_snapshots AS (
+            SELECT condition_id, MAX(snapshot_at) AS snapshot_at
+            FROM market_price_snapshots
+            GROUP BY condition_id
+        )
+        SELECT COALESCE(
+            MAX(
+                GREATEST(
+                    EXTRACT(EPOCH FROM markets.price_updated_at - latest_snapshots.snapshot_at),
+                    0
+                )
+            ),
+            0
+        ) AS snapshot_lag_seconds_max
+        FROM markets
+        INNER JOIN latest_snapshots
+            ON latest_snapshots.condition_id = markets.condition_id
+        WHERE markets.price_updated_at IS NOT NULL
+        """
+        async with self._pool.acquire() as connection:
+            value = await connection.fetchval(query)
+        if value is None:
+            return 0.0
+        return float(value)
+
     async def write_token(self, token: Token) -> None:
         query = """
         INSERT INTO tokens (
