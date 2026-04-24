@@ -1,12 +1,16 @@
 'use client';
 
 import { useEffect } from 'react';
+import { useRef, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { MarketDetailDrawer } from '@/components/MarketDetailDrawer';
 import { MarketsTable } from '@/components/MarketsTable';
 import { Nav } from '@/components/Nav';
+import { ToastStack, type ToastMessage } from '@/components/Toast';
 import { useLiveData } from '@/lib/useLiveData';
-import type { MarketsListResponse, StatusResponse } from '@/lib/types';
+import type { MarketRow, MarketsListResponse, StatusResponse } from '@/lib/types';
+
+type SubscriptionOverride = Pick<MarketRow, 'subscribed' | 'subscription_source'>;
 
 export function MarketsPageClient() {
   const router = useRouter();
@@ -14,11 +18,28 @@ export function MarketsPageClient() {
   const searchParams = useSearchParams();
   const marketsState = useLiveData<MarketsListResponse>('/markets?limit=20');
   const statusState = useLiveData<StatusResponse>('/status');
-  const rows = marketsState.data?.markets ?? [];
+  const [rows, setRows] = useState<MarketRow[]>([]);
+  const [subscriptionOverrides, setSubscriptionOverrides] = useState<
+    Record<string, SubscriptionOverride>
+  >({});
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const toastCounterRef = useRef(0);
   const subscribedCount = rows.filter((row) => row.subscribed).length;
   const runnerLabel: 'running' | 'paused' = statusState.data?.running ? 'running' : 'paused';
   const detailMarketId = searchParams.get('detail');
   const detailMarket = rows.find((row) => row.market_id === detailMarketId) ?? null;
+
+  useEffect(() => {
+    if (marketsState.data === null) {
+      return;
+    }
+    setRows(
+      marketsState.data.markets.map((row) => ({
+        ...row,
+        ...subscriptionOverrides[row.market_id]
+      }))
+    );
+  }, [marketsState.data, subscriptionOverrides]);
 
   function replaceDetail(nextMarketId: string | null) {
     const params = new URLSearchParams(searchParams.toString());
@@ -29,6 +50,24 @@ export function MarketsPageClient() {
     }
     const query = params.toString();
     router.replace(`${pathname}${query ? `?${query}` : ''}`, { scroll: false });
+  }
+
+  function updateMarket(updatedMarket: MarketRow) {
+    setRows((current) =>
+      current.map((row) => (row.market_id === updatedMarket.market_id ? updatedMarket : row))
+    );
+    setSubscriptionOverrides((current) => ({
+      ...current,
+      [updatedMarket.market_id]: {
+        subscribed: updatedMarket.subscribed,
+        subscription_source: updatedMarket.subscription_source
+      }
+    }));
+  }
+
+  function pushToast(toast: Omit<ToastMessage, 'id'>) {
+    const id = `toast-${toastCounterRef.current++}`;
+    setToasts((current) => [...current.slice(-2), { id, ...toast }]);
   }
 
   useEffect(() => {
@@ -82,8 +121,17 @@ export function MarketsPageClient() {
             runnerLabel={runnerLabel}
           />
         )}
-        <MarketDetailDrawer market={detailMarket} onClose={() => replaceDetail(null)} />
+        <MarketDetailDrawer
+          market={detailMarket}
+          onClose={() => replaceDetail(null)}
+          onMarketChange={updateMarket}
+          onToast={pushToast}
+        />
       </section>
+      <ToastStack
+        items={toasts}
+        onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))}
+      />
     </main>
   );
 }

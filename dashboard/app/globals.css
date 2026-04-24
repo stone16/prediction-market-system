@@ -637,6 +637,26 @@ h3 {
   width: 42px;
 }
 
+.market-detail-subscribe {
+  align-items: center;
+  background: rgb(255 255 255 / 80%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: var(--space-3);
+  justify-content: space-between;
+  padding: var(--space-3);
+}
+
+.market-detail-subscribe .ghost-button {
+  min-height: 38px;
+}
+
+.market-detail-subscribe .ghost-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .market-detail-price-grid {
   display: grid;
   gap: var(--space-3);
@@ -718,6 +738,58 @@ h3 {
   font-weight: var(--weight-bold);
   margin-left: var(--space-2);
   text-transform: uppercase;
+}
+
+.market-detail-chart {
+  min-height: 250px;
+  padding: var(--space-4);
+}
+
+.market-detail-chart h3 {
+  font-size: var(--text-18);
+  margin: 0;
+}
+
+.market-detail-chart .chart-frame {
+  height: 200px;
+}
+
+.price-history-chart {
+  min-width: 440px;
+}
+
+.price-history-single {
+  align-items: center;
+  background: rgb(31 138 112 / 9%);
+  border: 1px solid rgb(31 138 112 / 22%);
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: var(--space-3);
+  min-height: 180px;
+  padding: var(--space-4);
+}
+
+.price-history-single strong,
+.price-history-single span {
+  display: block;
+}
+
+.price-history-single strong {
+  font-size: var(--text-24);
+}
+
+.price-history-single span {
+  color: var(--muted);
+  font-size: var(--text-13);
+}
+
+.price-history-dot {
+  background: var(--green);
+  border-radius: 50%;
+  box-shadow: 0 0 0 8px rgb(31 138 112 / 14%);
+  flex: 0 0 auto;
+  height: 16px;
+  width: 16px;
 }
 
 .depth-card {
@@ -1674,7 +1746,7 @@ th {
   position: fixed;
   right: 24px;
   width: min(360px, calc(100vw - 48px));
-  z-index: 35;
+  z-index: 60;
 }
 
 .toast {

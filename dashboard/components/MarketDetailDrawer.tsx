@@ -2,11 +2,17 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { PriceBar } from '@/components/PriceBar';
-import type { MarketRow } from '@/lib/types';
+import { PriceHistoryChartNoSsr } from '@/components/PriceHistoryChartNoSsr';
+import { SubscribeStar } from '@/components/SubscribeStar';
+import type { ToastMessage } from '@/components/Toast';
+import type { MarketRow, PriceHistoryResponse } from '@/lib/types';
+import { useLiveData } from '@/lib/useLiveData';
 
 type MarketDetailDrawerProps = {
   market: MarketRow | null;
   onClose: () => void;
+  onMarketChange?: (market: MarketRow) => void;
+  onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
 };
 
 function focusableElements(root: HTMLElement) {
@@ -47,11 +53,23 @@ function formatDate(value: string | null | undefined) {
   }).format(parsed);
 }
 
-export function MarketDetailDrawer({ market, onClose }: MarketDetailDrawerProps) {
+export function MarketDetailDrawer({
+  market,
+  onClose,
+  onMarketChange,
+  onToast
+}: MarketDetailDrawerProps) {
   const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null);
+  const [subscribeInflight, setSubscribeInflight] = useState(false);
   const dialogRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
+  const priceHistoryState = useLiveData<PriceHistoryResponse>(
+    market === null
+      ? null
+      : `/markets/${encodeURIComponent(market.market_id)}/price-history?limit=1440`,
+    15000
+  );
 
   useEffect(() => {
     if (market === null) {
@@ -107,6 +125,7 @@ export function MarketDetailDrawer({ market, onClose }: MarketDetailDrawerProps)
   if (market === null) {
     return null;
   }
+  const activeMarket = market;
 
   async function copyToken(tokenId: string) {
     await navigator.clipboard.writeText(tokenId);
@@ -118,6 +137,40 @@ export function MarketDetailDrawer({ market, onClose }: MarketDetailDrawerProps)
       setCopiedTokenId(null);
       copiedTimerRef.current = null;
     }, 1400);
+  }
+
+  async function handleSubscribeToggle() {
+    if (subscribeInflight || activeMarket.yes_token_id === null) {
+      return;
+    }
+
+    const wasUserSubscribed = activeMarket.subscription_source === 'user';
+    const previousMarket = activeMarket;
+    const nextMarket: MarketRow = {
+      ...activeMarket,
+      subscribed: !wasUserSubscribed,
+      subscription_source: wasUserSubscribed ? null : 'user'
+    };
+
+    setSubscribeInflight(true);
+    onMarketChange?.(nextMarket);
+    try {
+      const response = await fetch(
+        `/api/pms/markets/${encodeURIComponent(activeMarket.yes_token_id)}/subscribe`,
+        { method: wasUserSubscribed ? 'DELETE' : 'POST' }
+      );
+      if (!response.ok) {
+        throw new Error(`Subscription request returned ${response.status}`);
+      }
+    } catch {
+      onMarketChange?.(previousMarket);
+      onToast?.({
+        tone: 'error',
+        message: 'Subscription failed. Reverted to the previous state.'
+      });
+    } finally {
+      setSubscribeInflight(false);
+    }
   }
 
   function tokenRow(label: 'YES' | 'NO', tokenId: string | null) {
@@ -178,6 +231,21 @@ export function MarketDetailDrawer({ market, onClose }: MarketDetailDrawerProps)
           </button>
         </header>
 
+        <div className="market-detail-subscribe">
+          <SubscribeStar
+            subscribed={market.subscribed}
+            subscriptionSource={market.subscription_source}
+          />
+          <button
+            className="ghost-button"
+            disabled={subscribeInflight || market.yes_token_id === null}
+            onClick={() => void handleSubscribeToggle()}
+            type="button"
+          >
+            {market.subscription_source === 'user' ? 'Unsubscribe market' : 'Subscribe market'}
+          </button>
+        </div>
+
         <div className="market-detail-price-grid">
           <div className="market-detail-price-card">
             <span>YES</span>
@@ -207,6 +275,17 @@ export function MarketDetailDrawer({ market, onClose }: MarketDetailDrawerProps)
             <dd>{formatDate(market.resolves_at)}</dd>
           </div>
         </dl>
+
+        <section className="market-detail-chart chart-panel">
+          <h3>YES price history</h3>
+          <div className="chart-frame">
+            {priceHistoryState.loading && priceHistoryState.data === null ? (
+              <p className="muted">Loading price history...</p>
+            ) : (
+              <PriceHistoryChartNoSsr snapshots={priceHistoryState.data?.snapshots ?? []} />
+            )}
+          </div>
+        </section>
 
         <details className="market-detail-metadata" open>
           <summary>Metadata</summary>

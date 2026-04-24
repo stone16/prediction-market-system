@@ -151,6 +151,22 @@ export type MarketsListResponse = {
   total: number;
 };
 
+export type PriceHistorySnapshot = {
+  snapshot_at: string;
+  yes_price: number | null;
+  no_price: number | null;
+  best_bid: number | null;
+  best_ask: number | null;
+  last_trade_price: number | null;
+  liquidity: number | null;
+  volume_24h: number | null;
+};
+
+export type PriceHistoryResponse = {
+  condition_id: string;
+  snapshots: PriceHistorySnapshot[];
+};
+
 export type PositionRow = {
   market_id: string;
   token_id: string | null;

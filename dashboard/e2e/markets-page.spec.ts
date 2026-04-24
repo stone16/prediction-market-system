@@ -133,19 +133,20 @@ test('markets page opens the detail drawer from a row and restores it after relo
   await expect(page.getByRole('heading', { name: 'Markets' })).toBeVisible();
   await page.getByRole('row', { name: /Will market 000 settle above consensus/i }).click();
   await expect(page).toHaveURL(/\/markets\?detail=market-000/);
-  await expect(page.getByRole('dialog', { name: 'Market details' })).toBeVisible();
+  const drawer = page.getByRole('dialog', { name: 'Market details' });
+  await expect(drawer).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Will market 000 settle above consensus?' })).toBeVisible();
   await expect(page.getByText('market-000-yes')).toBeVisible();
   await expect(page.getByTestId('price-history-line-chart')).toBeVisible();
   await page.getByRole('button', { name: 'Subscribe market' }).click();
-  await expect(page.getByLabel('User subscription')).toBeVisible();
+  await expect(drawer.getByLabel('User subscription')).toBeVisible();
   await page.getByRole('button', { name: 'Close market details' }).click();
-  await expect(page.getByRole('dialog', { name: 'Market details' })).toBeHidden();
+  await expect(drawer).toBeHidden();
   await page.getByRole('row', { name: /Will market 000 settle above consensus/i }).click();
-  await expect(page.getByLabel('User subscription')).toBeVisible();
+  await expect(drawer.getByLabel('User subscription')).toBeVisible();
 
   await page.reload();
-  await expect(page.getByRole('dialog', { name: 'Market details' })).toBeVisible();
+  await expect(drawer).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Will market 000 settle above consensus?' })).toBeVisible();
 
   await page.screenshot({
