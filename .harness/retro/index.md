@@ -28,7 +28,7 @@ CLAUDE.md, contributors expected to follow) → `retired` (resolved).
 | domain-math-piecewise                | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 2 |
 | lifecycle-cleanup-exit-paths         | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 3 |
 | document-instead-of-fix              | 1           | medium   | active     | pms-v1     | pms-v1      | Proposal 4 |
-| cross-checkpoint-integration         | 6           | medium   | proposed   | pms-v1     | cathedral-v1 | Proposal 5 |
+| cross-checkpoint-integration         | 7           | medium   | proposed   | pms-v1     | pms-markets-browser-v1 | Proposal 5 |
 | magnitude-overrun-tests              | 2           | low      | monitoring | pms-v1     | pms-factor-panel-v1 | Proposal 6 |
 | rule-conflict-precedence             | 1           | low      | active     | pms-v1     | pms-v1      | Proposal 7 |
 | runtime-behaviour-vs-design-intent   | 1           | high     | active     | pms-v1     | pms-v1      | Principle |
@@ -41,11 +41,22 @@ CLAUDE.md, contributors expected to follow) → `retired` (resolved).
 | skipped-full-verify-pre-merge        | 1           | medium   | observation| pms-factor-panel-v1 | pms-factor-panel-v1 | Observation |
 | empty-harness-phase-artifacts        | 1           | low      | observation| pms-factor-panel-v1 | pms-factor-panel-v1 | Observation |
 | generated-artifact-drift             | 2           | low      | monitoring | pms-research-backtest-v1 | cathedral-v1 | Observation |
+| npm-build-gate-gap                   | 1           | high     | proposed   | pms-markets-browser-v1 | pms-markets-browser-v1 | Proposal markets-P1 |
+| coverage-below-harness-default       | 1           | medium   | proposed   | pms-markets-browser-v1 | pms-markets-browser-v1 | Proposal markets-P2 |
 
 Active rules are codified in `/CLAUDE.md` at the repo root (Phase 3D).
 Cross-checkpoint integration remains `proposed` because the harness-side
 fix (an evaluator integration trace step) belongs in the orchestrator
 template, not in project CLAUDE.md.
+
+`npm-build-gate-gap` is `proposed` on first occurrence because severity is
+HIGH (deployment-breaking build failure). The fix is both a project-level
+gate documentation addition and a harness review-loop skill defect (SD-1).
+
+`coverage-below-harness-default` is `proposed` on first occurrence because
+the user explicitly requested an issue and severity is medium. The
+`.harness/config.json` threshold of 79 is a temporary accommodation for
+issue #22; target is 85 (the Harness default).
 
 ## Pending Proposals
 
@@ -72,6 +83,11 @@ These are ready for the Orchestrator to auto-create GitHub issues.
     (low, recommended) — `pms-phase2`
 11. **phase3-P1** — Stage lockfile changes with pyproject edits
     (low, observation) — `pms-phase3`
+12. **markets-P1** — Add `cd dashboard && npm run build` to canonical gate
+    list for all dashboard-touching branches (high) — `pms-markets-browser-v1`
+13. **markets-P2** — Increase `.harness/config.json` coverage threshold from
+    79 to 85%; user-requested issue for coverage improvement
+    (medium) — `pms-markets-browser-v1`
 
 ### Monitoring (low severity, watching for recurrence)
 
@@ -92,6 +108,18 @@ These are ready for the Orchestrator to auto-create GitHub issues.
   commits stage generated local artifacts (`.coverage`, framework
   stubs, Playwright evidence) that are not intended product changes
 
+### Proposed (issue-ready, rule text drafted)
+
+- `npm-build-gate-gap` — `npm run build` absent from review-loop gate
+  list for fullstack/dashboard tasks; Next.js prerender errors are
+  silent in lint/Vitest/Playwright but hard-fail the production build.
+  Proposed rule: add `(cd dashboard && npm run build)` to CLAUDE.md
+  canonical gates. Also a harness skill defect (SD-1).
+- `coverage-below-harness-default` — project `.harness/config.json`
+  `coverage_threshold` is 79 vs the harness default 85; measured
+  coverage is 80.01%. Proposed rule: raise threshold to 85 and add
+  contributor guidance. User explicitly requested an issue.
+
 ## Skill Defect Log
 
 | Task   | Skill              | Severity | Defect                                                    | Status           |
@@ -99,6 +127,7 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 | pms-v1 | harness bootstrap  | low      | Pyright not configured to use uv-managed venv             | flagged for review |
 | pms-v1 | harness evaluator  | low      | Magnitude gate conflates production and test LOC          | flagged for review |
 | pms-research-backtest-v1 | harness review-loop | low | Preflight checkpoint commit staged generated artifacts (`.coverage`, `next-env.d.ts`, Playwright evidence PNG) | flagged for review |
+| pms-markets-browser-v1 | harness review-loop | medium | SD-1: Review-loop verification gate list for fullstack/dashboard tasks does not include `cd dashboard && npm run build`; Next.js prerender errors are invisible to lint/Vitest/Playwright but surface as hard failures in `next build` | flagged for review |
 
 ## Task History
 
@@ -112,3 +141,4 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 | pms-factor-panel-v1 | 2026-04-18 | 8   | 7          | 9     | 0       | [2026-04-18-pms-factor-panel-v1.md](./2026-04-18-pms-factor-panel-v1.md) |
 | pms-research-backtest-v1 | 2026-04-20 | 13  | 11         | 15    | 0       | [2026-04-20-pms-research-backtest-v1.md](./2026-04-20-pms-research-backtest-v1.md) |
 | cathedral-v1 | 2026-04-23 | 12  | 11         | 13    | 0       | [2026-04-23-cathedral-v1.md](./2026-04-23-cathedral-v1.md) |
+| pms-markets-browser-v1 | 2026-04-24 | 14  | 13         | 16    | 0       | [2026-04-24-pms-markets-browser-v1.md](./2026-04-24-pms-markets-browser-v1.md) |

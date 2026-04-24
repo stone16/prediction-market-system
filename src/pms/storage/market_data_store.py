@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, Literal, cast
 
 import asyncpg
 
@@ -17,6 +17,20 @@ from pms.core.models import (
     Venue,
 )
 
+SubscribedMarketFilter = Literal["all", "only", "idle"]
+
+
+@dataclass(frozen=True)
+class MarketFilters:
+    q: str = ""
+    volume_min: float = 0.0
+    liquidity_min: float = 0.0
+    spread_max_bps: int | None = None
+    yes_min: float = 0.0
+    yes_max: float = 1.0
+    resolves_within_days: int | None = None
+    subscribed: SubscribedMarketFilter = "all"
+
 
 @dataclass(frozen=True)
 class MarketCatalogRow:
@@ -27,6 +41,34 @@ class MarketCatalogRow:
     updated_at: datetime
     yes_token_id: str | None
     no_token_id: str | None
+    resolves_at: datetime | None = None
+    yes_price: float | None = None
+    no_price: float | None = None
+    best_bid: float | None = None
+    best_ask: float | None = None
+    last_trade_price: float | None = None
+    liquidity: float | None = None
+    spread_bps: int | None = None
+    price_updated_at: datetime | None = None
+    subscription_source: str | None = None
+
+
+@dataclass(frozen=True)
+class MarketPriceSnapshotRow:
+    snapshot_at: datetime
+    yes_price: float | None
+    no_price: float | None
+    best_bid: float | None
+    best_ask: float | None
+    last_trade_price: float | None
+    liquidity: float | None
+    volume_24h: float | None
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(cast(Any, value))
 
 
 class PostgresMarketDataStore:
@@ -81,7 +123,10 @@ class PostgresMarketDataStore:
         *,
         limit: int,
         offset: int,
+        filters: MarketFilters | None = None,
+        current_asset_ids: frozenset[str] = frozenset(),
         now: datetime | None = None,
+        market_id: str | None = None,
     ) -> tuple[list[MarketCatalogRow], int]:
         query = """
         SELECT
@@ -90,29 +135,134 @@ class PostgresMarketDataStore:
             markets.venue,
             markets.volume_24h,
             markets.last_seen_at AS updated_at,
+            markets.resolves_at,
+            markets.yes_price,
+            markets.no_price,
+            markets.best_bid,
+            markets.best_ask,
+            markets.last_trade_price,
+            markets.liquidity,
+            markets.spread_bps,
+            markets.price_updated_at,
             MAX(CASE WHEN tokens.outcome = 'YES' THEN tokens.token_id END) AS yes_token_id,
             MAX(CASE WHEN tokens.outcome = 'NO' THEN tokens.token_id END) AS no_token_id,
+            MAX(market_subscriptions.source) AS subscription_source,
             COUNT(*) OVER() AS total_count
         FROM markets
         LEFT JOIN tokens
             ON tokens.condition_id = markets.condition_id
+        LEFT JOIN market_subscriptions
+            ON market_subscriptions.token_id = tokens.token_id
         WHERE (markets.resolves_at IS NULL OR markets.resolves_at > $1)
+          AND ($13::text IS NULL OR markets.condition_id = $13)
+          AND ($2 = '' OR markets.question ILIKE '%' || $2 || '%')
+          AND (
+              $3 = 0
+              OR (markets.volume_24h IS NOT NULL AND markets.volume_24h >= $3)
+          )
+          AND (
+              $4 = 0
+              OR (markets.liquidity IS NOT NULL AND markets.liquidity >= $4)
+          )
+          AND (
+              $5::integer IS NULL
+              OR (markets.spread_bps IS NOT NULL AND markets.spread_bps <= $5)
+          )
+          AND (
+              $6 = 0
+              OR (markets.yes_price IS NOT NULL AND markets.yes_price >= $6)
+          )
+          AND (
+              $7 = 1
+              OR (markets.yes_price IS NOT NULL AND markets.yes_price <= $7)
+          )
+          AND (
+              $8::timestamptz IS NULL
+              OR (markets.resolves_at IS NOT NULL AND markets.resolves_at <= $8)
+          )
+          AND (
+              $9 = 'all'
+              OR (
+                  $9 = 'only'
+                  AND (
+                      EXISTS (
+                          SELECT 1
+                          FROM tokens AS subscribed_tokens
+                          WHERE subscribed_tokens.condition_id = markets.condition_id
+                            AND subscribed_tokens.token_id = ANY($10::text[])
+                      )
+                      OR EXISTS (
+                          SELECT 1
+                          FROM tokens AS user_subscription_tokens
+                          JOIN market_subscriptions AS user_subscriptions
+                              ON user_subscriptions.token_id = user_subscription_tokens.token_id
+                          WHERE user_subscription_tokens.condition_id = markets.condition_id
+                      )
+                  )
+              )
+              OR (
+                  $9 = 'idle'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM tokens AS subscribed_tokens
+                      WHERE subscribed_tokens.condition_id = markets.condition_id
+                        AND subscribed_tokens.token_id = ANY($10::text[])
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM tokens AS user_subscription_tokens
+                      JOIN market_subscriptions AS user_subscriptions
+                          ON user_subscriptions.token_id = user_subscription_tokens.token_id
+                      WHERE user_subscription_tokens.condition_id = markets.condition_id
+                  )
+              )
+          )
         GROUP BY
             markets.condition_id,
             markets.question,
             markets.venue,
             markets.volume_24h,
-            markets.last_seen_at
+            markets.last_seen_at,
+            markets.resolves_at,
+            markets.yes_price,
+            markets.no_price,
+            markets.best_bid,
+            markets.best_ask,
+            markets.last_trade_price,
+            markets.liquidity,
+            markets.spread_bps,
+            markets.price_updated_at
         ORDER BY
             COALESCE(markets.volume_24h, 0) DESC,
             markets.last_seen_at DESC,
             markets.condition_id ASC
-        LIMIT $2
-        OFFSET $3
+        LIMIT $11
+        OFFSET $12
         """
         reference_now = now or datetime.now(tz=UTC)
+        active_filters = filters or MarketFilters()
+        resolves_before = (
+            None
+            if active_filters.resolves_within_days is None
+            else reference_now + timedelta(days=active_filters.resolves_within_days)
+        )
         async with self._pool.acquire() as connection:
-            rows = await connection.fetch(query, reference_now, limit, offset)
+            rows = await connection.fetch(
+                query,
+                reference_now,
+                active_filters.q.strip(),
+                active_filters.volume_min,
+                active_filters.liquidity_min,
+                active_filters.spread_max_bps,
+                active_filters.yes_min,
+                active_filters.yes_max,
+                resolves_before,
+                active_filters.subscribed,
+                sorted(current_asset_ids),
+                limit,
+                offset,
+                market_id,
+            )
         if not rows:
             return [], 0
         total = cast(int, rows[0]["total_count"])
@@ -125,9 +275,92 @@ class PostgresMarketDataStore:
                 updated_at=cast(datetime, row["updated_at"]),
                 yes_token_id=cast(str | None, row["yes_token_id"]),
                 no_token_id=cast(str | None, row["no_token_id"]),
+                resolves_at=cast(datetime | None, row["resolves_at"]),
+                yes_price=_optional_float(row["yes_price"]),
+                no_price=_optional_float(row["no_price"]),
+                best_bid=_optional_float(row["best_bid"]),
+                best_ask=_optional_float(row["best_ask"]),
+                last_trade_price=_optional_float(row["last_trade_price"]),
+                liquidity=_optional_float(row["liquidity"]),
+                spread_bps=cast(int | None, row["spread_bps"]),
+                price_updated_at=cast(datetime | None, row["price_updated_at"]),
+                subscription_source=cast(str | None, row["subscription_source"]),
             )
             for row in rows
         ], total
+
+    async def read_market_by_id(
+        self,
+        *,
+        market_id: str,
+        current_asset_ids: frozenset[str] = frozenset(),
+        now: datetime | None = None,
+    ) -> MarketCatalogRow | None:
+        rows, _ = await self.read_markets(
+            limit=1,
+            offset=0,
+            filters=MarketFilters(),
+            current_asset_ids=current_asset_ids,
+            now=now,
+            market_id=market_id,
+        )
+        return rows[0] if rows else None
+
+    async def read_price_history(
+        self,
+        *,
+        condition_id: str,
+        since: datetime,
+        limit: int,
+    ) -> list[MarketPriceSnapshotRow] | None:
+        snapshots_query = """
+        SELECT
+            snapshot_at,
+            yes_price,
+            no_price,
+            best_bid,
+            best_ask,
+            last_trade_price,
+            liquidity,
+            volume_24h
+        FROM market_price_snapshots
+        WHERE condition_id = $1
+          AND snapshot_at >= $2
+        ORDER BY snapshot_at ASC
+        LIMIT $3
+        """
+        async with self._pool.acquire() as connection:
+            market_exists = await connection.fetchval(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM markets
+                    WHERE condition_id = $1
+                )
+                """,
+                condition_id,
+            )
+            if not market_exists:
+                return None
+            rows = await connection.fetch(
+                snapshots_query,
+                condition_id,
+                since,
+                limit,
+            )
+        return [
+            MarketPriceSnapshotRow(
+                snapshot_at=cast(datetime, row["snapshot_at"]),
+                yes_price=_optional_float(row["yes_price"]),
+                no_price=_optional_float(row["no_price"]),
+                best_bid=_optional_float(row["best_bid"]),
+                best_ask=_optional_float(row["best_ask"]),
+                last_trade_price=_optional_float(row["last_trade_price"]),
+                liquidity=_optional_float(row["liquidity"]),
+                volume_24h=_optional_float(row["volume_24h"]),
+            )
+            for row in rows
+        ]
 
     async def read_eligible_markets(
         self,
@@ -239,15 +472,34 @@ class PostgresMarketDataStore:
             resolves_at,
             created_at,
             last_seen_at,
-            volume_24h
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            volume_24h,
+            yes_price,
+            no_price,
+            best_bid,
+            best_ask,
+            last_trade_price,
+            liquidity,
+            spread_bps,
+            price_updated_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            $9, $10, $11, $12, $13, $14, $15, $16
+        )
         ON CONFLICT (condition_id) DO UPDATE
         SET slug = EXCLUDED.slug,
             question = EXCLUDED.question,
             venue = EXCLUDED.venue,
             resolves_at = EXCLUDED.resolves_at,
             last_seen_at = EXCLUDED.last_seen_at,
-            volume_24h = EXCLUDED.volume_24h
+            volume_24h = EXCLUDED.volume_24h,
+            yes_price = EXCLUDED.yes_price,
+            no_price = EXCLUDED.no_price,
+            best_bid = EXCLUDED.best_bid,
+            best_ask = EXCLUDED.best_ask,
+            last_trade_price = EXCLUDED.last_trade_price,
+            liquidity = EXCLUDED.liquidity,
+            spread_bps = EXCLUDED.spread_bps,
+            price_updated_at = EXCLUDED.price_updated_at
         """
         async with self._pool.acquire() as connection:
             await connection.execute(
@@ -260,7 +512,82 @@ class PostgresMarketDataStore:
                 market.created_at,
                 market.last_seen_at,
                 market.volume_24h,
+                market.yes_price,
+                market.no_price,
+                market.best_bid,
+                market.best_ask,
+                market.last_trade_price,
+                market.liquidity,
+                market.spread_bps,
+                market.price_updated_at,
             )
+
+    async def write_price_snapshot(
+        self,
+        *,
+        condition_id: str,
+        snapshot_at: datetime,
+        yes_price: float | None,
+        no_price: float | None,
+        best_bid: float | None,
+        best_ask: float | None,
+        last_trade_price: float | None,
+        liquidity: float | None,
+        volume_24h: float | None,
+    ) -> None:
+        query = """
+        INSERT INTO market_price_snapshots (
+            condition_id,
+            snapshot_at,
+            yes_price,
+            no_price,
+            best_bid,
+            best_ask,
+            last_trade_price,
+            liquidity,
+            volume_24h
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        """
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                query,
+                condition_id,
+                snapshot_at,
+                yes_price,
+                no_price,
+                best_bid,
+                best_ask,
+                last_trade_price,
+                liquidity,
+                volume_24h,
+            )
+
+    async def read_snapshot_lag_seconds_max(self) -> float:
+        query = """
+        WITH latest_snapshots AS (
+            SELECT condition_id, MAX(snapshot_at) AS snapshot_at
+            FROM market_price_snapshots
+            GROUP BY condition_id
+        )
+        SELECT COALESCE(
+            MAX(
+                GREATEST(
+                    EXTRACT(EPOCH FROM markets.price_updated_at - latest_snapshots.snapshot_at),
+                    0
+                )
+            ),
+            0
+        ) AS snapshot_lag_seconds_max
+        FROM markets
+        INNER JOIN latest_snapshots
+            ON latest_snapshots.condition_id = markets.condition_id
+        WHERE markets.price_updated_at IS NOT NULL
+        """
+        async with self._pool.acquire() as connection:
+            value = await connection.fetchval(query)
+        if value is None:
+            return 0.0
+        return float(value)
 
     async def write_token(self, token: Token) -> None:
         query = """

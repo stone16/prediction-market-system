@@ -6,6 +6,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -14,7 +15,17 @@ import pytest
 
 from pms.config import PMSSettings
 from pms.core.enums import RunMode
-from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
+from pms.metrics import (
+    MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC,
+    SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC,
+    SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC,
+    get_metric,
+    set_metric,
+)
+from pms.sensor.adapters.market_discovery import (
+    MarketDiscoverySensor,
+    _gamma_market_to_market,
+)
 from pms.sensor.stream import SensorStream
 from pms.storage.market_data_store import PostgresMarketDataStore
 
@@ -26,6 +37,11 @@ def _gamma_market(
     outcomes: list[str] | None = None,
     include_condition_id: bool = True,
     volume_24hr: float | None = 1234.0,
+    outcome_prices: object | None = None,
+    last_trade_price: object | None = None,
+    best_bid: object | None = None,
+    best_ask: object | None = None,
+    liquidity: object | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": condition_id,
@@ -44,6 +60,16 @@ def _gamma_market(
         payload["clobTokenIds"] = json.dumps(token_ids)
     if outcomes is not None:
         payload["outcomes"] = json.dumps(outcomes)
+    if outcome_prices is not None:
+        payload["outcomePrices"] = outcome_prices
+    if last_trade_price is not None:
+        payload["lastTradePrice"] = last_trade_price
+    if best_bid is not None:
+        payload["bestBid"] = best_bid
+    if best_ask is not None:
+        payload["bestAsk"] = best_ask
+    if liquidity is not None:
+        payload["liquidity"] = liquidity
     return payload
 
 
@@ -51,6 +77,10 @@ def _gamma_market(
 class StoreMock:
     write_market_mock: AsyncMock = field(default_factory=AsyncMock)
     write_token_mock: AsyncMock = field(default_factory=AsyncMock)
+    write_price_snapshot_mock: AsyncMock = field(default_factory=AsyncMock)
+    read_snapshot_lag_seconds_max_mock: AsyncMock = field(
+        default_factory=lambda: AsyncMock(return_value=0.0)
+    )
 
     async def write_market(self, market: Any) -> None:
         await self.write_market_mock(market)
@@ -58,9 +88,113 @@ class StoreMock:
     async def write_token(self, token: Any) -> None:
         await self.write_token_mock(token)
 
+    async def write_price_snapshot(self, **kwargs: Any) -> None:
+        await self.write_price_snapshot_mock(**kwargs)
+
+    async def read_snapshot_lag_seconds_max(self) -> float:
+        return cast(float, await self.read_snapshot_lag_seconds_max_mock())
+
 
 def _store_mock() -> PostgresMarketDataStore:
     return cast(PostgresMarketDataStore, StoreMock())
+
+
+def test_gamma_row_to_market_extracts_all_price_fields() -> None:
+    fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+    market = _gamma_market_to_market(
+        _gamma_market(
+            "pm-priced",
+            outcomes=["Yes", "No"],
+            outcome_prices=["0.61", "0.39"],
+            last_trade_price="0.60",
+            best_bid="0.59",
+            best_ask="0.62",
+            liquidity="1250.5",
+        ),
+        fetched_at,
+    )
+
+    assert market.yes_price == 0.61
+    assert market.no_price == 0.39
+    assert market.last_trade_price == 0.60
+    assert market.best_bid == 0.59
+    assert market.best_ask == 0.62
+    assert market.liquidity == 1250.5
+    assert market.spread_bps == 300
+    assert market.price_updated_at == fetched_at
+
+
+def test_gamma_row_missing_outcome_prices_falls_back_to_none() -> None:
+    fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+    market = _gamma_market_to_market(
+        _gamma_market(
+            "pm-missing-outcome-prices",
+            outcomes=["Yes", "No"],
+            best_bid="0.41",
+            best_ask="0.43",
+        ),
+        fetched_at,
+    )
+
+    assert market.yes_price is None
+    assert market.no_price is None
+    assert market.best_bid == 0.41
+    assert market.best_ask == 0.43
+    assert market.price_updated_at == fetched_at
+
+
+def test_gamma_row_outcome_prices_string_encoded_parsed() -> None:
+    fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+    market = _gamma_market_to_market(
+        _gamma_market(
+            "pm-string-outcome-prices",
+            outcomes=["Yes", "No"],
+            outcome_prices=json.dumps(["0.55", "0.45"]),
+        ),
+        fetched_at,
+    )
+
+    assert market.yes_price == 0.55
+    assert market.no_price == 0.45
+
+
+def test_spread_bps_rounded_to_integer() -> None:
+    fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+    market = _gamma_market_to_market(
+        _gamma_market(
+            "pm-rounded-spread",
+            outcomes=["Yes", "No"],
+            best_bid="0.519",
+            best_ask="0.525",
+        ),
+        fetched_at,
+    )
+
+    assert market.spread_bps == 60
+
+
+def test_gamma_row_malformed_outcome_prices_logs_and_keeps_scalar_prices(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+
+    with caplog.at_level(logging.WARNING):
+        market = _gamma_market_to_market(
+            _gamma_market(
+                "pm-bad-outcome-prices",
+                outcomes=["Yes", "No"],
+                outcome_prices=["not-a-price", "0.4"],
+                best_bid="0.58",
+                best_ask="0.60",
+            ),
+            fetched_at,
+        )
+
+    assert market.yes_price is None
+    assert market.no_price is None
+    assert market.best_bid == 0.58
+    assert market.best_ask == 0.60
+    assert "discovery.price_parse_failure" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -104,6 +238,33 @@ async def test_market_discovery_sensor_polls_gamma_once_and_writes_markets_and_t
 
 
 @pytest.mark.asyncio
+async def test_market_discovery_sensor_requests_active_open_markets_with_page_limit() -> None:
+    store = _store_mock()
+    captured_params: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        captured_params.update(dict(request.url.params))
+        return httpx.Response(200, json=[])
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    assert captured_params.get("active") == "true"
+    assert captured_params.get("closed") == "false"
+    assert captured_params.get("limit") == "500"
+
+
+@pytest.mark.asyncio
 async def test_market_discovery_sensor_preserves_zero_volume_rows() -> None:
     store = _store_mock()
     store_mock = cast(StoreMock, store)
@@ -134,6 +295,47 @@ async def test_market_discovery_sensor_preserves_zero_volume_rows() -> None:
 
     written_market = store_mock.write_market_mock.await_args_list[0].args[0]
     assert written_market.volume_24h == 0.0
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_updates_price_field_ratio_metric() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.read_snapshot_lag_seconds_max_mock.return_value = 2.5
+    set_metric(SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC, 0.0)
+    payload = [
+        _gamma_market(
+            "pm-priced-metric",
+            token_ids=["yes-token", "no-token"],
+            outcomes=["Yes", "No"],
+            outcome_prices=["0.61", "0.39"],
+            last_trade_price="0.60",
+            best_bid="0.59",
+            best_ask="0.62",
+            liquidity="1250.5",
+        )
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    assert get_metric(SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC) == 1.0
+    assert get_metric(SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC) == 1.0
+    assert get_metric(MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC) == 2.5
+    store_mock.write_price_snapshot_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -240,6 +442,43 @@ async def test_market_discovery_sensor_skips_rows_missing_condition_id() -> None
 
     assert store_mock.write_market_mock.await_count == 0
     assert store_mock.write_token_mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_skips_malformed_tokens_before_market_write(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    payload = [
+        _gamma_market(
+            "mismatched-token-row",
+            token_ids=["yes-token-only"],
+            outcomes=["Yes", "No"],
+        )
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await sensor.poll_once()
+    await sensor.aclose()
+
+    assert store_mock.write_market_mock.await_count == 0
+    assert store_mock.write_price_snapshot_mock.await_count == 0
+    assert store_mock.write_token_mock.await_count == 0
+    assert "mismatched clobTokenIds/outcomes lengths" in caplog.text
 
 
 @pytest.mark.asyncio

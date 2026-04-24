@@ -16,6 +16,37 @@ CREATE TABLE IF NOT EXISTS markets (
 ALTER TABLE markets
     ADD COLUMN IF NOT EXISTS volume_24h DOUBLE PRECISION;
 
+ALTER TABLE markets
+    ADD COLUMN IF NOT EXISTS yes_price NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS no_price NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS best_bid NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS best_ask NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS last_trade_price NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS liquidity NUMERIC,
+    ADD COLUMN IF NOT EXISTS spread_bps INTEGER,
+    ADD COLUMN IF NOT EXISTS price_updated_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_markets_price_updated_at
+    ON markets (price_updated_at DESC)
+    WHERE price_updated_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS market_price_snapshots (
+    condition_id TEXT NOT NULL,
+    snapshot_at TIMESTAMPTZ NOT NULL,
+    yes_price NUMERIC(6,4),
+    no_price NUMERIC(6,4),
+    best_bid NUMERIC(6,4),
+    best_ask NUMERIC(6,4),
+    last_trade_price NUMERIC(6,4),
+    liquidity NUMERIC,
+    volume_24h NUMERIC,
+    PRIMARY KEY (condition_id, snapshot_at),
+    FOREIGN KEY (condition_id) REFERENCES markets(condition_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_price_snapshots_recent
+    ON market_price_snapshots (condition_id, snapshot_at DESC);
+
 CREATE TABLE IF NOT EXISTS tokens (
     token_id TEXT PRIMARY KEY,
     condition_id TEXT NOT NULL REFERENCES markets(condition_id) ON DELETE CASCADE,
@@ -24,6 +55,13 @@ CREATE TABLE IF NOT EXISTS tokens (
 
 CREATE INDEX IF NOT EXISTS idx_tokens_condition_id
     ON tokens(condition_id);
+
+CREATE TABLE IF NOT EXISTS market_subscriptions (
+    token_id TEXT NOT NULL PRIMARY KEY,
+    source TEXT NOT NULL CHECK (source IN ('user')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (token_id) REFERENCES tokens(token_id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS book_snapshots (
     id BIGSERIAL PRIMARY KEY,

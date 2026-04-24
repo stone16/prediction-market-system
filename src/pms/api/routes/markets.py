@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
-from typing import Protocol
+from datetime import UTC, datetime, timedelta
+from typing import Literal, Protocol, Self
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
-from pms.storage.market_data_store import MarketCatalogRow
+from pms.storage.market_data_store import (
+    MarketCatalogRow,
+    MarketFilters,
+    MarketPriceSnapshotRow,
+)
 
 
 StoredMarketRow = MarketCatalogRow
+StoredPriceSnapshotRow = MarketPriceSnapshotRow
+MAX_PRICE_HISTORY_LIMIT = 10_000
+SubscribedFilter = Literal["all", "only", "idle"]
 
 
 class MarketsReader(Protocol):
@@ -18,8 +25,42 @@ class MarketsReader(Protocol):
         *,
         limit: int,
         offset: int,
+        filters: MarketFilters | None = None,
+        current_asset_ids: frozenset[str] = frozenset(),
         now: datetime | None = None,
     ) -> tuple[Sequence[StoredMarketRow], int]: ...
+
+
+class MarketDetailReader(Protocol):
+    async def read_market_by_id(
+        self,
+        *,
+        market_id: str,
+        current_asset_ids: frozenset[str] = frozenset(),
+        now: datetime | None = None,
+    ) -> StoredMarketRow | None: ...
+
+
+class PriceHistoryReader(Protocol):
+    async def read_price_history(
+        self,
+        *,
+        condition_id: str,
+        since: datetime,
+        limit: int,
+    ) -> Sequence[StoredPriceSnapshotRow] | None: ...
+
+
+class MarketPriceHistoryNotFoundError(Exception):
+    def __init__(self, condition_id: str) -> None:
+        super().__init__(condition_id)
+        self.condition_id = condition_id
+
+
+class MarketNotFoundError(Exception):
+    def __init__(self, market_id: str) -> None:
+        super().__init__(market_id)
+        self.market_id = market_id
 
 
 class MarketRow(BaseModel):
@@ -28,8 +69,18 @@ class MarketRow(BaseModel):
     venue: str
     volume_24h: float | None
     updated_at: str
+    resolves_at: str | None = None
     yes_token_id: str | None
     no_token_id: str | None
+    yes_price: float | None = None
+    no_price: float | None = None
+    best_bid: float | None = None
+    best_ask: float | None = None
+    last_trade_price: float | None = None
+    liquidity: float | None = None
+    spread_bps: int | None = None
+    price_updated_at: str | None = None
+    subscription_source: str | None = None
     subscribed: bool
 
 
@@ -40,31 +91,152 @@ class MarketsListResponse(BaseModel):
     total: int
 
 
+class MarketsFilterParams(BaseModel):
+    q: str = ""
+    volume_min: float = Field(default=0.0, ge=0.0)
+    liquidity_min: float = Field(default=0.0, ge=0.0)
+    spread_max_bps: int | None = Field(default=None, ge=0)
+    yes_min: float = Field(default=0.0, ge=0.0, le=1.0)
+    yes_max: float = Field(default=1.0, ge=0.0, le=1.0)
+    resolves_within_days: int | None = Field(default=None, ge=0)
+    subscribed: SubscribedFilter = "all"
+
+    @model_validator(mode="after")
+    def validate_yes_bounds(self) -> Self:
+        if self.yes_min > self.yes_max:
+            msg = "yes_min must be less than or equal to yes_max"
+            raise ValueError(msg)
+        return self
+
+    def to_storage_filters(self) -> MarketFilters:
+        return MarketFilters(
+            q=self.q.strip(),
+            volume_min=self.volume_min,
+            liquidity_min=self.liquidity_min,
+            spread_max_bps=self.spread_max_bps,
+            yes_min=self.yes_min,
+            yes_max=self.yes_max,
+            resolves_within_days=self.resolves_within_days,
+            subscribed=self.subscribed,
+        )
+
+
+class PriceHistorySnapshot(BaseModel):
+    snapshot_at: str
+    yes_price: float | None
+    no_price: float | None
+    best_bid: float | None
+    best_ask: float | None
+    last_trade_price: float | None
+    liquidity: float | None
+    volume_24h: float | None
+
+
+class PriceHistoryResponse(BaseModel):
+    condition_id: str
+    snapshots: list[PriceHistorySnapshot]
+
+
 async def list_markets(
     store: MarketsReader,
     *,
     current_asset_ids: frozenset[str],
     limit: int,
     offset: int,
+    filters: MarketsFilterParams | None = None,
 ) -> MarketsListResponse:
-    rows, total = await store.read_markets(limit=limit, offset=offset)
+    rows, total = await store.read_markets(
+        limit=limit,
+        offset=offset,
+        filters=(filters or MarketsFilterParams()).to_storage_filters(),
+        current_asset_ids=current_asset_ids,
+    )
     return MarketsListResponse(
         markets=[
-            MarketRow(
-                market_id=row.market_id,
-                question=row.question,
-                venue=row.venue,
-                volume_24h=row.volume_24h,
-                updated_at=row.updated_at.isoformat(),
-                yes_token_id=row.yes_token_id,
-                no_token_id=row.no_token_id,
-                subscribed=_is_subscribed(row, current_asset_ids),
-            )
+            _market_row_payload(row, current_asset_ids)
             for row in rows
         ],
         limit=limit,
         offset=offset,
         total=total,
+    )
+
+
+async def get_market(
+    store: MarketDetailReader,
+    *,
+    current_asset_ids: frozenset[str],
+    market_id: str,
+) -> MarketRow:
+    row = await store.read_market_by_id(
+        market_id=market_id,
+        current_asset_ids=current_asset_ids,
+    )
+    if row is None:
+        raise MarketNotFoundError(market_id)
+    return _market_row_payload(row, current_asset_ids)
+
+
+async def get_price_history(
+    store: PriceHistoryReader,
+    *,
+    condition_id: str,
+    since: datetime | None,
+    limit: int,
+    now: datetime | None = None,
+) -> PriceHistoryResponse:
+    reference_now = now or datetime.now(tz=UTC)
+    effective_since = since or reference_now - timedelta(hours=24)
+    effective_limit = min(limit, MAX_PRICE_HISTORY_LIMIT)
+    rows = await store.read_price_history(
+        condition_id=condition_id,
+        since=effective_since,
+        limit=effective_limit,
+    )
+    if rows is None:
+        raise MarketPriceHistoryNotFoundError(condition_id)
+    return PriceHistoryResponse(
+        condition_id=condition_id,
+        snapshots=[
+            PriceHistorySnapshot(
+                snapshot_at=row.snapshot_at.isoformat(),
+                yes_price=row.yes_price,
+                no_price=row.no_price,
+                best_bid=row.best_bid,
+                best_ask=row.best_ask,
+                last_trade_price=row.last_trade_price,
+                liquidity=row.liquidity,
+                volume_24h=row.volume_24h,
+            )
+            for row in rows
+        ],
+    )
+
+
+def _market_row_payload(row: StoredMarketRow, current_asset_ids: frozenset[str]) -> MarketRow:
+    return MarketRow(
+        market_id=row.market_id,
+        question=row.question,
+        venue=row.venue,
+        volume_24h=row.volume_24h,
+        updated_at=row.updated_at.isoformat(),
+        resolves_at=row.resolves_at.isoformat() if row.resolves_at is not None else None,
+        yes_token_id=row.yes_token_id,
+        no_token_id=row.no_token_id,
+        yes_price=row.yes_price,
+        no_price=row.no_price,
+        best_bid=row.best_bid,
+        best_ask=row.best_ask,
+        last_trade_price=row.last_trade_price,
+        liquidity=row.liquidity,
+        spread_bps=row.spread_bps,
+        price_updated_at=(
+            row.price_updated_at.isoformat()
+            if row.price_updated_at is not None
+            else None
+        ),
+        subscription_source=row.subscription_source,
+        subscribed=_is_subscribed(row, current_asset_ids),
     )
 
 

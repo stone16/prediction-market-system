@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import logging
+from typing import Protocol
 
 from pms.core.enums import Venue
 from pms.core.exceptions import KalshiStubError
@@ -14,16 +15,22 @@ from pms.market_selection.merge import MergePolicy, MergeResult, StrategyMarketS
 logger = logging.getLogger(__name__)
 
 
+class UserSubscriptionStore(Protocol):
+    async def read_user_subscriptions(self) -> set[str]: ...
+
+
 class MarketSelector:
     def __init__(
         self,
         store: MarketDataStore,
         registry: StrategySelectionRegistry,
         merge_policy: MergePolicy,
+        market_subscription_store: UserSubscriptionStore | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
         self._merge_policy = merge_policy
+        self._market_subscription_store = market_subscription_store
 
     async def select(self) -> MergeResult:
         selections = await self.select_per_strategy()
@@ -36,7 +43,14 @@ class MarketSelector:
                 "no active_version_id rows found; data sensor will idle until "
                 "a strategy is activated",
             )
-        return self._merge_policy.merge(selections)
+        merged = self._merge_policy.merge(selections)
+        user_asset_ids = await self._read_user_subscriptions()
+        if not user_asset_ids:
+            return merged
+        return MergeResult(
+            asset_ids=sorted(frozenset(merged.asset_ids) | user_asset_ids),
+            conflicts=merged.conflicts,
+        )
 
     async def select_per_strategy(self) -> list[StrategyMarketSet]:
         strategy_specs = await self._registry.list_market_selections()
@@ -61,6 +75,11 @@ class MarketSelector:
                 )
             )
         return selections
+
+    async def _read_user_subscriptions(self) -> frozenset[str]:
+        if self._market_subscription_store is None:
+            return frozenset()
+        return frozenset(await self._market_subscription_store.read_user_subscriptions())
 
 
 def _asset_ids_from_eligible_markets(

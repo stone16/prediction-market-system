@@ -40,7 +40,20 @@ from pms.api.research_routes import (
 from pms.api.routes.factors import list_factor_catalog, list_factor_series
 from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
-from pms.api.routes.markets import list_markets as list_markets_items
+from pms.api.routes.markets import (
+    MarketNotFoundError,
+    MarketPriceHistoryNotFoundError,
+    MarketsFilterParams,
+    SubscribedFilter,
+    get_market as get_market_item,
+    get_price_history as get_price_history_item,
+    list_markets as list_markets_items,
+)
+from pms.api.routes.market_subscriptions import (
+    UnknownSubscriptionTokenError,
+    subscribe_market as subscribe_market_item,
+    unsubscribe_market as unsubscribe_market_item,
+)
 from pms.api.routes.positions import list_positions as list_positions_items
 from pms.api.routes.share import SHARE_NOT_FOUND_DETAIL, get_shared_strategy
 from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
@@ -51,10 +64,12 @@ from pms.config import PMSSettings
 from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
+from pms.metrics import metrics_snapshot
 from pms.runner import Runner
 from pms.storage.schema_check import ensure_schema_current
 from pms.storage.decision_store import DecisionStore
 from pms.storage.market_data_store import PostgresMarketDataStore
+from pms.storage.market_subscription_store import PostgresMarketSubscriptionStore
 
 
 T = TypeVar("T")
@@ -158,14 +173,101 @@ def create_app(
     async def markets(
         limit: int = Query(default=20, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
+        q: str = Query(default=""),
+        volume_min: float = Query(default=0.0, ge=0.0),
+        liquidity_min: float = Query(default=0.0, ge=0.0),
+        spread_max_bps: int | None = Query(default=None, ge=0),
+        yes_min: float = Query(default=0.0, ge=0.0, le=1.0),
+        yes_max: float = Query(default=1.0, ge=0.0, le=1.0),
+        resolves_within_days: int | None = Query(default=None, ge=0),
+        subscribed: SubscribedFilter = Query(default="all"),
     ) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        if yes_min > yes_max:
+            raise HTTPException(
+                status_code=422,
+                detail="yes_min must be less than or equal to yes_max",
+            )
         payload = await list_markets_items(
             PostgresMarketDataStore(active_runner.pg_pool),
             current_asset_ids=_current_subscription_asset_ids(active_runner),
             limit=limit,
             offset=offset,
+            filters=MarketsFilterParams(
+                q=q,
+                volume_min=volume_min,
+                liquidity_min=liquidity_min,
+                spread_max_bps=spread_max_bps,
+                yes_min=yes_min,
+                yes_max=yes_max,
+                resolves_within_days=resolves_within_days,
+                subscribed=subscribed,
+            ),
+        )
+        return payload.model_dump(mode="json")
+
+    @app.get("/markets/{condition_id}")
+    async def market_detail(condition_id: str) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            payload = await get_market_item(
+                PostgresMarketDataStore(active_runner.pg_pool),
+                current_asset_ids=_current_subscription_asset_ids(active_runner),
+                market_id=condition_id,
+            )
+        except MarketNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Market not found") from exc
+        return payload.model_dump(mode="json")
+
+    @app.get("/markets/{condition_id}/price-history")
+    async def market_price_history(
+        condition_id: str,
+        since: datetime | None = None,
+        limit: int = Query(default=1440, ge=1),
+    ) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            payload = await get_price_history_item(
+                PostgresMarketDataStore(active_runner.pg_pool),
+                condition_id=condition_id,
+                since=since,
+                limit=limit,
+            )
+        except MarketPriceHistoryNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Market not found") from exc
+        return payload.model_dump(mode="json")
+
+    @app.post(
+        "/markets/{token_id}/subscribe",
+        dependencies=[Depends(require_api_token)],
+    )
+    async def subscribe_market(token_id: str, request: Request) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            payload = await subscribe_market_item(
+                PostgresMarketSubscriptionStore(active_runner.pg_pool),
+                token_id=token_id,
+                request_metadata=_request_metadata(request),
+            )
+        except UnknownSubscriptionTokenError as exc:
+            raise HTTPException(status_code=404, detail="Token not found") from exc
+        return payload.model_dump(mode="json")
+
+    @app.delete(
+        "/markets/{token_id}/subscribe",
+        dependencies=[Depends(require_api_token)],
+    )
+    async def unsubscribe_market(token_id: str, request: Request) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await unsubscribe_market_item(
+            PostgresMarketSubscriptionStore(active_runner.pg_pool),
+            token_id=token_id,
+            request_metadata=_request_metadata(request),
         )
         return payload.model_dump(mode="json")
 
@@ -519,6 +621,7 @@ def _metrics_payload(
 
     payload = dict(ops_view)
     payload[FIRST_TRADE_TIME_SECONDS_METRIC] = first_trade_time_seconds
+    payload.update(metrics_snapshot())
     payload["per_strategy"] = per_strategy
     payload["ops_view"] = ops_view
     return payload
@@ -640,6 +743,13 @@ def _current_subscription_asset_ids(runner: Runner) -> frozenset[str]:
     ):
         return frozenset()
     return subscription_controller.current_asset_ids
+
+
+def _request_metadata(request: Request) -> dict[str, object]:
+    return {
+        "request_method": request.method,
+        "request_path": request.url.path,
+    }
 
 
 def _sensor_statuses(runner: Runner) -> list[dict[str, Any]]:

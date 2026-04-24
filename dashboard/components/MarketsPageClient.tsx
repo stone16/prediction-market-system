@@ -1,16 +1,123 @@
 'use client';
 
+import { useEffect, useRef, useState } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { MarketDetailDrawer } from '@/components/MarketDetailDrawer';
+import { MarketsFilterChips } from '@/components/MarketsFilterChips';
+import { MarketsFilterPopover } from '@/components/MarketsFilterPopover';
+import { MarketsPagination } from '@/components/MarketsPagination';
 import { MarketsTable } from '@/components/MarketsTable';
 import { Nav } from '@/components/Nav';
+import { ToastStack, type ToastMessage } from '@/components/Toast';
 import { useLiveData } from '@/lib/useLiveData';
-import type { MarketsListResponse, StatusResponse } from '@/lib/types';
+import { useMarketsFilters } from '@/lib/useMarketsFilters';
+import type { MarketRow, MarketsListResponse, StatusResponse } from '@/lib/types';
+
+type SubscriptionOverride = Pick<MarketRow, 'subscribed' | 'subscription_source'>;
 
 export function MarketsPageClient() {
-  const marketsState = useLiveData<MarketsListResponse>('/markets?limit=20');
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const {
+    activeChips,
+    clearFilter,
+    filters,
+    marketPath,
+    pagination,
+    setFilter,
+    setPage,
+    setPageSize
+  } = useMarketsFilters();
+  const marketsState = useLiveData<MarketsListResponse>(marketPath);
   const statusState = useLiveData<StatusResponse>('/status');
-  const rows = marketsState.data?.markets ?? [];
+  const [rows, setRows] = useState<MarketRow[]>([]);
+  const [searchDraft, setSearchDraft] = useState(filters.q);
+  const [subscriptionOverrides, setSubscriptionOverrides] = useState<
+    Record<string, SubscriptionOverride>
+  >({});
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const setFilterRef = useRef(setFilter);
+  const toastCounterRef = useRef(0);
   const subscribedCount = rows.filter((row) => row.subscribed).length;
   const runnerLabel: 'running' | 'paused' = statusState.data?.running ? 'running' : 'paused';
+  const detailMarketId = searchParams.get('detail');
+  const pageDetailMarket = rows.find((row) => row.market_id === detailMarketId) ?? null;
+  const fallbackDetailState = useLiveData<MarketRow>(
+    detailMarketId !== null && pageDetailMarket === null
+      ? `/markets/${encodeURIComponent(detailMarketId)}`
+      : null
+  );
+  const detailMarket = pageDetailMarket ?? fallbackDetailState.data;
+  const missingDetailMarketId =
+    detailMarketId !== null &&
+    pageDetailMarket === null &&
+    fallbackDetailState.disconnected
+      ? detailMarketId
+      : null;
+
+  useEffect(() => {
+    if (marketsState.data === null) {
+      return;
+    }
+    setRows(
+      marketsState.data.markets.map((row) => ({
+        ...row,
+        ...subscriptionOverrides[row.market_id]
+      }))
+    );
+  }, [marketsState.data, subscriptionOverrides]);
+
+  useEffect(() => {
+    setFilterRef.current = setFilter;
+  }, [setFilter]);
+
+  useEffect(() => {
+    setSearchDraft(filters.q);
+  }, [filters.q]);
+
+  useEffect(() => {
+    if (searchDraft === filters.q) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      setFilterRef.current('q', searchDraft);
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [filters.q, searchDraft]);
+
+  function replaceDetail(nextMarketId: string | null) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (nextMarketId === null) {
+      params.delete('detail');
+    } else {
+      params.set('detail', nextMarketId);
+    }
+    const query = params.toString();
+    router.replace(`${pathname}${query ? `?${query}` : ''}`, { scroll: false });
+  }
+
+  function updateMarket(updatedMarket: MarketRow) {
+    setRows((current) =>
+      current.map((row) => (row.market_id === updatedMarket.market_id ? updatedMarket : row))
+    );
+    setSubscriptionOverrides((current) => ({
+      ...current,
+      [updatedMarket.market_id]: {
+        subscribed: updatedMarket.subscribed,
+        subscription_source: updatedMarket.subscription_source
+      }
+    }));
+  }
+
+  function pushToast(toast: Omit<ToastMessage, 'id'>) {
+    const id = `toast-${toastCounterRef.current++}`;
+    setToasts((current) => [...current.slice(-2), { id, ...toast }]);
+  }
 
   return (
     <main className="shell">
@@ -33,6 +140,22 @@ export function MarketsPageClient() {
           </div>
         </header>
 
+        <section aria-label="Market filters" className="markets-filter-shell">
+          <div className="markets-filter-bar">
+            <label className="markets-search">
+              <span>Search markets</span>
+              <input
+                onChange={(event) => setSearchDraft(event.target.value)}
+                placeholder="Question or venue"
+                type="search"
+                value={searchDraft}
+              />
+            </label>
+            <MarketsFilterPopover filters={filters} onFilterChange={setFilter} />
+          </div>
+          <MarketsFilterChips chips={activeChips} onClearFilter={clearFilter} />
+        </section>
+
         {marketsState.loading && rows.length === 0 ? (
           <div className="card signal-callout">
             <p className="muted">Loading markets…</p>
@@ -45,9 +168,40 @@ export function MarketsPageClient() {
             </p>
           </div>
         ) : (
-          <MarketsTable rows={rows} runnerLabel={runnerLabel} />
+          <>
+            <MarketsTable
+              onSelectMarket={(marketId) => replaceDetail(marketId)}
+              rows={rows}
+              runnerLabel={runnerLabel}
+            />
+            {marketsState.data ? (
+              <MarketsPagination
+                onPageChange={setPage}
+                onPageSizeChange={setPageSize}
+                page={pagination.page}
+                pageSize={pagination.pageSize}
+                total={marketsState.data.total}
+              />
+            ) : null}
+          </>
         )}
+        <MarketDetailDrawer
+          loading={
+            detailMarketId !== null &&
+            pageDetailMarket === null &&
+            fallbackDetailState.loading
+          }
+          market={detailMarket}
+          missingMarketId={missingDetailMarketId}
+          onClose={() => replaceDetail(null)}
+          onMarketChange={updateMarket}
+          onToast={pushToast}
+        />
       </section>
+      <ToastStack
+        items={toasts}
+        onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))}
+      />
     </main>
   );
 }

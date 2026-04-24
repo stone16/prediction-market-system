@@ -6,6 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Awaitable, Callable, cast
 
 import asyncpg
@@ -16,10 +17,18 @@ from pms.core.exceptions import KalshiStubError
 from pms.core.models import Market, MarketSignal, Outcome, Token
 from pms.core.models import Venue as VenueValue
 from pms.core.venue_support import kalshi_stub_error, normalize_venue
+from pms.metrics import (
+    MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC,
+    SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC,
+    SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC,
+    increment_metric,
+    set_metric,
+)
 from pms.storage.market_data_store import PostgresMarketDataStore
 
 
 logger = logging.getLogger(__name__)
+_DISCOVERY_PRICE_FIELD_COUNT = 8
 
 
 @dataclass
@@ -68,7 +77,10 @@ class MarketDiscoverySensor:
                 backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)
 
     async def poll_once(self) -> None:
-        response = await self.http_client.get("/markets")
+        response = await self.http_client.get(
+            "/markets",
+            params={"active": "true", "closed": "false", "limit": "500"},
+        )
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list):
@@ -76,13 +88,36 @@ class MarketDiscoverySensor:
             raise ValueError(msg)
 
         fetched_at = datetime.now(tz=UTC)
+        written_markets: list[Market] = []
         for row in payload:
             if not isinstance(row, dict):
                 continue
             try:
                 market = _gamma_market_to_market(row, fetched_at)
-                await self.store.write_market(market)
                 tokens = _gamma_market_to_tokens(row, market.condition_id)
+                await self.store.write_market(market)
+                written_markets.append(market)
+                try:
+                    await self.store.write_price_snapshot(
+                        condition_id=market.condition_id,
+                        snapshot_at=fetched_at,
+                        yes_price=market.yes_price,
+                        no_price=market.no_price,
+                        best_bid=market.best_bid,
+                        best_ask=market.best_ask,
+                        last_trade_price=market.last_trade_price,
+                        liquidity=market.liquidity,
+                        volume_24h=market.volume_24h,
+                    )
+                    increment_metric(
+                        SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC
+                    )
+                except asyncpg.PostgresError as error:
+                    logger.warning(
+                        "discovery write_price_snapshot failed for %s: %s",
+                        market.condition_id,
+                        error,
+                    )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
                 logger.warning("skipping malformed Gamma market row: %s", error)
                 continue
@@ -112,6 +147,9 @@ class MarketDiscoverySensor:
                     )
                     continue
 
+        _record_price_fields_populated_ratio(written_markets)
+        await _record_snapshot_lag_seconds_max(self.store)
+
     async def aclose(self) -> None:
         await self.http_client.aclose()
 
@@ -130,6 +168,7 @@ def _gamma_market_to_market(row: dict[str, Any], fetched_at: datetime) -> Market
         raise kalshi_stub_error("MarketDiscoverySensor._gamma_market_to_market")
 
     created_at = _optional_datetime(row.get("createdAt")) or fetched_at
+    prices = _gamma_market_price_fields(row, fetched_at, condition_id)
     return Market(
         condition_id=condition_id,
         slug=str(row.get("slug") or condition_id),
@@ -141,6 +180,182 @@ def _gamma_market_to_market(row: dict[str, Any], fetched_at: datetime) -> Market
         volume_24h=_optional_float(
             _first_non_empty_value(row.get("volume24hr"), row.get("volume_24h"))
         ),
+        yes_price=prices.yes_price,
+        no_price=prices.no_price,
+        best_bid=prices.best_bid,
+        best_ask=prices.best_ask,
+        last_trade_price=prices.last_trade_price,
+        liquidity=prices.liquidity,
+        spread_bps=prices.spread_bps,
+        price_updated_at=prices.price_updated_at,
+    )
+
+
+@dataclass(frozen=True)
+class _GammaPriceFields:
+    yes_price: float | None
+    no_price: float | None
+    best_bid: float | None
+    best_ask: float | None
+    last_trade_price: float | None
+    liquidity: float | None
+    spread_bps: int | None
+    price_updated_at: datetime | None
+
+
+def _gamma_market_price_fields(
+    row: dict[str, Any],
+    fetched_at: datetime,
+    condition_id: str,
+) -> _GammaPriceFields:
+    yes_price, no_price = _parse_outcome_prices(row, condition_id)
+    best_bid = _optional_logged_float(
+        _first_non_empty_value(row.get("bestBid"), row.get("best_bid")),
+        field="bestBid",
+        condition_id=condition_id,
+    )
+    best_ask = _optional_logged_float(
+        _first_non_empty_value(row.get("bestAsk"), row.get("best_ask")),
+        field="bestAsk",
+        condition_id=condition_id,
+    )
+    last_trade_price = _optional_logged_float(
+        _first_non_empty_value(row.get("lastTradePrice"), row.get("last_trade_price")),
+        field="lastTradePrice",
+        condition_id=condition_id,
+    )
+    liquidity = _optional_logged_float(
+        row.get("liquidity"),
+        field="liquidity",
+        condition_id=condition_id,
+    )
+    spread_bps = _spread_bps(best_bid=best_bid, best_ask=best_ask)
+    price_updated_at = (
+        fetched_at
+        if any(
+            value is not None
+            for value in (
+                yes_price,
+                no_price,
+                best_bid,
+                best_ask,
+                last_trade_price,
+                liquidity,
+                spread_bps,
+            )
+        )
+        else None
+    )
+    return _GammaPriceFields(
+        yes_price=yes_price,
+        no_price=no_price,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        last_trade_price=last_trade_price,
+        liquidity=liquidity,
+        spread_bps=spread_bps,
+        price_updated_at=price_updated_at,
+    )
+
+
+def _parse_outcome_prices(
+    row: dict[str, Any],
+    condition_id: str,
+) -> tuple[float | None, float | None]:
+    raw_prices = row.get("outcomePrices")
+    if raw_prices is None or raw_prices == "":
+        return None, None
+
+    try:
+        loaded = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+        if not isinstance(loaded, list) or len(loaded) != 2:
+            msg = "outcomePrices must decode to a two-item list"
+            raise ValueError(msg)
+        outcomes = _gamma_market_outcomes(row)
+        prices_by_outcome = {
+            outcome: _strict_float(price)
+            for outcome, price in zip(outcomes, loaded, strict=True)
+        }
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        _log_price_parse_failure(condition_id, "outcomePrices", error)
+        return None, None
+
+    return prices_by_outcome["YES"], prices_by_outcome["NO"]
+
+
+def _optional_logged_float(
+    value: object,
+    *,
+    field: str,
+    condition_id: str,
+) -> float | None:
+    try:
+        return _optional_float(value)
+    except (TypeError, ValueError) as error:
+        _log_price_parse_failure(condition_id, field, error)
+        return None
+
+
+def _strict_float(value: object) -> float:
+    parsed = _optional_float(value)
+    if parsed is None:
+        msg = "expected a non-empty float-compatible value"
+        raise ValueError(msg)
+    return parsed
+
+
+def _spread_bps(*, best_bid: float | None, best_ask: float | None) -> int | None:
+    if best_bid is None or best_ask is None:
+        return None
+    spread = (Decimal(str(best_ask)) - Decimal(str(best_bid))) * Decimal("10000")
+    return int(round(spread))
+
+
+def _log_price_parse_failure(
+    condition_id: str,
+    field: str,
+    error: Exception,
+) -> None:
+    logger.warning(
+        "discovery.price_parse_failure condition_id=%s field=%s error=%s",
+        condition_id,
+        field,
+        error,
+    )
+
+
+def _record_price_fields_populated_ratio(markets: list[Market]) -> None:
+    if not markets:
+        set_metric(SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC, 0.0)
+        return
+
+    populated = sum(
+        sum(1 for value in _market_price_field_values(market) if value is not None)
+        for market in markets
+    )
+    total = len(markets) * _DISCOVERY_PRICE_FIELD_COUNT
+    set_metric(SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC, populated / total)
+
+
+async def _record_snapshot_lag_seconds_max(store: PostgresMarketDataStore) -> None:
+    try:
+        lag_seconds = await store.read_snapshot_lag_seconds_max()
+    except asyncpg.PostgresError as error:
+        logger.warning("discovery snapshot_lag metric failed: %s", error)
+        return
+    set_metric(MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC, lag_seconds)
+
+
+def _market_price_field_values(market: Market) -> tuple[object | None, ...]:
+    return (
+        market.yes_price,
+        market.no_price,
+        market.best_bid,
+        market.best_ask,
+        market.last_trade_price,
+        market.liquidity,
+        market.spread_bps,
+        market.price_updated_at,
     )
 
 

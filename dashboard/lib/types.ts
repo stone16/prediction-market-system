@@ -131,6 +131,16 @@ export type MarketRow = {
   updated_at: string;
   yes_token_id: string | null;
   no_token_id: string | null;
+  yes_price: number | null;
+  no_price: number | null;
+  best_bid: number | null;
+  best_ask: number | null;
+  last_trade_price: number | null;
+  liquidity: number | null;
+  spread_bps: number | null;
+  price_updated_at: string | null;
+  resolves_at?: string | null;
+  subscription_source: 'user' | null;
   subscribed: boolean;
 };
 
@@ -139,6 +149,22 @@ export type MarketsListResponse = {
   limit: number;
   offset: number;
   total: number;
+};
+
+export type PriceHistorySnapshot = {
+  snapshot_at: string;
+  yes_price: number | null;
+  no_price: number | null;
+  best_bid: number | null;
+  best_ask: number | null;
+  last_trade_price: number | null;
+  liquidity: number | null;
+  volume_24h: number | null;
+};
+
+export type PriceHistoryResponse = {
+  condition_id: string;
+  snapshots: PriceHistorySnapshot[];
 };
 
 export type PositionRow = {
