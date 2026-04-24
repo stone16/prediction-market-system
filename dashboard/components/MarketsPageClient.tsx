@@ -1,13 +1,15 @@
 'use client';
 
-import { useEffect } from 'react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { MarketDetailDrawer } from '@/components/MarketDetailDrawer';
+import { MarketsFilterChips } from '@/components/MarketsFilterChips';
+import { MarketsFilterPopover } from '@/components/MarketsFilterPopover';
 import { MarketsTable } from '@/components/MarketsTable';
 import { Nav } from '@/components/Nav';
 import { ToastStack, type ToastMessage } from '@/components/Toast';
 import { useLiveData } from '@/lib/useLiveData';
+import { useMarketsFilters } from '@/lib/useMarketsFilters';
 import type { MarketRow, MarketsListResponse, StatusResponse } from '@/lib/types';
 
 type SubscriptionOverride = Pick<MarketRow, 'subscribed' | 'subscription_source'>;
@@ -16,7 +18,8 @@ export function MarketsPageClient() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const marketsState = useLiveData<MarketsListResponse>('/markets?limit=20');
+  const { activeChips, clearFilter, filters, marketPath, setFilter } = useMarketsFilters();
+  const marketsState = useLiveData<MarketsListResponse>(marketPath);
   const statusState = useLiveData<StatusResponse>('/status');
   const [rows, setRows] = useState<MarketRow[]>([]);
   const [subscriptionOverrides, setSubscriptionOverrides] = useState<
@@ -102,6 +105,22 @@ export function MarketsPageClient() {
             </span>
           </div>
         </header>
+
+        <section aria-label="Market filters" className="markets-filter-shell">
+          <div className="markets-filter-bar">
+            <label className="markets-search">
+              <span>Search markets</span>
+              <input
+                onChange={(event) => setFilter('q', event.target.value)}
+                placeholder="Question or venue"
+                type="search"
+                value={filters.q}
+              />
+            </label>
+            <MarketsFilterPopover filters={filters} onFilterChange={setFilter} />
+          </div>
+          <MarketsFilterChips chips={activeChips} onClearFilter={clearFilter} />
+        </section>
 
         {marketsState.loading && rows.length === 0 ? (
           <div className="card signal-callout">

@@ -255,20 +255,22 @@ test('markets filters update the shown count, chips, and survive reload', async 
   await page.goto('/markets');
   await expect(page.getByRole('heading', { name: 'Markets' })).toBeVisible();
   await expect(page.getByText('3 visible')).toBeVisible();
+  const filterRegion = page.getByLabel('Market filters');
 
-  await page.getByLabel('Search markets').fill('settle');
+  await filterRegion.getByLabel('Search markets').fill('settle');
   await expect(page).toHaveURL(/q=settle/);
-  await page.getByLabel('Search markets').fill('');
+  await filterRegion.getByLabel('Search markets').fill('');
 
-  await page.getByRole('button', { name: 'Filters' }).click();
-  await page.getByLabel(/Minimum volume/i).fill('100000');
+  await filterRegion.getByRole('button', { name: 'Filters' }).click();
+  await filterRegion.getByLabel(/Minimum volume/i).fill('100000');
   await expect(page).toHaveURL(/volume_min=100000/);
   await expect(page.getByText('2 visible')).toBeVisible();
-  await page.getByLabel(/Subscription/i).selectOption('only');
+  await filterRegion.getByLabel(/Subscription/i).selectOption('only');
   await expect(page).toHaveURL(/subscribed=only/);
   await expect(page.getByText('1 visible')).toBeVisible();
-  await expect(page.getByText('Volume >= 100000')).toBeVisible();
-  await expect(page.getByText('Subscribed only')).toBeVisible();
+  const activeFilters = page.getByLabel('Active market filters');
+  await expect(activeFilters.getByText('Volume >= 100000')).toBeVisible();
+  await expect(activeFilters.getByText('Subscribed only')).toBeVisible();
 
   await page.getByRole('button', { name: 'Remove Subscribed only filter' }).click();
   await expect(page).not.toHaveURL(/subscribed=only/);
@@ -276,10 +278,11 @@ test('markets filters update the shown count, chips, and survive reload', async 
 
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Markets' })).toBeVisible();
-  await page.getByRole('button', { name: 'Filters' }).click();
-  await expect(page.getByLabel(/Minimum volume/i)).toHaveValue('100000');
-  await expect(page.getByLabel(/Subscription/i)).toHaveValue('all');
-  await expect(page.getByText('Volume >= 100000')).toBeVisible();
+  const reloadedFilterRegion = page.getByLabel('Market filters');
+  await reloadedFilterRegion.getByRole('button', { name: 'Filters' }).click();
+  await expect(reloadedFilterRegion.getByLabel(/Minimum volume/i)).toHaveValue('100000');
+  await expect(reloadedFilterRegion.getByLabel(/Subscription/i)).toHaveValue('all');
+  await expect(page.getByLabel('Active market filters').getByText('Volume >= 100000')).toBeVisible();
   await expect(page.getByText('2 visible')).toBeVisible();
 
   await page.screenshot({
