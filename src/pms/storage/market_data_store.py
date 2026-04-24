@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import asyncpg
 
@@ -16,6 +16,20 @@ from pms.core.models import (
     Trade,
     Venue,
 )
+
+SubscribedMarketFilter = Literal["all", "only", "idle"]
+
+
+@dataclass(frozen=True)
+class MarketFilters:
+    q: str = ""
+    volume_min: float = 0.0
+    liquidity_min: float = 0.0
+    spread_max_bps: int | None = None
+    yes_min: float = 0.0
+    yes_max: float = 1.0
+    resolves_within_days: int | None = None
+    subscribed: SubscribedMarketFilter = "all"
 
 
 @dataclass(frozen=True)
@@ -108,6 +122,8 @@ class PostgresMarketDataStore:
         *,
         limit: int,
         offset: int,
+        filters: MarketFilters | None = None,
+        current_asset_ids: frozenset[str] = frozenset(),
         now: datetime | None = None,
     ) -> tuple[list[MarketCatalogRow], int]:
         query = """
@@ -135,6 +151,52 @@ class PostgresMarketDataStore:
         LEFT JOIN market_subscriptions
             ON market_subscriptions.token_id = tokens.token_id
         WHERE (markets.resolves_at IS NULL OR markets.resolves_at > $1)
+          AND ($2 = '' OR markets.question ILIKE '%' || $2 || '%')
+          AND (
+              $3 = 0
+              OR (markets.volume_24h IS NOT NULL AND markets.volume_24h >= $3)
+          )
+          AND (
+              $4 = 0
+              OR (markets.liquidity IS NOT NULL AND markets.liquidity >= $4)
+          )
+          AND (
+              $5::integer IS NULL
+              OR (markets.spread_bps IS NOT NULL AND markets.spread_bps <= $5)
+          )
+          AND (
+              $6 = 0
+              OR (markets.yes_price IS NOT NULL AND markets.yes_price >= $6)
+          )
+          AND (
+              $7 = 1
+              OR (markets.yes_price IS NOT NULL AND markets.yes_price <= $7)
+          )
+          AND (
+              $8::timestamptz IS NULL
+              OR (markets.resolves_at IS NOT NULL AND markets.resolves_at <= $8)
+          )
+          AND (
+              $9 = 'all'
+              OR (
+                  $9 = 'only'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM tokens AS subscribed_tokens
+                      WHERE subscribed_tokens.condition_id = markets.condition_id
+                        AND subscribed_tokens.token_id = ANY($10::text[])
+                  )
+              )
+              OR (
+                  $9 = 'idle'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM tokens AS subscribed_tokens
+                      WHERE subscribed_tokens.condition_id = markets.condition_id
+                        AND subscribed_tokens.token_id = ANY($10::text[])
+                  )
+              )
+          )
         GROUP BY
             markets.condition_id,
             markets.question,
@@ -153,12 +215,32 @@ class PostgresMarketDataStore:
             COALESCE(markets.volume_24h, 0) DESC,
             markets.last_seen_at DESC,
             markets.condition_id ASC
-        LIMIT $2
-        OFFSET $3
+        LIMIT $11
+        OFFSET $12
         """
         reference_now = now or datetime.now(tz=UTC)
+        active_filters = filters or MarketFilters()
+        resolves_before = (
+            None
+            if active_filters.resolves_within_days is None
+            else reference_now + timedelta(days=active_filters.resolves_within_days)
+        )
         async with self._pool.acquire() as connection:
-            rows = await connection.fetch(query, reference_now, limit, offset)
+            rows = await connection.fetch(
+                query,
+                reference_now,
+                active_filters.q.strip(),
+                active_filters.volume_min,
+                active_filters.liquidity_min,
+                active_filters.spread_max_bps,
+                active_filters.yes_min,
+                active_filters.yes_max,
+                resolves_before,
+                active_filters.subscribed,
+                sorted(current_asset_ids),
+                limit,
+                offset,
+            )
         if not rows:
             return [], 0
         total = cast(int, rows[0]["total_count"])

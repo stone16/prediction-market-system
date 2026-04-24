@@ -90,12 +90,20 @@ def _row(
 
 
 async def _read_markets_query(
-    **kwargs: object,
+    *,
+    filters: MarketFilters | None = None,
+    current_asset_ids: frozenset[str] = frozenset(),
 ) -> tuple[str, tuple[object, ...]]:
     connection = FakeConnection(fetch_results=[[]])
     store = PostgresMarketDataStore(FakePool(connection))
 
-    await store.read_markets(limit=20, offset=0, now=REFERENCE_NOW, **kwargs)
+    await store.read_markets(
+        limit=20,
+        offset=0,
+        filters=filters,
+        current_asset_ids=current_asset_ids,
+        now=REFERENCE_NOW,
+    )
 
     return connection.fetch_calls[0]
 
@@ -139,7 +147,7 @@ async def test_read_markets_returns_rows_total_and_filters_to_active_markets_in_
     assert "resolves_at IS NULL OR markets.resolves_at > $1" in query
     assert "COUNT(*) OVER()" in query
     assert "market_subscriptions" in query
-    assert args[1:] == (20, 5)
+    assert args[10:] == (20, 5)
     assert isinstance(args[0], datetime)
 
 
@@ -257,7 +265,8 @@ async def test_read_markets_filter_q_substring() -> None:
 async def test_read_markets_null_price_excluded_from_band() -> None:
     query, args = await _read_markets_query(filters=MarketFilters(yes_min=0.2))
 
-    assert "$6 = 0 OR (markets.yes_price IS NOT NULL AND markets.yes_price >= $6)" in query
+    assert "$6 = 0" in query
+    assert "markets.yes_price IS NOT NULL AND markets.yes_price >= $6" in query
     assert args[5] == 0.2
 
 

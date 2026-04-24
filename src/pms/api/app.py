@@ -42,6 +42,8 @@ from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
 from pms.api.routes.markets import (
     MarketPriceHistoryNotFoundError,
+    MarketsFilterParams,
+    SubscribedFilter,
     get_price_history as get_price_history_item,
     list_markets as list_markets_items,
 )
@@ -169,6 +171,14 @@ def create_app(
     async def markets(
         limit: int = Query(default=20, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
+        q: str = Query(default=""),
+        volume_min: float = Query(default=0.0, ge=0.0),
+        liquidity_min: float = Query(default=0.0, ge=0.0),
+        spread_max_bps: int | None = Query(default=None, ge=0),
+        yes_min: float = Query(default=0.0, ge=0.0, le=1.0),
+        yes_max: float = Query(default=1.0, ge=0.0, le=1.0),
+        resolves_within_days: int | None = Query(default=None, ge=0),
+        subscribed: SubscribedFilter = Query(default="all"),
     ) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
@@ -177,6 +187,16 @@ def create_app(
             current_asset_ids=_current_subscription_asset_ids(active_runner),
             limit=limit,
             offset=offset,
+            filters=MarketsFilterParams(
+                q=q,
+                volume_min=volume_min,
+                liquidity_min=liquidity_min,
+                spread_max_bps=spread_max_bps,
+                yes_min=yes_min,
+                yes_max=yes_max,
+                resolves_within_days=resolves_within_days,
+                subscribed=subscribed,
+            ),
         )
         return payload.model_dump(mode="json")
 

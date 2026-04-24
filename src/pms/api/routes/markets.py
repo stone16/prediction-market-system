@@ -2,16 +2,21 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from pms.storage.market_data_store import MarketCatalogRow, MarketPriceSnapshotRow
+from pms.storage.market_data_store import (
+    MarketCatalogRow,
+    MarketFilters,
+    MarketPriceSnapshotRow,
+)
 
 
 StoredMarketRow = MarketCatalogRow
 StoredPriceSnapshotRow = MarketPriceSnapshotRow
 MAX_PRICE_HISTORY_LIMIT = 10_000
+SubscribedFilter = Literal["all", "only", "idle"]
 
 
 class MarketsReader(Protocol):
@@ -20,6 +25,8 @@ class MarketsReader(Protocol):
         *,
         limit: int,
         offset: int,
+        filters: MarketFilters | None = None,
+        current_asset_ids: frozenset[str] = frozenset(),
         now: datetime | None = None,
     ) -> tuple[Sequence[StoredMarketRow], int]: ...
 
@@ -67,6 +74,29 @@ class MarketsListResponse(BaseModel):
     total: int
 
 
+class MarketsFilterParams(BaseModel):
+    q: str = ""
+    volume_min: float = Field(default=0.0, ge=0.0)
+    liquidity_min: float = Field(default=0.0, ge=0.0)
+    spread_max_bps: int | None = Field(default=None, ge=0)
+    yes_min: float = Field(default=0.0, ge=0.0, le=1.0)
+    yes_max: float = Field(default=1.0, ge=0.0, le=1.0)
+    resolves_within_days: int | None = Field(default=None, ge=0)
+    subscribed: SubscribedFilter = "all"
+
+    def to_storage_filters(self) -> MarketFilters:
+        return MarketFilters(
+            q=self.q.strip(),
+            volume_min=self.volume_min,
+            liquidity_min=self.liquidity_min,
+            spread_max_bps=self.spread_max_bps,
+            yes_min=self.yes_min,
+            yes_max=self.yes_max,
+            resolves_within_days=self.resolves_within_days,
+            subscribed=self.subscribed,
+        )
+
+
 class PriceHistorySnapshot(BaseModel):
     snapshot_at: str
     yes_price: float | None
@@ -89,8 +119,14 @@ async def list_markets(
     current_asset_ids: frozenset[str],
     limit: int,
     offset: int,
+    filters: MarketsFilterParams | None = None,
 ) -> MarketsListResponse:
-    rows, total = await store.read_markets(limit=limit, offset=offset)
+    rows, total = await store.read_markets(
+        limit=limit,
+        offset=offset,
+        filters=(filters or MarketsFilterParams()).to_storage_filters(),
+        current_asset_ids=current_asset_ids,
+    )
     return MarketsListResponse(
         markets=[
             MarketRow(
