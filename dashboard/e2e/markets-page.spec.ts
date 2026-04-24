@@ -8,7 +8,7 @@ const evidenceDir = path.resolve(
   '.harness',
   'pms-markets-browser-v1',
   'checkpoints',
-  '09',
+  '10',
   'iter-1',
   'evidence'
 );
@@ -17,7 +17,7 @@ test.beforeEach(() => {
   fs.mkdirSync(evidenceDir, { recursive: true });
 });
 
-test('markets page renders redesigned columns at desktop width without console errors', async ({ page }) => {
+test('markets page opens the detail drawer from a row and restores it after reload', async ({ page }) => {
   const errors: string[] = [];
   const marketsPayload = {
     markets: [
@@ -81,23 +81,19 @@ test('markets page renders redesigned columns at desktop width without console e
 
   await page.goto('/markets');
   await expect(page.getByRole('heading', { name: 'Markets' })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'Market' })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'YES' })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'NO' })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'Vol 24h' })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'Liquidity' })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'Spread' })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'Resolves' })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'Subscription' })).toBeVisible();
-  await expect(page.getByText('Will market 000 settle above consensus?')).toBeVisible();
-  await expect(page.getByText('52.5%')).toBeVisible();
-  await expect(page.getByText('47.5%')).toBeVisible();
-  await expect(page.getByText('300 bps')).toBeVisible();
-  await expect(page.getByLabel('User subscription')).toBeVisible();
+  await page.getByRole('row', { name: /Will market 000 settle above consensus/i }).click();
+  await expect(page).toHaveURL(/\/markets\?detail=market-000/);
+  await expect(page.getByRole('dialog', { name: 'Market details' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Will market 000 settle above consensus?' })).toBeVisible();
+  await expect(page.getByText('market-000-yes')).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole('dialog', { name: 'Market details' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Will market 000 settle above consensus?' })).toBeVisible();
 
   await page.screenshot({
     fullPage: true,
-    path: path.join(evidenceDir, 'cp09-markets-table.png')
+    path: path.join(evidenceDir, 'cp10-market-detail-drawer.png')
   });
 
   expect(errors).toEqual([]);
