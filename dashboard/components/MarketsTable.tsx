@@ -1,5 +1,7 @@
-import Link from 'next/link';
 import { EmptyState } from '@/components/EmptyState';
+import { FreshnessDot } from '@/components/FreshnessDot';
+import { PriceBar } from '@/components/PriceBar';
+import { SubscribeStar } from '@/components/SubscribeStar';
 import type { MarketRow } from '@/lib/types';
 
 type MarketsTableProps = {
@@ -7,23 +9,36 @@ type MarketsTableProps = {
   runnerLabel: 'running' | 'paused';
 };
 
-function formatVolume(volume: number | null) {
-  if (volume === null) {
+function formatNumber(value: number | null) {
+  if (value === null) {
     return '—';
   }
   return new Intl.NumberFormat('en-US', {
     maximumFractionDigits: 1,
-    minimumFractionDigits: volume % 1 === 0 ? 0 : 1
-  }).format(volume);
+    minimumFractionDigits: value % 1 === 0 ? 0 : 1
+  }).format(value);
 }
 
-function formatUpdatedAt(updatedAt: string) {
+function formatDate(value: string | null | undefined) {
+  if (value == null) {
+    return '—';
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return '—';
+  }
   return new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-  }).format(new Date(updatedAt));
+    timeZone: 'UTC'
+  }).format(parsed);
+}
+
+function formatSpread(spreadBps: number | null) {
+  if (spreadBps === null) {
+    return '—';
+  }
+  return `${spreadBps} bps`;
 }
 
 export function MarketsTable({ rows, runnerLabel }: MarketsTableProps) {
@@ -43,35 +58,40 @@ export function MarketsTable({ rows, runnerLabel }: MarketsTableProps) {
         <thead>
           <tr>
             <th>Market</th>
-            <th>Question</th>
-            <th>Venue</th>
-            <th>Volume 24h</th>
-            <th>Updated</th>
-            <th>Subscribed</th>
-            <th>Token IDs</th>
+            <th>YES</th>
+            <th>NO</th>
+            <th>Vol 24h</th>
+            <th>Liquidity</th>
+            <th>Spread</th>
+            <th>Resolves</th>
+            <th aria-label="Subscription">★</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr className="interactive-row" key={row.market_id}>
-              <td>
-                <Link className="run-link" href={`/signals?market_id=${encodeURIComponent(row.market_id)}`}>
-                  {row.market_id}
-                </Link>
-              </td>
-              <td>{row.question}</td>
-              <td>{row.venue}</td>
-              <td>{formatVolume(row.volume_24h)}</td>
-              <td>{formatUpdatedAt(row.updated_at)}</td>
-              <td>
-                <span className={row.subscribed ? 'badge info' : 'badge muted-badge'}>
-                  {row.subscribed ? 'subscribed' : 'idle'}
+            <tr key={row.market_id}>
+              <td className="markets-table__market-cell">
+                <strong>{row.question}</strong>
+                <span className="markets-table__meta">
+                  <FreshnessDot priceUpdatedAt={row.price_updated_at} />
+                  {row.venue}
                 </span>
               </td>
               <td>
-                <span className="muted">
-                  YES {row.yes_token_id ?? '—'} / NO {row.no_token_id ?? '—'}
-                </span>
+                <PriceBar label="YES price" tone="yes" value={row.yes_price} />
+              </td>
+              <td>
+                <PriceBar label="NO price" tone="no" value={row.no_price} />
+              </td>
+              <td>{formatNumber(row.volume_24h)}</td>
+              <td>{formatNumber(row.liquidity)}</td>
+              <td>{formatSpread(row.spread_bps)}</td>
+              <td>{formatDate(row.resolves_at)}</td>
+              <td>
+                <SubscribeStar
+                  subscribed={row.subscribed}
+                  subscriptionSource={row.subscription_source}
+                />
               </td>
             </tr>
           ))}

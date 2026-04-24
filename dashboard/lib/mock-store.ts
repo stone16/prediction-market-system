@@ -58,6 +58,16 @@ export function mockMarkets(): MarketRow[] {
     updated_at: new Date(Date.UTC(2026, 3, 23, 12, index, 0)).toISOString(),
     yes_token_id: `market-${String(index).padStart(3, '0')}-yes`,
     no_token_id: `market-${String(index).padStart(3, '0')}-no`,
+    yes_price: 0.42 + (index % 12) / 100,
+    no_price: 0.58 - (index % 12) / 100,
+    best_bid: 0.41 + (index % 12) / 100,
+    best_ask: 0.43 + (index % 12) / 100,
+    last_trade_price: 0.42 + (index % 12) / 100,
+    liquidity: 18000 - index * 325.25,
+    spread_bps: 200 + (index % 5) * 25,
+    price_updated_at: new Date(Date.UTC(2026, 3, 23, 12, index, 20)).toISOString(),
+    resolves_at: new Date(Date.UTC(2026, 4, 1 + (index % 9), 0, 0, 0)).toISOString(),
+    subscription_source: index % 5 === 0 ? 'user' : null,
     subscribed: index % 3 === 0
   }));
 }

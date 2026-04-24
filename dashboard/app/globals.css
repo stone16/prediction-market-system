@@ -492,6 +492,107 @@ h3 {
   overflow-x: auto;
 }
 
+.markets-table__market-cell {
+  min-width: 320px;
+  white-space: normal;
+}
+
+.markets-table__market-cell strong {
+  display: block;
+  font-size: var(--text-14);
+  font-weight: var(--weight-bold);
+  max-width: 460px;
+}
+
+.markets-table__meta {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: var(--text-11);
+  font-weight: var(--weight-bold);
+  gap: var(--space-2);
+  letter-spacing: 0.08em;
+  margin-top: var(--space-2);
+  text-transform: uppercase;
+}
+
+.freshness-dot {
+  border-radius: 50%;
+  display: inline-block;
+  height: 9px;
+  width: 9px;
+}
+
+.freshness-dot--green {
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgb(31 138 112 / 12%);
+}
+
+.freshness-dot--amber {
+  background: var(--amber);
+  box-shadow: 0 0 0 4px rgb(214 167 45 / 15%);
+}
+
+.freshness-dot--gray {
+  background: rgb(93 102 91 / 55%);
+  box-shadow: 0 0 0 4px rgb(93 102 91 / 10%);
+}
+
+.price-bar {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 96px;
+}
+
+.price-bar__label {
+  font-family: var(--font-mono);
+  font-size: var(--text-13);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-bold);
+}
+
+.price-bar__track {
+  background: rgb(23 25 22 / 8%);
+  border-radius: var(--radius-pill);
+  display: block;
+  height: 7px;
+  overflow: hidden;
+}
+
+.price-bar__fill {
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+}
+
+.price-bar--yes .price-bar__fill {
+  background: var(--green);
+}
+
+.price-bar--no .price-bar__fill {
+  background: var(--cyan);
+}
+
+.subscribe-star {
+  display: inline-block;
+  font-size: var(--text-20);
+  line-height: 1;
+}
+
+.subscribe-star--user {
+  color: var(--amber);
+  filter: drop-shadow(0 4px 8px rgb(214 167 45 / 25%));
+}
+
+.subscribe-star--strategy {
+  color: var(--cyan);
+  filter: drop-shadow(0 4px 8px rgb(45 138 166 / 22%));
+}
+
+.subscribe-star--idle {
+  color: rgb(93 102 91 / 65%);
+}
+
 .depth-card {
   margin-bottom: 20px;
   padding: 20px;
