@@ -69,6 +69,7 @@ from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 from pms.storage.fill_store import FillStore
 from pms.storage.market_data_store import PostgresMarketDataStore
+from pms.storage.market_subscription_store import PostgresMarketSubscriptionStore
 from pms.storage.opportunity_store import OpportunityStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
@@ -569,6 +570,7 @@ class Runner:
             PostgresMarketDataStore(self._pg_pool),
             self._strategy_registry,
             UnionMergePolicy(),
+            PostgresMarketSubscriptionStore(self._pg_pool),
         )
         self._subscription_controller = SensorSubscriptionController(subscription_sink)
         self._register_strategy_change_callbacks()
