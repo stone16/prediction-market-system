@@ -8,6 +8,7 @@ import pytest
 
 from pms.api.app import create_app
 from pms.runner import Runner
+from pms.storage.market_data_store import MarketFilters
 
 
 def _record(
@@ -56,17 +57,19 @@ class _StoreDouble:
     def __init__(self, rows: list[Any], total: int) -> None:
         self._rows = rows
         self._total = total
-        self.calls: list[tuple[int, int]] = []
+        self.calls: list[tuple[int, int, MarketFilters, frozenset[str]]] = []
 
     async def read_markets(
         self,
         *,
         limit: int,
         offset: int,
+        filters: MarketFilters | None = None,
+        current_asset_ids: frozenset[str] = frozenset(),
         now: datetime | None = None,
     ) -> tuple[list[Any], int]:
         del now
-        self.calls.append((limit, offset))
+        self.calls.append((limit, offset, filters or MarketFilters(), current_asset_ids))
         return self._rows, self._total
 
 
@@ -99,7 +102,7 @@ async def test_list_markets_paginates_and_marks_subscribed_rows() -> None:
         offset=2,
     )
 
-    assert store.calls == [(2, 2)]
+    assert store.calls == [(2, 2, MarketFilters(), frozenset({"token-3-no"}))]
     assert payload.limit == 2
     assert payload.offset == 2
     assert payload.total == 5
@@ -212,3 +215,51 @@ async def test_get_markets_returns_503_when_runner_pg_pool_is_uninitialized() ->
     assert response.json() == {
         "detail": "Runner PostgreSQL pool is not initialized"
     }
+
+
+@pytest.mark.asyncio
+async def test_markets_route_forwards_filters_to_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _StoreDouble(rows=[], total=0)
+    monkeypatch.setattr("pms.api.app.PostgresMarketDataStore", lambda _: store)
+    runner = Runner()
+    setattr(runner, "_pg_pool", object())
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/markets",
+            params={
+                "limit": "50",
+                "offset": "10",
+                "q": "election",
+                "volume_min": "1000.5",
+                "liquidity_min": "2500.25",
+                "spread_max_bps": "300",
+                "yes_min": "0.2",
+                "yes_max": "0.8",
+                "resolves_within_days": "14",
+                "subscribed": "idle",
+            },
+        )
+
+    assert response.status_code == 200
+    assert store.calls == [
+        (
+            50,
+            10,
+            MarketFilters(
+                q="election",
+                volume_min=1000.5,
+                liquidity_min=2500.25,
+                spread_max_bps=300,
+                yes_min=0.2,
+                yes_max=0.8,
+                resolves_within_days=14,
+                subscribed="idle",
+            ),
+            frozenset(),
+        )
+    ]

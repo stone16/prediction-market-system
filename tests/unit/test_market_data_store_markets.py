@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from pms.core.models import Market
-from pms.storage.market_data_store import PostgresMarketDataStore
+from pms.storage.market_data_store import MarketFilters, PostgresMarketDataStore
 
 
 @dataclass
@@ -43,6 +43,9 @@ class FakePool:
 
     def acquire(self) -> FakeAcquire:
         return FakeAcquire(self._connection)
+
+
+REFERENCE_NOW = datetime(2026, 4, 24, 12, 0, tzinfo=UTC)
 
 
 def _row(
@@ -86,6 +89,17 @@ def _row(
     }
 
 
+async def _read_markets_query(
+    **kwargs: object,
+) -> tuple[str, tuple[object, ...]]:
+    connection = FakeConnection(fetch_results=[[]])
+    store = PostgresMarketDataStore(FakePool(connection))
+
+    await store.read_markets(limit=20, offset=0, now=REFERENCE_NOW, **kwargs)
+
+    return connection.fetch_calls[0]
+
+
 @pytest.mark.asyncio
 async def test_read_markets_returns_rows_total_and_filters_to_active_markets_in_sql() -> None:
     updated_at = datetime(2026, 4, 23, 9, 30, tzinfo=UTC)
@@ -127,6 +141,157 @@ async def test_read_markets_returns_rows_total_and_filters_to_active_markets_in_
     assert "market_subscriptions" in query
     assert args[1:] == (20, 5)
     assert isinstance(args[0], datetime)
+
+
+@pytest.mark.asyncio
+async def test_read_markets_filter_volume_min() -> None:
+    updated_at = datetime(2026, 4, 23, 9, 30, tzinfo=UTC)
+    connection = FakeConnection(
+        fetch_results=[
+            [
+                _row(
+                    market_id="volume-match",
+                    question="Will volume filter match?",
+                    volume_24h=2500.0,
+                    updated_at=updated_at,
+                    yes_token_id="volume-match-yes",
+                    no_token_id="volume-match-no",
+                    total_count=1,
+                )
+            ]
+        ]
+    )
+    store = PostgresMarketDataStore(FakePool(connection))
+
+    rows, total = await store.read_markets(
+        limit=20,
+        offset=0,
+        now=REFERENCE_NOW,
+        filters=MarketFilters(volume_min=2000.0),
+    )
+
+    query, args = connection.fetch_calls[0]
+    assert total == 1
+    assert rows[0].market_id == "volume-match"
+    assert "markets.volume_24h IS NOT NULL" in query
+    assert "markets.volume_24h >= $3" in query
+    assert args[2] == 2000.0
+
+
+@pytest.mark.asyncio
+async def test_read_markets_filter_liquidity_min() -> None:
+    query, args = await _read_markets_query(filters=MarketFilters(liquidity_min=5000.0))
+
+    assert "markets.liquidity IS NOT NULL" in query
+    assert "markets.liquidity >= $4" in query
+    assert args[3] == 5000.0
+
+
+@pytest.mark.asyncio
+async def test_read_markets_filter_spread_max_bps() -> None:
+    query, args = await _read_markets_query(filters=MarketFilters(spread_max_bps=250))
+
+    assert "markets.spread_bps IS NOT NULL" in query
+    assert "markets.spread_bps <= $5" in query
+    assert args[4] == 250
+
+
+@pytest.mark.asyncio
+async def test_read_markets_filter_yes_price_band() -> None:
+    query, args = await _read_markets_query(filters=MarketFilters(yes_min=0.2, yes_max=0.8))
+
+    assert "markets.yes_price IS NOT NULL" in query
+    assert "markets.yes_price >= $6" in query
+    assert "markets.yes_price <= $7" in query
+    assert args[5:7] == (0.2, 0.8)
+
+
+@pytest.mark.asyncio
+async def test_read_markets_filter_resolves_within_days() -> None:
+    query, args = await _read_markets_query(
+        filters=MarketFilters(resolves_within_days=7)
+    )
+
+    assert "markets.resolves_at IS NOT NULL" in query
+    assert "markets.resolves_at <= $8" in query
+    assert args[7] == REFERENCE_NOW + timedelta(days=7)
+
+
+@pytest.mark.asyncio
+async def test_read_markets_filter_subscribed_only() -> None:
+    query, args = await _read_markets_query(
+        filters=MarketFilters(subscribed="only"),
+        current_asset_ids=frozenset({"market-2-no", "market-1-yes"}),
+    )
+
+    assert "$9 = 'only'" in query
+    assert "EXISTS" in query
+    assert "subscribed_tokens.token_id = ANY($10::text[])" in query
+    assert args[8] == "only"
+    assert args[9] == ["market-1-yes", "market-2-no"]
+
+
+@pytest.mark.asyncio
+async def test_read_markets_filter_subscribed_idle() -> None:
+    query, args = await _read_markets_query(
+        filters=MarketFilters(subscribed="idle"),
+        current_asset_ids=frozenset({"market-1-yes"}),
+    )
+
+    assert "$9 = 'idle'" in query
+    assert "NOT EXISTS" in query
+    assert "subscribed_tokens.token_id = ANY($10::text[])" in query
+    assert args[8] == "idle"
+    assert args[9] == ["market-1-yes"]
+
+
+@pytest.mark.asyncio
+async def test_read_markets_filter_q_substring() -> None:
+    query, args = await _read_markets_query(filters=MarketFilters(q="Consensus"))
+
+    assert "markets.question ILIKE '%' || $2 || '%'" in query
+    assert args[1] == "Consensus"
+
+
+@pytest.mark.asyncio
+async def test_read_markets_null_price_excluded_from_band() -> None:
+    query, args = await _read_markets_query(filters=MarketFilters(yes_min=0.2))
+
+    assert "$6 = 0 OR (markets.yes_price IS NOT NULL AND markets.yes_price >= $6)" in query
+    assert args[5] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_read_markets_combined_filters() -> None:
+    query, args = await _read_markets_query(
+        filters=MarketFilters(
+            q="election",
+            volume_min=1000.0,
+            liquidity_min=2500.0,
+            spread_max_bps=300,
+            yes_min=0.25,
+            yes_max=0.75,
+            resolves_within_days=14,
+            subscribed="only",
+        ),
+        current_asset_ids=frozenset({"token-a", "token-b"}),
+    )
+
+    assert "markets.question ILIKE '%' || $2 || '%'" in query
+    assert args == (
+        REFERENCE_NOW,
+        "election",
+        1000.0,
+        2500.0,
+        300,
+        0.25,
+        0.75,
+        REFERENCE_NOW + timedelta(days=14),
+        "only",
+        ["token-a", "token-b"],
+        20,
+        0,
+    )
 
 
 @pytest.mark.asyncio
