@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, test, vi } from 'vitest';
+import { useState } from 'react';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { MarketDetailDrawer } from '@/components/MarketDetailDrawer';
 import type { MarketRow } from '@/lib/types';
 
@@ -24,12 +25,22 @@ const market: MarketRow = {
   subscribed: true
 };
 
-function renderDrawerHarness(initialUrl: string) {
+function renderDrawerHarness(
+  initialUrl: string,
+  {
+    initialMarket = market,
+    onToast = vi.fn()
+  }: {
+    initialMarket?: MarketRow;
+    onToast?: ReturnType<typeof vi.fn>;
+  } = {}
+) {
   window.history.replaceState({}, '', initialUrl);
 
   function Harness() {
+    const [currentMarket, setCurrentMarket] = useState(initialMarket);
     const detailId = new URLSearchParams(window.location.search).get('detail');
-    const selectedMarket = detailId === market.market_id ? market : null;
+    const selectedMarket = detailId === currentMarket.market_id ? currentMarket : null;
     function closeDrawer() {
       const params = new URLSearchParams(window.location.search);
       params.delete('detail');
@@ -37,13 +48,25 @@ function renderDrawerHarness(initialUrl: string) {
       window.history.replaceState({}, '', `/markets${query ? `?${query}` : ''}`);
     }
 
-    return <MarketDetailDrawer market={selectedMarket} onClose={closeDrawer} />;
+    return (
+      <MarketDetailDrawer
+        market={selectedMarket}
+        onClose={closeDrawer}
+        onMarketChange={setCurrentMarket}
+        onToast={onToast}
+      />
+    );
   }
 
   return render(<Harness />);
 }
 
 describe('MarketDetailDrawer', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   test('renders market data when the URL has detail and stays closed without it', () => {
     const openRender = renderDrawerHarness('/markets?detail=market-001');
 
@@ -112,5 +135,65 @@ describe('MarketDetailDrawer', () => {
 
     fireEvent.keyDown(document, { key: 'Tab' });
     expect(document.activeElement).toBe(closeButton);
+  });
+
+  test('subscribe click issues POST and updates the star', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/price-history')) {
+        return Response.json({ condition_id: 'market-001', snapshots: [] });
+      }
+      if (url.includes('/subscribe') && init?.method === 'POST') {
+        return Response.json({
+          token_id: 'market-001-yes',
+          source: 'user',
+          created_at: '2026-04-24T12:00:00+00:00'
+        });
+      }
+      return Response.json({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderDrawerHarness('/markets?detail=market-001', {
+      initialMarket: { ...market, subscribed: false, subscription_source: null }
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Subscribe market' }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/pms/markets/market-001-yes/subscribe',
+        expect.objectContaining({ method: 'POST' })
+      );
+      expect(screen.getByLabelText('User subscription')).toBeInTheDocument();
+    });
+  });
+
+  test('subscribe failure rolls back and emits a toast', async () => {
+    const onToast = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/price-history')) {
+        return Response.json({ condition_id: 'market-001', snapshots: [] });
+      }
+      if (url.includes('/subscribe') && init?.method === 'POST') {
+        return Response.json({ detail: 'denied' }, { status: 500 });
+      }
+      return Response.json({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderDrawerHarness('/markets?detail=market-001', {
+      initialMarket: { ...market, subscribed: false, subscription_source: null },
+      onToast
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Subscribe market' }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Not subscribed')).toBeInTheDocument();
+      expect(onToast).toHaveBeenCalledWith({
+        tone: 'error',
+        message: 'Subscription failed. Reverted to the previous state.'
+      });
+    });
   });
 });
