@@ -193,7 +193,7 @@ async def test_subscribe_endpoint_emits_structured_log(
     ]
     assert len(records) == 1
     assert records[0].message == "subscription.user_add"
-    assert records[0].token_id == "token-yes"
-    assert records[0].condition_id == "market-1"
-    assert records[0].request_method == "POST"
-    assert records[0].request_path == "/markets/token-yes/subscribe"
+    assert getattr(records[0], "token_id") == "token-yes"
+    assert getattr(records[0], "condition_id") == "market-1"
+    assert getattr(records[0], "request_method") == "POST"
+    assert getattr(records[0], "request_path") == "/markets/token-yes/subscribe"
