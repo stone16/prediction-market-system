@@ -163,3 +163,38 @@ async def test_write_market_upserts_current_price_fields() -> None:
         200,
         price_updated_at,
     )
+
+
+@pytest.mark.asyncio
+async def test_write_price_snapshot_inserts_row() -> None:
+    connection = FakeConnection()
+    store = PostgresMarketDataStore(FakePool(connection))
+    snapshot_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+
+    await store.write_price_snapshot(
+        condition_id="market-snapshot",
+        snapshot_at=snapshot_at,
+        yes_price=0.61,
+        no_price=0.39,
+        best_bid=0.60,
+        best_ask=0.62,
+        last_trade_price=0.61,
+        liquidity=2500.0,
+        volume_24h=1250.0,
+    )
+
+    query, args = connection.execute_calls[0]
+    assert "INSERT INTO market_price_snapshots" in query
+    assert "condition_id" in query
+    assert "volume_24h" in query
+    assert args == (
+        "market-snapshot",
+        snapshot_at,
+        0.61,
+        0.39,
+        0.60,
+        0.62,
+        0.61,
+        2500.0,
+        1250.0,
+    )

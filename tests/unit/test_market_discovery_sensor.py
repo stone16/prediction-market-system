@@ -16,8 +16,11 @@ import pytest
 from pms.config import PMSSettings
 from pms.core.enums import RunMode
 from pms.metrics import (
+    MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC,
     SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC,
+    SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC,
     get_metric,
+    set_metric,
 )
 from pms.sensor.adapters.market_discovery import (
     MarketDiscoverySensor,
@@ -74,12 +77,22 @@ def _gamma_market(
 class StoreMock:
     write_market_mock: AsyncMock = field(default_factory=AsyncMock)
     write_token_mock: AsyncMock = field(default_factory=AsyncMock)
+    write_price_snapshot_mock: AsyncMock = field(default_factory=AsyncMock)
+    read_snapshot_lag_seconds_max_mock: AsyncMock = field(
+        default_factory=lambda: AsyncMock(return_value=0.0)
+    )
 
     async def write_market(self, market: Any) -> None:
         await self.write_market_mock(market)
 
     async def write_token(self, token: Any) -> None:
         await self.write_token_mock(token)
+
+    async def write_price_snapshot(self, **kwargs: Any) -> None:
+        await self.write_price_snapshot_mock(**kwargs)
+
+    async def read_snapshot_lag_seconds_max(self) -> float:
+        return cast(float, await self.read_snapshot_lag_seconds_max_mock())
 
 
 def _store_mock() -> PostgresMarketDataStore:
@@ -287,6 +300,9 @@ async def test_market_discovery_sensor_preserves_zero_volume_rows() -> None:
 @pytest.mark.asyncio
 async def test_market_discovery_sensor_updates_price_field_ratio_metric() -> None:
     store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.read_snapshot_lag_seconds_max_mock.return_value = 2.5
+    set_metric(SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC, 0.0)
     payload = [
         _gamma_market(
             "pm-priced-metric",
@@ -317,6 +333,9 @@ async def test_market_discovery_sensor_updates_price_field_ratio_metric() -> Non
     await sensor.aclose()
 
     assert get_metric(SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC) == 1.0
+    assert get_metric(SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC) == 1.0
+    assert get_metric(MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC) == 2.5
+    store_mock.write_price_snapshot_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio

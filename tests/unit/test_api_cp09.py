@@ -19,7 +19,9 @@ from pms.core.models import (
     TradeDecision,
 )
 from pms.metrics import (
+    MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC,
     SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC,
+    SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC,
     set_metric,
 )
 from pms.runner import Runner
@@ -176,6 +178,8 @@ def _feedback(feedback_id: str) -> Feedback:
 @pytest.mark.asyncio
 async def test_api_routes_expose_mock_runner_state() -> None:
     set_metric(SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC, 0.625)
+    set_metric(SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC, 3.0)
+    set_metric(MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC, 12.5)
     app = create_app(_runner_with_state())
     transport = httpx.ASGITransport(app=app)
 
@@ -201,6 +205,8 @@ async def test_api_routes_expose_mock_runner_state() -> None:
     assert decisions[0]["kelly_size"] == 12.5
     assert metrics["brier_overall"] == 0.09
     assert metrics[SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC] == 0.625
+    assert metrics[SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC] == 3.0
+    assert metrics[MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC] == 12.5
     assert metrics["ops_view"]["brier_overall"] == 0.09
     assert metrics["ops_view"]["pnl"] == 1.0
     assert metrics["per_strategy"] == [
