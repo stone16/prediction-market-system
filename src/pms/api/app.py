@@ -40,7 +40,11 @@ from pms.api.research_routes import (
 from pms.api.routes.factors import list_factor_catalog, list_factor_series
 from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
-from pms.api.routes.markets import list_markets as list_markets_items
+from pms.api.routes.markets import (
+    MarketPriceHistoryNotFoundError,
+    get_price_history as get_price_history_item,
+    list_markets as list_markets_items,
+)
 from pms.api.routes.market_subscriptions import (
     UnknownSubscriptionTokenError,
     subscribe_market as subscribe_market_item,
@@ -174,6 +178,25 @@ def create_app(
             limit=limit,
             offset=offset,
         )
+        return payload.model_dump(mode="json")
+
+    @app.get("/markets/{condition_id}/price-history")
+    async def market_price_history(
+        condition_id: str,
+        since: datetime | None = None,
+        limit: int = Query(default=1440, ge=1),
+    ) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            payload = await get_price_history_item(
+                PostgresMarketDataStore(active_runner.pg_pool),
+                condition_id=condition_id,
+                since=since,
+                limit=limit,
+            )
+        except MarketPriceHistoryNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Market not found") from exc
         return payload.model_dump(mode="json")
 
     @app.post(

@@ -38,6 +38,18 @@ class MarketCatalogRow:
     subscription_source: str | None = None
 
 
+@dataclass(frozen=True)
+class MarketPriceSnapshotRow:
+    snapshot_at: datetime
+    yes_price: float | None
+    no_price: float | None
+    best_bid: float | None
+    best_ask: float | None
+    last_trade_price: float | None
+    liquidity: float | None
+    volume_24h: float | None
+
+
 def _optional_float(value: object) -> float | None:
     if value is None:
         return None
@@ -171,6 +183,62 @@ class PostgresMarketDataStore:
             )
             for row in rows
         ], total
+
+    async def read_price_history(
+        self,
+        *,
+        condition_id: str,
+        since: datetime,
+        limit: int,
+    ) -> list[MarketPriceSnapshotRow] | None:
+        snapshots_query = """
+        SELECT
+            snapshot_at,
+            yes_price,
+            no_price,
+            best_bid,
+            best_ask,
+            last_trade_price,
+            liquidity,
+            volume_24h
+        FROM market_price_snapshots
+        WHERE condition_id = $1
+          AND snapshot_at >= $2
+        ORDER BY snapshot_at ASC
+        LIMIT $3
+        """
+        async with self._pool.acquire() as connection:
+            market_exists = await connection.fetchval(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM markets
+                    WHERE condition_id = $1
+                )
+                """,
+                condition_id,
+            )
+            if not market_exists:
+                return None
+            rows = await connection.fetch(
+                snapshots_query,
+                condition_id,
+                since,
+                limit,
+            )
+        return [
+            MarketPriceSnapshotRow(
+                snapshot_at=cast(datetime, row["snapshot_at"]),
+                yes_price=_optional_float(row["yes_price"]),
+                no_price=_optional_float(row["no_price"]),
+                best_bid=_optional_float(row["best_bid"]),
+                best_ask=_optional_float(row["best_ask"]),
+                last_trade_price=_optional_float(row["last_trade_price"]),
+                liquidity=_optional_float(row["liquidity"]),
+                volume_24h=_optional_float(row["volume_24h"]),
+            )
+            for row in rows
+        ]
 
     async def read_eligible_markets(
         self,
