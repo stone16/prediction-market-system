@@ -322,3 +322,44 @@ async def test_markets_route_subscribed_true_when_selector_has_token_even_if_no_
     assert row["market_id"] == "market-selector-subscription"
     assert row["subscribed"] is True
     assert row["subscription_source"] is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_subscribe_unsubscribe_roundtrip(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    store = PostgresMarketDataStore(pg_pool)
+    now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    yes_token_id, _ = await _seed_market(
+        store,
+        market_id="market-subscribe-roundtrip",
+        question="Will subscribe roundtrip update markets?",
+        resolves_at=now + timedelta(days=1),
+        created_at=now - timedelta(days=7),
+        updated_at=now,
+        volume_24h=3_000.0,
+    )
+
+    async with _client(pg_pool, current_asset_ids=frozenset()) as client:
+        subscribe = await client.post(f"/markets/{yes_token_id}/subscribe")
+        subscribed_markets = await client.get("/markets?limit=20&offset=0")
+        unsubscribe = await client.delete(f"/markets/{yes_token_id}/subscribe")
+        unsubscribed_markets = await client.get("/markets?limit=20&offset=0")
+
+    assert subscribe.status_code == 200
+    assert subscribe.json()["token_id"] == yes_token_id
+    assert subscribe.json()["source"] == "user"
+    assert subscribe.json()["created_at"] is not None
+
+    assert subscribed_markets.status_code == 200
+    subscribed_row = subscribed_markets.json()["markets"][0]
+    assert subscribed_row["market_id"] == "market-subscribe-roundtrip"
+    assert subscribed_row["subscription_source"] == "user"
+
+    assert unsubscribe.status_code == 200
+    assert unsubscribe.json() == {"token_id": yes_token_id, "deleted": True}
+
+    assert unsubscribed_markets.status_code == 200
+    unsubscribed_row = unsubscribed_markets.json()["markets"][0]
+    assert unsubscribed_row["market_id"] == "market-subscribe-roundtrip"
+    assert unsubscribed_row["subscription_source"] is None
