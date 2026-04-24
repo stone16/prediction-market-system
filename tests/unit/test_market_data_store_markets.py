@@ -55,6 +55,15 @@ def _row(
     yes_token_id: str | None,
     no_token_id: str | None,
     total_count: int,
+    yes_price: float | None = None,
+    no_price: float | None = None,
+    best_bid: float | None = None,
+    best_ask: float | None = None,
+    last_trade_price: float | None = None,
+    liquidity: float | None = None,
+    spread_bps: int | None = None,
+    price_updated_at: datetime | None = None,
+    subscription_source: str | None = None,
 ) -> dict[str, object]:
     return {
         "market_id": market_id,
@@ -64,6 +73,15 @@ def _row(
         "updated_at": updated_at,
         "yes_token_id": yes_token_id,
         "no_token_id": no_token_id,
+        "yes_price": yes_price,
+        "no_price": no_price,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "last_trade_price": last_trade_price,
+        "liquidity": liquidity,
+        "spread_bps": spread_bps,
+        "price_updated_at": price_updated_at,
+        "subscription_source": subscription_source,
         "total_count": total_count,
     }
 
@@ -106,8 +124,51 @@ async def test_read_markets_returns_rows_total_and_filters_to_active_markets_in_
     query, args = connection.fetch_calls[0]
     assert "resolves_at IS NULL OR markets.resolves_at > $1" in query
     assert "COUNT(*) OVER()" in query
+    assert "market_subscriptions" in query
     assert args[1:] == (20, 5)
     assert isinstance(args[0], datetime)
+
+
+@pytest.mark.asyncio
+async def test_read_markets_returns_price_fields_and_subscription_source() -> None:
+    price_updated_at = datetime(2026, 4, 23, 9, 31, tzinfo=UTC)
+    connection = FakeConnection(
+        fetch_results=[
+            [
+                _row(
+                    market_id="market-priced",
+                    question="Will read_markets include prices?",
+                    updated_at=datetime(2026, 4, 23, 9, 32, tzinfo=UTC),
+                    yes_token_id="market-priced-yes",
+                    no_token_id="market-priced-no",
+                    total_count=1,
+                    yes_price=0.62,
+                    no_price=0.38,
+                    best_bid=0.61,
+                    best_ask=0.63,
+                    last_trade_price=0.62,
+                    liquidity=2500.25,
+                    spread_bps=200,
+                    price_updated_at=price_updated_at,
+                    subscription_source="user",
+                )
+            ]
+        ]
+    )
+    store = PostgresMarketDataStore(FakePool(connection))
+
+    rows, total = await store.read_markets(limit=20, offset=0)
+
+    assert total == 1
+    assert rows[0].yes_price == 0.62
+    assert rows[0].no_price == 0.38
+    assert rows[0].best_bid == 0.61
+    assert rows[0].best_ask == 0.63
+    assert rows[0].last_trade_price == 0.62
+    assert rows[0].liquidity == 2500.25
+    assert rows[0].spread_bps == 200
+    assert rows[0].price_updated_at == price_updated_at
+    assert rows[0].subscription_source == "user"
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,15 @@ def _record(
     updated_at: datetime | None = None,
     yes_token_id: str | None = None,
     no_token_id: str | None = None,
+    yes_price: float | None = None,
+    no_price: float | None = None,
+    best_bid: float | None = None,
+    best_ask: float | None = None,
+    last_trade_price: float | None = None,
+    liquidity: float | None = None,
+    spread_bps: int | None = None,
+    price_updated_at: datetime | None = None,
+    subscription_source: str | None = None,
 ) -> Any:
     from pms.api.routes.markets import StoredMarketRow
 
@@ -31,6 +40,15 @@ def _record(
         updated_at=timestamp,
         yes_token_id=yes_token_id,
         no_token_id=no_token_id,
+        yes_price=yes_price,
+        no_price=no_price,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        last_trade_price=last_trade_price,
+        liquidity=liquidity,
+        spread_bps=spread_bps,
+        price_updated_at=price_updated_at,
+        subscription_source=subscription_source,
     )
 
 
@@ -94,6 +112,15 @@ async def test_list_markets_paginates_and_marks_subscribed_rows() -> None:
             "updated_at": "2026-04-23T11:00:00+00:00",
             "yes_token_id": "token-2-yes",
             "no_token_id": "token-2-no",
+            "yes_price": None,
+            "no_price": None,
+            "best_bid": None,
+            "best_ask": None,
+            "last_trade_price": None,
+            "liquidity": None,
+            "spread_bps": None,
+            "price_updated_at": None,
+            "subscription_source": None,
             "subscribed": False,
         },
         {
@@ -104,9 +131,73 @@ async def test_list_markets_paginates_and_marks_subscribed_rows() -> None:
             "updated_at": "2026-04-23T10:00:00+00:00",
             "yes_token_id": "token-3-yes",
             "no_token_id": "token-3-no",
+            "yes_price": None,
+            "no_price": None,
+            "best_bid": None,
+            "best_ask": None,
+            "last_trade_price": None,
+            "liquidity": None,
+            "spread_bps": None,
+            "price_updated_at": None,
+            "subscription_source": None,
             "subscribed": True,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_markets_response_includes_price_fields() -> None:
+    from pms.api.routes.markets import list_markets
+
+    price_updated_at = datetime(2026, 4, 23, 11, 30, tzinfo=UTC)
+    store = _StoreDouble(
+        rows=[
+            _record(
+                market_id="market-priced",
+                question="Will price fields serialize?",
+                updated_at=datetime(2026, 4, 23, 11, 31, tzinfo=UTC),
+                yes_token_id="market-priced-yes",
+                no_token_id="market-priced-no",
+                yes_price=0.62,
+                no_price=0.38,
+                best_bid=0.61,
+                best_ask=0.63,
+                last_trade_price=0.62,
+                liquidity=2500.25,
+                spread_bps=200,
+                price_updated_at=price_updated_at,
+                subscription_source="user",
+            )
+        ],
+        total=1,
+    )
+
+    payload = await list_markets(
+        store,
+        current_asset_ids=frozenset(),
+        limit=20,
+        offset=0,
+    )
+
+    assert payload.markets[0].model_dump(mode="json") == {
+        "market_id": "market-priced",
+        "question": "Will price fields serialize?",
+        "venue": "polymarket",
+        "volume_24h": 1000.0,
+        "updated_at": "2026-04-23T11:31:00+00:00",
+        "yes_token_id": "market-priced-yes",
+        "no_token_id": "market-priced-no",
+        "yes_price": 0.62,
+        "no_price": 0.38,
+        "best_bid": 0.61,
+        "best_ask": 0.63,
+        "last_trade_price": 0.62,
+        "liquidity": 2500.25,
+        "spread_bps": 200,
+        "price_updated_at": "2026-04-23T11:30:00+00:00",
+        "subscription_source": "user",
+        "subscribed": False,
+    }
 
 
 @pytest.mark.asyncio
