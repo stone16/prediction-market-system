@@ -41,6 +41,11 @@ from pms.api.routes.factors import list_factor_catalog, list_factor_series
 from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
 from pms.api.routes.markets import list_markets as list_markets_items
+from pms.api.routes.market_subscriptions import (
+    UnknownSubscriptionTokenError,
+    subscribe_market as subscribe_market_item,
+    unsubscribe_market as unsubscribe_market_item,
+)
 from pms.api.routes.positions import list_positions as list_positions_items
 from pms.api.routes.share import SHARE_NOT_FOUND_DETAIL, get_shared_strategy
 from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
@@ -56,6 +61,7 @@ from pms.runner import Runner
 from pms.storage.schema_check import ensure_schema_current
 from pms.storage.decision_store import DecisionStore
 from pms.storage.market_data_store import PostgresMarketDataStore
+from pms.storage.market_subscription_store import PostgresMarketSubscriptionStore
 
 
 T = TypeVar("T")
@@ -167,6 +173,37 @@ def create_app(
             current_asset_ids=_current_subscription_asset_ids(active_runner),
             limit=limit,
             offset=offset,
+        )
+        return payload.model_dump(mode="json")
+
+    @app.post(
+        "/markets/{token_id}/subscribe",
+        dependencies=[Depends(require_api_token)],
+    )
+    async def subscribe_market(token_id: str, request: Request) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            payload = await subscribe_market_item(
+                PostgresMarketSubscriptionStore(active_runner.pg_pool),
+                token_id=token_id,
+                request_metadata=_request_metadata(request),
+            )
+        except UnknownSubscriptionTokenError as exc:
+            raise HTTPException(status_code=404, detail="Token not found") from exc
+        return payload.model_dump(mode="json")
+
+    @app.delete(
+        "/markets/{token_id}/subscribe",
+        dependencies=[Depends(require_api_token)],
+    )
+    async def unsubscribe_market(token_id: str, request: Request) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        payload = await unsubscribe_market_item(
+            PostgresMarketSubscriptionStore(active_runner.pg_pool),
+            token_id=token_id,
+            request_metadata=_request_metadata(request),
         )
         return payload.model_dump(mode="json")
 
@@ -642,6 +679,13 @@ def _current_subscription_asset_ids(runner: Runner) -> frozenset[str]:
     ):
         return frozenset()
     return subscription_controller.current_asset_ids
+
+
+def _request_metadata(request: Request) -> dict[str, object]:
+    return {
+        "request_method": request.method,
+        "request_path": request.url.path,
+    }
 
 
 def _sensor_statuses(runner: Runner) -> list[dict[str, Any]]:
