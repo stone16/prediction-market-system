@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from pms.core.models import Market
 from pms.storage.market_data_store import PostgresMarketDataStore
 
 
@@ -12,12 +13,17 @@ from pms.storage.market_data_store import PostgresMarketDataStore
 class FakeConnection:
     fetch_results: list[list[dict[str, object]]] = field(default_factory=list)
     fetch_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
+    execute_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
         self.fetch_calls.append((query, args))
         if not self.fetch_results:
             return []
         return self.fetch_results.pop(0)
+
+    async def execute(self, query: str, *args: object) -> str:
+        self.execute_calls.append((query, args))
+        return "INSERT 0 1"
 
 
 class FakeAcquire:
@@ -113,3 +119,47 @@ async def test_read_markets_returns_zero_total_when_query_returns_no_rows() -> N
 
     assert rows == []
     assert total == 0
+
+
+@pytest.mark.asyncio
+async def test_write_market_upserts_current_price_fields() -> None:
+    connection = FakeConnection()
+    store = PostgresMarketDataStore(FakePool(connection))
+    created_at = datetime(2026, 4, 24, 8, 0, tzinfo=UTC)
+    price_updated_at = datetime(2026, 4, 24, 8, 1, tzinfo=UTC)
+
+    await store.write_market(
+        Market(
+            condition_id="market-priced",
+            slug="market-priced",
+            question="Will write_market persist prices?",
+            venue="polymarket",
+            resolves_at=None,
+            created_at=created_at,
+            last_seen_at=price_updated_at,
+            volume_24h=500.0,
+            yes_price=0.52,
+            no_price=0.48,
+            best_bid=0.51,
+            best_ask=0.53,
+            last_trade_price=0.52,
+            liquidity=1500.0,
+            spread_bps=200,
+            price_updated_at=price_updated_at,
+        )
+    )
+
+    query, args = connection.execute_calls[0]
+    assert "yes_price" in query
+    assert "no_price" in query
+    assert "price_updated_at = EXCLUDED.price_updated_at" in query
+    assert args[8:] == (
+        0.52,
+        0.48,
+        0.51,
+        0.53,
+        0.52,
+        1500.0,
+        200,
+        price_updated_at,
+    )

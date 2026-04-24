@@ -27,8 +27,17 @@ pytestmark = [
 ]
 
 
-def _gamma_market(condition_id: str, *, venue: str = "polymarket") -> dict[str, Any]:
-    return {
+def _gamma_market(
+    condition_id: str,
+    *,
+    venue: str = "polymarket",
+    outcome_prices: object | None = None,
+    last_trade_price: object | None = None,
+    best_bid: object | None = None,
+    best_ask: object | None = None,
+    liquidity: object | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "id": condition_id,
         "conditionId": condition_id,
         "venue": venue,
@@ -41,6 +50,17 @@ def _gamma_market(condition_id: str, *, venue: str = "polymarket") -> dict[str, 
         "active": True,
         "closed": False,
     }
+    if outcome_prices is not None:
+        payload["outcomePrices"] = outcome_prices
+    if last_trade_price is not None:
+        payload["lastTradePrice"] = last_trade_price
+    if best_bid is not None:
+        payload["bestBid"] = best_bid
+    if best_ask is not None:
+        payload["bestAsk"] = best_ask
+    if liquidity is not None:
+        payload["liquidity"] = liquidity
+    return payload
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -71,6 +91,65 @@ async def test_market_discovery_poll_once_persists_markets_and_tokens(
 
     assert market_count == 10
     assert token_count == 20
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_discovery_poll_persists_price_fields(
+    pg_pool: Any,
+    db_conn: Any,
+) -> None:
+    payload = [
+        _gamma_market(
+            "pm-live-priced",
+            outcome_prices=["0.62", "0.38"],
+            last_trade_price="0.61",
+            best_bid="0.59",
+            best_ask="0.62",
+            liquidity="2500.25",
+        )
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=PostgresMarketDataStore(pg_pool),
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    row = await db_conn.fetchrow(
+        """
+        SELECT
+            yes_price,
+            no_price,
+            best_bid,
+            best_ask,
+            last_trade_price,
+            liquidity,
+            spread_bps,
+            price_updated_at
+        FROM markets
+        WHERE condition_id = 'pm-live-priced'
+        """
+    )
+
+    assert row is not None
+    assert row["yes_price"] == pytest.approx(0.62)
+    assert row["no_price"] == pytest.approx(0.38)
+    assert row["best_bid"] == pytest.approx(0.59)
+    assert row["best_ask"] == pytest.approx(0.62)
+    assert row["last_trade_price"] == pytest.approx(0.61)
+    assert row["liquidity"] == pytest.approx(2500.25)
+    assert row["spread_bps"] == 300
+    assert row["price_updated_at"] is not None
 
 
 @pytest.mark.asyncio(loop_scope="session")

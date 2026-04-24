@@ -18,6 +18,10 @@ from pms.core.models import (
     MarketSignal,
     TradeDecision,
 )
+from pms.metrics import (
+    SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC,
+    set_metric,
+)
 from pms.runner import Runner
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
@@ -171,6 +175,7 @@ def _feedback(feedback_id: str) -> Feedback:
 
 @pytest.mark.asyncio
 async def test_api_routes_expose_mock_runner_state() -> None:
+    set_metric(SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC, 0.625)
     app = create_app(_runner_with_state())
     transport = httpx.ASGITransport(app=app)
 
@@ -195,6 +200,7 @@ async def test_api_routes_expose_mock_runner_state() -> None:
     assert decisions[0]["limit_price"] == 0.4
     assert decisions[0]["kelly_size"] == 12.5
     assert metrics["brier_overall"] == 0.09
+    assert metrics[SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC] == 0.625
     assert metrics["ops_view"]["brier_overall"] == 0.09
     assert metrics["ops_view"]["pnl"] == 1.0
     assert metrics["per_strategy"] == [
