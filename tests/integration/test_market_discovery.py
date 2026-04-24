@@ -142,12 +142,12 @@ async def test_discovery_poll_persists_price_fields(
     )
 
     assert row is not None
-    assert row["yes_price"] == pytest.approx(0.62)
-    assert row["no_price"] == pytest.approx(0.38)
-    assert row["best_bid"] == pytest.approx(0.59)
-    assert row["best_ask"] == pytest.approx(0.62)
-    assert row["last_trade_price"] == pytest.approx(0.61)
-    assert row["liquidity"] == pytest.approx(2500.25)
+    assert float(row["yes_price"]) == pytest.approx(0.62)
+    assert float(row["no_price"]) == pytest.approx(0.38)
+    assert float(row["best_bid"]) == pytest.approx(0.59)
+    assert float(row["best_ask"]) == pytest.approx(0.62)
+    assert float(row["last_trade_price"]) == pytest.approx(0.61)
+    assert float(row["liquidity"]) == pytest.approx(2500.25)
     assert row["spread_bps"] == 300
     assert row["price_updated_at"] is not None
 
