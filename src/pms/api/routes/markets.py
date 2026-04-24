@@ -30,6 +30,15 @@ class MarketRow(BaseModel):
     updated_at: str
     yes_token_id: str | None
     no_token_id: str | None
+    yes_price: float | None = None
+    no_price: float | None = None
+    best_bid: float | None = None
+    best_ask: float | None = None
+    last_trade_price: float | None = None
+    liquidity: float | None = None
+    spread_bps: int | None = None
+    price_updated_at: str | None = None
+    subscription_source: str | None = None
     subscribed: bool
 
 
@@ -58,6 +67,19 @@ async def list_markets(
                 updated_at=row.updated_at.isoformat(),
                 yes_token_id=row.yes_token_id,
                 no_token_id=row.no_token_id,
+                yes_price=row.yes_price,
+                no_price=row.no_price,
+                best_bid=row.best_bid,
+                best_ask=row.best_ask,
+                last_trade_price=row.last_trade_price,
+                liquidity=row.liquidity,
+                spread_bps=row.spread_bps,
+                price_updated_at=(
+                    row.price_updated_at.isoformat()
+                    if row.price_updated_at is not None
+                    else None
+                ),
+                subscription_source=row.subscription_source,
                 subscribed=_is_subscribed(row, current_asset_ids),
             )
             for row in rows

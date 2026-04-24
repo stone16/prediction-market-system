@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 import asyncpg
 
@@ -27,6 +27,21 @@ class MarketCatalogRow:
     updated_at: datetime
     yes_token_id: str | None
     no_token_id: str | None
+    yes_price: float | None = None
+    no_price: float | None = None
+    best_bid: float | None = None
+    best_ask: float | None = None
+    last_trade_price: float | None = None
+    liquidity: float | None = None
+    spread_bps: int | None = None
+    price_updated_at: datetime | None = None
+    subscription_source: str | None = None
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(cast(Any, value))
 
 
 class PostgresMarketDataStore:
@@ -90,19 +105,38 @@ class PostgresMarketDataStore:
             markets.venue,
             markets.volume_24h,
             markets.last_seen_at AS updated_at,
+            markets.yes_price,
+            markets.no_price,
+            markets.best_bid,
+            markets.best_ask,
+            markets.last_trade_price,
+            markets.liquidity,
+            markets.spread_bps,
+            markets.price_updated_at,
             MAX(CASE WHEN tokens.outcome = 'YES' THEN tokens.token_id END) AS yes_token_id,
             MAX(CASE WHEN tokens.outcome = 'NO' THEN tokens.token_id END) AS no_token_id,
+            MAX(market_subscriptions.source) AS subscription_source,
             COUNT(*) OVER() AS total_count
         FROM markets
         LEFT JOIN tokens
             ON tokens.condition_id = markets.condition_id
+        LEFT JOIN market_subscriptions
+            ON market_subscriptions.token_id = tokens.token_id
         WHERE (markets.resolves_at IS NULL OR markets.resolves_at > $1)
         GROUP BY
             markets.condition_id,
             markets.question,
             markets.venue,
             markets.volume_24h,
-            markets.last_seen_at
+            markets.last_seen_at,
+            markets.yes_price,
+            markets.no_price,
+            markets.best_bid,
+            markets.best_ask,
+            markets.last_trade_price,
+            markets.liquidity,
+            markets.spread_bps,
+            markets.price_updated_at
         ORDER BY
             COALESCE(markets.volume_24h, 0) DESC,
             markets.last_seen_at DESC,
@@ -125,6 +159,15 @@ class PostgresMarketDataStore:
                 updated_at=cast(datetime, row["updated_at"]),
                 yes_token_id=cast(str | None, row["yes_token_id"]),
                 no_token_id=cast(str | None, row["no_token_id"]),
+                yes_price=_optional_float(row["yes_price"]),
+                no_price=_optional_float(row["no_price"]),
+                best_bid=_optional_float(row["best_bid"]),
+                best_ask=_optional_float(row["best_ask"]),
+                last_trade_price=_optional_float(row["last_trade_price"]),
+                liquidity=_optional_float(row["liquidity"]),
+                spread_bps=cast(int | None, row["spread_bps"]),
+                price_updated_at=cast(datetime | None, row["price_updated_at"]),
+                subscription_source=cast(str | None, row["subscription_source"]),
             )
             for row in rows
         ], total
