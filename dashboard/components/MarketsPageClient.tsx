@@ -40,7 +40,19 @@ export function MarketsPageClient() {
   const subscribedCount = rows.filter((row) => row.subscribed).length;
   const runnerLabel: 'running' | 'paused' = statusState.data?.running ? 'running' : 'paused';
   const detailMarketId = searchParams.get('detail');
-  const detailMarket = rows.find((row) => row.market_id === detailMarketId) ?? null;
+  const pageDetailMarket = rows.find((row) => row.market_id === detailMarketId) ?? null;
+  const fallbackDetailState = useLiveData<MarketRow>(
+    detailMarketId !== null && pageDetailMarket === null
+      ? `/markets/${encodeURIComponent(detailMarketId)}`
+      : null
+  );
+  const detailMarket = pageDetailMarket ?? fallbackDetailState.data;
+  const missingDetailMarketId =
+    detailMarketId !== null &&
+    pageDetailMarket === null &&
+    fallbackDetailState.disconnected
+      ? detailMarketId
+      : null;
 
   useEffect(() => {
     if (marketsState.data === null) {
@@ -162,7 +174,13 @@ export function MarketsPageClient() {
           </>
         )}
         <MarketDetailDrawer
+          loading={
+            detailMarketId !== null &&
+            pageDetailMarket === null &&
+            fallbackDetailState.loading
+          }
           market={detailMarket}
+          missingMarketId={missingDetailMarketId}
           onClose={() => replaceDetail(null)}
           onMarketChange={updateMarket}
           onToast={pushToast}

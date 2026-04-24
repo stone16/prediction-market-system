@@ -41,6 +41,7 @@ class MarketCatalogRow:
     updated_at: datetime
     yes_token_id: str | None
     no_token_id: str | None
+    resolves_at: datetime | None = None
     yes_price: float | None = None
     no_price: float | None = None
     best_bid: float | None = None
@@ -125,6 +126,7 @@ class PostgresMarketDataStore:
         filters: MarketFilters | None = None,
         current_asset_ids: frozenset[str] = frozenset(),
         now: datetime | None = None,
+        market_id: str | None = None,
     ) -> tuple[list[MarketCatalogRow], int]:
         query = """
         SELECT
@@ -133,6 +135,7 @@ class PostgresMarketDataStore:
             markets.venue,
             markets.volume_24h,
             markets.last_seen_at AS updated_at,
+            markets.resolves_at,
             markets.yes_price,
             markets.no_price,
             markets.best_bid,
@@ -151,6 +154,7 @@ class PostgresMarketDataStore:
         LEFT JOIN market_subscriptions
             ON market_subscriptions.token_id = tokens.token_id
         WHERE (markets.resolves_at IS NULL OR markets.resolves_at > $1)
+          AND ($13::text IS NULL OR markets.condition_id = $13)
           AND ($2 = '' OR markets.question ILIKE '%' || $2 || '%')
           AND (
               $3 = 0
@@ -203,6 +207,7 @@ class PostgresMarketDataStore:
             markets.venue,
             markets.volume_24h,
             markets.last_seen_at,
+            markets.resolves_at,
             markets.yes_price,
             markets.no_price,
             markets.best_bid,
@@ -240,6 +245,7 @@ class PostgresMarketDataStore:
                 sorted(current_asset_ids),
                 limit,
                 offset,
+                market_id,
             )
         if not rows:
             return [], 0
@@ -253,6 +259,7 @@ class PostgresMarketDataStore:
                 updated_at=cast(datetime, row["updated_at"]),
                 yes_token_id=cast(str | None, row["yes_token_id"]),
                 no_token_id=cast(str | None, row["no_token_id"]),
+                resolves_at=cast(datetime | None, row["resolves_at"]),
                 yes_price=_optional_float(row["yes_price"]),
                 no_price=_optional_float(row["no_price"]),
                 best_bid=_optional_float(row["best_bid"]),
@@ -265,6 +272,23 @@ class PostgresMarketDataStore:
             )
             for row in rows
         ], total
+
+    async def read_market_by_id(
+        self,
+        *,
+        market_id: str,
+        current_asset_ids: frozenset[str] = frozenset(),
+        now: datetime | None = None,
+    ) -> MarketCatalogRow | None:
+        rows, _ = await self.read_markets(
+            limit=1,
+            offset=0,
+            filters=MarketFilters(),
+            current_asset_ids=current_asset_ids,
+            now=now,
+            market_id=market_id,
+        )
+        return rows[0] if rows else None
 
     async def read_price_history(
         self,

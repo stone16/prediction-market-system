@@ -31,6 +31,16 @@ class MarketsReader(Protocol):
     ) -> tuple[Sequence[StoredMarketRow], int]: ...
 
 
+class MarketDetailReader(Protocol):
+    async def read_market_by_id(
+        self,
+        *,
+        market_id: str,
+        current_asset_ids: frozenset[str] = frozenset(),
+        now: datetime | None = None,
+    ) -> StoredMarketRow | None: ...
+
+
 class PriceHistoryReader(Protocol):
     async def read_price_history(
         self,
@@ -47,12 +57,19 @@ class MarketPriceHistoryNotFoundError(Exception):
         self.condition_id = condition_id
 
 
+class MarketNotFoundError(Exception):
+    def __init__(self, market_id: str) -> None:
+        super().__init__(market_id)
+        self.market_id = market_id
+
+
 class MarketRow(BaseModel):
     market_id: str
     question: str
     venue: str
     volume_24h: float | None
     updated_at: str
+    resolves_at: str | None = None
     yes_token_id: str | None
     no_token_id: str | None
     yes_price: float | None = None
@@ -129,35 +146,28 @@ async def list_markets(
     )
     return MarketsListResponse(
         markets=[
-            MarketRow(
-                market_id=row.market_id,
-                question=row.question,
-                venue=row.venue,
-                volume_24h=row.volume_24h,
-                updated_at=row.updated_at.isoformat(),
-                yes_token_id=row.yes_token_id,
-                no_token_id=row.no_token_id,
-                yes_price=row.yes_price,
-                no_price=row.no_price,
-                best_bid=row.best_bid,
-                best_ask=row.best_ask,
-                last_trade_price=row.last_trade_price,
-                liquidity=row.liquidity,
-                spread_bps=row.spread_bps,
-                price_updated_at=(
-                    row.price_updated_at.isoformat()
-                    if row.price_updated_at is not None
-                    else None
-                ),
-                subscription_source=row.subscription_source,
-                subscribed=_is_subscribed(row, current_asset_ids),
-            )
+            _market_row_payload(row, current_asset_ids)
             for row in rows
         ],
         limit=limit,
         offset=offset,
         total=total,
     )
+
+
+async def get_market(
+    store: MarketDetailReader,
+    *,
+    current_asset_ids: frozenset[str],
+    market_id: str,
+) -> MarketRow:
+    row = await store.read_market_by_id(
+        market_id=market_id,
+        current_asset_ids=current_asset_ids,
+    )
+    if row is None:
+        raise MarketNotFoundError(market_id)
+    return _market_row_payload(row, current_asset_ids)
 
 
 async def get_price_history(
@@ -193,6 +203,33 @@ async def get_price_history(
             )
             for row in rows
         ],
+    )
+
+
+def _market_row_payload(row: StoredMarketRow, current_asset_ids: frozenset[str]) -> MarketRow:
+    return MarketRow(
+        market_id=row.market_id,
+        question=row.question,
+        venue=row.venue,
+        volume_24h=row.volume_24h,
+        updated_at=row.updated_at.isoformat(),
+        resolves_at=row.resolves_at.isoformat() if row.resolves_at is not None else None,
+        yes_token_id=row.yes_token_id,
+        no_token_id=row.no_token_id,
+        yes_price=row.yes_price,
+        no_price=row.no_price,
+        best_bid=row.best_bid,
+        best_ask=row.best_ask,
+        last_trade_price=row.last_trade_price,
+        liquidity=row.liquidity,
+        spread_bps=row.spread_bps,
+        price_updated_at=(
+            row.price_updated_at.isoformat()
+            if row.price_updated_at is not None
+            else None
+        ),
+        subscription_source=row.subscription_source,
+        subscribed=_is_subscribed(row, current_asset_ids),
     )
 
 

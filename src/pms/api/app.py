@@ -41,9 +41,11 @@ from pms.api.routes.factors import list_factor_catalog, list_factor_series
 from pms.api.routes.feedback import list_feedback as list_feedback_items
 from pms.api.routes.feedback import resolve_feedback as resolve_feedback_item
 from pms.api.routes.markets import (
+    MarketNotFoundError,
     MarketPriceHistoryNotFoundError,
     MarketsFilterParams,
     SubscribedFilter,
+    get_market as get_market_item,
     get_price_history as get_price_history_item,
     list_markets as list_markets_items,
 )
@@ -198,6 +200,20 @@ def create_app(
                 subscribed=subscribed,
             ),
         )
+        return payload.model_dump(mode="json")
+
+    @app.get("/markets/{condition_id}")
+    async def market_detail(condition_id: str) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            payload = await get_market_item(
+                PostgresMarketDataStore(active_runner.pg_pool),
+                current_asset_ids=_current_subscription_asset_ids(active_runner),
+                market_id=condition_id,
+            )
+        except MarketNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Market not found") from exc
         return payload.model_dump(mode="json")
 
     @app.get("/markets/{condition_id}/price-history")

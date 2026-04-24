@@ -151,7 +151,7 @@ async def test_read_markets_returns_rows_total_and_filters_to_active_markets_in_
     assert "resolves_at IS NULL OR markets.resolves_at > $1" in query
     assert "COUNT(*) OVER()" in query
     assert "market_subscriptions" in query
-    assert args[10:] == (20, 5)
+    assert args[10:12] == (20, 5)
     assert isinstance(args[0], datetime)
 
 
@@ -304,6 +304,7 @@ async def test_read_markets_combined_filters() -> None:
         ["token-a", "token-b"],
         20,
         0,
+        None,
     )
 
 

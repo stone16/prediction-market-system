@@ -10,6 +10,8 @@ import { useLiveData } from '@/lib/useLiveData';
 
 type MarketDetailDrawerProps = {
   market: MarketRow | null;
+  loading?: boolean;
+  missingMarketId?: string | null;
   onClose: () => void;
   onMarketChange?: (market: MarketRow) => void;
   onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
@@ -55,6 +57,8 @@ function formatDate(value: string | null | undefined) {
 
 export function MarketDetailDrawer({
   market,
+  loading = false,
+  missingMarketId = null,
   onClose,
   onMarketChange,
   onToast
@@ -64,6 +68,7 @@ export function MarketDetailDrawer({
   const dialogRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
+  const isOpen = market !== null || loading || missingMarketId !== null;
   const priceHistoryState = useLiveData<PriceHistoryResponse>(
     market === null
       ? null
@@ -72,7 +77,7 @@ export function MarketDetailDrawer({
   );
 
   useEffect(() => {
-    if (market === null) {
+    if (!isOpen) {
       return undefined;
     }
 
@@ -112,7 +117,7 @@ export function MarketDetailDrawer({
       document.removeEventListener('keydown', handleKeyDown);
       previousFocus?.focus();
     };
-  }, [market, onClose]);
+  }, [isOpen, onClose]);
 
   useEffect(() => {
     return () => {
@@ -122,8 +127,55 @@ export function MarketDetailDrawer({
     };
   }, []);
 
-  if (market === null) {
+  if (!isOpen) {
     return null;
+  }
+
+  if (market === null) {
+    return (
+      <div
+        className="market-detail-backdrop"
+        data-testid="market-detail-backdrop"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) {
+            onClose();
+          }
+        }}
+      >
+        <section
+          aria-label="Market details"
+          aria-modal="true"
+          className="market-detail-drawer"
+          ref={dialogRef}
+          role="dialog"
+        >
+          <header className="market-detail-header">
+            <div>
+              <p className="eyebrow">Market details</p>
+              <h2 id="market-detail-title">
+                {loading ? 'Loading market details...' : 'Market not found'}
+              </h2>
+            </div>
+            <button
+              aria-label="Close market details"
+              className="market-detail-close"
+              onClick={onClose}
+              ref={closeButtonRef}
+              type="button"
+            >
+              ×
+            </button>
+          </header>
+          <div className="card signal-callout">
+            <p className="muted">
+              {loading
+                ? 'Fetching this shared market outside the current page.'
+                : `No market row is available for ${missingMarketId ?? 'this detail URL'}.`}
+            </p>
+          </div>
+        </section>
+      </div>
+    );
   }
   const activeMarket = market;
 
