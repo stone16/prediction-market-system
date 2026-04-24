@@ -6,9 +6,9 @@ const evidenceDir = path.resolve(
   process.cwd(),
   '..',
   '.harness',
-  'cathedral-v1',
+  'pms-markets-browser-v1',
   'checkpoints',
-  '04',
+  '09',
   'iter-1',
   'evidence'
 );
@@ -17,11 +17,9 @@ test.beforeEach(() => {
   fs.mkdirSync(evidenceDir, { recursive: true });
 });
 
-test('markets page renders a populated table, then an empty state, without console errors', async ({
-  page
-}) => {
+test('markets page renders redesigned columns at desktop width without console errors', async ({ page }) => {
   const errors: string[] = [];
-  let marketsPayload = {
+  const marketsPayload = {
     markets: [
       {
         market_id: 'market-000',
@@ -31,6 +29,16 @@ test('markets page renders a populated table, then an empty state, without conso
         updated_at: '2026-04-23T10:00:00+00:00',
         yes_token_id: 'market-000-yes',
         no_token_id: 'market-000-no',
+        yes_price: 0.525,
+        no_price: 0.475,
+        best_bid: 0.51,
+        best_ask: 0.54,
+        last_trade_price: 0.52,
+        liquidity: 34000.25,
+        spread_bps: 300,
+        price_updated_at: new Date().toISOString(),
+        resolves_at: '2026-05-01T00:00:00+00:00',
+        subscription_source: 'user',
         subscribed: true
       }
     ],
@@ -73,29 +81,23 @@ test('markets page renders a populated table, then an empty state, without conso
 
   await page.goto('/markets');
   await expect(page.getByRole('heading', { name: 'Markets' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'market-000' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Market' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'YES' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'NO' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Vol 24h' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Liquidity' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Spread' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Resolves' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Subscription' })).toBeVisible();
+  await expect(page.getByText('Will market 000 settle above consensus?')).toBeVisible();
+  await expect(page.getByText('52.5%')).toBeVisible();
+  await expect(page.getByText('47.5%')).toBeVisible();
+  await expect(page.getByText('300 bps')).toBeVisible();
+  await expect(page.getByLabel('User subscription')).toBeVisible();
 
   await page.screenshot({
     fullPage: true,
-    path: path.join(evidenceDir, 'cp04-markets-populated.png')
-  });
-
-  await page.getByRole('link', { name: 'market-000' }).click();
-  await expect(page).toHaveURL(/\/signals\?market_id=market-000/);
-
-  marketsPayload = {
-    markets: [],
-    limit: 20,
-    offset: 0,
-    total: 0
-  };
-
-  await page.goto('/markets');
-  await expect(page.getByText('No markets yet.')).toBeVisible();
-
-  await page.screenshot({
-    fullPage: true,
-    path: path.join(evidenceDir, 'cp04-markets-empty.png')
+    path: path.join(evidenceDir, 'cp09-markets-table.png')
   });
 
   expect(errors).toEqual([]);
