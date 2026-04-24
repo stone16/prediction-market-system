@@ -6,6 +6,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock
 

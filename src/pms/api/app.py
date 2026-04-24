@@ -51,6 +51,7 @@ from pms.config import PMSSettings
 from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
+from pms.metrics import metrics_snapshot
 from pms.runner import Runner
 from pms.storage.schema_check import ensure_schema_current
 from pms.storage.decision_store import DecisionStore
@@ -519,6 +520,7 @@ def _metrics_payload(
 
     payload = dict(ops_view)
     payload[FIRST_TRADE_TIME_SECONDS_METRIC] = first_trade_time_seconds
+    payload.update(metrics_snapshot())
     payload["per_strategy"] = per_strategy
     payload["ops_view"] = ops_view
     return payload

@@ -239,15 +239,34 @@ class PostgresMarketDataStore:
             resolves_at,
             created_at,
             last_seen_at,
-            volume_24h
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            volume_24h,
+            yes_price,
+            no_price,
+            best_bid,
+            best_ask,
+            last_trade_price,
+            liquidity,
+            spread_bps,
+            price_updated_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            $9, $10, $11, $12, $13, $14, $15, $16
+        )
         ON CONFLICT (condition_id) DO UPDATE
         SET slug = EXCLUDED.slug,
             question = EXCLUDED.question,
             venue = EXCLUDED.venue,
             resolves_at = EXCLUDED.resolves_at,
             last_seen_at = EXCLUDED.last_seen_at,
-            volume_24h = EXCLUDED.volume_24h
+            volume_24h = EXCLUDED.volume_24h,
+            yes_price = EXCLUDED.yes_price,
+            no_price = EXCLUDED.no_price,
+            best_bid = EXCLUDED.best_bid,
+            best_ask = EXCLUDED.best_ask,
+            last_trade_price = EXCLUDED.last_trade_price,
+            liquidity = EXCLUDED.liquidity,
+            spread_bps = EXCLUDED.spread_bps,
+            price_updated_at = EXCLUDED.price_updated_at
         """
         async with self._pool.acquire() as connection:
             await connection.execute(
@@ -260,6 +279,14 @@ class PostgresMarketDataStore:
                 market.created_at,
                 market.last_seen_at,
                 market.volume_24h,
+                market.yes_price,
+                market.no_price,
+                market.best_bid,
+                market.best_ask,
+                market.last_trade_price,
+                market.liquidity,
+                market.spread_bps,
+                market.price_updated_at,
             )
 
     async def write_token(self, token: Token) -> None:
