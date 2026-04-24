@@ -363,3 +363,58 @@ async def test_subscribe_unsubscribe_roundtrip(
     unsubscribed_row = unsubscribed_markets.json()["markets"][0]
     assert unsubscribed_row["market_id"] == "market-subscribe-roundtrip"
     assert unsubscribed_row["subscription_source"] is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_price_history_endpoint_returns_chronological_order(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    store = PostgresMarketDataStore(pg_pool)
+    now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    await _seed_market(
+        store,
+        market_id="market-price-history",
+        question="Will price history sort chronologically?",
+        resolves_at=now + timedelta(days=1),
+        created_at=now - timedelta(days=7),
+        updated_at=now,
+        volume_24h=3_000.0,
+    )
+    first_snapshot_at = now - timedelta(minutes=3)
+    second_snapshot_at = now - timedelta(minutes=2)
+    third_snapshot_at = now - timedelta(minutes=1)
+    for snapshot_at, yes_price in (
+        (second_snapshot_at, 0.53),
+        (first_snapshot_at, 0.51),
+        (third_snapshot_at, 0.55),
+    ):
+        await store.write_price_snapshot(
+            condition_id="market-price-history",
+            snapshot_at=snapshot_at,
+            yes_price=yes_price,
+            no_price=1.0 - yes_price,
+            best_bid=yes_price - 0.01,
+            best_ask=yes_price + 0.01,
+            last_trade_price=yes_price,
+            liquidity=2_500.0,
+            volume_24h=3_000.0,
+        )
+
+    async with _client(pg_pool, current_asset_ids=frozenset()) as client:
+        response = await client.get(
+            "/markets/market-price-history/price-history",
+            params={
+                "since": (now - timedelta(minutes=10)).isoformat(),
+                "limit": 10,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["condition_id"] == "market-price-history"
+    assert [row["snapshot_at"] for row in payload["snapshots"]] == [
+        first_snapshot_at.isoformat(),
+        second_snapshot_at.isoformat(),
+        third_snapshot_at.isoformat(),
+    ]
+    assert [row["yes_price"] for row in payload["snapshots"]] == [0.51, 0.53, 0.55]
