@@ -14,18 +14,18 @@ depends_on = None
 
 MARKETS_PRICE_COLUMNS_SQL = """
 ALTER TABLE markets
-  ADD COLUMN yes_price NUMERIC(6,4),
-  ADD COLUMN no_price NUMERIC(6,4),
-  ADD COLUMN best_bid NUMERIC(6,4),
-  ADD COLUMN best_ask NUMERIC(6,4),
-  ADD COLUMN last_trade_price NUMERIC(6,4),
-  ADD COLUMN liquidity NUMERIC,
-  ADD COLUMN spread_bps INTEGER,
-  ADD COLUMN price_updated_at TIMESTAMPTZ
+  ADD COLUMN IF NOT EXISTS yes_price NUMERIC(6,4),
+  ADD COLUMN IF NOT EXISTS no_price NUMERIC(6,4),
+  ADD COLUMN IF NOT EXISTS best_bid NUMERIC(6,4),
+  ADD COLUMN IF NOT EXISTS best_ask NUMERIC(6,4),
+  ADD COLUMN IF NOT EXISTS last_trade_price NUMERIC(6,4),
+  ADD COLUMN IF NOT EXISTS liquidity NUMERIC,
+  ADD COLUMN IF NOT EXISTS spread_bps INTEGER,
+  ADD COLUMN IF NOT EXISTS price_updated_at TIMESTAMPTZ
 """
 
 MARKETS_PRICE_UPDATED_INDEX_SQL = """
-CREATE INDEX idx_markets_price_updated_at
+CREATE INDEX IF NOT EXISTS idx_markets_price_updated_at
   ON markets (price_updated_at DESC)
   WHERE price_updated_at IS NOT NULL
 """

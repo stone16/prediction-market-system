@@ -58,18 +58,20 @@ def test_markets_price_fields_migration_upgrade_adds_nullable_columns_and_index(
     assert len(fake_connection.statements) == 2
     alter_statement = fake_connection.statements[0]
     assert "ALTER TABLE markets" in alter_statement
-    assert "ADD COLUMN yes_price NUMERIC(6,4)" in alter_statement
-    assert "ADD COLUMN no_price NUMERIC(6,4)" in alter_statement
-    assert "ADD COLUMN best_bid NUMERIC(6,4)" in alter_statement
-    assert "ADD COLUMN best_ask NUMERIC(6,4)" in alter_statement
-    assert "ADD COLUMN last_trade_price NUMERIC(6,4)" in alter_statement
-    assert "ADD COLUMN liquidity NUMERIC" in alter_statement
-    assert "ADD COLUMN spread_bps INTEGER" in alter_statement
-    assert "ADD COLUMN price_updated_at TIMESTAMPTZ" in alter_statement
+    assert "ADD COLUMN IF NOT EXISTS yes_price NUMERIC(6,4)" in alter_statement
+    assert "ADD COLUMN IF NOT EXISTS no_price NUMERIC(6,4)" in alter_statement
+    assert "ADD COLUMN IF NOT EXISTS best_bid NUMERIC(6,4)" in alter_statement
+    assert "ADD COLUMN IF NOT EXISTS best_ask NUMERIC(6,4)" in alter_statement
+    assert (
+        "ADD COLUMN IF NOT EXISTS last_trade_price NUMERIC(6,4)" in alter_statement
+    )
+    assert "ADD COLUMN IF NOT EXISTS liquidity NUMERIC" in alter_statement
+    assert "ADD COLUMN IF NOT EXISTS spread_bps INTEGER" in alter_statement
+    assert "ADD COLUMN IF NOT EXISTS price_updated_at TIMESTAMPTZ" in alter_statement
     assert "NOT NULL" not in alter_statement
 
     index_statement = fake_connection.statements[1]
-    assert "CREATE INDEX idx_markets_price_updated_at" in index_statement
+    assert "CREATE INDEX IF NOT EXISTS idx_markets_price_updated_at" in index_statement
     assert "ON markets (price_updated_at DESC)" in index_statement
     assert "WHERE price_updated_at IS NOT NULL" in index_statement
 
