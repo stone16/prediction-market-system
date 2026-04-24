@@ -1,16 +1,47 @@
 'use client';
 
+import { useEffect } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { MarketDetailDrawer } from '@/components/MarketDetailDrawer';
 import { MarketsTable } from '@/components/MarketsTable';
 import { Nav } from '@/components/Nav';
 import { useLiveData } from '@/lib/useLiveData';
 import type { MarketsListResponse, StatusResponse } from '@/lib/types';
 
 export function MarketsPageClient() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const marketsState = useLiveData<MarketsListResponse>('/markets?limit=20');
   const statusState = useLiveData<StatusResponse>('/status');
   const rows = marketsState.data?.markets ?? [];
   const subscribedCount = rows.filter((row) => row.subscribed).length;
   const runnerLabel: 'running' | 'paused' = statusState.data?.running ? 'running' : 'paused';
+  const detailMarketId = searchParams.get('detail');
+  const detailMarket = rows.find((row) => row.market_id === detailMarketId) ?? null;
+
+  function replaceDetail(nextMarketId: string | null) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (nextMarketId === null) {
+      params.delete('detail');
+    } else {
+      params.set('detail', nextMarketId);
+    }
+    const query = params.toString();
+    router.replace(`${pathname}${query ? `?${query}` : ''}`, { scroll: false });
+  }
+
+  useEffect(() => {
+    return () => {
+      const params = new URLSearchParams(window.location.search);
+      if (!params.has('detail')) {
+        return;
+      }
+      params.delete('detail');
+      const query = params.toString();
+      window.history.replaceState(null, '', `${window.location.pathname}${query ? `?${query}` : ''}`);
+    };
+  }, []);
 
   return (
     <main className="shell">
@@ -45,8 +76,13 @@ export function MarketsPageClient() {
             </p>
           </div>
         ) : (
-          <MarketsTable rows={rows} runnerLabel={runnerLabel} />
+          <MarketsTable
+            onSelectMarket={(marketId) => replaceDetail(marketId)}
+            rows={rows}
+            runnerLabel={runnerLabel}
+          />
         )}
+        <MarketDetailDrawer market={detailMarket} onClose={() => replaceDetail(null)} />
       </section>
     </main>
   );

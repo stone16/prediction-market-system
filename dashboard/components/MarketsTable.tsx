@@ -7,6 +7,7 @@ import type { MarketRow } from '@/lib/types';
 type MarketsTableProps = {
   rows: MarketRow[];
   runnerLabel: 'running' | 'paused';
+  onSelectMarket?: (marketId: string) => void;
 };
 
 function formatNumber(value: number | null) {
@@ -41,7 +42,7 @@ function formatSpread(spreadBps: number | null) {
   return `${spreadBps} bps`;
 }
 
-export function MarketsTable({ rows, runnerLabel }: MarketsTableProps) {
+export function MarketsTable({ rows, runnerLabel, onSelectMarket }: MarketsTableProps) {
   if (rows.length === 0) {
     return (
       <EmptyState
@@ -69,7 +70,22 @@ export function MarketsTable({ rows, runnerLabel }: MarketsTableProps) {
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.market_id}>
+            <tr
+              className={onSelectMarket ? 'interactive-row' : undefined}
+              key={row.market_id}
+              onClick={onSelectMarket ? () => onSelectMarket(row.market_id) : undefined}
+              onKeyDown={
+                onSelectMarket
+                  ? (event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        onSelectMarket(row.market_id);
+                      }
+                    }
+                  : undefined
+              }
+              tabIndex={onSelectMarket ? 0 : undefined}
+            >
               <td className="markets-table__market-cell">
                 <strong>{row.question}</strong>
                 <span className="markets-table__meta">
