@@ -16,6 +16,20 @@ CREATE TABLE IF NOT EXISTS markets (
 ALTER TABLE markets
     ADD COLUMN IF NOT EXISTS volume_24h DOUBLE PRECISION;
 
+ALTER TABLE markets
+    ADD COLUMN IF NOT EXISTS yes_price NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS no_price NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS best_bid NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS best_ask NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS last_trade_price NUMERIC(6,4),
+    ADD COLUMN IF NOT EXISTS liquidity NUMERIC,
+    ADD COLUMN IF NOT EXISTS spread_bps INTEGER,
+    ADD COLUMN IF NOT EXISTS price_updated_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_markets_price_updated_at
+    ON markets (price_updated_at DESC)
+    WHERE price_updated_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS tokens (
     token_id TEXT PRIMARY KEY,
     condition_id TEXT NOT NULL REFERENCES markets(condition_id) ON DELETE CASCADE,
