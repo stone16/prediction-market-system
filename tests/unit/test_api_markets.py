@@ -18,6 +18,7 @@ def _record(
     venue: str = "polymarket",
     volume_24h: float | None = 1000.0,
     updated_at: datetime | None = None,
+    resolves_at: datetime | None = None,
     yes_token_id: str | None = None,
     no_token_id: str | None = None,
     yes_price: float | None = None,
@@ -39,6 +40,7 @@ def _record(
         venue=cast(Any, venue),
         volume_24h=volume_24h,
         updated_at=timestamp,
+        resolves_at=resolves_at,
         yes_token_id=yes_token_id,
         no_token_id=no_token_id,
         yes_price=yes_price,
@@ -58,6 +60,7 @@ class _StoreDouble:
         self._rows = rows
         self._total = total
         self.calls: list[tuple[int, int, MarketFilters, frozenset[str]]] = []
+        self.by_id_calls: list[tuple[str, frozenset[str]]] = []
 
     async def read_markets(
         self,
@@ -71,6 +74,17 @@ class _StoreDouble:
         del now
         self.calls.append((limit, offset, filters or MarketFilters(), current_asset_ids))
         return self._rows, self._total
+
+    async def read_market_by_id(
+        self,
+        *,
+        market_id: str,
+        current_asset_ids: frozenset[str] = frozenset(),
+        now: datetime | None = None,
+    ) -> Any | None:
+        del now
+        self.by_id_calls.append((market_id, current_asset_ids))
+        return next((row for row in self._rows if row.market_id == market_id), None)
 
 
 @pytest.mark.asyncio
@@ -113,6 +127,7 @@ async def test_list_markets_paginates_and_marks_subscribed_rows() -> None:
             "venue": "polymarket",
             "volume_24h": 1000.0,
             "updated_at": "2026-04-23T11:00:00+00:00",
+            "resolves_at": None,
             "yes_token_id": "token-2-yes",
             "no_token_id": "token-2-no",
             "yes_price": None,
@@ -132,6 +147,7 @@ async def test_list_markets_paginates_and_marks_subscribed_rows() -> None:
             "venue": "polymarket",
             "volume_24h": 1000.0,
             "updated_at": "2026-04-23T10:00:00+00:00",
+            "resolves_at": None,
             "yes_token_id": "token-3-yes",
             "no_token_id": "token-3-no",
             "yes_price": None,
@@ -188,6 +204,7 @@ async def test_list_markets_response_includes_price_fields() -> None:
         "venue": "polymarket",
         "volume_24h": 1000.0,
         "updated_at": "2026-04-23T11:31:00+00:00",
+        "resolves_at": None,
         "yes_token_id": "market-priced-yes",
         "no_token_id": "market-priced-no",
         "yes_price": 0.62,
@@ -201,6 +218,36 @@ async def test_list_markets_response_includes_price_fields() -> None:
         "subscription_source": "user",
         "subscribed": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_get_market_returns_detail_row_with_resolves_at() -> None:
+    from pms.api.routes.markets import get_market
+
+    resolves_at = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    store = _StoreDouble(
+        rows=[
+            _record(
+                market_id="market-detail",
+                question="Will detail route serialize resolves_at?",
+                updated_at=datetime(2026, 4, 23, 11, 31, tzinfo=UTC),
+                resolves_at=resolves_at,
+                yes_token_id="market-detail-yes",
+                no_token_id="market-detail-no",
+            )
+        ],
+        total=1,
+    )
+
+    payload = await get_market(
+        store,
+        current_asset_ids=frozenset({"market-detail-yes"}),
+        market_id="market-detail",
+    )
+
+    assert store.by_id_calls == [("market-detail", frozenset({"market-detail-yes"}))]
+    assert payload.model_dump(mode="json")["resolves_at"] == resolves_at.isoformat()
+    assert payload.subscribed is True
 
 
 @pytest.mark.asyncio

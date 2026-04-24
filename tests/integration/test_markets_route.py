@@ -176,6 +176,7 @@ async def test_get_markets_returns_20_active_rows_with_subscription_state(
         "venue": "polymarket",
         "volume_24h": 2000.0,
         "updated_at": now.isoformat(),
+        "resolves_at": (now + timedelta(days=1)).isoformat(),
         "yes_token_id": "market-00-yes",
         "no_token_id": "market-00-no",
         "yes_price": None,
@@ -225,6 +226,7 @@ async def test_markets_route_returns_price_fields(
     assert response.status_code == 200
     row = response.json()["markets"][0]
     assert row["market_id"] == "market-priced"
+    assert row["resolves_at"] == (now + timedelta(days=1)).isoformat()
     assert row["yes_price"] == 0.62
     assert row["no_price"] == 0.38
     assert row["best_bid"] == 0.61

@@ -145,3 +145,76 @@ test('markets happy path paginates, changes size, filters, and resets to page on
 
   expect(errors).toEqual([]);
 });
+
+test('shared detail URL loads a market outside the current page', async ({ page }) => {
+  const errors: string[] = [];
+  const rows = allMarkets();
+  const detailMarket = rows[0];
+
+  page.on('console', (message) => {
+    if (message.type() === 'error') {
+      errors.push(message.text());
+    }
+  });
+  page.on('pageerror', (error) => {
+    errors.push(error.message);
+  });
+
+  await page.route('**/api/pms/status', routeStatus);
+  await page.route('**/api/pms/markets/market-001/price-history**', async (route) => {
+    await fulfillJson(route, {
+      condition_id: 'market-001',
+      snapshots: [
+        {
+          snapshot_at: '2026-04-24T11:57:00+00:00',
+          yes_price: 0.51,
+          no_price: 0.49,
+          best_bid: 0.5,
+          best_ask: 0.52,
+          last_trade_price: 0.51,
+          liquidity: 2400,
+          volume_24h: 1000
+        },
+        {
+          snapshot_at: '2026-04-24T11:58:00+00:00',
+          yes_price: 0.53,
+          no_price: 0.47,
+          best_bid: 0.52,
+          best_ask: 0.54,
+          last_trade_price: 0.53,
+          liquidity: 2450,
+          volume_24h: 1025
+        }
+      ]
+    });
+  });
+  await page.route('**/api/pms/markets/market-001', async (route) => {
+    await fulfillJson(route, detailMarket);
+  });
+  await page.route('**/api/pms/markets**', async (route) => {
+    const requestUrl = new URL(route.request().url());
+    const limit = Number(requestUrl.searchParams.get('limit') ?? '50');
+    const offset = Number(requestUrl.searchParams.get('offset') ?? '0');
+    await fulfillJson(route, {
+      markets: rows.slice(offset, offset + limit),
+      limit,
+      offset,
+      total: rows.length
+    });
+  });
+
+  await page.goto('/markets?page=3&detail=market-001');
+
+  await expect(page.getByText('101-150 of 485')).toBeVisible();
+  await expect(page.getByRole('row', { name: /Will market 101 settle/i })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Market details' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Will market 001 settle above consensus?' })).toBeVisible();
+  await expect(page.getByText('May 1')).toBeVisible();
+
+  await page.screenshot({
+    fullPage: true,
+    path: path.join(evidenceDir, 'cp14-shared-detail-url.png')
+  });
+
+  expect(errors).toEqual([]);
+});

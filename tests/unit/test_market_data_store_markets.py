@@ -55,6 +55,7 @@ def _row(
     venue: str = "polymarket",
     volume_24h: float | None = 1500.0,
     updated_at: datetime,
+    resolves_at: datetime | None = None,
     yes_token_id: str | None,
     no_token_id: str | None,
     total_count: int,
@@ -74,6 +75,7 @@ def _row(
         "venue": venue,
         "volume_24h": volume_24h,
         "updated_at": updated_at,
+        "resolves_at": resolves_at,
         "yes_token_id": yes_token_id,
         "no_token_id": no_token_id,
         "yes_price": yes_price,
@@ -141,9 +143,11 @@ async def test_read_markets_returns_rows_total_and_filters_to_active_markets_in_
     assert [row.market_id for row in rows] == ["market-1", "market-2"]
     assert rows[0].yes_token_id == "market-1-yes"
     assert rows[0].no_token_id == "market-1-no"
+    assert rows[0].resolves_at is None
     assert len(connection.fetch_calls) == 1
 
     query, args = connection.fetch_calls[0]
+    assert "markets.resolves_at" in query
     assert "resolves_at IS NULL OR markets.resolves_at > $1" in query
     assert "COUNT(*) OVER()" in query
     assert "market_subscriptions" in query
@@ -306,6 +310,7 @@ async def test_read_markets_combined_filters() -> None:
 @pytest.mark.asyncio
 async def test_read_markets_returns_price_fields_and_subscription_source() -> None:
     price_updated_at = datetime(2026, 4, 23, 9, 31, tzinfo=UTC)
+    resolves_at = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
     connection = FakeConnection(
         fetch_results=[
             [
@@ -313,6 +318,7 @@ async def test_read_markets_returns_price_fields_and_subscription_source() -> No
                     market_id="market-priced",
                     question="Will read_markets include prices?",
                     updated_at=datetime(2026, 4, 23, 9, 32, tzinfo=UTC),
+                    resolves_at=resolves_at,
                     yes_token_id="market-priced-yes",
                     no_token_id="market-priced-no",
                     total_count=1,
@@ -335,6 +341,7 @@ async def test_read_markets_returns_price_fields_and_subscription_source() -> No
 
     assert total == 1
     assert rows[0].yes_price == 0.62
+    assert rows[0].resolves_at == resolves_at
     assert rows[0].no_price == 0.38
     assert rows[0].best_bid == 0.61
     assert rows[0].best_ask == 0.63
