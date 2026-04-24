@@ -22,6 +22,13 @@ export type MarketsFilterChip = {
   label: string;
 };
 
+export type MarketsPageSize = 20 | 50 | 100;
+
+export type MarketsPaginationState = {
+  page: number;
+  pageSize: MarketsPageSize;
+};
+
 const FILTER_PARAMS: Record<MarketsFilterKey, string> = {
   q: 'q',
   volumeMin: 'volume_min',
@@ -44,6 +51,26 @@ const DEFAULT_FILTERS: MarketsFilterState = {
   subscribed: 'all'
 };
 
+const PAGE_SIZE_OPTIONS: MarketsPageSize[] = [20, 50, 100];
+const DEFAULT_PAGE = 1;
+const DEFAULT_PAGE_SIZE: MarketsPageSize = 50;
+
+function normalizePage(value: string | null) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    return DEFAULT_PAGE;
+  }
+  return parsed;
+}
+
+function normalizePageSize(value: string | null): MarketsPageSize {
+  const parsed = Number(value);
+  if (PAGE_SIZE_OPTIONS.includes(parsed as MarketsPageSize)) {
+    return parsed as MarketsPageSize;
+  }
+  return DEFAULT_PAGE_SIZE;
+}
+
 function normalizeSubscribed(value: string | null): SubscribedFilter {
   if (value === 'only' || value === 'idle') {
     return value;
@@ -62,6 +89,13 @@ function readFilters(params: URLSearchParams): MarketsFilterState {
     resolvesWithinDays:
       params.get(FILTER_PARAMS.resolvesWithinDays) ?? DEFAULT_FILTERS.resolvesWithinDays,
     subscribed: normalizeSubscribed(params.get(FILTER_PARAMS.subscribed))
+  };
+}
+
+function readPagination(params: URLSearchParams): MarketsPaginationState {
+  return {
+    page: normalizePage(params.get('page')),
+    pageSize: normalizePageSize(params.get('limit'))
   };
 }
 
@@ -87,8 +121,29 @@ function buildUrl(pathname: string, params: URLSearchParams) {
   return `${pathname}${query ? `?${query}` : ''}`;
 }
 
-function buildMarketPath(filters: MarketsFilterState) {
-  const params = new URLSearchParams({ limit: '20' });
+function writePage(params: URLSearchParams, page: number) {
+  const normalizedPage = Math.max(1, page);
+  if (normalizedPage === DEFAULT_PAGE) {
+    params.delete('page');
+    return;
+  }
+  params.set('page', String(normalizedPage));
+}
+
+function writePageSize(params: URLSearchParams, pageSize: MarketsPageSize) {
+  if (pageSize === DEFAULT_PAGE_SIZE) {
+    params.delete('limit');
+    return;
+  }
+  params.set('limit', String(pageSize));
+}
+
+function buildMarketPath(filters: MarketsFilterState, pagination: MarketsPaginationState) {
+  const offset = (pagination.page - 1) * pagination.pageSize;
+  const params = new URLSearchParams({
+    limit: String(pagination.pageSize),
+    offset: String(offset)
+  });
   for (const key of Object.keys(FILTER_PARAMS) as MarketsFilterKey[]) {
     writeFilter(params, key, filters[key]);
   }
@@ -136,24 +191,50 @@ export function useMarketsFilters() {
   const searchParams = useSearchParams();
   const currentParams = new URLSearchParams(searchParams.toString());
   const filters = readFilters(currentParams);
+  const pagination = readPagination(currentParams);
 
   function setFilter(key: MarketsFilterKey, value: string) {
     const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete('page');
     writeFilter(nextParams, key, value);
     router.replace(buildUrl(pathname, nextParams), { scroll: false });
   }
 
   function clearFilter(key: MarketsFilterKey) {
     const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete('page');
     nextParams.delete(FILTER_PARAMS[key]);
+    router.replace(buildUrl(pathname, nextParams), { scroll: false });
+  }
+
+  function setPage(page: number) {
+    const nextParams = new URLSearchParams(searchParams.toString());
+    const explicitLimit = nextParams.get('limit');
+    const pageSize = normalizePageSize(explicitLimit);
+    nextParams.delete('page');
+    nextParams.delete('limit');
+    if (explicitLimit !== null) {
+      nextParams.set('limit', String(pageSize));
+    }
+    writePage(nextParams, page);
+    router.replace(buildUrl(pathname, nextParams), { scroll: false });
+  }
+
+  function setPageSize(pageSize: MarketsPageSize) {
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete('page');
+    writePageSize(nextParams, pageSize);
     router.replace(buildUrl(pathname, nextParams), { scroll: false });
   }
 
   return {
     filters,
+    pagination,
     activeChips: buildActiveChips(filters),
-    marketPath: buildMarketPath(filters),
+    marketPath: buildMarketPath(filters, pagination),
     setFilter,
-    clearFilter
+    clearFilter,
+    setPage,
+    setPageSize
   };
 }

@@ -5,6 +5,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { MarketDetailDrawer } from '@/components/MarketDetailDrawer';
 import { MarketsFilterChips } from '@/components/MarketsFilterChips';
 import { MarketsFilterPopover } from '@/components/MarketsFilterPopover';
+import { MarketsPagination } from '@/components/MarketsPagination';
 import { MarketsTable } from '@/components/MarketsTable';
 import { Nav } from '@/components/Nav';
 import { ToastStack, type ToastMessage } from '@/components/Toast';
@@ -18,7 +19,16 @@ export function MarketsPageClient() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const { activeChips, clearFilter, filters, marketPath, setFilter } = useMarketsFilters();
+  const {
+    activeChips,
+    clearFilter,
+    filters,
+    marketPath,
+    pagination,
+    setFilter,
+    setPage,
+    setPageSize
+  } = useMarketsFilters();
   const marketsState = useLiveData<MarketsListResponse>(marketPath);
   const statusState = useLiveData<StatusResponse>('/status');
   const [rows, setRows] = useState<MarketRow[]>([]);
@@ -134,11 +144,22 @@ export function MarketsPageClient() {
             </p>
           </div>
         ) : (
-          <MarketsTable
-            onSelectMarket={(marketId) => replaceDetail(marketId)}
-            rows={rows}
-            runnerLabel={runnerLabel}
-          />
+          <>
+            <MarketsTable
+              onSelectMarket={(marketId) => replaceDetail(marketId)}
+              rows={rows}
+              runnerLabel={runnerLabel}
+            />
+            {marketsState.data ? (
+              <MarketsPagination
+                onPageChange={setPage}
+                onPageSizeChange={setPageSize}
+                page={pagination.page}
+                pageSize={pagination.pageSize}
+                total={marketsState.data.total}
+              />
+            ) : null}
+          </>
         )}
         <MarketDetailDrawer
           market={detailMarket}

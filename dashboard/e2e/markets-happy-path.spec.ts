@@ -136,7 +136,7 @@ test('markets happy path paginates, changes size, filters, and resets to page on
   await filterRegion.getByLabel(/Subscription/i).selectOption('only');
   await expect(page).not.toHaveURL(/page=2/);
   await expect(page.getByText('1-100 of 161')).toBeVisible();
-  await expect(page.getByText('Subscribed only')).toBeVisible();
+  await expect(page.getByLabel('Active market filters').getByText('Subscribed only')).toBeVisible();
 
   await page.screenshot({
     fullPage: true,
