@@ -445,6 +445,43 @@ async def test_market_discovery_sensor_skips_rows_missing_condition_id() -> None
 
 
 @pytest.mark.asyncio
+async def test_market_discovery_sensor_skips_malformed_tokens_before_market_write(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    payload = [
+        _gamma_market(
+            "mismatched-token-row",
+            token_ids=["yes-token-only"],
+            outcomes=["Yes", "No"],
+        )
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await sensor.poll_once()
+    await sensor.aclose()
+
+    assert store_mock.write_market_mock.await_count == 0
+    assert store_mock.write_price_snapshot_mock.await_count == 0
+    assert store_mock.write_token_mock.await_count == 0
+    assert "mismatched clobTokenIds/outcomes lengths" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_market_discovery_sensor_backoff_on_http_429(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

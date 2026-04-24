@@ -84,7 +84,10 @@ describe('MarketsTable', () => {
     expect(screen.getByText('25,000.8')).toBeInTheDocument();
     expect(screen.getByText('300 bps')).toBeInTheDocument();
     expect(screen.getByText('May 1')).toBeInTheDocument();
-    expect(screen.getByLabelText('User subscription')).toBeInTheDocument();
+    expect(screen.getByLabelText('User subscription')).toHaveAttribute(
+      'title',
+      'Open details to subscribe'
+    );
   });
 
   test('renders dashes for rows with null prices instead of undefined or NaN', () => {

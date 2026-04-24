@@ -239,6 +239,7 @@ async def test_read_markets_filter_subscribed_only() -> None:
     assert "$9 = 'only'" in query
     assert "EXISTS" in query
     assert "subscribed_tokens.token_id = ANY($10::text[])" in query
+    assert "market_subscriptions AS user_subscriptions" in query
     assert args[8] == "only"
     assert args[9] == ["market-1-yes", "market-2-no"]
 
@@ -253,6 +254,7 @@ async def test_read_markets_filter_subscribed_idle() -> None:
     assert "$9 = 'idle'" in query
     assert "NOT EXISTS" in query
     assert "subscribed_tokens.token_id = ANY($10::text[])" in query
+    assert "market_subscriptions AS user_subscriptions" in query
     assert args[8] == "idle"
     assert args[9] == ["market-1-yes"]
 

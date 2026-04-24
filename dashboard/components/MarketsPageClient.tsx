@@ -32,10 +32,12 @@ export function MarketsPageClient() {
   const marketsState = useLiveData<MarketsListResponse>(marketPath);
   const statusState = useLiveData<StatusResponse>('/status');
   const [rows, setRows] = useState<MarketRow[]>([]);
+  const [searchDraft, setSearchDraft] = useState(filters.q);
   const [subscriptionOverrides, setSubscriptionOverrides] = useState<
     Record<string, SubscriptionOverride>
   >({});
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const setFilterRef = useRef(setFilter);
   const toastCounterRef = useRef(0);
   const subscribedCount = rows.filter((row) => row.subscribed).length;
   const runnerLabel: 'running' | 'paused' = statusState.data?.running ? 'running' : 'paused';
@@ -66,6 +68,28 @@ export function MarketsPageClient() {
     );
   }, [marketsState.data, subscriptionOverrides]);
 
+  useEffect(() => {
+    setFilterRef.current = setFilter;
+  }, [setFilter]);
+
+  useEffect(() => {
+    setSearchDraft(filters.q);
+  }, [filters.q]);
+
+  useEffect(() => {
+    if (searchDraft === filters.q) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      setFilterRef.current('q', searchDraft);
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [filters.q, searchDraft]);
+
   function replaceDetail(nextMarketId: string | null) {
     const params = new URLSearchParams(searchParams.toString());
     if (nextMarketId === null) {
@@ -95,18 +119,6 @@ export function MarketsPageClient() {
     setToasts((current) => [...current.slice(-2), { id, ...toast }]);
   }
 
-  useEffect(() => {
-    return () => {
-      const params = new URLSearchParams(window.location.search);
-      if (!params.has('detail')) {
-        return;
-      }
-      params.delete('detail');
-      const query = params.toString();
-      window.history.replaceState(null, '', `${window.location.pathname}${query ? `?${query}` : ''}`);
-    };
-  }, []);
-
   return (
     <main className="shell">
       <Nav />
@@ -133,10 +145,10 @@ export function MarketsPageClient() {
             <label className="markets-search">
               <span>Search markets</span>
               <input
-                onChange={(event) => setFilter('q', event.target.value)}
+                onChange={(event) => setSearchDraft(event.target.value)}
                 placeholder="Question or venue"
                 type="search"
-                value={filters.q}
+                value={searchDraft}
               />
             </label>
             <MarketsFilterPopover filters={filters} onFilterChange={setFilter} />

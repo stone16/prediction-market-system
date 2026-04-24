@@ -184,11 +184,20 @@ class PostgresMarketDataStore:
               $9 = 'all'
               OR (
                   $9 = 'only'
-                  AND EXISTS (
-                      SELECT 1
-                      FROM tokens AS subscribed_tokens
-                      WHERE subscribed_tokens.condition_id = markets.condition_id
-                        AND subscribed_tokens.token_id = ANY($10::text[])
+                  AND (
+                      EXISTS (
+                          SELECT 1
+                          FROM tokens AS subscribed_tokens
+                          WHERE subscribed_tokens.condition_id = markets.condition_id
+                            AND subscribed_tokens.token_id = ANY($10::text[])
+                      )
+                      OR EXISTS (
+                          SELECT 1
+                          FROM tokens AS user_subscription_tokens
+                          JOIN market_subscriptions AS user_subscriptions
+                              ON user_subscriptions.token_id = user_subscription_tokens.token_id
+                          WHERE user_subscription_tokens.condition_id = markets.condition_id
+                      )
                   )
               )
               OR (
@@ -198,6 +207,13 @@ class PostgresMarketDataStore:
                       FROM tokens AS subscribed_tokens
                       WHERE subscribed_tokens.condition_id = markets.condition_id
                         AND subscribed_tokens.token_id = ANY($10::text[])
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM tokens AS user_subscription_tokens
+                      JOIN market_subscriptions AS user_subscriptions
+                          ON user_subscriptions.token_id = user_subscription_tokens.token_id
+                      WHERE user_subscription_tokens.condition_id = markets.condition_id
                   )
               )
           )

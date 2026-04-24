@@ -157,7 +157,7 @@ describe('MarketDetailDrawer', () => {
       initialMarket: { ...market, subscribed: false, subscription_source: null }
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Subscribe market' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Subscribe YES' }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -165,6 +165,33 @@ describe('MarketDetailDrawer', () => {
         expect.objectContaining({ method: 'POST' })
       );
       expect(screen.getByLabelText('User subscription')).toBeInTheDocument();
+    });
+  });
+
+  test('unsubscribe keeps runtime strategy subscription visible while clearing the user source', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/price-history')) {
+        return Response.json({ condition_id: 'market-001', snapshots: [] });
+      }
+      if (url.includes('/subscribe') && init?.method === 'DELETE') {
+        return Response.json({ token_id: 'market-001-yes', deleted: true });
+      }
+      return Response.json({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderDrawerHarness('/markets?detail=market-001', {
+      initialMarket: { ...market, subscribed: true, subscription_source: 'user' }
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unsubscribe YES' }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/pms/markets/market-001-yes/subscribe',
+        expect.objectContaining({ method: 'DELETE' })
+      );
+      expect(screen.getByLabelText('Strategy subscription')).toBeInTheDocument();
     });
   });
 
@@ -186,7 +213,7 @@ describe('MarketDetailDrawer', () => {
       onToast
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Subscribe market' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Subscribe YES' }));
 
     await waitFor(() => {
       expect(screen.getByLabelText('Not subscribed')).toBeInTheDocument();
@@ -195,5 +222,14 @@ describe('MarketDetailDrawer', () => {
         message: 'Subscription failed. Reverted to the previous state.'
       });
     });
+  });
+
+  test('documents that v1 user subscriptions target the YES token', () => {
+    renderDrawerHarness('/markets?detail=market-001', {
+      initialMarket: { ...market, yes_token_id: null, subscription_source: null }
+    });
+
+    expect(screen.getByText('User subscriptions track the YES token in v1.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Subscribe YES' })).toBeDisabled();
   });
 });

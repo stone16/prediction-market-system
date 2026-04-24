@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from pms.api.app import create_app
 from pms.runner import Runner
@@ -85,6 +86,13 @@ class _StoreDouble:
         del now
         self.by_id_calls.append((market_id, current_asset_ids))
         return next((row for row in self._rows if row.market_id == market_id), None)
+
+
+def test_markets_filter_params_rejects_inverted_yes_bounds() -> None:
+    from pms.api.routes.markets import MarketsFilterParams
+
+    with pytest.raises(ValidationError, match="yes_min must be less than or equal to yes_max"):
+        MarketsFilterParams(yes_min=0.8, yes_max=0.2)
 
 
 @pytest.mark.asyncio
@@ -310,3 +318,24 @@ async def test_markets_route_forwards_filters_to_store(
             frozenset(),
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_markets_route_rejects_inverted_yes_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _StoreDouble(rows=[], total=0)
+    monkeypatch.setattr("pms.api.app.PostgresMarketDataStore", lambda _: store)
+    runner = Runner()
+    setattr(runner, "_pg_pool", object())
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/markets?yes_min=0.8&yes_max=0.2")
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "yes_min must be less than or equal to yes_max"
+    }
+    assert store.calls == []

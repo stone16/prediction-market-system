@@ -107,6 +107,7 @@ export function MarketsTable({ rows, runnerLabel, onSelectMarket }: MarketsTable
                 <SubscribeStar
                   subscribed={row.subscribed}
                   subscriptionSource={row.subscription_source}
+                  title="Open details to subscribe"
                 />
               </td>
             </tr>

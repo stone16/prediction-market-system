@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from typing import Literal, Protocol, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from pms.storage.market_data_store import (
     MarketCatalogRow,
@@ -100,6 +100,13 @@ class MarketsFilterParams(BaseModel):
     yes_max: float = Field(default=1.0, ge=0.0, le=1.0)
     resolves_within_days: int | None = Field(default=None, ge=0)
     subscribed: SubscribedFilter = "all"
+
+    @model_validator(mode="after")
+    def validate_yes_bounds(self) -> Self:
+        if self.yes_min > self.yes_max:
+            msg = "yes_min must be less than or equal to yes_max"
+            raise ValueError(msg)
+        return self
 
     def to_storage_filters(self) -> MarketFilters:
         return MarketFilters(

@@ -200,7 +200,6 @@ export function MarketDetailDrawer({
     const previousMarket = activeMarket;
     const nextMarket: MarketRow = {
       ...activeMarket,
-      subscribed: !wasUserSubscribed,
       subscription_source: wasUserSubscribed ? null : 'user'
     };
 
@@ -294,8 +293,9 @@ export function MarketDetailDrawer({
             onClick={() => void handleSubscribeToggle()}
             type="button"
           >
-            {market.subscription_source === 'user' ? 'Unsubscribe market' : 'Subscribe market'}
+            {market.subscription_source === 'user' ? 'Unsubscribe YES' : 'Subscribe YES'}
           </button>
+          <span className="muted">User subscriptions track the YES token in v1.</span>
         </div>
 
         <div className="market-detail-price-grid">

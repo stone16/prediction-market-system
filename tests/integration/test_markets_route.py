@@ -345,6 +345,7 @@ async def test_subscribe_unsubscribe_roundtrip(
     async with _client(pg_pool, current_asset_ids=frozenset()) as client:
         subscribe = await client.post(f"/markets/{yes_token_id}/subscribe")
         subscribed_markets = await client.get("/markets?limit=20&offset=0")
+        subscribed_filter = await client.get("/markets?limit=20&offset=0&subscribed=only")
         unsubscribe = await client.delete(f"/markets/{yes_token_id}/subscribe")
         unsubscribed_markets = await client.get("/markets?limit=20&offset=0")
 
@@ -357,6 +358,11 @@ async def test_subscribe_unsubscribe_roundtrip(
     subscribed_row = subscribed_markets.json()["markets"][0]
     assert subscribed_row["market_id"] == "market-subscribe-roundtrip"
     assert subscribed_row["subscription_source"] == "user"
+
+    assert subscribed_filter.status_code == 200
+    subscribed_filter_row = subscribed_filter.json()["markets"][0]
+    assert subscribed_filter_row["market_id"] == "market-subscribe-roundtrip"
+    assert subscribed_filter_row["subscription_source"] == "user"
 
     assert unsubscribe.status_code == 200
     assert unsubscribe.json() == {"token_id": yes_token_id, "deleted": True}

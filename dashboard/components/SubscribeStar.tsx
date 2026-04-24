@@ -1,15 +1,17 @@
 type SubscribeStarProps = {
   subscribed: boolean;
   subscriptionSource: 'user' | null;
+  title?: string;
 };
 
-export function SubscribeStar({ subscribed, subscriptionSource }: SubscribeStarProps) {
+export function SubscribeStar({ subscribed, subscriptionSource, title }: SubscribeStarProps) {
   if (subscriptionSource === 'user') {
     return (
       <span
         aria-label="User subscription"
         className="subscribe-star subscribe-star--user"
         role="img"
+        title={title}
       >
         ★
       </span>
@@ -21,6 +23,7 @@ export function SubscribeStar({ subscribed, subscriptionSource }: SubscribeStarP
         aria-label="Strategy subscription"
         className="subscribe-star subscribe-star--strategy"
         role="img"
+        title={title}
       >
         ★
       </span>
@@ -31,6 +34,7 @@ export function SubscribeStar({ subscribed, subscriptionSource }: SubscribeStarP
       aria-label="Not subscribed"
       className="subscribe-star subscribe-star--idle"
       role="img"
+      title={title}
     >
       ☆
     </span>

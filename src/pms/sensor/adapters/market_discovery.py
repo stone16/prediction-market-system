@@ -94,6 +94,7 @@ class MarketDiscoverySensor:
                 continue
             try:
                 market = _gamma_market_to_market(row, fetched_at)
+                tokens = _gamma_market_to_tokens(row, market.condition_id)
                 await self.store.write_market(market)
                 written_markets.append(market)
                 try:
@@ -117,7 +118,6 @@ class MarketDiscoverySensor:
                         market.condition_id,
                         error,
                     )
-                tokens = _gamma_market_to_tokens(row, market.condition_id)
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
                 logger.warning("skipping malformed Gamma market row: %s", error)
                 continue

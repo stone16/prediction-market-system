@@ -184,6 +184,11 @@ def create_app(
     ) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        if yes_min > yes_max:
+            raise HTTPException(
+                status_code=422,
+                detail="yes_min must be less than or equal to yes_max",
+            )
         payload = await list_markets_items(
             PostgresMarketDataStore(active_runner.pg_pool),
             current_asset_ids=_current_subscription_asset_ids(active_runner),

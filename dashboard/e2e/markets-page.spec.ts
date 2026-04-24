@@ -172,7 +172,7 @@ test('markets page opens the detail drawer from a row and restores it after relo
   await expect(page.getByRole('heading', { name: 'Will market 000 settle above consensus?' })).toBeVisible();
   await expect(page.getByText('market-000-yes')).toBeVisible();
   await expect(page.getByTestId('price-history-line-chart')).toBeVisible();
-  await page.getByRole('button', { name: 'Subscribe market' }).click();
+  await page.getByRole('button', { name: 'Subscribe YES' }).click();
   await expect(drawer.getByLabel('User subscription')).toBeVisible();
   await page.getByRole('button', { name: 'Close market details' }).click();
   await expect(drawer).toBeHidden();
