@@ -66,4 +66,16 @@ def downgrade() -> None:
     op.execute(
         "ALTER TABLE order_intents DROP CONSTRAINT IF EXISTS order_intents_outcome_check"
     )
+    # Reconcile any rows that adopted the new outcome before re-adding
+    # the stricter constraint. Setting outcome=NULL preserves the audit
+    # trail (acquired_at, decision_id, worker info) but takes the row
+    # back to an "intent unreleased" state, which is the correct
+    # semantic — a `submission_unknown` outcome means the operator never
+    # confirmed the venue state, so leaving it released under a
+    # different outcome would falsely imply finality.
+    op.execute(
+        "UPDATE order_intents "
+        "SET outcome = NULL, released_at = NULL "
+        "WHERE outcome = 'submission_unknown'"
+    )
     op.execute(_check_constraint_sql(_OUTCOMES_WITHOUT_SUBMISSION_UNKNOWN))

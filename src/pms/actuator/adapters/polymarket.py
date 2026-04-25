@@ -514,38 +514,27 @@ def _order_result_from_sdk_response(
     filled_quantity: float
     fill_price: float | None
 
+    # Validate every non-None explicit fill field BEFORE branching. A
+    # malformed venue response must not be able to corrupt accounting
+    # via the matched fallback (which previously trusted explicit values
+    # without checking) — a status="matched" response with negative
+    # filled_quantity or fill_price=1.5 used to slip through.
+    _validate_explicit_fill_fields(
+        order=order,
+        notional=explicit_filled_notional,
+        quantity=explicit_filled_quantity,
+        price=explicit_fill_price,
+    )
+
     if explicit_filled_notional is not None and explicit_filled_notional > 0.0:
-        # Partial-or-full fill with explicit data from the venue. Validate
-        # ranges before persisting: a malformed SDK response must not be
-        # able to corrupt portfolio accounting with negative shares,
-        # over-filled notional, or out-of-range probability prices.
-        if explicit_filled_notional > order.notional_usdc + _NOTIONAL_OVERFILL_TOLERANCE:
-            msg = (
-                "Polymarket reported filled_notional exceeds requested "
-                "notional; refusing to persist suspect fill"
-            )
-            raise LiveTradingDisabledError(msg)
+        # Partial-or-full fill with explicit data from the venue.
         filled_notional_usdc = explicit_filled_notional
-        if explicit_filled_quantity is not None and explicit_filled_quantity < 0.0:
-            msg = (
-                "Polymarket reported negative filled_quantity; refusing "
-                "to persist suspect fill"
-            )
-            raise LiveTradingDisabledError(msg)
         filled_quantity = (
             explicit_filled_quantity
             if explicit_filled_quantity is not None and explicit_filled_quantity > 0.0
             else 0.0
         )
         if explicit_fill_price is not None:
-            if not (
-                _PROBABILITY_PRICE_MIN < explicit_fill_price <= _PROBABILITY_PRICE_MAX
-            ):
-                msg = (
-                    "Polymarket reported fill_price outside (0, 1] range; "
-                    "refusing to persist suspect fill"
-                )
-                raise LiveTradingDisabledError(msg)
             fill_price = explicit_fill_price
         elif filled_quantity > 0.0:
             implied_price = filled_notional_usdc / filled_quantity
@@ -564,7 +553,8 @@ def _order_result_from_sdk_response(
             fill_price = order.price
     elif status == OrderStatus.MATCHED.value:
         # Backwards-compat: status=matched without explicit fill data
-        # implies full fill at limit price.
+        # implies full fill at limit price. Explicit fields were
+        # validated above, so any non-None values can be trusted.
         filled_notional_usdc = order.notional_usdc
         filled_quantity = (
             explicit_filled_quantity
@@ -594,6 +584,47 @@ def _order_result_from_sdk_response(
         fill_price=fill_price,
         filled_quantity=filled_quantity,
     )
+
+
+def _validate_explicit_fill_fields(
+    *,
+    order: PolymarketOrderRequest,
+    notional: float | None,
+    quantity: float | None,
+    price: float | None,
+) -> None:
+    """Reject malformed venue-supplied fill fields before any branch
+    consumes them. Runs ahead of the matched/partial/no-fill branches so
+    a `status=matched` response with `filled_quantity=-8.0` (for
+    example) cannot be persisted via the backwards-compat fallback.
+    """
+    if notional is not None:
+        if notional < 0.0:
+            msg = (
+                "Polymarket reported negative filled_notional; refusing "
+                "to persist suspect fill"
+            )
+            raise LiveTradingDisabledError(msg)
+        if notional > order.notional_usdc + _NOTIONAL_OVERFILL_TOLERANCE:
+            msg = (
+                "Polymarket reported filled_notional exceeds requested "
+                "notional; refusing to persist suspect fill"
+            )
+            raise LiveTradingDisabledError(msg)
+    if quantity is not None and quantity < 0.0:
+        msg = (
+            "Polymarket reported negative filled_quantity; refusing to "
+            "persist suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
+    if price is not None and not (
+        _PROBABILITY_PRICE_MIN < price <= _PROBABILITY_PRICE_MAX
+    ):
+        msg = (
+            "Polymarket reported fill_price outside (0, 1] range; "
+            "refusing to persist suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
 
 
 def _coerce_float_or_none(value: object) -> float | None:

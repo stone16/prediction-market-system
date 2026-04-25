@@ -1620,6 +1620,81 @@ async def test_polymarket_partial_fill_rejects_out_of_range_fill_price(
         )
 
 
+# --- review-loop round-3 follow-ups (codex findings f9 and f10) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_invalid_explicit_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f9: even when status is `matched` (the backwards-
+    compat fallback), a venue response with an invalid explicit field
+    must be rejected — not silently persisted via the fallback path."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            # No explicit_filled_notional → matched fallback would
+            # synthesize a full fill, but the explicit (negative)
+            # quantity must still trigger validation.
+            "filled_quantity": -8.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="negative filled_quantity"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_invalid_explicit_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f9: matched fallback must also reject an explicit
+    out-of-range fill_price."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "fill_price": 1.5,  # impossible probability
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="outside"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_negative_explicit_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f9: matched fallback must reject negative explicit
+    filled_notional (which previously fell through the `> 0.0` filter
+    into the matched-fallback branch and was silently ignored)."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": -4.0,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="negative filled_notional"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
 def _install_partial_fill_sdk(
     monkeypatch: pytest.MonkeyPatch,
     *,
