@@ -526,6 +526,12 @@ def _order_result_from_sdk_response(
         price=explicit_fill_price,
     )
 
+    explicit_field_present = (
+        explicit_filled_notional is not None
+        or explicit_filled_quantity is not None
+        or explicit_fill_price is not None
+    )
+
     if explicit_filled_notional is not None and explicit_filled_notional > 0.0:
         # Partial-or-full fill with explicit data from the venue.
         # A positive filled_notional MUST imply positive filled_quantity —
@@ -578,21 +584,31 @@ def _order_result_from_sdk_response(
                 "filled_quantity for positive notional"
             )
             raise LiveTradingDisabledError(msg)
-    elif status == OrderStatus.MATCHED.value:
-        # Backwards-compat: status=matched without explicit fill data
-        # implies full fill at limit price. Explicit fields were
-        # validated above, so any non-None values can be trusted.
+    elif status == OrderStatus.MATCHED.value and not explicit_field_present:
+        # Backwards-compat: status=matched WITH NO EXPLICIT FILL DATA
+        # implies full fill at limit price. The full-fill heuristic must
+        # only fire when the venue offered no fill fields at all —
+        # otherwise a partial response (e.g. status=matched with explicit
+        # filled_notional=0, or with explicit_quantity=0 + price set)
+        # would silently synthesize a fake $10 / 0-share fill.
         filled_notional_usdc = order.notional_usdc
-        filled_quantity = (
-            explicit_filled_quantity
-            if explicit_filled_quantity is not None
-            else order.estimated_quantity
+        filled_quantity = order.estimated_quantity
+        fill_price = order.price
+    elif status == OrderStatus.MATCHED.value:
+        # Status=matched but the explicit fields disagree with a full
+        # fill (zero notional, or partial fields without positive
+        # notional). The partial-fill branch above only fires for
+        # `explicit_filled_notional > 0`, so reaching here means the
+        # response is contradictory. Refuse to fabricate a fill.
+        msg = (
+            "Polymarket reported status=matched with inconsistent "
+            "explicit fill fields (zero notional or partial data); "
+            "refusing to persist contradictory fill"
         )
-        fill_price = (
-            explicit_fill_price if explicit_fill_price is not None else order.price
-        )
+        raise LiveTradingDisabledError(msg)
     else:
-        # Live / pending / cancelled with no fill data — no fill yet.
+        # Live / pending / cancelled with no positive fill — pass
+        # through any explicit zeros from the venue without synthesis.
         filled_notional_usdc = 0.0
         filled_quantity = (
             explicit_filled_quantity if explicit_filled_quantity is not None else 0.0

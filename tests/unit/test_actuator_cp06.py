@@ -1753,6 +1753,85 @@ async def test_polymarket_partial_fill_rejects_zero_quantity_with_positive_notio
         )
 
 
+# --- review-loop round-5 follow-ups (codex finding f12) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_explicit_zero_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f12: status=matched with `filled_notional_usdc: 0`
+    is contradictory — the matched-fallback heuristic must NOT
+    synthesize a $10 / fully-filled response from an explicit zero."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": 0.0,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="inconsistent"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_partial_fields_without_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f12: status=matched with explicit
+    filled_quantity / fill_price but NO filled_notional must be
+    rejected — the matched-fallback would otherwise synthesize a
+    notional from the order while using the explicit zero quantity,
+    persisting a $10 fill of 0 shares."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_quantity": 0.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="inconsistent"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_synthesizes_full_fill_only_when_no_explicit_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f12 (positive case): status=matched WITHOUT any
+    explicit fill fields IS the legitimate backwards-compat path — the
+    full-fill heuristic should still fire to support venues that
+    surface only `status: matched` without per-fill detail."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            # No explicit fill fields at all.
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        _partial_fill_request(),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert result.filled_notional_usdc == pytest.approx(10.0)
+    assert result.filled_quantity == pytest.approx(20.0)  # 10 / 0.5
+    assert result.fill_price == pytest.approx(0.5)
+
+
 def _install_partial_fill_sdk(
     monkeypatch: pytest.MonkeyPatch,
     *,
