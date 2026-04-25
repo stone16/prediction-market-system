@@ -25,6 +25,7 @@ from pms.actuator.adapters.polymarket import (
     PolymarketOrderResult,
     PolymarketOrderRequest,
     PolymarketSDKClient,
+    PolymarketSubmissionUnknownError,
 )
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
@@ -313,10 +314,14 @@ class RecordingPolymarketClient:
 class RecordingOperatorGate:
     approved: bool
     previews: list[LiveOrderPreview] = field(default_factory=list)
+    consumed: list[LiveOrderPreview] = field(default_factory=list)
 
     async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
         self.previews.append(preview)
         return self.approved
+
+    async def consume(self, preview: LiveOrderPreview) -> None:
+        self.consumed.append(preview)
 
 
 @dataclass
@@ -330,6 +335,9 @@ class BlockingOperatorGate:
         self.entered.set()
         await self.release.wait()
         return True
+
+    async def consume(self, preview: LiveOrderPreview) -> None:
+        del preview
 
 
 def _live_settings() -> PMSSettings:
@@ -392,10 +400,23 @@ async def test_polymarket_actuator_submits_mocked_live_order_after_first_order_g
     assert state.strategy_version_id == "default-v1"
     assert len(client.submitted) == 1
     assert len(gate.previews) == 1
+    # After a successful first submit, the gate's approval artefact must be
+    # consumed so it cannot be replayed by a future restart or concurrent
+    # task. Verifies the consume-on-success contract.
+    assert len(gate.consumed) == 1
+    assert gate.consumed[0] == gate.previews[0]
 
 
 @pytest.mark.asyncio
 async def test_polymarket_actuator_first_order_gate_is_serialized() -> None:
+    # The lock around the gate must serialize gate calls — a second concurrent
+    # task cannot observe an in-progress gate. After the live-hardening fix
+    # the first-order flag is *not* set until after a successful submit, so
+    # the second task may legitimately call the gate again once T1 exits the
+    # critical section. What MUST hold:
+    #   1. While T1 is blocked in the gate, T2 cannot have called it.
+    #   2. Both tasks eventually submit (one operator approval is the floor,
+    #      not the ceiling — this matches the original concurrent semantics).
     client = RecordingPolymarketClient()
     gate = BlockingOperatorGate()
     actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
@@ -409,7 +430,10 @@ async def test_polymarket_actuator_first_order_gate_is_serialized() -> None:
     gate.release.set()
     await asyncio.gather(first, second)
 
-    assert len(gate.previews) == 1
+    # Lock invariant preserved (gate not entered concurrently). Whether T2's
+    # gate call is observed is race-dependent — what matters is that T1 was
+    # alone in the critical section while blocking.
+    assert 1 <= len(gate.previews) <= 2
     assert len(client.submitted) == 2
 
 
@@ -955,3 +979,334 @@ async def test_executor_soft_release_keeps_decision_blocked_until_retention_scan
     assert first.raw_status == "insufficient_liquidity"
     assert second.raw_status == "duplicate_decision"
     assert dedup_store.contains("d-soft-release") is True
+
+
+# --- live-readiness hardening tests (added by fix/live-readiness-hardening) ---
+
+
+@dataclass
+class _FailThenSucceedClient:
+    """Polymarket client that raises on the first call and succeeds after."""
+
+    fail_count: int = 1
+    submitted: list[PolymarketOrderRequest] = field(default_factory=list)
+    error: Exception = field(
+        default_factory=lambda: RuntimeError("simulated network drop")
+    )
+
+    async def submit_order(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: object,
+    ) -> PolymarketOrderResult:
+        del credentials
+        if self.fail_count > 0:
+            self.fail_count -= 1
+            raise self.error
+        self.submitted.append(order)
+        return PolymarketOrderResult(
+            order_id="pm-live-recovered",
+            status=OrderStatus.MATCHED.value,
+            raw_status="matched",
+            filled_notional_usdc=order.notional_usdc,
+            remaining_notional_usdc=0.0,
+            fill_price=order.price,
+            filled_quantity=order.estimated_quantity,
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_does_not_mark_approved_when_submit_fails() -> None:
+    """SECURITY: a failed first submit must not permanently bypass the gate.
+
+    Pre-fix: `_approval_state.approved = True` was set inside the gate flow,
+    so a network failure on the first venue call left the gate permanently
+    open — every subsequent decision skipped operator approval.
+    """
+    client = _FailThenSucceedClient(fail_count=1)
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+
+    with pytest.raises(RuntimeError, match="simulated network drop"):
+        await actuator.execute(_decision(decision_id="d-fail"), _portfolio())
+
+    # Gate was consulted, but submit failed — the floodgate must remain shut.
+    assert len(gate.previews) == 1
+    assert actuator._first_order_approved() is False
+    # And no consume happened, since no submit succeeded.
+    assert gate.consumed == []
+
+    # Next attempt MUST go through the gate again.
+    state = await actuator.execute(_decision(decision_id="d-retry"), _portfolio())
+    assert state.status == OrderStatus.MATCHED.value
+    assert len(gate.previews) == 2
+    assert actuator._first_order_approved() is True
+    # Now the gate has been consumed.
+    assert len(gate.consumed) == 1
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_consumes_file_after_first_success(
+    tmp_path: Path,
+) -> None:
+    """The approval JSON file must be removed after a successful first submit
+    so an attacker / stale file cannot replay it."""
+    approval_path = tmp_path / "approval.json"
+    preview_payload = {
+        "approved": True,
+        "max_notional_usdc": 10.0,
+        "venue": "polymarket",
+        "market_id": "m-cp06",
+        "token_id": "t-yes",
+        "side": Side.BUY.value,
+        "limit_price": 0.4,
+        "max_slippage_bps": 50,
+    }
+    approval_path.write_text(json.dumps(preview_payload), encoding="utf-8")
+
+    client = RecordingPolymarketClient()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=FileFirstLiveOrderGate(approval_path),
+    )
+
+    state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    assert approval_path.exists() is False, "approval file must be unlinked after use"
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_uses_isclose_for_floats(
+    tmp_path: Path,
+) -> None:
+    """Approval JSON copied from preview values may pick up float
+    representation drift (e.g. 0.1+0.2). The gate must accept tiny drift,
+    while still rejecting any meaningful difference."""
+    path = tmp_path / "approval.json"
+    gate = FileFirstLiveOrderGate(path)
+    preview = LiveOrderPreview(
+        max_notional_usdc=0.1 + 0.2,  # 0.30000000000000004
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+    )
+    # Operator wrote the rounded value 0.3, the actuator computed 0.1 + 0.2.
+    path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 0.3,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert await gate.approve_first_order(preview) is True
+
+    # But a meaningful difference is still rejected.
+    path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 0.31,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_client_propagates_timeout_as_unknown_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout in the SDK call means the order MAY have reached the venue.
+    Wrapping it as `LiveTradingDisabledError` ('disabled, nothing sent') is
+    misleading. Surface as `PolymarketSubmissionUnknownError` so operators
+    know to reconcile."""
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        GTC = "GTC"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> object:
+            del kwargs
+            raise asyncio.TimeoutError()
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    with pytest.raises(PolymarketSubmissionUnknownError) as exc_info:
+        await PolymarketSDKClient().submit_order(
+            PolymarketOrderRequest(
+                market_id="m-cp06",
+                token_id="t-yes",
+                side=Side.BUY.value,
+                price=0.4,
+                size=25.0,
+                notional_usdc=10.0,
+                estimated_quantity=25.0,
+                order_type="limit",
+                time_in_force=TimeInForce.GTC.value,
+                max_slippage_bps=50,
+            ),
+            _live_settings().polymarket.credentials(),
+        )
+
+    message = str(exc_info.value)
+    assert "reconcile" in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_client_maps_limit_ioc_to_fak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A limit order with TIF=IOC must map to FAK, not silently demote to
+    GTC (which would rest in the book instead of being killed unfilled)."""
+    calls: dict[str, object] = {}
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    @dataclass
+    class FakeOrderArgs:
+        token_id: str
+        price: float
+        side: object
+        size: float
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        GTC = "GTC"
+        FOK = "FOK"
+        FAK = "FAK"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(
+            self,
+            *,
+            order_args: FakeOrderArgs,
+            options: FakePartialCreateOrderOptions,
+            order_type: object,
+        ) -> dict[str, object]:
+            del options
+            calls["order_args"] = order_args
+            calls["order_type"] = order_type
+            return {"orderID": "x", "status": "matched", "errorMsg": ""}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    await PolymarketSDKClient().submit_order(
+        PolymarketOrderRequest(
+            market_id="m-cp06",
+            token_id="t-yes",
+            side=Side.BUY.value,
+            price=0.4,
+            size=25.0,
+            notional_usdc=10.0,
+            estimated_quantity=25.0,
+            order_type="limit",
+            time_in_force=TimeInForce.IOC.value,
+            max_slippage_bps=50,
+        ),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert calls["order_type"] == "FAK", "limit + IOC must map to FAK"
+
+
+def test_risk_manager_rejects_above_max_quantity_shares() -> None:
+    """RiskSettings.max_quantity_shares clamps the low-price-token blow-up
+    case (e.g. limit_price=0.001 → notional/$10 = 10,000 shares)."""
+    manager = RiskManager(
+        RiskSettings(
+            max_position_per_market=100.0,
+            max_total_exposure=1000.0,
+            max_quantity_shares=5_000.0,
+        )
+    )
+
+    # 10 USDC at price 0.001 = 10,000 shares — above the 5,000 cap.
+    over_cap = manager.check(
+        _decision(notional_usdc=10.0, limit_price=0.001),
+        _portfolio(),
+    )
+    assert over_cap.approved is False
+    assert over_cap.reason == "max_quantity_shares"
+
+    # Same notional at a normal price stays under the cap.
+    in_cap = manager.check(
+        _decision(notional_usdc=10.0, limit_price=0.4),
+        _portfolio(),
+    )
+    assert in_cap.approved is True
+
+
+def test_risk_manager_quantity_cap_disabled_by_default() -> None:
+    """Default RiskSettings has no max_quantity_shares — preserves
+    backward-compatible behaviour for users who haven't opted in."""
+    manager = RiskManager(
+        RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
+    )
+    decision = _decision(notional_usdc=10.0, limit_price=0.001)
+    assert manager.check(decision, _portfolio()).approved is True

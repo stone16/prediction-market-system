@@ -261,6 +261,7 @@ def test_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) -> Non
         "max_open_positions",
         "min_order_usdc",
         "slippage_threshold_bps",
+        "max_quantity_shares",
     }
 
     monkeypatch.setenv("PMS_MODE", "paper")

@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 class OperatorApprovalRequiredError(LiveTradingDisabledError):
     """Raised when the first live order has not been approved by an operator."""
+
+
+class PolymarketSubmissionUnknownError(RuntimeError):
+    """Raised when a Polymarket order submission timed out — the order may
+    have reached the venue. Operators must reconcile before retrying.
+    """
 
 
 @dataclass(frozen=True)
@@ -76,12 +83,17 @@ class PolymarketClient(Protocol):
 class FirstLiveOrderGate(Protocol):
     async def approve_first_order(self, preview: LiveOrderPreview) -> bool: ...
 
+    async def consume(self, preview: LiveOrderPreview) -> None: ...
+
 
 @dataclass(frozen=True)
 class DenyFirstLiveOrderGate:
     async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
         del preview
         return False
+
+    async def consume(self, preview: LiveOrderPreview) -> None:
+        del preview
 
 
 @dataclass
@@ -103,6 +115,15 @@ class FileFirstLiveOrderGate:
         if not isinstance(payload, dict):
             return False
         return _approval_payload_matches(cast(dict[str, object], payload), preview)
+
+    async def consume(self, preview: LiveOrderPreview) -> None:
+        # Atomically consume the approval artefact so it cannot be replayed
+        # by a future restart or a concurrent `approve_first_order` call.
+        del preview
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -131,6 +152,29 @@ class PolymarketSDKClient:
         try:
             client = _build_sdk_client(sdk, credentials)
             response = _post_sdk_order(sdk, client, order)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Cooperative cancellation — caller decides what to do. The
+            # underlying request may still be in flight on Polymarket; the
+            # caller is responsible for reconciliation if it suppresses this.
+            raise
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            # A timeout means the venue may have accepted the order — we
+            # simply did not see the response. Surfacing this as
+            # `LiveTradingDisabledError` would falsely imply "nothing was
+            # sent". Use a venue-specific exception so callers and
+            # operators can distinguish "submitted but unknown" from
+            # "rejected / never sent".
+            redacted = _redacted_exception_message(exc, credentials)
+            logger.warning(
+                "Polymarket live order submission timed out (%s): %s",
+                type(exc).__name__,
+                redacted,
+            )
+            msg = (
+                "Polymarket live order submission timed out; order status is "
+                "unknown — reconcile with venue before retrying"
+            )
+            raise PolymarketSubmissionUnknownError(msg) from None
         except Exception as exc:  # noqa: BLE001
             redacted = _redacted_exception_message(exc, credentials)
             logger.warning(
@@ -189,17 +233,33 @@ class PolymarketActuator:
             raise LiveTradingDisabledError("Polymarket live trading is disabled")
         del portfolio
         credentials = validate_live_mode_ready(self.settings)
-        await self._require_first_order_approval(decision)
+        # `_require_first_order_approval` returns the preview that was just
+        # approved by the operator gate; returns None if a previous successful
+        # submit already opened the floodgates. The approval is *not* yet
+        # marked as committed — that happens only after a successful submit.
+        just_approved_preview = await self._require_first_order_approval(decision)
         request = _order_request(decision)
         result = await self.client.submit_order(request, credentials)
+        if just_approved_preview is not None:
+            # First venue submission succeeded: lock in first-order completion
+            # and consume the operator-side approval artefact so it cannot be
+            # replayed.
+            self._approval_state.approved = True
+            try:
+                await self.operator_gate.consume(just_approved_preview)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("first-order gate consume failed: %s", exc)
         return _order_state_from_result(decision, result)
 
-    async def _require_first_order_approval(self, decision: TradeDecision) -> None:
+    async def _require_first_order_approval(
+        self,
+        decision: TradeDecision,
+    ) -> LiveOrderPreview | None:
         if self._first_order_approved():
-            return
+            return None
         async with self._approval_lock:
             if self._first_order_approved():
-                return
+                return None
             preview = LiveOrderPreview(
                 max_notional_usdc=decision.notional_usdc,
                 venue=decision.venue,
@@ -220,7 +280,12 @@ class PolymarketActuator:
                     f"max_slippage_bps={preview.max_slippage_bps}"
                 )
                 raise OperatorApprovalRequiredError(msg)
-            self._approval_state.approved = True
+            # NOTE: `_approval_state.approved` is intentionally not set here.
+            # If the operator-approved preview never reaches the venue (submit
+            # failure), the next `execute()` must re-prompt the gate. The
+            # caller marks state.approved=True only after `submit_order`
+            # returns successfully.
+            return preview
 
     def _first_order_approved(self) -> bool:
         return self._approval_state.approved
@@ -294,16 +359,32 @@ def _approval_payload_matches(
 ) -> bool:
     if payload.get("approved") is not True:
         return False
-    expected = {
-        "max_notional_usdc": preview.max_notional_usdc,
-        "venue": preview.venue,
-        "market_id": preview.market_id,
-        "token_id": preview.token_id,
-        "side": preview.side,
-        "limit_price": preview.limit_price,
-        "max_slippage_bps": preview.max_slippage_bps,
-    }
-    return all(payload.get(key) == value for key, value in expected.items())
+    if payload.get("venue") != preview.venue:
+        return False
+    if payload.get("market_id") != preview.market_id:
+        return False
+    if payload.get("token_id") != preview.token_id:
+        return False
+    if payload.get("side") != preview.side:
+        return False
+    if payload.get("max_slippage_bps") != preview.max_slippage_bps:
+        return False
+    if not _float_close(payload.get("max_notional_usdc"), preview.max_notional_usdc):
+        return False
+    if not _float_close(payload.get("limit_price"), preview.limit_price):
+        return False
+    return True
+
+
+def _float_close(value: object, expected: float) -> bool:
+    # Operators copy/paste preview values into the approval JSON. Strict `==`
+    # comparison fails on harmless float representation differences (e.g.
+    # 0.1 + 0.2) and trains the operator to massage values until equality
+    # holds. `math.isclose` keeps the gate strict (rel/abs tolerances are
+    # tight) without introducing such drift.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isclose(float(value), expected, rel_tol=1e-9, abs_tol=1e-12)
 
 
 def _build_sdk_client(sdk: object, credentials: VenueCredentials) -> object:
@@ -360,9 +441,18 @@ def _post_sdk_order(
 
 
 def _sdk_order_type(order_type_cls: object, order: PolymarketOrderRequest) -> object:
+    # Polymarket SDK enum: GTC (rest), FAK (fill-and-kill = IOC), FOK (all-or-nothing),
+    # GTD (good-till-date). PMS TimeInForce maps GTC→GTC, IOC→FAK, FOK→FOK
+    # symmetrically across market and limit orders. Without explicit IOC/FOK
+    # mapping for limit orders, an IOC limit silently rests in the book as
+    # GTC — a real behaviour change.
+    if order.time_in_force == "IOC":
+        return getattr(order_type_cls, "FAK")
+    if order.time_in_force == "FOK":
+        return getattr(order_type_cls, "FOK")
     if order.order_type.lower() == "market":
-        if order.time_in_force == "IOC":
-            return getattr(order_type_cls, "FAK")
+        # Default for market orders without an explicit TIF is FOK
+        # (all-or-nothing) — the SDK's own MarketOrderArgs default.
         return getattr(order_type_cls, "FOK")
     return getattr(order_type_cls, "GTC")
 

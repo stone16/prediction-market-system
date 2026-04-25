@@ -390,6 +390,13 @@ class Runner:
                     signal_stream=factor_signal_stream,
                 )
                 self._factor_service_task = asyncio.create_task(self._factor_service.run())
+                # Rebuild the portfolio from persisted fills BEFORE sensors
+                # start producing signals. Without this, a restart in LIVE
+                # mode would forget open Polymarket exposure: every new BUY
+                # would size against the hardcoded `Portfolio(free_usdc=…)`
+                # default while the venue actually holds real exposure. See
+                # also `_reconcile_portfolio_from_db`.
+                await self._reconcile_portfolio_from_db()
             self._active_sensors = self._build_sensors()
             self._wire_active_perception(self._active_sensors)
             await self._configure_controllers()
@@ -1109,6 +1116,60 @@ class Runner:
 
         if stop_error is not None:
             raise stop_error
+
+    async def _reconcile_portfolio_from_db(self) -> None:
+        """Rebuild the in-memory portfolio from persisted fills.
+
+        On a fresh process start the default Runner portfolio is hardcoded
+        (`Portfolio(total_usdc=1000, free_usdc=1000, locked_usdc=0,
+        open_positions=[])`). Without this step, restarting in LIVE mode
+        forgets all open Polymarket exposure: every new BUY decision sizes
+        against the hardcoded `free_usdc` while the venue actually holds
+        real positions. Empirically observed during the 2026-04-25 PAPER
+        soak — DB held 44 positions / $1984 locked while a fresh runner
+        instance reported `locked_usdc=0`.
+
+        Reconciliation aggregates fills via `FillStore.read_positions`,
+        sums `locked_usdc`, and rebuilds the in-memory `Portfolio`. We
+        clamp `free_usdc` to 0 if reconciled exposure exceeds
+        `total_usdc` and surface a warning so operators tighten risk
+        caps before resuming.
+        """
+        pool = self._pg_pool
+        if pool is None:
+            return
+        try:
+            persisted_positions = await self.fill_store.read_positions()
+        except Exception as error:  # noqa: BLE001
+            logger.warning("portfolio reconciliation failed: %s", error)
+            return
+        open_positions = [p for p in persisted_positions if p.shares_held > 0.0]
+        if not open_positions:
+            return
+        total_locked = sum(position.locked_usdc for position in open_positions)
+        total_budget = self.portfolio.total_usdc
+        if total_locked > total_budget:
+            logger.warning(
+                "Reconciled locked exposure $%.2f exceeds total budget $%.2f"
+                " — clamping free_usdc=0; review risk caps before resuming",
+                total_locked,
+                total_budget,
+            )
+            free_usdc = 0.0
+        else:
+            free_usdc = total_budget - total_locked
+        self.portfolio = replace(
+            self.portfolio,
+            locked_usdc=total_locked,
+            free_usdc=free_usdc,
+            open_positions=open_positions,
+        )
+        logger.info(
+            "Reconciled portfolio from DB: %d positions, $%.2f locked of $%.2f total",
+            len(open_positions),
+            total_locked,
+            total_budget,
+        )
 
     async def _reselect(self) -> None:
         selector = self._market_selector

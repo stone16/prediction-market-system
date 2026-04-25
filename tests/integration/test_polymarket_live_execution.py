@@ -45,11 +45,16 @@ class RecordingFillStore:
 @dataclass
 class AllowFirstOrderGate:
     approvals: int = 0
+    consumed: int = 0
 
     async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
         del preview
         self.approvals += 1
         return True
+
+    async def consume(self, preview: LiveOrderPreview) -> None:
+        del preview
+        self.consumed += 1
 
 
 @dataclass

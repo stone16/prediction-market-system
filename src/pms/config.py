@@ -63,6 +63,10 @@ class RiskSettings(BaseModel):
     max_open_positions: int | None = None
     min_order_usdc: float = 1.0
     slippage_threshold_bps: float = 50.0
+    # Maximum share/contract count per order. Catches the low-price-token
+    # blow-up case: at limit_price=0.001 and notional=$10, quantity=10000
+    # shares — well beyond a small-test risk envelope. None disables.
+    max_quantity_shares: float | None = None
 
 
 class SensorSettings(BaseModel):

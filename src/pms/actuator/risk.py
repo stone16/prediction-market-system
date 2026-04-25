@@ -55,6 +55,11 @@ class RiskManager:
         if notional > portfolio.free_usdc:
             return RiskDecision(False, "insufficient_free_usdc")
 
+        if self.risk.max_quantity_shares is not None and decision.limit_price > 0.0:
+            estimated_quantity = notional / decision.limit_price
+            if estimated_quantity > self.risk.max_quantity_shares:
+                return RiskDecision(False, "max_quantity_shares")
+
         return RiskDecision(True, "approved")
 
 
