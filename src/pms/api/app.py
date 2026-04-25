@@ -60,7 +60,7 @@ from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
 from pms.api.routes.strategies import list_strategy_metrics as list_strategy_metrics_items
 from pms.api.routes.strategies import list_strategies as list_strategies_items
 from pms.api.routes.trades import list_trades as list_trades_items
-from pms.config import PMSSettings
+from pms.config import MissingPolymarketCredentialsError, PMSSettings, validate_live_mode_ready
 from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
@@ -560,6 +560,11 @@ def create_app(
     async def update_config(update: ConfigUpdate) -> dict[str, str]:
         if update.mode == RunMode.LIVE and not active_runner.config.live_trading_enabled:
             raise HTTPException(status_code=400, detail=LIVE_DISABLED_DETAIL)
+        if update.mode == RunMode.LIVE:
+            try:
+                validate_live_mode_ready(active_runner.config)
+            except MissingPolymarketCredentialsError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         active_runner.switch_mode(update.mode)
         return {"mode": active_runner.state.mode.value}
 

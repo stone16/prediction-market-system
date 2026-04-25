@@ -188,6 +188,20 @@ async def _count_null_strategy_tags(connection: asyncpg.Connection, table: str) 
     return count
 
 
+async def _strategy_row_count(
+    connection: asyncpg.Connection,
+    table: str,
+) -> int:
+    query = f"""
+    SELECT COUNT(*)
+    FROM {table}
+    WHERE strategy_id = 'default'
+    """
+    count = await connection.fetchval(query)
+    assert isinstance(count, int)
+    return count
+
+
 async def _strategy_pairs(
     connection: asyncpg.Connection,
     table: str,
@@ -282,10 +296,10 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
             ,
             active_version.strategy_version_id,
         )
-        feedback_count = await connection.fetchval("SELECT COUNT(*) FROM feedback")
-        eval_count = await connection.fetchval("SELECT COUNT(*) FROM eval_records")
-        orders_count = await connection.fetchval("SELECT COUNT(*) FROM orders")
-        fills_count = await connection.fetchval("SELECT COUNT(*) FROM fills")
+        feedback_count = await _strategy_row_count(connection, "feedback")
+        eval_count = await _strategy_row_count(connection, "eval_records")
+        orders_count = await _strategy_row_count(connection, "orders")
+        fills_count = await _strategy_row_count(connection, "fills")
 
         counts = {
             "feedback": feedback_count,
@@ -317,5 +331,7 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
     tagged_strategy_id, tagged_strategy_version_id = next(iter(strategy_pairs["feedback"]))
     assert tagged_strategy_id == "default"
     assert tagged_strategy_version_id
-    assert strategy_pairs["orders"] == set()
-    assert strategy_pairs["fills"] == set()
+    assert counts["orders"] > 0
+    assert counts["fills"] > 0
+    assert strategy_pairs["orders"] == strategy_pairs["feedback"]
+    assert strategy_pairs["fills"] == strategy_pairs["feedback"]

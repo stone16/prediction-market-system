@@ -33,9 +33,18 @@ polymarket:
   host: https://clob.polymarket.com
   websocket_url: wss://ws-subscriptions-clob.polymarket.com/ws/
   chain_id: 137
-  # private_key, api_key, api_secret, api_passphrase, funder_address,
-  # and signature_type are required for live trading; leave unset for
-  # paper/backtest modes.
+  # Keep live credentials out of config.yaml and load them from the process
+  # environment instead:
+  #
+  #   PMS_POLYMARKET__PRIVATE_KEY=...
+  #   PMS_POLYMARKET__API_KEY=...
+  #   PMS_POLYMARKET__API_SECRET=...
+  #   PMS_POLYMARKET__API_PASSPHRASE=...
+  #   PMS_POLYMARKET__SIGNATURE_TYPE=1
+  #   PMS_POLYMARKET__FUNDER_ADDRESS=...
+  #
+  # The first real-money order also needs a non-secret approval JSON file:
+  #   PMS_POLYMARKET__FIRST_LIVE_ORDER_APPROVAL_PATH=/secure/pms/first-order.json
 
 llm:
   enabled: false

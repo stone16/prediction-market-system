@@ -14,11 +14,16 @@ import asyncpg
 import httpx
 from pms.actuator.adapters.backtest import BacktestActuator
 from pms.actuator.adapters.paper import PaperActuator
-from pms.actuator.adapters.polymarket import PolymarketActuator
+from pms.actuator.adapters.polymarket import (
+    DenyFirstLiveOrderGate,
+    FileFirstLiveOrderGate,
+    PolymarketActuator,
+    PolymarketSDKClient,
+)
 from pms.actuator.executor import ActuatorAdapter, ActuatorExecutor
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
-from pms.config import PMSSettings
+from pms.config import PMSSettings, validate_live_mode_ready
 from pms.controller.diagnostics import ControllerDiagnostic
 from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
@@ -351,6 +356,9 @@ class Runner:
         if any(not task.done() for task in self.tasks):
             msg = "Runner is already started"
             raise RuntimeError(msg)
+
+        if self.config.mode == RunMode.LIVE:
+            validate_live_mode_ready(self.config)
 
         self._stop_event.clear()
         self._controller_pipeline_error = None
@@ -724,7 +732,11 @@ class Runner:
             return BacktestActuator(self.historical_data_path)
         if mode == RunMode.PAPER:
             return PaperActuator(orderbooks=self._paper_orderbooks)
-        return PolymarketActuator(self.config)
+        return PolymarketActuator(
+            self.config,
+            client=PolymarketSDKClient(),
+            operator_gate=_first_live_order_gate(self.config),
+        )
 
     async def _controller_loop(self) -> None:
         while True:
@@ -850,8 +862,18 @@ class Runner:
 
             try:
                 work_item = _coerce_actuator_work_item(raw_work_item)
-                decision = work_item.decision
-                signal = work_item.signal
+            except Exception as error:
+                await self.event_bus.publish(
+                    "error",
+                    f"malformed actuator work item: {error}",
+                )
+                logger.warning("malformed actuator work item: %s", error)
+                self._decision_queue.task_done()
+                continue
+
+            decision = work_item.decision
+            signal = work_item.signal
+            try:
                 if self.config.mode == RunMode.PAPER and signal is not None:
                     self._paper_orderbooks[decision.market_id] = signal.orderbook
                 order_state = await _execute_actuator_work_item(
@@ -1395,6 +1417,15 @@ def _append_bounded(items: list[T], item: T) -> None:
         del items[:overflow]
 
 
+def _first_live_order_gate(
+    settings: PMSSettings,
+) -> DenyFirstLiveOrderGate | FileFirstLiveOrderGate:
+    approval_path = settings.polymarket.first_live_order_approval_path
+    if approval_path is None or approval_path.strip() == "":
+        return DenyFirstLiveOrderGate()
+    return FileFirstLiveOrderGate(Path(approval_path))
+
+
 def _controller_diagnostic(controller: object) -> ControllerDiagnostic | None:
     diagnostic = getattr(controller, "last_diagnostic", None)
     if isinstance(diagnostic, ControllerDiagnostic):
@@ -1705,6 +1736,6 @@ def _decision_expires_at(
     candidates = [created_at + DECISION_PENDING_TTL]
     if opportunity is not None and opportunity.expiry is not None:
         candidates.append(opportunity.expiry)
-    elif signal.resolves_at is not None:
+    if signal.resolves_at is not None:
         candidates.append(signal.resolves_at)
     return min(candidates)

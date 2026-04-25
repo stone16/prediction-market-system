@@ -261,3 +261,22 @@ async def test_actuator_loop_emits_error_event_when_execution_fails() -> None:
     assert [item.event_type for item in replay] == ["error"]
     assert replay[0].summary.endswith("cp10 boom")
     await runner.event_bus.unsubscribe(subscriber)
+
+
+@pytest.mark.asyncio
+async def test_actuator_loop_handles_malformed_work_item_without_unbound_decision() -> None:
+    runner = _runner()
+    runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+    await runner._controller_task
+    runner._stop_event.set()  # noqa: SLF001
+    malformed_queue = cast(asyncio.Queue[Any], runner._decision_queue)  # noqa: SLF001
+    await malformed_queue.put(object())
+
+    await asyncio.wait_for(runner._actuator_loop(), timeout=1.0)  # noqa: SLF001
+
+    replay, subscriber = await runner.event_bus.subscribe(last_event_id=0)
+    assert [item.event_type for item in replay] == ["error"]
+    assert "malformed actuator work item" in replay[0].summary
+    assert replay[0].market_id is None
+    assert replay[0].decision_id is None
+    await runner.event_bus.unsubscribe(subscriber)

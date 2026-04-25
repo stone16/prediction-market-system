@@ -1,16 +1,19 @@
 # Prediction Market System (pms)
 
-Modular prediction market trading system organised around a **cybernetic loop**:
-
-```
-Sensor → Controller → Actuator → Evaluator → Feedback → (Controller)
-```
+Modular prediction market trading system organised as a concurrent cybernetic
+feedback web across Sensor, Controller, Actuator, Evaluator, and feedback edges.
 
 Target venues: Polymarket (primary). Kalshi is reserved in the venue enum but
 has no adapter in v1 — see CP06's stub gate. Implemented run modes are
-`backtest` and `paper`; `live` is not implemented in v1, and
-`src/pms/actuator/adapters/polymarket.py:23-25` raises `NotImplementedError`
-after the `live_trading_enabled` guard.
+`backtest`, `paper`, and gated Polymarket `live`. LIVE mode remains fail-closed
+unless `live_trading_enabled=true`, required Polymarket credentials validate,
+and the first live order is approved by an operator gate.
+
+See [docs/operations/live-polymarket-runbook.md](docs/operations/live-polymarket-runbook.md)
+for the PAPER soak, credential setup, first live order, rollback, and emergency
+stop runbook.
+Install the optional live SDK with `uv sync --extra live` before starting LIVE
+mode.
 
 ## Layout
 

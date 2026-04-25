@@ -23,6 +23,30 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("created_at", "timestamp with time zone"),
         ("last_seen_at", "timestamp with time zone"),
         ("volume_24h", "double precision"),
+        ("yes_price", "numeric"),
+        ("no_price", "numeric"),
+        ("best_bid", "numeric"),
+        ("best_ask", "numeric"),
+        ("last_trade_price", "numeric"),
+        ("liquidity", "numeric"),
+        ("spread_bps", "integer"),
+        ("price_updated_at", "timestamp with time zone"),
+    ],
+    "market_price_snapshots": [
+        ("condition_id", "text"),
+        ("snapshot_at", "timestamp with time zone"),
+        ("yes_price", "numeric"),
+        ("no_price", "numeric"),
+        ("best_bid", "numeric"),
+        ("best_ask", "numeric"),
+        ("last_trade_price", "numeric"),
+        ("liquidity", "numeric"),
+        ("volume_24h", "numeric"),
+    ],
+    "market_subscriptions": [
+        ("token_id", "text"),
+        ("source", "text"),
+        ("created_at", "timestamp with time zone"),
     ],
     "tokens": [
         ("token_id", "text"),
@@ -142,6 +166,8 @@ def test_schema_sql_applies_outer_ring_tables() -> None:
         WHERE table_schema = 'public'
           AND table_name IN (
             'markets',
+            'market_price_snapshots',
+            'market_subscriptions',
             'tokens',
             'book_snapshots',
             'book_levels',
@@ -172,6 +198,8 @@ def test_schema_sql_applies_outer_ring_tables() -> None:
         JOIN pg_class AS c ON c.oid = ct.conrelid
         WHERE c.relname IN (
             'markets',
+            'market_price_snapshots',
+            'market_subscriptions',
             'tokens',
             'book_snapshots',
             'book_levels',

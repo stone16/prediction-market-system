@@ -67,7 +67,11 @@ def test_alembic_share_projection_upgrade_and_downgrade_round_trip() -> None:
 
     try:
         _run_psql(admin_database_url, "-c", f"CREATE DATABASE {temp_database}")
-        upgrade = _run_alembic(temp_database_url, "upgrade", "head")
+        upgrade = _run_alembic(
+            temp_database_url,
+            "upgrade",
+            "0005_strategies_share_metadata",
+        )
         assert upgrade.returncode == 0, upgrade.stderr
 
         upgraded_columns = _run_psql(
@@ -116,10 +120,12 @@ def test_alembic_share_projection_upgrade_and_downgrade_round_trip() -> None:
             "created_at|timestamp with time zone|NO|now()",
             "metadata_json|jsonb|NO|'{}'::jsonb",
         ]
+
+        reupgrade = _run_alembic(temp_database_url, "upgrade", "head")
+        assert reupgrade.returncode == 0, reupgrade.stderr
     finally:
         _run_psql(
             admin_database_url,
             "-c",
             f"DROP DATABASE IF EXISTS {temp_database} WITH (FORCE)",
         )
-

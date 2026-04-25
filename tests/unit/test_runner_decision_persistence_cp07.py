@@ -10,7 +10,7 @@ import pytest
 from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode, Side, TimeInForce
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
-from pms.runner import Runner, StrategyControllerRuntime
+from pms.runner import Runner, StrategyControllerRuntime, _decision_expires_at
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -194,3 +194,15 @@ async def test_runner_sweep_expired_decisions_once_delegates_to_store() -> None:
 
     assert expired == 2
     assert cast(_RecordingSweepStore, runner.decision_store).calls == [now]
+
+
+def test_decision_expiry_uses_signal_resolution_when_opportunity_has_no_expiry() -> None:
+    created_at = datetime(2026, 4, 23, 10, 0, tzinfo=UTC)
+    opportunity = _opportunity()
+    signal = _signal()
+    object.__setattr__(opportunity, "expiry", None)
+    object.__setattr__(signal, "resolves_at", datetime(2026, 4, 23, 10, 5, tzinfo=UTC))
+
+    expires_at = _decision_expires_at(signal, opportunity, created_at=created_at)
+
+    assert expires_at == datetime(2026, 4, 23, 10, 5, tzinfo=UTC)

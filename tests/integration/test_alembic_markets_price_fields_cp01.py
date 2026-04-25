@@ -58,6 +58,47 @@ def _run_alembic(database_url: str, *args: str) -> subprocess.CompletedProcess[s
     )
 
 
+def _read_market_price_columns(
+    database_url: str,
+) -> subprocess.CompletedProcess[str]:
+    return _run_psql(
+        database_url,
+        "-At",
+        "-F",
+        "|",
+        "-c",
+        """
+        SELECT column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'markets'
+          AND column_name IN (
+            'yes_price',
+            'no_price',
+            'best_bid',
+            'best_ask',
+            'last_trade_price',
+            'liquidity',
+            'spread_bps',
+            'price_updated_at'
+          )
+        ORDER BY array_position(
+          ARRAY[
+            'yes_price',
+            'no_price',
+            'best_bid',
+            'best_ask',
+            'last_trade_price',
+            'liquidity',
+            'spread_bps',
+            'price_updated_at'
+          ],
+          column_name
+        )
+        """,
+    )
+
+
 def test_migration_0006_apply_and_reverse() -> None:
     assert PMS_TEST_DATABASE_URL is not None
 
@@ -78,45 +119,10 @@ def test_migration_0006_apply_and_reverse() -> None:
     try:
         _run_psql(admin_database_url, "-c", f"CREATE DATABASE {temp_database}")
 
-        upgrade = _run_alembic(temp_database_url, "upgrade", "head")
+        upgrade = _run_alembic(temp_database_url, "upgrade", "0006_markets_price_fields")
         assert upgrade.returncode == 0, upgrade.stderr
 
-        columns = _run_psql(
-            temp_database_url,
-            "-At",
-            "-F",
-            "|",
-            "-c",
-            """
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'markets'
-              AND column_name IN (
-                'yes_price',
-                'no_price',
-                'best_bid',
-                'best_ask',
-                'last_trade_price',
-                'liquidity',
-                'spread_bps',
-                'price_updated_at'
-              )
-            ORDER BY array_position(
-              ARRAY[
-                'yes_price',
-                'no_price',
-                'best_bid',
-                'best_ask',
-                'last_trade_price',
-                'liquidity',
-                'spread_bps',
-                'price_updated_at'
-              ],
-              column_name
-            )
-            """,
-        )
+        columns = _read_market_price_columns(temp_database_url)
         assert columns.stdout.splitlines() == expected_columns
 
         indexes = _run_psql(
@@ -162,6 +168,8 @@ def test_migration_0006_apply_and_reverse() -> None:
 
         reupgrade = _run_alembic(temp_database_url, "upgrade", "head")
         assert reupgrade.returncode == 0, reupgrade.stderr
+        restored_columns = _read_market_price_columns(temp_database_url)
+        assert restored_columns.stdout.splitlines() == expected_columns
     finally:
         _run_psql(
             admin_database_url,

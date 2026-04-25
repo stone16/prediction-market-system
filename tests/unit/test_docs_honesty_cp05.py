@@ -19,14 +19,16 @@ KEYWORDS = ("live mode", "live trading", "live execution", "Kalshi")
 STUB_MARKERS = ("not implemented", "reserved", "stub", "NotImplementedError")
 
 
-def test_readme_and_claude_explicitly_document_polymarket_stub_gate() -> None:
+def test_readme_and_claude_explicitly_document_gated_polymarket_live_mode() -> None:
     readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
     claude_text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
 
-    assert "polymarket.py:23-25" in readme_text
-    assert "NotImplementedError" in readme_text
-    assert "polymarket.py:23-25" in claude_text
-    assert "NotImplementedError" in claude_text
+    assert "gated Polymarket `live`" in readme_text
+    assert "live_trading_enabled=true" in readme_text
+    assert "operator gate" in readme_text
+    assert "gated Polymarket `live`" in claude_text
+    assert "live_trading_enabled=true" in claude_text
+    assert "operator gate" in claude_text
 
 
 def test_live_and_kalshi_mentions_are_stubbed_not_capability_claims() -> None:
