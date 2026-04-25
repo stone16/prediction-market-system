@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import inspect
 import logging
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal, cast
 
 import pytest
@@ -13,10 +16,18 @@ from pms.actuator import executor
 from pms.actuator.adapters import backtest
 from pms.actuator.adapters.backtest import BacktestActuator
 from pms.actuator.adapters.paper import PaperActuator
-from pms.actuator.adapters.polymarket import PolymarketActuator
+from pms.actuator.adapters.polymarket import (
+    FileFirstLiveOrderGate,
+    LiveOrderPreview,
+    OperatorApprovalRequiredError,
+    PolymarketActuator,
+    PolymarketOrderResult,
+    PolymarketOrderRequest,
+    PolymarketSDKClient,
+)
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
-from pms.config import PMSSettings, RiskSettings
+from pms.config import PMSSettings, PolymarketSettings, RiskSettings
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side, TimeInForce
 from pms.core.models import LiveTradingDisabledError, OrderState, Portfolio, TradeDecision
 from pms.storage.dedup_store import InMemoryDedupStore
@@ -273,6 +284,361 @@ async def test_polymarket_actuator_raises_when_live_trading_disabled() -> None:
 
     with pytest.raises(LiveTradingDisabledError):
         await actuator.execute(_decision(), _portfolio())
+
+
+@dataclass
+class RecordingPolymarketClient:
+    submitted: list[PolymarketOrderRequest] = field(default_factory=list)
+
+    async def submit_order(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: object,
+    ) -> PolymarketOrderResult:
+        del credentials
+        self.submitted.append(order)
+        return PolymarketOrderResult(
+            order_id="pm-live-order-1",
+            status=OrderStatus.MATCHED.value,
+            raw_status="matched",
+            filled_notional_usdc=10.0,
+            remaining_notional_usdc=0.0,
+            fill_price=0.4,
+            filled_quantity=25.0,
+        )
+
+
+@dataclass
+class RecordingOperatorGate:
+    approved: bool
+    previews: list[LiveOrderPreview] = field(default_factory=list)
+
+    async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+        self.previews.append(preview)
+        return self.approved
+
+
+def _live_settings() -> PMSSettings:
+    return PMSSettings(
+        live_trading_enabled=True,
+        polymarket=PolymarketSettings(
+            private_key="private-key",
+            api_key="api-key",
+            api_secret="api-secret",
+            api_passphrase="passphrase",
+            signature_type=1,
+            funder_address="0xabc",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_missing_live_credentials() -> None:
+    actuator = PolymarketActuator(PMSSettings(live_trading_enabled=True))
+
+    with pytest.raises(LiveTradingDisabledError, match="Missing Polymarket credential fields"):
+        await actuator.execute(_decision(), _portfolio())
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_requires_operator_approval_for_first_live_order() -> None:
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=False)
+    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+
+    with pytest.raises(OperatorApprovalRequiredError):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert len(gate.previews) == 1
+    assert gate.previews[0].max_notional_usdc == 10.0
+    assert gate.previews[0].venue == "polymarket"
+    assert gate.previews[0].market_id == "m-cp06"
+    assert gate.previews[0].token_id == "t-yes"
+    assert gate.previews[0].side == Side.BUY.value
+    assert gate.previews[0].limit_price == 0.4
+    assert gate.previews[0].max_slippage_bps == 50
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_submits_mocked_live_order_after_first_order_gate() -> None:
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+
+    state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.order_id == "pm-live-order-1"
+    assert state.status == OrderStatus.MATCHED.value
+    assert state.filled_notional_usdc == 10.0
+    assert state.remaining_notional_usdc == 0.0
+    assert state.fill_price == 0.4
+    assert state.filled_quantity == 25.0
+    assert state.strategy_id == "default"
+    assert state.strategy_version_id == "default-v1"
+    assert len(client.submitted) == 1
+    assert len(gate.previews) == 1
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_converts_limit_notional_to_order_shares() -> None:
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+
+    await actuator.execute(_decision(notional_usdc=10.0, limit_price=0.4), _portfolio())
+
+    assert client.submitted[0].size == pytest.approx(25.0)
+    assert client.submitted[0].notional_usdc == pytest.approx(10.0)
+    assert client.submitted[0].price == pytest.approx(0.4)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_converts_market_sell_notional_to_shares() -> None:
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+    decision = _decision(
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+        notional_usdc=12.0,
+        limit_price=0.3,
+    )
+    object.__setattr__(decision, "order_type", "market")
+
+    await actuator.execute(decision, _portfolio())
+
+    assert client.submitted[0].size == pytest.approx(40.0)
+    assert client.submitted[0].notional_usdc == pytest.approx(12.0)
+    assert client.submitted[0].order_type == "market"
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_requires_exact_preview(tmp_path: Path) -> None:
+    path = tmp_path / "approval.json"
+    gate = FileFirstLiveOrderGate(path)
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 10.0,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert await gate.approve_first_order(preview) is True
+
+    path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 11.0,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_client_posts_limit_order_through_v2_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    @dataclass
+    class FakeApiCreds:
+        api_key: str
+        api_secret: str
+        api_passphrase: str
+
+    @dataclass
+    class FakeOrderArgs:
+        token_id: str
+        price: float
+        side: object
+        size: float
+
+    @dataclass
+    class FakeMarketOrderArgs:
+        token_id: str
+        amount: float
+        side: object
+        price: float
+        order_type: object
+
+    @dataclass
+    class FakePartialCreateOrderOptions:
+        tick_size: object | None = None
+        neg_risk: object | None = None
+
+    class FakeOrderType:
+        GTC = "GTC"
+        FOK = "FOK"
+        FAK = "FAK"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+        SELL = "SDK_SELL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            calls["init"] = kwargs
+
+        def create_and_post_order(
+            self,
+            *,
+            order_args: FakeOrderArgs,
+            options: FakePartialCreateOrderOptions,
+            order_type: object,
+        ) -> dict[str, object]:
+            calls["limit_order"] = order_args
+            calls["limit_options"] = options
+            calls["limit_order_type"] = order_type
+            return {"orderID": "sdk-order-1", "status": "matched", "errorMsg": ""}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeMarketOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    request = PolymarketOrderRequest(
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        price=0.4,
+        size=25.0,
+        notional_usdc=10.0,
+        estimated_quantity=25.0,
+        order_type="limit",
+        time_in_force=TimeInForce.GTC.value,
+        max_slippage_bps=50,
+    )
+    result = await PolymarketSDKClient().submit_order(
+        request,
+        _live_settings().polymarket.credentials(),
+    )
+
+    init = cast(dict[str, object], calls["init"])
+    creds = cast(FakeApiCreds, init["creds"])
+    order_args = cast(FakeOrderArgs, calls["limit_order"])
+    assert init["host"] == "https://clob.polymarket.com"
+    assert init["chain_id"] == 137
+    assert init["key"] == "private-key"
+    assert init["signature_type"] == 1
+    assert init["funder"] == "0xabc"
+    assert creds.api_key == "api-key"
+    assert creds.api_secret == "api-secret"
+    assert creds.api_passphrase == "passphrase"
+    assert order_args.token_id == "t-yes"
+    assert order_args.price == 0.4
+    assert order_args.side == "SDK_BUY"
+    assert order_args.size == 25.0
+    assert calls["limit_order_type"] == "GTC"
+    assert result.order_id == "sdk-order-1"
+    assert result.status == OrderStatus.MATCHED.value
+    assert result.filled_notional_usdc == pytest.approx(10.0)
+    assert result.filled_quantity == pytest.approx(25.0)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_client_redacts_secrets_from_sdk_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeApiCreds:
+        def __init__(
+            self,
+            *,
+            api_key: str,
+            api_secret: str,
+            api_passphrase: str,
+        ) -> None:
+            del api_key, api_secret, api_passphrase
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        GTC = "GTC"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> object:
+            del kwargs
+            raise RuntimeError("venue rejected private-key api-secret passphrase")
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    with pytest.raises(LiveTradingDisabledError) as exc_info:
+        await PolymarketSDKClient().submit_order(
+            PolymarketOrderRequest(
+                market_id="m-cp06",
+                token_id="t-yes",
+                side=Side.BUY.value,
+                price=0.4,
+                size=25.0,
+                notional_usdc=10.0,
+                estimated_quantity=25.0,
+                order_type="limit",
+                time_in_force=TimeInForce.GTC.value,
+                max_slippage_bps=50,
+            ),
+            _live_settings().polymarket.credentials(),
+        )
+
+    message = str(exc_info.value)
+    assert "private-key" not in message
+    assert "api-secret" not in message
+    assert "passphrase" not in message
+    assert "Polymarket live order submission failed" in message
 
 
 @pytest.mark.asyncio

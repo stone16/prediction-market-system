@@ -14,11 +14,16 @@ import asyncpg
 import httpx
 from pms.actuator.adapters.backtest import BacktestActuator
 from pms.actuator.adapters.paper import PaperActuator
-from pms.actuator.adapters.polymarket import PolymarketActuator
+from pms.actuator.adapters.polymarket import (
+    DenyFirstLiveOrderGate,
+    FileFirstLiveOrderGate,
+    PolymarketActuator,
+    PolymarketSDKClient,
+)
 from pms.actuator.executor import ActuatorAdapter, ActuatorExecutor
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
-from pms.config import PMSSettings
+from pms.config import PMSSettings, validate_live_mode_ready
 from pms.controller.diagnostics import ControllerDiagnostic
 from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
@@ -351,6 +356,9 @@ class Runner:
         if any(not task.done() for task in self.tasks):
             msg = "Runner is already started"
             raise RuntimeError(msg)
+
+        if self.config.mode == RunMode.LIVE:
+            validate_live_mode_ready(self.config)
 
         self._stop_event.clear()
         self._controller_pipeline_error = None
@@ -724,7 +732,11 @@ class Runner:
             return BacktestActuator(self.historical_data_path)
         if mode == RunMode.PAPER:
             return PaperActuator(orderbooks=self._paper_orderbooks)
-        return PolymarketActuator(self.config)
+        return PolymarketActuator(
+            self.config,
+            client=PolymarketSDKClient(),
+            operator_gate=_first_live_order_gate(self.config),
+        )
 
     async def _controller_loop(self) -> None:
         while True:
@@ -1393,6 +1405,15 @@ def _append_bounded(items: list[T], item: T) -> None:
     overflow = len(items) - RUNNER_STATE_LIMIT
     if overflow > 0:
         del items[:overflow]
+
+
+def _first_live_order_gate(
+    settings: PMSSettings,
+) -> DenyFirstLiveOrderGate | FileFirstLiveOrderGate:
+    approval_path = settings.polymarket.first_live_order_approval_path
+    if approval_path is None or approval_path.strip() == "":
+        return DenyFirstLiveOrderGate()
+    return FileFirstLiveOrderGate(Path(approval_path))
 
 
 def _controller_diagnostic(controller: object) -> ControllerDiagnostic | None:

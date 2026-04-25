@@ -50,11 +50,10 @@ that governs this layer:
   bound for `FeedbackStore`.
 - `adapters/backtest.py` — replays fills from fixture orderbooks.
 - `adapters/paper.py` — simulated fills from live orderbook depth.
-- `adapters/polymarket.py` — v1 live stub. It first enforces the
-  `live_trading_enabled` gate, then
-  `src/pms/actuator/adapters/polymarket.py:23-25` raises
-  `NotImplementedError` because live execution is not implemented in
-  v1.
+- `adapters/polymarket.py` — gated live adapter. It first enforces the
+  `live_trading_enabled` gate, validates credential presence, requires
+  first-order operator approval, then submits through an injected
+  `PolymarketClient`.
 
 ## Do not
 
@@ -66,9 +65,9 @@ that governs this layer:
   forward the values from the originating decision.
 - Never bypass Risk Manager for "special" decisions (no "admin
   mode" override).
-- Never bypass the `live_trading_enabled` gate in the Polymarket
-  adapter or the subsequent `NotImplementedError` stub. The gate is
-  load-bearing and must remain the first runtime check in
+- Never bypass the `live_trading_enabled` gate, credential validation,
+  or first-order operator gate in the Polymarket adapter. The config
+  gate is load-bearing and must remain the first runtime check in
   `PolymarketActuator.execute`.
 - Never acquire a lock, token, or position slot without a matching
   release in a `try/finally` that covers all four exit paths

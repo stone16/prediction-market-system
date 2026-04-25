@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pytest
 
-from pms.config import DatabaseSettings, PMSSettings, RiskSettings
+from pms.config import DatabaseSettings, PMSSettings, PolymarketSettings, RiskSettings
 from pms.core.enums import RunMode, TimeInForce
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
 from pms.market_selection.merge import StrategyMarketSet
@@ -191,6 +191,7 @@ class FakeControllerFactory:
 def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.LIVE,
+        live_trading_enabled=True,
         auto_migrate_default_v2=False,
         database=DatabaseSettings(
             dsn="postgresql://localhost/pms_test_runner_cp08",
@@ -201,6 +202,18 @@ def _settings() -> PMSSettings:
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
         ),
+        polymarket=_live_polymarket_settings(),
+    )
+
+
+def _live_polymarket_settings() -> PolymarketSettings:
+    return PolymarketSettings(
+        private_key="private-key",
+        api_key="api-key",
+        api_secret="api-secret",
+        api_passphrase="passphrase",
+        signature_type=1,
+        funder_address="0xabc",
     )
 
 

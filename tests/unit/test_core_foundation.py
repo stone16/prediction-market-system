@@ -8,7 +8,13 @@ from typing import Any, get_type_hints
 
 import pytest
 
-from pms.config import PMSSettings, RiskSettings
+from pms.config import (
+    MissingPolymarketCredentialsError,
+    PMSSettings,
+    PolymarketSettings,
+    RiskSettings,
+    validate_live_mode_ready,
+)
 from pms.core import interfaces, models
 from pms.core.enums import (
     FeedbackSource,
@@ -158,6 +164,45 @@ def test_venue_credentials_repr_redacts_secret_fields() -> None:
     assert "passphrase" not in rendered
     assert "api-key-id" not in rendered
     assert "private-key-pem" not in rendered
+
+
+def test_live_mode_validation_requires_all_polymarket_credentials() -> None:
+    settings = PMSSettings(mode=RunMode.LIVE, live_trading_enabled=True)
+
+    with pytest.raises(MissingPolymarketCredentialsError) as exc_info:
+        validate_live_mode_ready(settings)
+
+    message = str(exc_info.value)
+    assert "Missing Polymarket credential fields" in message
+    assert "private_key" in message
+    assert "api_key" in message
+    assert "api_secret" in message
+    assert "api_passphrase" in message
+    assert "signature_type" in message
+    assert "private-key" not in message
+
+
+def test_live_mode_validation_returns_redacted_credentials() -> None:
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        live_trading_enabled=True,
+        polymarket=PolymarketSettings(
+            host="https://clob.polymarket.com",
+            private_key="private-key",
+            api_key="api-key",
+            api_secret="api-secret",
+            api_passphrase="passphrase",
+            signature_type=1,
+            funder_address="0xabc",
+        ),
+    )
+
+    credentials = validate_live_mode_ready(settings)
+
+    assert credentials.venue == "polymarket"
+    assert credentials.host == "https://clob.polymarket.com"
+    assert credentials.private_key == "private-key"
+    assert "private-key" not in repr(credentials)
 
 
 def test_core_enums_use_stable_wire_values() -> None:

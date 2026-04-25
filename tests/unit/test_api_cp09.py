@@ -246,6 +246,20 @@ async def test_api_feedback_resolve_and_config_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_config_rejects_live_mode_when_credentials_are_missing() -> None:
+    runner = _runner_with_state()
+    runner.config.live_trading_enabled = True
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/config", json={"mode": "live"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Missing Polymarket credential fields:")
+
+
+@pytest.mark.asyncio
 async def test_api_run_start_stop_cycle(tmp_path: Path) -> None:
     runner = Runner(
         config=PMSSettings(

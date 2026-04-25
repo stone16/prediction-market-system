@@ -9,18 +9,18 @@ context drift.
 
 # prediction-market-system
 
-Cybernetic trading platform — Sensor → Controller → Actuator →
-Evaluator, with active-perception feedback.
+Cybernetic trading platform — concurrent Sensor / Controller /
+Actuator / Evaluator tasks with active-perception feedback.
 
 **Stack:** Python 3.13 (asyncio), FastAPI + uvicorn, Next.js 16
 (Turbopack) dashboard on :3100, PostgreSQL (load-bearing since S1;
 outer + middle + inner rings all persisted), `uv` for Python deps.
 
-**Capability honesty:** implemented run modes are `backtest` and
-`paper`. `live` is not implemented in v1;
-`src/pms/actuator/adapters/polymarket.py:23-25` raises
-`NotImplementedError` after the `live_trading_enabled` guard. Kalshi
-is reserved in the venue enum but has no adapter in v1.
+**Capability honesty:** implemented run modes are `backtest`, `paper`,
+and gated Polymarket `live`. LIVE remains fail-closed unless
+`live_trading_enabled=true`, required credentials validate, and the
+first live order passes an operator gate. Kalshi is reserved in the
+venue enum but has no adapter in v1.
 
 **Branches:** feature branches only (`feat/…`, `fix/…`, `docs/…`).
 Never commit to `main` directly; changes land via PR.

@@ -28,6 +28,7 @@ pms-research = "pms.research.cli:main"
 # `uv pip install 'pms[llm]'`. LLMForecaster imports it lazily, so the default
 # rule-based/statistical controller path does not require it.
 llm = ["anthropic>=0.40.0"]
+live = ["py-clob-client-v2>=1.0.0,<2.0.0"]
 
 [dependency-groups]
 dev = [

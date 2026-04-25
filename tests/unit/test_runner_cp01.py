@@ -10,8 +10,13 @@ from typing import Any, cast
 
 import pytest
 
-from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.actuator.executor import ActuatorExecutor
+from pms.actuator.adapters.polymarket import (
+    FileFirstLiveOrderGate,
+    PolymarketActuator,
+    PolymarketSDKClient,
+)
+from pms.config import DatabaseSettings, PMSSettings, PolymarketSettings, RiskSettings
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, OrderState, Portfolio
 from pms.market_selection.merge import StrategyMarketSet
@@ -121,6 +126,7 @@ class FakeRegistry:
 def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.LIVE,
+        live_trading_enabled=True,
         auto_migrate_default_v2=False,
         database=DatabaseSettings(
             dsn="postgresql://localhost/pms_test_runner_cp01",
@@ -131,6 +137,44 @@ def _settings() -> PMSSettings:
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
         ),
+        polymarket=_live_polymarket_settings(),
+    )
+
+
+def test_runner_builds_live_polymarket_adapter_with_sdk_client_and_file_gate(
+    tmp_path: Path,
+) -> None:
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        live_trading_enabled=True,
+        auto_migrate_default_v2=False,
+        polymarket=PolymarketSettings(
+            private_key="private-key",
+            api_key="api-key",
+            api_secret="api-secret",
+            api_passphrase="passphrase",
+            signature_type=1,
+            funder_address="0xabc",
+            first_live_order_approval_path=str(tmp_path / "approval.json"),
+        ),
+    )
+    runner = Runner(config=settings, historical_data_path=FIXTURE_PATH)
+
+    adapter = runner._build_adapter(RunMode.LIVE)  # noqa: SLF001
+
+    assert isinstance(adapter, PolymarketActuator)
+    assert isinstance(adapter.client, PolymarketSDKClient)
+    assert isinstance(adapter.operator_gate, FileFirstLiveOrderGate)
+
+
+def _live_polymarket_settings() -> PolymarketSettings:
+    return PolymarketSettings(
+        private_key="private-key",
+        api_key="api-key",
+        api_secret="api-secret",
+        api_passphrase="passphrase",
+        signature_type=1,
+        funder_address="0xabc",
     )
 
 

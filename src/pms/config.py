@@ -10,6 +10,11 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from pms.core.enums import RunMode
+from pms.core.models import LiveTradingDisabledError, VenueCredentials
+
+
+class MissingPolymarketCredentialsError(LiveTradingDisabledError):
+    """Raised when LIVE mode lacks required Polymarket credentials."""
 
 
 class PolymarketSettings(BaseModel):
@@ -22,6 +27,20 @@ class PolymarketSettings(BaseModel):
     signature_type: int | None = None
     funder_address: str | None = None
     chain_id: int = 137
+    first_live_order_approval_path: str | None = None
+
+    def credentials(self) -> VenueCredentials:
+        return VenueCredentials(
+            venue="polymarket",
+            host=self.host,
+            private_key=self.private_key,
+            api_key=self.api_key,
+            api_secret=self.api_secret,
+            api_passphrase=self.api_passphrase,
+            signature_type=self.signature_type,
+            funder_address=self.funder_address,
+            chain_id=self.chain_id,
+        )
 
 
 class LLMSettings(BaseModel):
@@ -109,3 +128,33 @@ class PMSSettings(BaseSettings):
 
         config_data: dict[str, Any] = loaded
         return cls(**config_data)
+
+
+def validate_live_mode_ready(settings: PMSSettings) -> VenueCredentials:
+    if not settings.live_trading_enabled:
+        msg = "Live trading is disabled. Set live_trading_enabled=true in config."
+        raise LiveTradingDisabledError(msg)
+
+    credentials = settings.polymarket.credentials()
+    missing = _missing_polymarket_fields(credentials)
+    if missing:
+        fields = ", ".join(missing)
+        msg = f"Missing Polymarket credential fields: {fields}"
+        raise MissingPolymarketCredentialsError(msg)
+    return credentials
+
+
+def _missing_polymarket_fields(credentials: VenueCredentials) -> list[str]:
+    missing: list[str] = []
+    required_text_fields = {
+        "private_key": credentials.private_key,
+        "api_key": credentials.api_key,
+        "api_secret": credentials.api_secret,
+        "api_passphrase": credentials.api_passphrase,
+    }
+    for field_name, value in required_text_fields.items():
+        if value is None or value.strip() == "":
+            missing.append(field_name)
+    if credentials.signature_type is None:
+        missing.append("signature_type")
+    return missing

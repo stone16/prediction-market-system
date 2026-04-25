@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 
-from pms.config import DatabaseSettings, PMSSettings, RiskSettings
+from pms.config import DatabaseSettings, PMSSettings, PolymarketSettings, RiskSettings
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal
 from pms.market_selection.merge import StrategyMarketSet
@@ -229,6 +229,7 @@ def _signal() -> MarketSignal:
 def _settings(mode: RunMode) -> PMSSettings:
     return PMSSettings(
         mode=mode,
+        live_trading_enabled=mode == RunMode.LIVE,
         auto_migrate_default_v2=False,
         database=DatabaseSettings(
             dsn="postgresql://localhost/pms_test_runner",
@@ -239,6 +240,18 @@ def _settings(mode: RunMode) -> PMSSettings:
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
         ),
+        polymarket=_live_polymarket_settings() if mode == RunMode.LIVE else PolymarketSettings(),
+    )
+
+
+def _live_polymarket_settings() -> PolymarketSettings:
+    return PolymarketSettings(
+        private_key="private-key",
+        api_key="api-key",
+        api_secret="api-secret",
+        api_passphrase="passphrase",
+        signature_type=1,
+        funder_address="0xabc",
     )
 
 
@@ -540,6 +553,7 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
 
     settings = PMSSettings(
         mode=RunMode.LIVE,
+        live_trading_enabled=True,
         auto_migrate_default_v2=True,
         database=DatabaseSettings(
             dsn="postgresql://localhost/pms_test_runner",
@@ -550,6 +564,7 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
         ),
+        polymarket=_live_polymarket_settings(),
     )
 
     runner = Runner(config=settings, historical_data_path=FIXTURE_PATH)
