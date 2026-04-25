@@ -158,12 +158,8 @@ class PolymarketSDKClient:
             # caller is responsible for reconciliation if it suppresses this.
             raise
         except (asyncio.TimeoutError, TimeoutError) as exc:
-            # A timeout means the venue may have accepted the order — we
-            # simply did not see the response. Surfacing this as
-            # `LiveTradingDisabledError` would falsely imply "nothing was
-            # sent". Use a venue-specific exception so callers and
-            # operators can distinguish "submitted but unknown" from
-            # "rejected / never sent".
+            # Bare timeout — the venue never responded. Surface as
+            # submission_unknown so operators reconcile before retrying.
             redacted = _redacted_exception_message(exc, credentials)
             logger.warning(
                 "Polymarket live order submission timed out (%s): %s",
@@ -177,6 +173,28 @@ class PolymarketSDKClient:
             raise PolymarketSubmissionUnknownError(msg) from None
         except Exception as exc:  # noqa: BLE001
             redacted = _redacted_exception_message(exc, credentials)
+            # `py_clob_client_v2.exceptions.PolyApiException` wraps httpx
+            # request errors (timeouts, connection drops) with `resp=None`,
+            # and HTTP-level venue errors with a populated httpx Response.
+            # The bare `except (TimeoutError, ...)` block above misses
+            # these wrapped transport failures — without this branch a
+            # real timeout still routes to `LiveTradingDisabledError` =
+            # venue_rejection, defeating the f2 contract that timeouts
+            # must surface as submission_unknown. Duck-typed (class name
+            # + attribute) so polymarket.py keeps no hard dependency on
+            # the SDK's exception class.
+            if _is_sdk_transport_failure(exc):
+                logger.warning(
+                    "Polymarket live order submission transport failure (%s): %s; "
+                    "treating as submission_unknown",
+                    type(exc).__name__,
+                    redacted,
+                )
+                msg = (
+                    "Polymarket live order submission transport failure; "
+                    "order status is unknown — reconcile with venue before retrying"
+                )
+                raise PolymarketSubmissionUnknownError(msg) from None
             logger.warning(
                 "Polymarket live order submission failed (%s): %s",
                 type(exc).__name__,
@@ -659,6 +677,25 @@ def _order_result_from_sdk_response(
         fill_price=fill_price,
         filled_quantity=filled_quantity,
     )
+
+
+def _is_sdk_transport_failure(exc: BaseException) -> bool:
+    """Detect SDK exceptions that represent a transport-level failure
+    (no HTTP response from the venue) — distinct from the venue
+    rejecting the order with an HTTP error response.
+
+    `py_clob_client_v2.exceptions.PolyApiException(resp=None, ...)`
+    is the wrapped form of httpx timeouts, connection drops, etc. We
+    duck-type via class name + attribute presence so this module does
+    not take a hard import dependency on the SDK exception class.
+    """
+    if type(exc).__name__ != "PolyApiException":
+        return False
+    resp = getattr(exc, "resp", _MISSING_SENTINEL)
+    return resp is None
+
+
+_MISSING_SENTINEL: Final[object] = object()
 
 
 def _validate_explicit_fill_fields(

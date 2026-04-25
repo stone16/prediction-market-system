@@ -1957,6 +1957,151 @@ async def test_polymarket_recognizes_fill_count_as_valid_quantity(
     assert result.filled_notional_usdc == pytest.approx(4.0)
 
 
+# --- review-loop fresh-final follow-up (codex SDK-wrapped timeout finding) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_polyapiexception_no_resp_routes_as_submission_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh-final consensus finding: `py_clob_client_v2` wraps httpx
+    request-level timeouts into `PolyApiException(resp=None, ...)`.
+    The bare `TimeoutError` catch alone misses these — so a REAL POST
+    timeout would still flow as `LiveTradingDisabledError` =
+    venue_rejection, not `submission_unknown`. This test pins the
+    correct routing."""
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        FAK = "FAK"
+        FOK = "FOK"
+        GTC = "GTC"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class PolyApiException(Exception):
+        """Mirror the real SDK class shape just enough for duck-typing."""
+
+        def __init__(
+            self,
+            resp: object | None = None,
+            error_msg: str | None = None,
+        ) -> None:
+            super().__init__(error_msg or "Request exception!")
+            self.resp = resp
+            self.error_msg = error_msg
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> object:
+            del kwargs
+            raise PolyApiException(resp=None, error_msg="Request exception!")
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    with pytest.raises(PolymarketSubmissionUnknownError, match="transport failure"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_polyapiexception_with_resp_routes_as_venue_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inverse control: PolyApiException WITH a populated `resp` (i.e.
+    venue actually responded with an HTTP error) is a real
+    venue_rejection, NOT submission_unknown. Routing must distinguish."""
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        GTC = "GTC"
+        FOK = "FOK"
+        FAK = "FAK"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeHttpResponse:
+        status_code = 400
+        text = "venue rejected"
+
+    class PolyApiException(Exception):
+        def __init__(
+            self,
+            resp: object | None = None,
+            error_msg: str | None = None,
+        ) -> None:
+            super().__init__(error_msg or "")
+            self.resp = resp
+            self.error_msg = error_msg
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> object:
+            del kwargs
+            raise PolyApiException(resp=FakeHttpResponse(), error_msg="rejected")
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    # Should raise LiveTradingDisabledError (venue_rejection), NOT
+    # PolymarketSubmissionUnknownError. Use the broader exception type
+    # to confirm that and assert the message hints at venue error.
+    with pytest.raises(LiveTradingDisabledError) as exc_info:
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+    assert not isinstance(exc_info.value, PolymarketSubmissionUnknownError)
+    assert "venue error redacted" in str(exc_info.value)
+
+
 def _install_partial_fill_sdk(
     monkeypatch: pytest.MonkeyPatch,
     *,
