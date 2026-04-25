@@ -483,32 +483,52 @@ def _order_result_from_sdk_response(
     # aliases and fall back to the status-based heuristic when none are
     # present. Pre-fix, only MATCHED produced fill data — every partial
     # fill was silently dropped.
-    explicit_filled_notional = _coerce_float_or_none(
-        _response_value(
-            response,
-            "filled_notional_usdc",
-            "filledNotional",
-            "filled_amount",
-        )
+    # Track raw key presence and coerced value separately. A
+    # `_coerce_float_or_none` of "nan"/"inf"/null returns None, but the
+    # field IS still in the venue response — we must NOT treat that as
+    # "no explicit data" (which would trigger the matched-fallback
+    # full-fill synthesis). Reject unparseable values up front.
+    notional_field_present = _response_field_present(
+        response, "filled_notional_usdc", "filledNotional", "filled_amount"
     )
-    explicit_filled_quantity = _coerce_float_or_none(
-        _response_value(
-            response,
-            "filled_quantity",
-            "filledQuantity",
-            "filled_size",
-            "filled",
-        )
+    raw_notional = _response_value(
+        response, "filled_notional_usdc", "filledNotional", "filled_amount"
     )
-    explicit_fill_price = _coerce_float_or_none(
-        _response_value(
-            response,
-            "fill_price",
-            "fillPrice",
-            "average_price",
-            "avg_price",
+    explicit_filled_notional = _coerce_float_or_none(raw_notional)
+    if notional_field_present and explicit_filled_notional is None:
+        msg = (
+            "Polymarket reported unparseable filled_notional "
+            "(non-finite or null); refusing to persist suspect fill"
         )
+        raise LiveTradingDisabledError(msg)
+
+    quantity_field_present = _response_field_present(
+        response, "filled_quantity", "filledQuantity", "filled_size", "filled"
     )
+    raw_quantity = _response_value(
+        response, "filled_quantity", "filledQuantity", "filled_size", "filled"
+    )
+    explicit_filled_quantity = _coerce_float_or_none(raw_quantity)
+    if quantity_field_present and explicit_filled_quantity is None:
+        msg = (
+            "Polymarket reported unparseable filled_quantity "
+            "(non-finite or null); refusing to persist suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
+
+    price_field_present = _response_field_present(
+        response, "fill_price", "fillPrice", "average_price", "avg_price"
+    )
+    raw_price = _response_value(
+        response, "fill_price", "fillPrice", "average_price", "avg_price"
+    )
+    explicit_fill_price = _coerce_float_or_none(raw_price)
+    if price_field_present and explicit_fill_price is None:
+        msg = (
+            "Polymarket reported unparseable fill_price "
+            "(non-finite or null); refusing to persist suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
 
     filled_notional_usdc: float
     filled_quantity: float
@@ -526,10 +546,12 @@ def _order_result_from_sdk_response(
         price=explicit_fill_price,
     )
 
+    # Use *raw* presence here, not coerced. A field that arrived but
+    # failed to coerce was already rejected above; this flag is for
+    # legitimately-set but zero-valued fields (e.g. resting limit with
+    # filled_notional=0).
     explicit_field_present = (
-        explicit_filled_notional is not None
-        or explicit_filled_quantity is not None
-        or explicit_fill_price is not None
+        notional_field_present or quantity_field_present or price_field_present
     )
 
     if explicit_filled_notional is not None and explicit_filled_notional > 0.0:
@@ -708,6 +730,18 @@ def _response_value(response: object, *keys: str) -> object | None:
         if value is not None:
             return cast(object, value)
     return None
+
+
+def _response_field_present(response: object, *keys: str) -> bool:
+    """Distinct from `_response_value`: returns True iff the venue
+    actually surfaced one of the keys (regardless of whether the value
+    parses). Used to detect malformed-but-present fields, which must be
+    rejected before the matched-fallback can synthesize a full fill.
+    """
+    if isinstance(response, Mapping):
+        mapping = cast(Mapping[str, object], response)
+        return any(key in mapping for key in keys)
+    return any(hasattr(response, key) for key in keys)
 
 
 def _required_secret(value: str | None, field_name: str) -> str:

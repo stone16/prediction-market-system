@@ -1832,6 +1832,77 @@ async def test_polymarket_matched_status_synthesizes_full_fill_only_when_no_expl
     assert result.fill_price == pytest.approx(0.5)
 
 
+# --- review-loop round-6 follow-ups (codex finding f13) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_malformed_filled_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f13: a venue response with a PRESENT-BUT-MALFORMED
+    fill field (e.g. `"nan"`, `"inf"`, `null`) must be rejected — not
+    treated as 'no explicit fields' and silently routed into the
+    matched-fallback full-fill synthesis path."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": "nan",  # present but unparseable
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="unparseable filled_notional"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_malformed_filled_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f13: malformed filled_quantity (here `"inf"`)
+    must be rejected, not silently dropped into the matched fallback."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_quantity": "inf",
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="unparseable filled_quantity"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_null_fill_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f13: a JSON null in a present field is also
+    'present but unparseable' and must be rejected."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "fill_price": None,  # JSON null
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="unparseable fill_price"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
 def _install_partial_fill_sdk(
     monkeypatch: pytest.MonkeyPatch,
     *,
