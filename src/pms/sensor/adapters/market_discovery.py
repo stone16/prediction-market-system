@@ -75,10 +75,12 @@ class MarketDiscoverySensor:
                 # Always include the exception type — many transient errors
                 # (httpx.ConnectError, asyncio.TimeoutError) have an empty
                 # default str() and would otherwise log as "transient error: ".
+                # `error or ...` would *never* fall through because exception
+                # objects are truthy; coerce via str() first.
                 logger.warning(
                     "discovery poll transient error (%s): %s",
                     type(error).__name__,
-                    error or "(no message)",
+                    str(error) or "(no message)",
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)

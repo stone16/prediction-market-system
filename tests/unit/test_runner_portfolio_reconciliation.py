@@ -222,3 +222,47 @@ async def test_reconcile_paper_mode_still_swallows_errors() -> None:
     # Must not raise.
     await runner._reconcile_portfolio_from_db()  # noqa: SLF001
     assert runner.portfolio.locked_usdc == 0.0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_clears_stale_portfolio_when_db_returns_empty(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for CodeRabbit Major: a stop/start cycle on a runner
+    that previously held positions must NOT preserve stale `locked_usdc`,
+    `free_usdc`, or `open_positions` when reconciliation finds the DB
+    is empty.
+
+    Pre-fix: the empty-positions fast path returned early without
+    clearing state, so a runner that held $50 locked / 1 position would
+    still report that exposure on a subsequent restart even after every
+    fill closed and the FillStore returned [].
+    """
+    from dataclasses import replace
+
+    from pms.core.models import Portfolio
+
+    runner = _runner_with_fake_pool(_FakeFillStore([]))
+    # Simulate a runner that previously held positions: stale state from
+    # a prior reconciliation cycle.
+    stale_position = _position(market_id="m-stale", locked_usdc=50.0)
+    runner.portfolio = replace(
+        runner.portfolio,
+        locked_usdc=50.0,
+        free_usdc=950.0,
+        open_positions=[stale_position],
+    )
+    caplog.set_level(logging.INFO, logger="pms.runner")
+
+    await runner._reconcile_portfolio_from_db()  # noqa: SLF001
+
+    assert runner.portfolio.locked_usdc == 0.0
+    assert runner.portfolio.free_usdc == runner.portfolio.total_usdc
+    assert runner.portfolio.open_positions == []
+    # Single Portfolio invariant: total_usdc unchanged.
+    assert isinstance(runner.portfolio, Portfolio)
+    # Operator visibility: empty reconciliation should still log so a
+    # human can see "the runner reconciled from DB and found nothing".
+    assert any(
+        "0 positions" in record.getMessage() for record in caplog.records
+    )

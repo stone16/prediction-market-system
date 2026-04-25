@@ -1158,6 +1158,24 @@ class Runner:
             return
         open_positions = [p for p in persisted_positions if p.shares_held > 0.0]
         if not open_positions:
+            # Reset to baseline so a stop/start cycle on a runner that
+            # previously held positions does not leave stale `locked_usdc`,
+            # `free_usdc`, or `open_positions` in `self.portfolio`. Without
+            # this, a second `start()` on the same Runner instance after
+            # all positions closed would still report the old locked
+            # exposure and undercount free budget, even though the DB
+            # is empty.
+            total_budget = self.portfolio.total_usdc
+            self.portfolio = replace(
+                self.portfolio,
+                locked_usdc=0.0,
+                free_usdc=total_budget,
+                open_positions=[],
+            )
+            logger.info(
+                "Reconciled portfolio from DB: 0 positions, $0.00 locked of $%.2f total",
+                total_budget,
+            )
             return
         total_locked = sum(position.locked_usdc for position in open_positions)
         total_budget = self.portfolio.total_usdc

@@ -811,3 +811,73 @@ async def test_runner_builds_market_discovery_sensor_for_non_backtest_modes(
     assert isinstance(sensors[1], MarketDataSensor)
     await sensors[0].aclose()
     await sensors[1].aclose()
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_transient_error_log_falls_back_when_str_empty(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for CodeRabbit Minor: prior implementation used
+    `error or "(no message)"` to provide a fallback when an exception's
+    str() was empty. But exception objects are always truthy, so the
+    fallback never fired — logs would still end with an empty tail
+    like "transient error: ". The fix is `str(error) or "(no message)"`.
+    """
+
+    class _EmptyHTTPError(httpx.HTTPError):
+        def __init__(self) -> None:
+            super().__init__("")
+
+    real_sleep = asyncio.sleep
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    raised = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal raised
+        if not raised:
+            raised = True
+            raise _EmptyHTTPError()
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    sensor = MarketDiscoverySensor(
+        store=cast(PostgresMarketDataStore, AsyncMock()),
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+    caplog.set_level(logging.WARNING, logger="pms.sensor.adapters.market_discovery")
+
+    async def consume() -> None:
+        async for _ in cast(AsyncGenerator[object, None], sensor.__aiter__()):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        # Wait until the second poll fires (post-recovery).
+        for _ in range(100):
+            if any(s == 60.0 for s in sleeps):
+                break
+            await real_sleep(0)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        await sensor.aclose()
+
+    transient_records = [
+        r for r in caplog.records if "transient error" in r.getMessage()
+    ]
+    assert transient_records, "expected a transient-error warning"
+    assert "(no message)" in transient_records[0].getMessage(), (
+        "fallback must replace empty str(error) — got: "
+        f"{transient_records[0].getMessage()!r}"
+    )

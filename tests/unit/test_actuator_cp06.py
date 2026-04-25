@@ -2162,3 +2162,312 @@ def _install_partial_fill_sdk(
         Side=FakeSide,
     )
     monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+
+# ---------------------------------------------------------------------------
+# Regression: first-order approval race (codex P2 / CodeRabbit Critical)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _SlowPolymarketClient:
+    """Client whose `submit_order` blocks on an `asyncio.Event` until
+    `release` is fired. Used to widen the post-approval / pre-commit
+    window so a second concurrent task can attempt to re-use the same
+    approval.
+    """
+
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    entered_submit: asyncio.Event = field(default_factory=asyncio.Event)
+    submitted: list[PolymarketOrderRequest] = field(default_factory=list)
+
+    async def submit_order(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: object,
+    ) -> PolymarketOrderResult:
+        del credentials
+        self.submitted.append(order)
+        self.entered_submit.set()
+        await self.release.wait()
+        return PolymarketOrderResult(
+            order_id=f"pm-live-{len(self.submitted)}",
+            status=OrderStatus.MATCHED.value,
+            raw_status="matched",
+            filled_notional_usdc=10.0,
+            remaining_notional_usdc=0.0,
+            fill_price=0.4,
+            filled_quantity=25.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_lock_held_through_submit_blocks_concurrent_reuse(
+    tmp_path: Path,
+) -> None:
+    """Regression for codex P2 / CodeRabbit Critical: prior implementation
+    released `_approval_lock` before `submit_order()` returned and only
+    set `_approval_state.approved=True` afterwards, leaving a window
+    where a second concurrent task could re-read the same approval file
+    (which `consume()` had not yet unlinked) and submit a parallel
+    first-order trade with one operator approval.
+
+    The fix holds the lock across approval + submit + commit + consume.
+    With the fix:
+      * T1 enters, takes lock, gets gate approval, blocks in submit.
+      * T2 enters, blocks on the lock.
+      * T1 completes submit, sets approved=True, consumes the file,
+        releases the lock.
+      * T2 acquires the lock, the double-check sees approved=True, and
+        T2 submits via the fast path WITHOUT re-reading the (now-
+        unlinked) approval file.
+    Net: gate.approve_first_order is called exactly once even though
+    both tasks make a first-order submit.
+    """
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 10.0,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    @dataclass(frozen=True)
+    class _CountingFileGate:
+        """Wrapper that delegates to FileFirstLiveOrderGate while
+        counting approve calls. Frozen dataclass to satisfy the
+        FirstLiveOrderGate protocol the actuator expects."""
+
+        inner: FileFirstLiveOrderGate
+        calls: list[int] = field(default_factory=list)
+
+        async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+            self.calls.append(1)
+            return await self.inner.approve_first_order(preview)
+
+        async def consume(self, preview: LiveOrderPreview) -> None:
+            await self.inner.consume(preview)
+
+    gate = _CountingFileGate(inner=FileFirstLiveOrderGate(approval_path))
+
+    client = _SlowPolymarketClient()
+    actuator = PolymarketActuator(
+        _live_settings(), client=client, operator_gate=gate
+    )
+
+    first = asyncio.create_task(
+        actuator.execute(_decision(decision_id="d-first"), _portfolio())
+    )
+    # Wait for T1 to enter submit_order — it now holds the approval lock
+    # *and* is blocked inside the venue call.
+    await asyncio.wait_for(client.entered_submit.wait(), timeout=1.0)
+
+    second = asyncio.create_task(
+        actuator.execute(_decision(decision_id="d-second"), _portfolio())
+    )
+    # Give the event loop a chance to run T2; with the lock-through-submit
+    # fix it MUST block on `_approval_lock` and not have submitted yet.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(client.submitted) == 1, (
+        "second task must not submit while first holds the approval lock"
+    )
+
+    # Now allow T1 to finish submit. It will set approved=True, consume
+    # the file, release the lock, and T2 will fast-path through.
+    client.release.set()
+    await asyncio.gather(first, second)
+
+    # Both submits eventually happened.
+    assert len(client.submitted) == 2
+    # And the gate was called exactly once — T2 must NOT have re-read
+    # the approval file. This is the load-bearing assertion.
+    assert len(gate.calls) == 1
+    # The approval file was consumed by T1's success.
+    assert approval_path.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_failed_first_submit_re_prompts_gate(
+    tmp_path: Path,
+) -> None:
+    """Consume-on-success preservation under the new lock scope.
+
+    The lock-through-submit fix must NOT regress the consume-on-success
+    semantic: if `submit_order()` raises while we hold the lock, the
+    approval flag stays False and a subsequent caller must be re-
+    prompted for operator approval (rather than silently re-using a
+    stale flag or being permanently locked out).
+    """
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 10.0,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+    gate = FileFirstLiveOrderGate(approval_path)
+
+    @dataclass
+    class _FailingClient:
+        attempts: int = 0
+
+        async def submit_order(
+            self,
+            order: PolymarketOrderRequest,
+            credentials: object,
+        ) -> PolymarketOrderResult:
+            del order, credentials
+            self.attempts += 1
+            raise LiveTradingDisabledError("simulated venue rejection")
+
+    failing = _FailingClient()
+    actuator = PolymarketActuator(
+        _live_settings(), client=failing, operator_gate=gate
+    )
+
+    with pytest.raises(LiveTradingDisabledError):
+        await actuator.execute(_decision(decision_id="d-first"), _portfolio())
+    # Approval flag must still be False — submit failed, do not commit.
+    assert actuator._first_order_approved() is False  # noqa: SLF001
+    # Approval file was NOT consumed because the submit failed (the
+    # operator can retry without re-writing the file).
+    assert approval_path.exists() is True
+
+    # Second attempt must succeed by re-reading the approval file.
+    @dataclass
+    class _PassingClient:
+        async def submit_order(
+            self,
+            order: PolymarketOrderRequest,
+            credentials: object,
+        ) -> PolymarketOrderResult:
+            del order, credentials
+            return PolymarketOrderResult(
+                order_id="pm-live-retry",
+                status=OrderStatus.MATCHED.value,
+                raw_status="matched",
+                filled_notional_usdc=10.0,
+                remaining_notional_usdc=0.0,
+                fill_price=0.4,
+                filled_quantity=25.0,
+            )
+
+    actuator2 = PolymarketActuator(
+        _live_settings(),
+        client=_PassingClient(),
+        operator_gate=gate,
+    )
+    state = await actuator2.execute(_decision(decision_id="d-retry"), _portfolio())
+    assert state.order_id == "pm-live-retry"
+    assert actuator2._first_order_approved() is True  # noqa: SLF001
+    # And now consumed.
+    assert approval_path.exists() is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: cross-field fill consistency (codex P1 / CodeRabbit Major)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_rejects_inconsistent_notional_quantity_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for codex P1 / CodeRabbit Major: a venue response with
+    all three explicit fill fields set must satisfy
+    `notional ≈ quantity * price` within rounding tolerance. Without
+    cross-field validation the example
+        (filled_notional_usdc=4, filled_quantity=100, fill_price=0.5)
+    where the true notional should be 50 — a 92% miss — passes
+    individual range validation and corrupts share accounting.
+    """
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": 4.0,
+            "filled_quantity": 100.0,
+            "fill_price": 0.5,  # 100 * 0.5 == 50, NOT 4
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="inconsistent fill triple"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_accepts_consistent_triple_within_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive path: a triple where notional ≈ quantity * price within
+    1% / $0.01 tolerance must pass the cross-field check. Polymarket
+    CLOB rounding can introduce sub-cent drift; the validator must not
+    reject those."""
+    # 20 shares * 0.5 = 10.0 exactly — well within tolerance.
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": 10.0,
+            "filled_quantity": 20.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        _partial_fill_request(),
+        _live_settings().polymarket.credentials(),
+    )
+    assert result.filled_notional_usdc == pytest.approx(10.0)
+    assert result.filled_quantity == pytest.approx(20.0)
+    assert result.fill_price == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_accepts_sub_cent_rounding_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sub-cent rounding drift in the venue response (e.g. quantity
+    rounded to whole shares) must not be rejected. 20.001 shares at
+    0.5 = 10.0005, reported as notional=10.0 — well within $0.01
+    absolute tolerance."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": 10.0,
+            "filled_quantity": 20.001,
+            "fill_price": 0.5,
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        _partial_fill_request(),
+        _live_settings().polymarket.credentials(),
+    )
+    assert result.filled_notional_usdc == pytest.approx(10.0)

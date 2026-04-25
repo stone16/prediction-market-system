@@ -131,9 +131,14 @@ def create_app(
                     # the API control plane. The previous behaviour
                     # (silent escape, 32-hour zombie) is the load-bearing
                     # incident this guard exists for.
-                    app_inst.state.autostart_error = (
-                        f"{type(exc).__name__}: {exc}"
-                    )
+                    #
+                    # `/status` is unauthenticated, so the exposed value is
+                    # restricted to the exception class name. Connection
+                    # errors / schema failures / OSError can otherwise leak
+                    # DSNs, hostnames, paths, and user info via the raw
+                    # str(exc). Full detail stays in the server-side log
+                    # below so the operator can still diagnose.
+                    app_inst.state.autostart_error = type(exc).__name__
                     logger.critical(
                         "PMS_AUTO_START failed: %s: %s",
                         type(exc).__name__,

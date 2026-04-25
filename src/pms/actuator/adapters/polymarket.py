@@ -251,33 +251,34 @@ class PolymarketActuator:
             raise LiveTradingDisabledError("Polymarket live trading is disabled")
         del portfolio
         credentials = validate_live_mode_ready(self.settings)
-        # `_require_first_order_approval` returns the preview that was just
-        # approved by the operator gate; returns None if a previous successful
-        # submit already opened the floodgates. The approval is *not* yet
-        # marked as committed — that happens only after a successful submit.
-        just_approved_preview = await self._require_first_order_approval(decision)
         request = _order_request(decision)
-        result = await self.client.submit_order(request, credentials)
-        if just_approved_preview is not None:
-            # First venue submission succeeded: lock in first-order completion
-            # and consume the operator-side approval artefact so it cannot be
-            # replayed.
-            self._approval_state.approved = True
-            try:
-                await self.operator_gate.consume(just_approved_preview)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("first-order gate consume failed: %s", exc)
-        return _order_state_from_result(decision, result)
 
-    async def _require_first_order_approval(
-        self,
-        decision: TradeDecision,
-    ) -> LiveOrderPreview | None:
+        # Fast path: once the first order has been confirmed by the venue
+        # the floodgates are open and subsequent submits do not serialize
+        # on `_approval_lock`. This keeps live throughput unaffected after
+        # the one-time gate.
         if self._first_order_approved():
-            return None
+            result = await self.client.submit_order(request, credentials)
+            return _order_state_from_result(decision, result)
+
+        # Slow path: hold `_approval_lock` across the *entire* approval +
+        # submit + commit window. The previous implementation released
+        # the lock before `submit_order()` and only flipped
+        # `_approval_state.approved` after the venue replied — leaving a
+        # window where a second concurrent task could re-read the same
+        # approval file (which `consume()` had not yet unlinked) and
+        # authorize a parallel first-order submit. Holding the lock
+        # through submit serializes only the first-order path while
+        # preserving "consume-on-success" semantics: if `submit_order`
+        # raises, the lock releases without flipping the flag and the
+        # next caller will re-prompt the gate.
         async with self._approval_lock:
+            # Double-check after acquiring — another task may have just
+            # opened the floodgates while we were waiting.
             if self._first_order_approved():
-                return None
+                result = await self.client.submit_order(request, credentials)
+                return _order_state_from_result(decision, result)
+
             preview = LiveOrderPreview(
                 max_notional_usdc=decision.notional_usdc,
                 venue=decision.venue,
@@ -298,12 +299,23 @@ class PolymarketActuator:
                     f"max_slippage_bps={preview.max_slippage_bps}"
                 )
                 raise OperatorApprovalRequiredError(msg)
-            # NOTE: `_approval_state.approved` is intentionally not set here.
-            # If the operator-approved preview never reaches the venue (submit
-            # failure), the next `execute()` must re-prompt the gate. The
-            # caller marks state.approved=True only after `submit_order`
-            # returns successfully.
-            return preview
+
+            # Submit while still holding the lock. If this raises, the
+            # `async with` releases the lock and `_approval_state.approved`
+            # stays False — the next caller will see no commit and
+            # re-prompt the gate (correct consume-on-success behavior).
+            result = await self.client.submit_order(request, credentials)
+
+            # First venue submission succeeded: lock in first-order
+            # completion and consume the operator-side approval artefact
+            # so it cannot be replayed by a future restart.
+            self._approval_state.approved = True
+            try:
+                await self.operator_gate.consume(preview)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("first-order gate consume failed: %s", exc)
+
+        return _order_state_from_result(decision, result)
 
     def _first_order_approved(self) -> bool:
         return self._approval_state.approved
@@ -744,6 +756,35 @@ def _validate_explicit_fill_fields(
         msg = (
             "Polymarket reported fill_price outside (0, 1] range; "
             "refusing to persist suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
+    # Cross-field consistency: when the venue surfaces all three of
+    # `filled_notional_usdc`, `filled_quantity`, and `fill_price` with
+    # positive values, the identity `notional == quantity * price` must
+    # hold within rounding tolerance. Without this check a malformed
+    # triple like (notional=4, quantity=100, price=0.5) — where the
+    # true notional should be 50 — passes individual range validation
+    # and is silently persisted, corrupting share accounting.
+    #
+    # `math.isclose` with rel_tol=1% and abs_tol=$0.01 accommodates
+    # legitimate venue rounding (Polymarket CLOB matches at discrete
+    # prices) while catching the kind of order-of-magnitude divergence
+    # the example above exhibits.
+    if (
+        notional is not None
+        and notional > 0.0
+        and quantity is not None
+        and quantity > 0.0
+        and price is not None
+        and price > 0.0
+        and not math.isclose(notional, quantity * price, rel_tol=0.01, abs_tol=0.01)
+    ):
+        expected = quantity * price
+        msg = (
+            "Polymarket reported inconsistent fill triple "
+            f"(notional={notional}, quantity={quantity}, price={price}; "
+            f"expected notional≈{expected:.4f}); refusing to persist "
+            "suspect fill"
         )
         raise LiveTradingDisabledError(msg)
 
