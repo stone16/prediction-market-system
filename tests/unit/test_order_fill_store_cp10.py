@@ -186,6 +186,7 @@ async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
             "side": "yes",
             "shares_held": 400.0,
             "avg_entry_price": 0.25,
+            "current_price": 0.31,
             "locked_usdc": 100.0,
         }
     ]
@@ -201,11 +202,46 @@ async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
             side="yes",
             shares_held=400.0,
             avg_entry_price=0.25,
-            unrealized_pnl=0.0,
+            unrealized_pnl=24.0,
             locked_usdc=100.0,
         )
     ]
     assert "GROUP BY" in connection.fetch_calls[0][0]
+    assert "LEFT JOIN tokens" in connection.fetch_calls[0][0]
+    assert "LEFT JOIN markets" in connection.fetch_calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_fill_store_read_positions_maps_missing_market_price_to_zero_pnl() -> None:
+    connection = _RecordingConnection()
+    connection.fetch_rows = [
+        {
+            "market_id": "market-unit-cp10-2",
+            "token_id": "token-unit-cp10-2",
+            "venue": "polymarket",
+            "side": "BUY",
+            "shares_held": 50.0,
+            "avg_entry_price": 0.42,
+            "current_price": None,
+            "locked_usdc": 21.0,
+        }
+    ]
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    positions = await store.read_positions()
+
+    assert positions == [
+        Position(
+            market_id="market-unit-cp10-2",
+            token_id="token-unit-cp10-2",
+            venue="polymarket",
+            side="BUY",
+            shares_held=50.0,
+            avg_entry_price=0.42,
+            unrealized_pnl=0.0,
+            locked_usdc=21.0,
+        )
+    ]
 
 
 @pytest.mark.asyncio

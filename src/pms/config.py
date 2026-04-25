@@ -49,6 +49,7 @@ class RiskSettings(BaseModel):
 class SensorSettings(BaseModel):
     poll_interval_s: float = 5.0
     max_reconnect_interval_s: float = 60.0
+    max_subscription_asset_ids: int | None = Field(default=100, ge=1)
 
 
 class DashboardSettings(BaseModel):

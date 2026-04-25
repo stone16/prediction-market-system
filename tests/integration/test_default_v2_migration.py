@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import os
 
 import asyncpg
@@ -160,7 +161,10 @@ async def _expected_default_v2_version_id(pg_pool: asyncpg.Pool) -> str:
         risk=strategy.risk,
         eval_spec=strategy.eval_spec,
         forecaster=strategy.forecaster,
-        market_selection=strategy.market_selection,
+        market_selection=replace(
+            strategy.market_selection,
+            resolution_time_max_horizon_days=90,
+        ),
     )
     return compute_strategy_version_id(*migrated.snapshot())
 
@@ -185,6 +189,14 @@ async def test_default_v2_migration_is_idempotent_and_respects_disable_flag(
         )
         first_strategy_factor_count = await connection.fetchval(
             "SELECT COUNT(*) FROM strategy_factors WHERE strategy_id = 'default'"
+        )
+        first_config_json = await connection.fetchval(
+            """
+            SELECT config_json
+            FROM strategy_versions
+            WHERE strategy_version_id = $1
+            """,
+            first_active_version_id,
         )
 
     await _boot_runner(pg_pool, auto_migrate_default_v2=True)
@@ -216,6 +228,9 @@ async def test_default_v2_migration_is_idempotent_and_respects_disable_flag(
     assert first_active_version_id == expected_version_id
     assert first_version_count == 2
     assert first_strategy_factor_count >= 3
+    assert json.loads(first_config_json)["market_selection"][
+        "resolution_time_max_horizon_days"
+    ] == 90
     assert second_active_version_id == expected_version_id
     assert second_version_count == first_version_count
     assert second_strategy_factor_count == first_strategy_factor_count

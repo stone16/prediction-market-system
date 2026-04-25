@@ -11,11 +11,12 @@ from typing import Any, cast
 
 import pytest
 
-from pms.config import DatabaseSettings, PMSSettings, RiskSettings
+from pms.config import DatabaseSettings, PMSSettings, RiskSettings, SensorSettings
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal
 from pms.market_selection.merge import StrategyMarketSet
-from pms.runner import Runner
+from pms.runner import Runner, _default_active_strategy
+from tests.support.default_strategy_seed import build_default_v1_strategy
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -161,6 +162,60 @@ def _settings(mode: RunMode) -> PMSSettings:
             max_total_exposure=10_000.0,
         ),
     )
+
+
+class _DefaultV2Connection:
+    async def fetchval(self, query: str) -> str:
+        del query
+        return "default-v1"
+
+
+class _DefaultV2AcquireContext:
+    async def __aenter__(self) -> _DefaultV2Connection:
+        return _DefaultV2Connection()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: object,
+    ) -> bool:
+        del exc_type, exc, tb
+        return False
+
+
+class _DefaultV2Pool:
+    def acquire(self) -> _DefaultV2AcquireContext:
+        return _DefaultV2AcquireContext()
+
+
+@dataclass
+class _RecordingDefaultV2Registry:
+    created_strategy: Any | None = None
+    active_version: str | None = None
+    populated_version: str | None = None
+
+    async def get_by_id(self, strategy_id: str) -> Any:
+        assert strategy_id == "default"
+        return build_default_v1_strategy()
+
+    async def create_version(self, strategy: Any) -> Any:
+        self.created_strategy = strategy
+        return SimpleNamespace(strategy_version_id="default-v2-test")
+
+    async def set_active(self, strategy_id: str, strategy_version_id: str) -> None:
+        assert strategy_id == "default"
+        self.active_version = strategy_version_id
+
+    async def populate_strategy_factors(
+        self,
+        strategy_id: str,
+        strategy_version_id: str,
+        factor_ids: object,
+    ) -> None:
+        del factor_ids
+        assert strategy_id == "default"
+        self.populated_version = strategy_version_id
 
 
 def _runner(mode: RunMode, **kwargs: Any) -> Runner:
@@ -322,6 +377,41 @@ async def test_runner_active_perception_boot_order_and_first_poll_subscription_u
     await runner.stop()
 
 
+def test_default_active_strategy_uses_operational_market_selection_horizon() -> None:
+    strategy = _default_active_strategy(_settings(RunMode.PAPER))
+
+    assert strategy.market_selection.resolution_time_max_horizon_days == 90
+
+
+@pytest.mark.asyncio
+async def test_default_v2_migration_widens_legacy_bootstrap_horizon() -> None:
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            auto_migrate_default_v2=True,
+            database=DatabaseSettings(
+                dsn="postgresql://localhost/pms_test_runner",
+                pool_min_size=2,
+                pool_max_size=10,
+            ),
+        ),
+        historical_data_path=FIXTURE_PATH,
+    )
+    registry = _RecordingDefaultV2Registry()
+    runner._pg_pool = cast(Any, _DefaultV2Pool())  # noqa: SLF001
+    runner._strategy_registry = cast(Any, registry)  # noqa: SLF001
+
+    await runner._ensure_default_v2_version()  # noqa: SLF001
+
+    assert registry.created_strategy is not None
+    assert (
+        registry.created_strategy.market_selection.resolution_time_max_horizon_days
+        == 90
+    )
+    assert registry.active_version == "default-v2-test"
+    assert registry.populated_version == "default-v2-test"
+
+
 @pytest.mark.asyncio
 async def test_runner_active_perception_backtest_skips_wiring(
     monkeypatch: pytest.MonkeyPatch,
@@ -405,6 +495,119 @@ async def test_runner_active_perception_reselection_is_serialized(
 
 
 @pytest.mark.asyncio
+async def test_discovery_poll_refreshes_controller_runtime_scopes() -> None:
+    events: list[list[str]] = []
+
+    class IdleController:
+        async def decide(
+            self,
+            signal: MarketSignal,
+            portfolio: object | None = None,
+        ) -> None:
+            del signal, portfolio
+            return None
+
+    class ActiveRegistry:
+        async def list_active_strategies(self) -> list[Any]:
+            return [
+                SimpleNamespace(
+                    strategy_id="alpha",
+                    strategy_version_id="alpha-v1",
+                )
+            ]
+
+    @dataclass
+    class ScopeSelector:
+        async def select(self) -> Any:
+            return type("MergeResult", (), {"asset_ids": ("fresh-token",)})()
+
+        async def select_per_strategy(self) -> list[StrategyMarketSet]:
+            return [
+                StrategyMarketSet(
+                    strategy_id="alpha",
+                    strategy_version_id="alpha-v1",
+                    asset_ids=frozenset({"fresh-token"}),
+                )
+            ]
+
+    @dataclass
+    class RecordingSubscriptionController:
+        async def update(self, asset_ids: list[str]) -> bool:
+            events.append(list(asset_ids))
+            return True
+
+    class ControllerFactory:
+        def build_many(self, active_strategies: list[Any]) -> dict[str, IdleController]:
+            return {
+                strategy.strategy_id: IdleController()
+                for strategy in active_strategies
+            }
+
+    runner = _runner(RunMode.LIVE)
+    runner._strategy_registry = cast(Any, ActiveRegistry())  # noqa: SLF001
+    runner._market_selector = cast(Any, ScopeSelector())  # noqa: SLF001
+    runner._subscription_controller = cast(Any, RecordingSubscriptionController())  # noqa: SLF001
+    runner._controller_factory = cast(Any, ControllerFactory())  # noqa: SLF001
+
+    try:
+        await runner._handle_discovery_poll_complete()  # noqa: SLF001
+
+        assert runner._controller_runtimes["alpha"].asset_ids == frozenset(  # noqa: SLF001
+            {"fresh-token"}
+        )
+        assert events == [["fresh-token"]]
+        assert runner._reselection_requested.is_set()  # noqa: SLF001
+    finally:
+        runner._stop_event.set()  # noqa: SLF001
+        tasks = tuple(runner._controller_pipeline_tasks.values())  # noqa: SLF001
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_reselection_caps_subscription_asset_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _, discovery, market_data, selector, subscription_controller = _install_live_doubles(
+        monkeypatch,
+        events=events,
+        returned_asset_ids=["asset-a", "asset-b", "asset-c"],
+    )
+
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.LIVE,
+            auto_migrate_default_v2=False,
+            database=DatabaseSettings(
+                dsn="postgresql://localhost/pms_test_runner",
+                pool_min_size=2,
+                pool_max_size=10,
+            ),
+            sensor=SensorSettings(max_subscription_asset_ids=2),
+        ),
+        historical_data_path=FIXTURE_PATH,
+    )
+    await runner.start()
+
+    task = asyncio.create_task(runner._reselect())  # noqa: SLF001
+    await asyncio.wait_for(selector.call_started.wait(), timeout=2.0)
+    selector.call_release.set()
+    await asyncio.wait_for(subscription_controller.call_started.wait(), timeout=2.0)
+    subscription_controller.call_release.set()
+    await asyncio.wait_for(market_data.update_started.wait(), timeout=2.0)
+    market_data.update_release.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert subscription_controller.updates[-1] == ["asset-a", "asset-b"]
+    assert market_data.asset_ids == ["asset-a", "asset-b"]
+
+    discovery.poll_released.set()
+    await runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_refresh_subscription_updates_wait_for_reselection_lock() -> None:
     events: list[list[str]] = []
 
@@ -463,6 +666,42 @@ async def test_refresh_subscription_updates_wait_for_reselection_lock() -> None:
 
     assert subscription_controller.max_active_calls == 1
     assert events == [["strategy-token"], ["refresh-token"]]
+
+
+@pytest.mark.asyncio
+async def test_refresh_subscription_caps_asset_ids() -> None:
+    events: list[list[str]] = []
+
+    @dataclass
+    class RecordingSubscriptionController:
+        async def update(self, asset_ids: list[str]) -> bool:
+            events.append(list(asset_ids))
+            return True
+
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.LIVE,
+            auto_migrate_default_v2=False,
+            database=DatabaseSettings(
+                dsn="postgresql://localhost/pms_test_runner",
+                pool_min_size=2,
+                pool_max_size=10,
+            ),
+            sensor=SensorSettings(max_subscription_asset_ids=2),
+        ),
+        historical_data_path=FIXTURE_PATH,
+    )
+    runner._subscription_controller = cast(Any, RecordingSubscriptionController())  # noqa: SLF001
+    runner._controller_runtimes = {  # noqa: SLF001
+        "alpha": cast(
+            Any,
+            SimpleNamespace(asset_ids=frozenset({"asset-c", "asset-a", "asset-b"})),
+        )
+    }
+
+    await runner._refresh_subscription_assets_locked()  # noqa: SLF001
+
+    assert events == [["asset-a", "asset-b"]]
 
 
 @pytest.mark.asyncio

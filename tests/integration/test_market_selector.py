@@ -224,11 +224,8 @@ async def test_market_selector_returns_merged_asset_ids_from_active_strategies(
     result = await selector.select()
 
     assert result.asset_ids == [
-        "pm-far-secondary-no",
         "pm-far-secondary-yes",
-        "pm-fast-no",
         "pm-fast-yes",
-        "pm-near-secondary-no",
         "pm-near-secondary-yes",
     ]
     assert result.conflicts == []

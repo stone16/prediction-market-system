@@ -206,12 +206,12 @@ async def test_market_selector_builds_strategy_sets_before_merging(
         strategy_market_set_cls(
             strategy_id="alpha",
             strategy_version_id="alpha-v1",
-            asset_ids=frozenset({"pm-yes", "pm-no"}),
+            asset_ids=frozenset({"pm-yes"}),
         ),
         strategy_market_set_cls(
             strategy_id="beta",
             strategy_version_id="beta-v2",
-            asset_ids=frozenset({"pm-b-yes", "pm-b-no"}),
+            asset_ids=frozenset({"pm-b-yes"}),
         ),
     ]
     assert result.asset_ids == ["pm-b-no", "pm-b-yes", "pm-no", "pm-yes"]
@@ -287,12 +287,12 @@ async def test_market_selector_select_per_strategy_returns_pre_merge_strategy_se
         strategy_market_set_cls(
             strategy_id="alpha",
             strategy_version_id="alpha-v1",
-            asset_ids=frozenset({"pm-yes", "pm-no"}),
+            asset_ids=frozenset({"pm-yes"}),
         ),
         strategy_market_set_cls(
             strategy_id="beta",
             strategy_version_id="beta-v2",
-            asset_ids=frozenset({"pm-yes", "pm-no"}),
+            asset_ids=frozenset({"pm-yes"}),
         ),
     ]
 
