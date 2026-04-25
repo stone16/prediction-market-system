@@ -71,6 +71,7 @@ from pms.storage.fill_store import FillStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.market_subscription_store import PostgresMarketSubscriptionStore
 from pms.storage.opportunity_store import OpportunityStore
+from pms.storage.order_store import OrderStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
 from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
@@ -93,6 +94,7 @@ RUNNER_STATE_LIMIT = 1000
 RESELECTION_INTERVAL_S = 300.0
 DECISION_PENDING_TTL = timedelta(minutes=15)
 DECISION_SWEEP_INTERVAL_S = 5.0
+DEFAULT_OPERATIONAL_MARKET_SELECTION_HORIZON_DAYS = 90
 RAW_FACTOR_COMPOSITION_ROLES = frozenset(
     {
         "weighted",
@@ -174,6 +176,7 @@ class Runner:
     eval_store: EvalStore = field(default_factory=EvalStore)
     feedback_store: FeedbackStore = field(default_factory=FeedbackStore)
     decision_store: DecisionStore = field(default_factory=DecisionStore)
+    order_store: OrderStore = field(default_factory=OrderStore)
     fill_store: FillStore = field(default_factory=FillStore)
     opportunity_store: OpportunityStore = field(default_factory=OpportunityStore)
     portfolio: Portfolio = field(default_factory=lambda: Portfolio(
@@ -351,7 +354,11 @@ class Runner:
 
         self._stop_event.clear()
         self._controller_pipeline_error = None
-        self.state.runner_started_at = datetime.now(tz=UTC)
+        self.state = RunnerState(
+            mode=self.config.mode,
+            runner_started_at=datetime.now(tz=UTC),
+        )
+        self._paper_orderbooks.clear()
 
         try:
             self._assert_no_legacy_jsonl_paths()
@@ -574,7 +581,7 @@ class Runner:
         )
         self._subscription_controller = SensorSubscriptionController(subscription_sink)
         self._register_strategy_change_callbacks()
-        discovery_sensor.on_poll_complete = self._request_reselection
+        discovery_sensor.on_poll_complete = self._handle_discovery_poll_complete
         self._reselection_task = asyncio.create_task(self._periodic_reselection_loop())
 
     def _register_strategy_change_callbacks(self) -> None:
@@ -630,7 +637,13 @@ class Runner:
         strategy = await registry.get_by_id("default")
         if strategy is None:
             return
-        if strategy.config.factor_composition == DEFAULT_V2_FACTOR_COMPOSITION:
+        migrated_market_selection = _operational_default_market_selection(
+            strategy.market_selection
+        )
+        if (
+            strategy.config.factor_composition == DEFAULT_V2_FACTOR_COMPOSITION
+            and strategy.market_selection == migrated_market_selection
+        ):
             return
 
         migrated_strategy = Strategy(
@@ -641,7 +654,7 @@ class Runner:
             risk=strategy.risk,
             eval_spec=strategy.eval_spec,
             forecaster=strategy.forecaster,
-            market_selection=strategy.market_selection,
+            market_selection=migrated_market_selection,
         )
         version = await registry.create_version(migrated_strategy)
         await registry.set_active("default", version.strategy_version_id)
@@ -668,6 +681,8 @@ class Runner:
             self.feedback_store.bind_pool(self._pg_pool)
         if isinstance(self.decision_store, DecisionStore):
             self.decision_store.bind_pool(self._pg_pool)
+        if isinstance(self.order_store, OrderStore):
+            self.order_store.bind_pool(self._pg_pool)
         if isinstance(self.fill_store, FillStore):
             self.fill_store.bind_pool(self._pg_pool)
         if isinstance(self.opportunity_store, OpportunityStore):
@@ -683,6 +698,8 @@ class Runner:
             self.feedback_store.pool = None
         if isinstance(self.decision_store, DecisionStore):
             self.decision_store.pool = None
+        if isinstance(self.order_store, OrderStore):
+            self.order_store.pool = None
         if isinstance(self.fill_store, FillStore):
             self.fill_store.pool = None
         if isinstance(self.opportunity_store, OpportunityStore):
@@ -844,6 +861,10 @@ class Runner:
                     dedup_acquired=work_item.dedup_acquired,
                 )
                 _append_bounded(self.state.orders, order_state)
+                try:
+                    await self.order_store.insert(order_state)
+                except Exception as error:  # noqa: BLE001
+                    logger.warning("order persistence failed: %s", error)
                 fill = _fill_from_order(order_state, decision, signal)
                 if fill is not None:
                     _append_bounded(self.state.fills, fill)
@@ -1074,7 +1095,9 @@ class Runner:
             return
         async with self._reselection_lock:
             result = await selector.select()
-            await subscription_controller.update(list(result.asset_ids))
+            await subscription_controller.update(
+                _cap_subscription_asset_ids(list(result.asset_ids), self.config)
+            )
 
     async def _periodic_reselection_loop(self) -> None:
         while True:
@@ -1105,6 +1128,13 @@ class Runner:
 
     async def _request_reselection(self) -> None:
         self._reselection_requested.set()
+
+    async def _handle_discovery_poll_complete(self) -> None:
+        try:
+            await self._sync_controller_runtimes()
+        except Exception as error:  # noqa: BLE001
+            logger.warning("discovery-driven controller sync failed: %s", error)
+        await self._request_reselection()
 
     async def _await_cancelled_task(
         self,
@@ -1147,6 +1177,8 @@ class Runner:
             }
             current_strategy_ids = set(self._controller_runtimes)
             desired_strategy_ids = set(desired_by_strategy)
+            if not current_strategy_ids and not desired_strategy_ids:
+                return
 
             for strategy_id in sorted(current_strategy_ids - desired_strategy_ids):
                 await self._release_controller_runtime_locked(strategy_id)
@@ -1265,7 +1297,9 @@ class Runner:
             }
         )
         async with self._reselection_lock:
-            await subscription_controller.update(merged_asset_ids)
+            await subscription_controller.update(
+                _cap_subscription_asset_ids(merged_asset_ids, self.config)
+            )
 
     async def _maybe_inject_controller_release_cancel(
         self,
@@ -1319,6 +1353,8 @@ class Runner:
             )
         ):
             active_strategies = await self._strategy_registry.list_active_strategies()
+            if not active_strategies:
+                return []
             scopes: dict[str, frozenset[str]] = {}
             if (
                 self._market_selector is not None
@@ -1418,7 +1454,9 @@ def _default_active_strategy(settings: PMSSettings) -> ActiveStrategy:
     )
     market_selection = MarketSelectionSpec(
         venue="polymarket",
-        resolution_time_max_horizon_days=7,
+        resolution_time_max_horizon_days=(
+            DEFAULT_OPERATIONAL_MARKET_SELECTION_HORIZON_DAYS
+        ),
         volume_min_usdc=500.0,
     )
     strategy_version_id = compute_strategy_version_id(
@@ -1437,6 +1475,34 @@ def _default_active_strategy(settings: PMSSettings) -> ActiveStrategy:
         forecaster=forecaster,
         market_selection=market_selection,
     )
+
+
+def _operational_default_market_selection(
+    market_selection: MarketSelectionSpec,
+) -> MarketSelectionSpec:
+    if market_selection.resolution_time_max_horizon_days != 7:
+        return market_selection
+    return replace(
+        market_selection,
+        resolution_time_max_horizon_days=(
+            DEFAULT_OPERATIONAL_MARKET_SELECTION_HORIZON_DAYS
+        ),
+    )
+
+
+def _cap_subscription_asset_ids(
+    asset_ids: list[str],
+    settings: PMSSettings,
+) -> list[str]:
+    limit = settings.sensor.max_subscription_asset_ids
+    if limit is None or len(asset_ids) <= limit:
+        return asset_ids
+    logger.warning(
+        "subscription asset set capped at %d of %d selected assets",
+        limit,
+        len(asset_ids),
+    )
+    return asset_ids[:limit]
 
 
 def _fill_from_order(

@@ -118,6 +118,9 @@ async def _seed_market_data(pg_pool: asyncpg.Pool) -> None:
             created_at=now - timedelta(days=1),
             last_seen_at=now,
             volume_24h=1200.0,
+            yes_price=0.46,
+            no_price=0.54,
+            price_updated_at=now,
         )
     )
     await store.write_token(
@@ -208,7 +211,7 @@ async def test_positions_and_trades_routes_reflect_persisted_paper_fill(
                 "side": "BUY",
                 "shares_held": 50.0,
                 "avg_entry_price": 0.41,
-                "unrealized_pnl": 0.0,
+                "unrealized_pnl": 2.5,
                 "locked_usdc": 20.5,
             }
         ]

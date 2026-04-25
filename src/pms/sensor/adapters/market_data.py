@@ -59,6 +59,7 @@ class MarketDataSensor:
     _HEARTBEAT_INTERVAL_S = 10.0
     _PONG_TIMEOUT_S = 15.0
     _WATCHDOG_TIMEOUT_S = 120.0
+    _CLOSE_TIMEOUT_S = 1.0
 
     def __init__(
         self,
@@ -69,6 +70,7 @@ class MarketDataSensor:
         self.store = store
         self.ws_url = ws_url
         self._asset_ids: list[str] = list(asset_ids) if asset_ids else []
+        self._subscribed_asset_ids: frozenset[str] = frozenset()
         self._books: dict[str, _BookState] = {}
         self._websocket: Any = None
         self._send_lock = asyncio.Lock()
@@ -127,7 +129,7 @@ class MarketDataSensor:
                     "reconnect" if self._connected_once else "subscribe"
                 )
                 try:
-                    async with connect(self.ws_url) as websocket:
+                    async with self._connect() as websocket:
                         self._reset_book_state()
                         self._websocket = websocket
                         self._connection_book_source = connection_book_source
@@ -138,6 +140,7 @@ class MarketDataSensor:
                         self._heartbeat_task = heartbeat_task
                         try:
                             await self._send_subscription()
+                            self._subscribed_asset_ids = frozenset(self._asset_ids)
                             self._connected_once = True
                             backoff = self._INITIAL_BACKOFF_S
                             async for raw_message in websocket:
@@ -150,6 +153,7 @@ class MarketDataSensor:
                             self._heartbeat_task = None
                             self._websocket = None
                             self._connection_book_source = None
+                            self._subscribed_asset_ids = frozenset()
                             self._pending_reconnect_assets = set()
                             self._reset_book_state()
                 except asyncio.CancelledError:
@@ -169,11 +173,13 @@ class MarketDataSensor:
             await self._watchdog.stop()
             self._websocket = None
             self._connection_book_source = None
+            self._subscribed_asset_ids = frozenset()
             self._pending_reconnect_assets = set()
             self._reset_book_state()
 
     async def update_subscription(self, asset_ids: list[str]) -> None:
-        self._asset_ids = list(asset_ids)
+        next_asset_ids = list(dict.fromkeys(asset_ids))
+        self._asset_ids = next_asset_ids
         if self._websocket is None:
             return
 
@@ -183,7 +189,11 @@ class MarketDataSensor:
             await self._sleep(self._POOL_RETRY_BACKOFF_S)
             await self._probe_pool_latency()
 
-        await self._send_subscription()
+        await self._send_subscription_update(
+            previous_asset_ids=self._subscribed_asset_ids,
+            next_asset_ids=next_asset_ids,
+        )
+        self._subscribed_asset_ids = frozenset(next_asset_ids)
 
     async def aclose(self) -> None:
         heartbeat_task = self._heartbeat_task
@@ -195,6 +205,7 @@ class MarketDataSensor:
 
         websocket = self._websocket
         self._websocket = None
+        self._subscribed_asset_ids = frozenset()
         if websocket is not None:
             await websocket.close()
         await self._watchdog.stop()
@@ -386,6 +397,52 @@ class MarketDataSensor:
         async with self._send_lock:
             await websocket.send(json.dumps(_subscription_payload(self._asset_ids)))
 
+    def _connect(self) -> Any:
+        try:
+            return connect(self.ws_url, close_timeout=self._CLOSE_TIMEOUT_S)
+        except TypeError as exc:
+            if "close_timeout" not in str(exc):
+                raise
+            return connect(self.ws_url)
+
+    async def _send_subscription_update(
+        self,
+        *,
+        previous_asset_ids: frozenset[str],
+        next_asset_ids: list[str],
+    ) -> None:
+        websocket = self._websocket
+        if websocket is None:
+            return
+        next_asset_set = frozenset(next_asset_ids)
+        removed_asset_ids = sorted(previous_asset_ids - next_asset_set)
+        added_asset_ids = [
+            asset_id
+            for asset_id in next_asset_ids
+            if asset_id not in previous_asset_ids
+        ]
+        async with self._send_lock:
+            if removed_asset_ids:
+                await websocket.send(
+                    json.dumps(
+                        _subscription_update_payload(
+                            removed_asset_ids,
+                            operation="unsubscribe",
+                        )
+                    )
+                )
+                for asset_id in removed_asset_ids:
+                    self._books.pop(asset_id, None)
+            if added_asset_ids:
+                await websocket.send(
+                    json.dumps(
+                        _subscription_update_payload(
+                            added_asset_ids,
+                            operation="subscribe",
+                        )
+                    )
+                )
+
     async def _probe_pool_latency(self) -> float:
         started = time.perf_counter()
         async with self.store.pool.acquire():
@@ -459,6 +516,17 @@ def _subscription_payload(asset_ids: list[str]) -> dict[str, Any]:
         "type": "market",
         "initial_dump": True,
         "level": 2,
+    }
+
+
+def _subscription_update_payload(
+    asset_ids: list[str],
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    return {
+        "assets_ids": asset_ids,
+        "operation": operation,
     }
 
 

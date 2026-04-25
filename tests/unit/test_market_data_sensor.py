@@ -254,6 +254,51 @@ async def test_market_data_sensor_replays_fixture_losslessly_and_persists_piecew
 
 
 @pytest.mark.asyncio
+async def test_market_data_sensor_bounds_websocket_close_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store_mock()
+    captured_kwargs: dict[str, Any] = {}
+    fake_websocket = HeartbeatWebSocket(
+        [
+            json.dumps(
+                {
+                    "event_type": "book",
+                    "market": "m-close-timeout",
+                    "asset_id": "asset-close-timeout",
+                    "timestamp": "1757908892351",
+                    "hash": "book-close-timeout",
+                    "bids": [{"price": "0.40", "size": "5"}],
+                    "asks": [{"price": "0.60", "size": "5"}],
+                    "last_trade_price": "0.50",
+                }
+            )
+        ],
+        ping_outcomes=[0.0],
+    )
+
+    def fake_connect(url: str, **kwargs: Any) -> FakeConnect:
+        del url
+        captured_kwargs.update(kwargs)
+        return FakeConnect(fake_websocket)
+
+    monkeypatch.setattr("pms.sensor.adapters.market_data.connect", fake_connect)
+    sensor = MarketDataSensor(
+        store=store,
+        ws_url="ws://market-data.example.test",
+        asset_ids=["asset-close-timeout"],
+    )
+    iterator = cast(Any, sensor.__aiter__())
+
+    signal = await asyncio.wait_for(anext(iterator), timeout=0.5)
+    await asyncio.wait_for(iterator.aclose(), timeout=0.5)
+    await sensor.aclose()
+
+    assert signal.market_id == "m-close-timeout"
+    assert captured_kwargs["close_timeout"] == 1.0
+
+
+@pytest.mark.asyncio
 async def test_market_data_sensor_persists_last_trade_price_and_emits_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -345,11 +390,32 @@ async def test_market_data_sensor_update_subscription_warns_and_retries_on_slow_
     assert fake_websocket.sent_messages == [
         {
             "assets_ids": ["asset-a", "asset-b"],
-            "type": "market",
-            "initial_dump": True,
-            "level": 2,
+            "operation": "subscribe",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_dynamic_update_sends_subscribe_and_unsubscribe_deltas(
+) -> None:
+    sensor = MarketDataSensor(store=_store_mock(), asset_ids=["asset-a", "asset-b"])
+    fake_websocket = FakeWebSocket([])
+    sensor._websocket = cast(Any, fake_websocket)
+    sensor._subscribed_asset_ids = frozenset({"asset-a", "asset-b"})
+
+    await sensor.update_subscription(["asset-b", "asset-c"])
+
+    assert fake_websocket.sent_messages == [
+        {
+            "assets_ids": ["asset-a"],
+            "operation": "unsubscribe",
+        },
+        {
+            "assets_ids": ["asset-c"],
+            "operation": "subscribe",
+        },
+    ]
+    assert sensor._subscribed_asset_ids == frozenset({"asset-b", "asset-c"})
 
 
 @pytest.mark.asyncio

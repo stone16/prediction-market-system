@@ -330,6 +330,7 @@ async def test_runner_close_pg_pool_unbinds_eval_and_feedback_stores(
     from pms.storage.eval_store import EvalStore
     from pms.storage.feedback_store import FeedbackStore
     from pms.storage.fill_store import FillStore
+    from pms.storage.order_store import OrderStore
 
     fake_pool = FakePool()
     runner = _runner(
@@ -338,11 +339,13 @@ async def test_runner_close_pg_pool_unbinds_eval_and_feedback_stores(
         eval_store=EvalStore(),
         feedback_store=FeedbackStore(),
         decision_store=DecisionStore(),
+        order_store=OrderStore(),
         fill_store=FillStore(),
     )
     eval_store = runner.eval_store
     feedback_store = runner.feedback_store
     decision_store = runner.decision_store
+    order_store = runner.order_store
     fill_store = runner.fill_store
 
     runner.bind_pg_pool(cast(Any, fake_pool))
@@ -350,6 +353,7 @@ async def test_runner_close_pg_pool_unbinds_eval_and_feedback_stores(
     assert eval_store.pool is fake_pool
     assert feedback_store.pool is fake_pool
     assert decision_store.pool is fake_pool
+    assert order_store.pool is fake_pool
     assert fill_store.pool is fake_pool
 
     await runner.close_pg_pool()
@@ -357,6 +361,7 @@ async def test_runner_close_pg_pool_unbinds_eval_and_feedback_stores(
     assert getattr(eval_store, "pool", None) is None
     assert getattr(feedback_store, "pool", None) is None
     assert getattr(decision_store, "pool", None) is None
+    assert getattr(order_store, "pool", None) is None
     assert getattr(fill_store, "pool", None) is None
 
 

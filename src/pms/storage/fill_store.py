@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 import json
 from typing import Any, cast
 
@@ -107,26 +108,60 @@ class FillStore:
             await _ensure_fill_payloads_table(connection)
             rows = await connection.fetch(
                 """
+                WITH aggregated_positions AS (
+                    SELECT
+                        fills.market_id,
+                        fill_payloads.payload->>'token_id' AS token_id,
+                        fill_payloads.payload->>'venue' AS venue,
+                        fill_payloads.payload->>'side' AS side,
+                        SUM(fills.fill_quantity) AS shares_held,
+                        CASE
+                            WHEN SUM(fills.fill_quantity) = 0 THEN 0.0
+                            ELSE SUM(fills.fill_notional_usdc) / SUM(fills.fill_quantity)
+                        END AS avg_entry_price,
+                        SUM(fills.fill_notional_usdc) AS locked_usdc,
+                        MAX(fills.ts) AS last_fill_at
+                    FROM fills
+                    INNER JOIN fill_payloads
+                        ON fill_payloads.fill_id = fills.fill_id
+                    GROUP BY
+                        fills.market_id,
+                        fill_payloads.payload->>'token_id',
+                        fill_payloads.payload->>'venue',
+                        fill_payloads.payload->>'side'
+                )
                 SELECT
-                    fills.market_id,
-                    fill_payloads.payload->>'token_id' AS token_id,
-                    fill_payloads.payload->>'venue' AS venue,
-                    fill_payloads.payload->>'side' AS side,
-                    SUM(fills.fill_quantity) AS shares_held,
+                    aggregated_positions.market_id,
+                    aggregated_positions.token_id,
+                    aggregated_positions.venue,
+                    aggregated_positions.side,
+                    aggregated_positions.shares_held,
+                    aggregated_positions.avg_entry_price,
+                    aggregated_positions.locked_usdc,
                     CASE
-                        WHEN SUM(fills.fill_quantity) = 0 THEN 0.0
-                        ELSE SUM(fills.fill_notional_usdc) / SUM(fills.fill_quantity)
-                    END AS avg_entry_price,
-                    SUM(fills.fill_notional_usdc) AS locked_usdc
-                FROM fills
-                INNER JOIN fill_payloads
-                    ON fill_payloads.fill_id = fills.fill_id
-                GROUP BY
-                    fills.market_id,
-                    fill_payloads.payload->>'token_id',
-                    fill_payloads.payload->>'venue',
-                    fill_payloads.payload->>'side'
-                ORDER BY MAX(fills.ts) DESC, fills.market_id ASC
+                        WHEN tokens.outcome = 'YES' THEN COALESCE(
+                            markets.yes_price,
+                            CASE
+                                WHEN markets.no_price IS NULL THEN NULL
+                                ELSE 1 - markets.no_price
+                            END
+                        )
+                        WHEN tokens.outcome = 'NO' THEN COALESCE(
+                            markets.no_price,
+                            CASE
+                                WHEN markets.yes_price IS NULL THEN NULL
+                                ELSE 1 - markets.yes_price
+                            END
+                        )
+                        ELSE markets.yes_price
+                    END AS current_price
+                FROM aggregated_positions
+                LEFT JOIN tokens
+                    ON tokens.token_id = aggregated_positions.token_id
+                LEFT JOIN markets
+                    ON markets.condition_id = aggregated_positions.market_id
+                ORDER BY aggregated_positions.last_fill_at DESC,
+                    aggregated_positions.market_id ASC
                 """
             )
         return [_position_from_row(row) for row in rows]
@@ -252,9 +287,36 @@ def _position_from_row(row: asyncpg.Record) -> Position:
         side=cast(str, row["side"]),
         shares_held=float(cast(float, row["shares_held"])),
         avg_entry_price=float(cast(float, row["avg_entry_price"])),
-        unrealized_pnl=0.0,
+        unrealized_pnl=_unrealized_pnl_from_row(row),
         locked_usdc=float(cast(float, row["locked_usdc"])),
     )
+
+
+def _unrealized_pnl_from_row(row: asyncpg.Record) -> float:
+    current_price = _decimal_or_none(_optional_row_value(row, "current_price"))
+    if current_price is None:
+        return 0.0
+
+    shares_held = Decimal(str(row["shares_held"]))
+    avg_entry_price = Decimal(str(row["avg_entry_price"]))
+    if str(row["side"]).upper() == "SELL":
+        pnl = (avg_entry_price - current_price) * shares_held
+    else:
+        pnl = (current_price - avg_entry_price) * shares_held
+    return float(pnl)
+
+
+def _optional_row_value(row: asyncpg.Record, key: str) -> object | None:
+    try:
+        return cast(object, row[key])
+    except KeyError:
+        return None
+
+
+def _decimal_or_none(value: object | None) -> Decimal | None:
+    if value is None:
+        return None
+    return Decimal(str(value))
 
 
 def _trade_from_row(row: asyncpg.Record) -> StoredTradeRow:

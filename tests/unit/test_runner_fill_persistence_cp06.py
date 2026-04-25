@@ -137,6 +137,29 @@ class _EvaluatorSpoolDouble:
         self.calls.append((fill.market_id, decision.decision_id))
 
 
+class _RecordingOrderStore:
+    def __init__(self, runner: Runner) -> None:
+        self.runner = runner
+        self.calls: list[str] = []
+
+    async def insert(self, order: OrderState) -> None:
+        assert self.runner.state.orders[-1] == order
+        self.calls.append(order.market_id)
+
+
+class _FlakyOrderStore(_RecordingOrderStore):
+    def __init__(self, runner: Runner) -> None:
+        super().__init__(runner)
+        self.fail_first = True
+
+    async def insert(self, order: OrderState) -> None:
+        assert self.runner.state.orders[-1] == order
+        self.calls.append(order.market_id)
+        if self.fail_first:
+            self.fail_first = False
+            raise RuntimeError("order store down")
+
+
 class _RecordingFillStore:
     def __init__(self, runner: Runner) -> None:
         self.runner = runner
@@ -173,6 +196,7 @@ async def test_actuator_loop_persists_fill_after_appending_runner_state() -> Non
     runner = _runner()
     runner.actuator_executor = cast(Any, _ExecutorDouble())
     runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _RecordingOrderStore(runner))
     runner.fill_store = cast(Any, _RecordingFillStore(runner))
     _mark_controller_done(runner)
 
@@ -183,12 +207,66 @@ async def test_actuator_loop_persists_fill_after_appending_runner_state() -> Non
 
     await _run_actuator_loop(runner)
 
+    assert [order.market_id for order in runner.state.orders] == ["market-cp06-a"]
+    assert cast(_RecordingOrderStore, runner.order_store).calls == ["market-cp06-a"]
     assert [fill.market_id for fill in runner.state.fills] == ["market-cp06-a"]
     assert cast(_RecordingFillStore, runner.fill_store).calls == ["market-cp06-a"]
     assert runner.portfolio.locked_usdc == pytest.approx(20.5)
     assert cast(_EvaluatorSpoolDouble, runner._evaluator_spool).calls == [
         ("market-cp06-a", "decision-market-cp06-a")
     ]
+
+
+@pytest.mark.asyncio
+async def test_actuator_loop_logs_order_store_failures_and_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runner = _runner()
+    runner.actuator_executor = cast(Any, _ExecutorDouble())
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _FlakyOrderStore(runner))
+    runner.fill_store = cast(Any, _RecordingFillStore(runner))
+    _mark_controller_done(runner)
+
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(
+            _decision(market_id="market-cp06-a"),
+            _signal(market_id="market-cp06-a"),
+        )
+    )
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(
+            _decision(market_id="market-cp06-b"),
+            _signal(market_id="market-cp06-b"),
+        )
+    )
+
+    caplog.set_level(logging.WARNING, logger="pms.runner")
+
+    await _run_actuator_loop(runner)
+
+    assert [order.market_id for order in runner.state.orders] == [
+        "market-cp06-a",
+        "market-cp06-b",
+    ]
+    assert cast(_FlakyOrderStore, runner.order_store).calls == [
+        "market-cp06-a",
+        "market-cp06-b",
+    ]
+    assert [fill.market_id for fill in runner.state.fills] == [
+        "market-cp06-a",
+        "market-cp06-b",
+    ]
+    assert cast(_RecordingFillStore, runner.fill_store).calls == [
+        "market-cp06-a",
+        "market-cp06-b",
+    ]
+    assert runner.portfolio.locked_usdc == pytest.approx(41.0)
+    assert cast(_EvaluatorSpoolDouble, runner._evaluator_spool).calls == [
+        ("market-cp06-a", "decision-market-cp06-a"),
+        ("market-cp06-b", "decision-market-cp06-b"),
+    ]
+    assert "order persistence failed" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -210,3 +210,48 @@ async def test_paper_runner_fills_against_signal_orderbook_depth(
     assert runner.state.orders[0].raw_status == "matched"
     assert runner.state.orders[0].fill_price == pytest.approx(0.41)
     assert len(runner.state.fills) == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_start_resets_in_memory_session_state(
+    tmp_path: Path,
+) -> None:
+    runner = Runner(
+        config=_settings(RunMode.PAPER),
+        sensors=[
+            OneShotSensor(
+                _signal(
+                    market_id="paper-state-reset",
+                    orderbook={
+                        "bids": [{"price": 0.39, "size": 250.0}],
+                        "asks": [{"price": 0.41, "size": 250.0}],
+                    },
+                    external_signal={"metaculus_prob": 0.9, "resolved_outcome": 1.0},
+                )
+            )
+        ],
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+
+    await runner.start()
+    await asyncio.wait_for(runner.wait_until_idle(), timeout=5.0)
+    await asyncio.wait_for(runner.stop(), timeout=5.0)
+
+    assert runner.state.signals
+    assert runner.state.decisions
+    assert runner.state.orders
+
+    runner.sensors = [HoldingSensor()]
+    await runner.start()
+    try:
+        assert runner.state.mode == RunMode.PAPER
+        assert runner.state.runner_started_at is not None
+        assert runner.state.signals == []
+        assert runner.state.opportunities == []
+        assert runner.state.decisions == []
+        assert runner.state.orders == []
+        assert runner.state.fills == []
+        assert runner.state.controller_diagnostics == []
+    finally:
+        await asyncio.wait_for(runner.stop(), timeout=5.0)

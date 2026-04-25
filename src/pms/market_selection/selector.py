@@ -89,4 +89,5 @@ def _asset_ids_from_eligible_markets(
         token.token_id
         for _, tokens in eligible_markets
         for token in tokens
+        if token.outcome == "YES"
     )
