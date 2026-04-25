@@ -502,11 +502,21 @@ def _order_result_from_sdk_response(
         )
         raise LiveTradingDisabledError(msg)
 
+    # `fill_count` is the venue-side contract count alias documented at
+    # `docs/research/schema-spec.md:284,307` — order-response contract
+    # count used for order-state reconciliation. Including it here
+    # closes the bypass codex called out in Round 7 finding f14: a
+    # response with `fill_count: "nan"` was previously not seen by the
+    # raw-presence check and therefore could route through the matched
+    # full-fill synthesis path. NOTE: `price` is intentionally NOT
+    # aliased to fill_price — in `py_clob_client_v2.OrderArgs`/
+    # `MarketOrderArgs`, `price` is the *request* price, not the fill
+    # price. Aliasing it would conflate request and execution data.
     quantity_field_present = _response_field_present(
-        response, "filled_quantity", "filledQuantity", "filled_size", "filled"
+        response, "filled_quantity", "filledQuantity", "filled_size", "filled", "fill_count"
     )
     raw_quantity = _response_value(
-        response, "filled_quantity", "filledQuantity", "filled_size", "filled"
+        response, "filled_quantity", "filledQuantity", "filled_size", "filled", "fill_count"
     )
     explicit_filled_quantity = _coerce_float_or_none(raw_quantity)
     if quantity_field_present and explicit_filled_quantity is None:

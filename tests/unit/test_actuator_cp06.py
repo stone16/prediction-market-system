@@ -1903,6 +1903,60 @@ async def test_polymarket_matched_status_rejects_null_fill_price(
         )
 
 
+# --- review-loop round-7 follow-ups (codex finding f14, partial accept) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_recognizes_fill_count_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f14: `fill_count` is documented at
+    `docs/research/schema-spec.md:284,307` as a venue-side contract
+    count alias for filled_quantity. Recognising it ensures malformed
+    `fill_count` values (e.g. "nan") get routed through the
+    raw-presence rejection path rather than being silently ignored."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "fill_count": "nan",
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="unparseable filled_quantity"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_recognizes_fill_count_as_valid_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive control: a well-formed `fill_count` is accepted as the
+    canonical filled_quantity, just like `filled_quantity` itself."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 4.0,
+            "fill_count": 8.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        _partial_fill_request(),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert result.filled_quantity == pytest.approx(8.0)
+    assert result.filled_notional_usdc == pytest.approx(4.0)
+
+
 def _install_partial_fill_sdk(
     monkeypatch: pytest.MonkeyPatch,
     *,
