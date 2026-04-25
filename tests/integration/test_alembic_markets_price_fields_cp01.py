@@ -78,7 +78,7 @@ def test_migration_0006_apply_and_reverse() -> None:
     try:
         _run_psql(admin_database_url, "-c", f"CREATE DATABASE {temp_database}")
 
-        upgrade = _run_alembic(temp_database_url, "upgrade", "head")
+        upgrade = _run_alembic(temp_database_url, "upgrade", "0006_markets_price_fields")
         assert upgrade.returncode == 0, upgrade.stderr
 
         columns = _run_psql(

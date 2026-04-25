@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from pms.api.app import create_app
-from pms.config import DatabaseSettings, PMSSettings
+from pms.config import DatabaseSettings, PMSSettings, PolymarketSettings
 from pms.core.enums import RunMode
 from pms.core.models import Market, MarketSignal, Token
 from pms.runner import Runner
@@ -104,7 +104,16 @@ class _NoopFactorService:
 def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.LIVE,
+        live_trading_enabled=True,
         auto_migrate_default_v2=False,
+        polymarket=PolymarketSettings(
+            private_key="private-key",
+            api_key="api-key",
+            api_secret="api-secret",
+            api_passphrase="passphrase",
+            signature_type=1,
+            funder_address="0xabc",
+        ),
         database=DatabaseSettings(
             dsn=cast(str, PMS_TEST_DATABASE_URL),
             pool_min_size=1,

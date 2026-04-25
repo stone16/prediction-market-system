@@ -19,6 +19,8 @@ from pms.storage.market_data_store import PostgresMarketDataStore
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
+ACTIVE_MARKET_NOW = datetime(2035, 4, 23, 12, 0, tzinfo=UTC)
+EXPIRED_MARKET_AT = datetime(2020, 1, 1, 12, 0, tzinfo=UTC)
 
 pytestmark = [
     pytest.mark.integration,
@@ -136,7 +138,7 @@ async def test_get_markets_returns_20_active_rows_with_subscription_state(
     pg_pool: asyncpg.Pool,
 ) -> None:
     store = PostgresMarketDataStore(pg_pool)
-    now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    now = ACTIVE_MARKET_NOW
 
     for index in range(20):
         market_id = f"market-{index:02d}"
@@ -154,9 +156,9 @@ async def test_get_markets_returns_20_active_rows_with_subscription_state(
         store,
         market_id="market-expired",
         question="Should not be returned",
-        resolves_at=now - timedelta(days=2),
-        created_at=now - timedelta(days=14),
-        updated_at=now - timedelta(days=1),
+        resolves_at=EXPIRED_MARKET_AT,
+        created_at=EXPIRED_MARKET_AT - timedelta(days=14),
+        updated_at=EXPIRED_MARKET_AT - timedelta(days=1),
         volume_24h=9_999.0,
     )
 
@@ -200,7 +202,7 @@ async def test_markets_route_returns_price_fields(
     pg_pool: asyncpg.Pool,
 ) -> None:
     store = PostgresMarketDataStore(pg_pool)
-    now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    now = ACTIVE_MARKET_NOW
     price_updated_at = now - timedelta(seconds=15)
     await _seed_market(
         store,
@@ -242,7 +244,7 @@ async def test_markets_route_returns_subscription_source_user(
     pg_pool: asyncpg.Pool,
 ) -> None:
     store = PostgresMarketDataStore(pg_pool)
-    now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    now = ACTIVE_MARKET_NOW
     yes_token_id, _ = await _seed_market(
         store,
         market_id="market-user-subscription",
@@ -276,7 +278,7 @@ async def test_markets_route_subscription_source_null_when_idle(
     pg_pool: asyncpg.Pool,
 ) -> None:
     store = PostgresMarketDataStore(pg_pool)
-    now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    now = ACTIVE_MARKET_NOW
     await _seed_market(
         store,
         market_id="market-idle",
@@ -302,7 +304,7 @@ async def test_markets_route_subscribed_true_when_selector_has_token_even_if_no_
     pg_pool: asyncpg.Pool,
 ) -> None:
     store = PostgresMarketDataStore(pg_pool)
-    now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    now = ACTIVE_MARKET_NOW
     yes_token_id, _ = await _seed_market(
         store,
         market_id="market-selector-subscription",
@@ -331,7 +333,7 @@ async def test_subscribe_unsubscribe_roundtrip(
     pg_pool: asyncpg.Pool,
 ) -> None:
     store = PostgresMarketDataStore(pg_pool)
-    now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    now = ACTIVE_MARKET_NOW
     yes_token_id, _ = await _seed_market(
         store,
         market_id="market-subscribe-roundtrip",
@@ -378,7 +380,7 @@ async def test_price_history_endpoint_returns_chronological_order(
     pg_pool: asyncpg.Pool,
 ) -> None:
     store = PostgresMarketDataStore(pg_pool)
-    now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    now = ACTIVE_MARKET_NOW
     await _seed_market(
         store,
         market_id="market-price-history",

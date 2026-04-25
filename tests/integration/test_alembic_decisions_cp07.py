@@ -67,7 +67,7 @@ def test_alembic_decisions_table_upgrade_and_downgrade_round_trip() -> None:
 
     try:
         _run_psql(admin_database_url, "-c", f"CREATE DATABASE {temp_database}")
-        upgrade = _run_alembic(temp_database_url, "upgrade", "head")
+        upgrade = _run_alembic(temp_database_url, "upgrade", "0004_decisions_table")
         assert upgrade.returncode == 0, upgrade.stderr
 
         columns = _run_psql(

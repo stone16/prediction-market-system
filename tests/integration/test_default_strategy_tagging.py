@@ -317,5 +317,7 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
     tagged_strategy_id, tagged_strategy_version_id = next(iter(strategy_pairs["feedback"]))
     assert tagged_strategy_id == "default"
     assert tagged_strategy_version_id
-    assert strategy_pairs["orders"] == set()
-    assert strategy_pairs["fills"] == set()
+    assert counts["orders"] > 0
+    assert counts["fills"] > 0
+    assert strategy_pairs["orders"] == strategy_pairs["feedback"]
+    assert strategy_pairs["fills"] == strategy_pairs["feedback"]

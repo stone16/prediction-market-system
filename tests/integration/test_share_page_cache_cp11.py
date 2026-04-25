@@ -114,6 +114,16 @@ def _run_dashboard_server(
     build_env["PMS_API_BASE_URL"] = f"http://127.0.0.1:{api_port}"
     build_env["PMS_SHARE_DEBUG_RENDER"] = "1"
     build_env["PMS_SHARE_REVALIDATE_SECONDS"] = str(revalidate_seconds)
+    next_binary = DASHBOARD_DIR / "node_modules" / ".bin" / "next"
+    if not next_binary.exists():
+        subprocess.run(
+            ["npm", "ci"],
+            cwd=DASHBOARD_DIR,
+            env=build_env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
     subprocess.run(
         ["npm", "run", "build"],
         cwd=DASHBOARD_DIR,
