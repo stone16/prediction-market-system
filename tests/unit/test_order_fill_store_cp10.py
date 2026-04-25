@@ -175,6 +175,7 @@ async def test_fill_store_insert_wraps_shell_and_payload_writes_in_transaction()
     assert connection.execute_flags == [False, True, True]
 
 
+@pytest.mark.real_fill_store
 @pytest.mark.asyncio
 async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
     connection = _RecordingConnection()
@@ -211,6 +212,7 @@ async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
     assert "LEFT JOIN markets" in connection.fetch_calls[0][0]
 
 
+@pytest.mark.real_fill_store
 @pytest.mark.asyncio
 async def test_fill_store_read_positions_maps_missing_market_price_to_zero_pnl() -> None:
     connection = _RecordingConnection()

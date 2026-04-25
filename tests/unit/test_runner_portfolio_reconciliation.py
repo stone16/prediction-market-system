@@ -176,3 +176,49 @@ async def test_reconcile_no_op_when_no_persisted_positions() -> None:
     assert runner.portfolio.locked_usdc == 0.0
     assert runner.portfolio.free_usdc == 1000.0
     assert runner.portfolio.open_positions == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fails_closed_in_live_mode_on_db_error() -> None:
+    """SECURITY: in LIVE mode, swallowing DB errors and continuing with
+    the default `$1000 free` portfolio recreates the exact restart-
+    exposure bug this method exists to prevent. Codex round-1 finding f1.
+    """
+    from pms.config import PMSSettings
+    from pms.core.enums import RunMode
+
+    class _BrokenFillStore(FillStore):
+        async def read_positions(self) -> list[Position]:
+            raise RuntimeError("simulated PG error")
+
+    runner = Runner(
+        config=PMSSettings(mode=RunMode.LIVE),
+        fill_store=_BrokenFillStore(),
+    )
+    runner._pg_pool = cast(Any, object())  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="LIVE portfolio reconciliation failed"):
+        await runner._reconcile_portfolio_from_db()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_reconcile_paper_mode_still_swallows_errors() -> None:
+    """In PAPER and BACKTEST, a transient read failure should not
+    prevent the runner from starting — the in-memory portfolio simply
+    stays at its default. Only LIVE fails closed."""
+    from pms.config import PMSSettings
+    from pms.core.enums import RunMode
+
+    class _BrokenFillStore(FillStore):
+        async def read_positions(self) -> list[Position]:
+            raise RuntimeError("simulated PG error")
+
+    runner = Runner(
+        config=PMSSettings(mode=RunMode.PAPER),
+        fill_store=_BrokenFillStore(),
+    )
+    runner._pg_pool = cast(Any, object())  # noqa: SLF001
+
+    # Must not raise.
+    await runner._reconcile_portfolio_from_db()  # noqa: SLF001
+    assert runner.portfolio.locked_usdc == 0.0

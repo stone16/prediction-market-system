@@ -99,6 +99,47 @@ def _stub_runner_asyncpg_pool(
     monkeypatch.setattr("pms.runner.asyncpg.create_pool", fake_create_pool)
 
 
+@pytest.fixture(autouse=True)
+def _stub_fill_store_read_positions(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Stub `FillStore.read_positions` to return [] for non-integration
+    unit tests.
+
+    `Runner.start` calls `_reconcile_portfolio_from_db` which depends on
+    `FillStore.read_positions()`. The default `FillStore` queries the
+    bound asyncpg pool — which most unit tests replace with a minimal
+    `FakePool` that lacks `.acquire`. Without this stub, every unit
+    test that exercises `Runner.start` in LIVE mode would fail closed
+    (per the live-readiness hardening fix) on a fake-pool AttributeError
+    rather than for the test's actual assertion.
+
+    Opt out by tagging tests `@pytest.mark.real_fill_store` (used by
+    tests that exercise `FillStore.read_positions` directly) or
+    `@pytest.mark.integration` with `PMS_RUN_INTEGRATION=1` set.
+    Reconciliation-specific tests in
+    `tests/unit/test_runner_portfolio_reconciliation.py` replace the
+    `fill_store` field directly and so bypass this stub naturally.
+    """
+    if (
+        request.node.get_closest_marker("integration") is not None
+        and os.environ.get("PMS_RUN_INTEGRATION") == "1"
+    ):
+        return
+    if request.node.get_closest_marker("real_fill_store") is not None:
+        return
+
+    async def _empty_read_positions(self: object) -> list[object]:
+        del self
+        return []
+
+    monkeypatch.setattr(
+        "pms.storage.fill_store.FillStore.read_positions",
+        _empty_read_positions,
+    )
+
+
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "compose.yml"
 DEFAULT_COMPOSE_POSTGRES_DSN = "postgresql://postgres:postgres@127.0.0.1:5432/pms_test"

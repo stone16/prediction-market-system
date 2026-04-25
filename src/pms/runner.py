@@ -1141,6 +1141,19 @@ class Runner:
         try:
             persisted_positions = await self.fill_store.read_positions()
         except Exception as error:  # noqa: BLE001
+            if self.config.mode == RunMode.LIVE:
+                # Fail closed in LIVE: silent degradation here recreates
+                # the exact restart-exposure bug this method exists to
+                # prevent. Operator gets a clear signal via the
+                # autostart_error path on /status (see api/app.py
+                # lifespan). Do not start trading without a verified
+                # baseline.
+                msg = (
+                    "LIVE portfolio reconciliation failed "
+                    f"({type(error).__name__}: {error}); refusing to start "
+                    "without a verified portfolio"
+                )
+                raise RuntimeError(msg) from error
             logger.warning("portfolio reconciliation failed: %s", error)
             return
         open_positions = [p for p in persisted_positions if p.shares_held > 0.0]
@@ -1602,11 +1615,16 @@ def _fill_from_order(
     decision: TradeDecision,
     signal: MarketSignal | None,
 ) -> FillRecord | None:
-    if order_state.status != OrderStatus.MATCHED.value or order_state.fill_price is None:
+    # Emit a FillRecord whenever the venue reports a non-zero positive
+    # fill, regardless of the order's terminal status. Polymarket can
+    # return PARTIAL/LIVE statuses with positive `filled_notional_usdc`
+    # (e.g. an IOC limit that filled half its size and cancelled the
+    # rest). Pre-fix, only `MATCHED` produced a FillRecord — every
+    # partial fill was silently dropped from the inner ring, breaking
+    # both portfolio accounting and evaluator metrics.
+    if order_state.fill_price is None or order_state.fill_price <= 0.0:
         return None
     if order_state.filled_notional_usdc <= 0.0:
-        return None
-    if order_state.fill_price <= 0.0:
         return None
 
     return FillRecord(

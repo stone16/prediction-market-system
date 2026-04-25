@@ -474,15 +474,79 @@ def _order_result_from_sdk_response(
         raise LiveTradingDisabledError(msg)
 
     status = str(_response_value(response, "status") or OrderStatus.LIVE.value).lower()
-    filled_notional_usdc = 0.0
-    remaining_notional_usdc = order.notional_usdc
-    fill_price: float | None = None
-    filled_quantity = 0.0
-    if status == OrderStatus.MATCHED.value:
+
+    # Parse explicit partial-fill data from the SDK response. Polymarket
+    # can return positive `filled_notional` with status != MATCHED (e.g.
+    # an IOC limit that filled half its size and cancelled the rest, or
+    # a GTC limit with a partial match still resting in the book). Field
+    # names vary across SDK versions; we accept any of the documented
+    # aliases and fall back to the status-based heuristic when none are
+    # present. Pre-fix, only MATCHED produced fill data — every partial
+    # fill was silently dropped.
+    explicit_filled_notional = _coerce_float_or_none(
+        _response_value(
+            response,
+            "filled_notional_usdc",
+            "filledNotional",
+            "filled_amount",
+        )
+    )
+    explicit_filled_quantity = _coerce_float_or_none(
+        _response_value(
+            response,
+            "filled_quantity",
+            "filledQuantity",
+            "filled_size",
+            "filled",
+        )
+    )
+    explicit_fill_price = _coerce_float_or_none(
+        _response_value(
+            response,
+            "fill_price",
+            "fillPrice",
+            "average_price",
+            "avg_price",
+        )
+    )
+
+    filled_notional_usdc: float
+    filled_quantity: float
+    fill_price: float | None
+
+    if explicit_filled_notional is not None and explicit_filled_notional > 0.0:
+        # Partial-or-full fill with explicit data from the venue.
+        filled_notional_usdc = explicit_filled_notional
+        filled_quantity = explicit_filled_quantity or 0.0
+        if explicit_fill_price is not None and explicit_fill_price > 0.0:
+            fill_price = explicit_fill_price
+        elif filled_quantity > 0.0:
+            fill_price = filled_notional_usdc / filled_quantity
+        else:
+            # Avoid div-by-zero; fall back to the limit price (best
+            # available estimate when the venue elided fill_quantity).
+            fill_price = order.price
+    elif status == OrderStatus.MATCHED.value:
+        # Backwards-compat: status=matched without explicit fill data
+        # implies full fill at limit price.
         filled_notional_usdc = order.notional_usdc
-        remaining_notional_usdc = 0.0
-        fill_price = order.price
-        filled_quantity = order.estimated_quantity
+        filled_quantity = (
+            explicit_filled_quantity
+            if explicit_filled_quantity is not None
+            else order.estimated_quantity
+        )
+        fill_price = (
+            explicit_fill_price if explicit_fill_price is not None else order.price
+        )
+    else:
+        # Live / pending / cancelled with no fill data — no fill yet.
+        filled_notional_usdc = 0.0
+        filled_quantity = (
+            explicit_filled_quantity if explicit_filled_quantity is not None else 0.0
+        )
+        fill_price = explicit_fill_price
+
+    remaining_notional_usdc = max(0.0, order.notional_usdc - filled_notional_usdc)
 
     order_id = _response_value(response, "orderID", "order_id", "id")
     return PolymarketOrderResult(
@@ -494,6 +558,19 @@ def _order_result_from_sdk_response(
         fill_price=fill_price,
         filled_quantity=filled_quantity,
     )
+
+
+def _coerce_float_or_none(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _response_value(response: object, *keys: str) -> object | None:

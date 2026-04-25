@@ -1310,3 +1310,201 @@ def test_risk_manager_quantity_cap_disabled_by_default() -> None:
     )
     decision = _decision(notional_usdc=10.0, limit_price=0.001)
     assert manager.check(decision, _portfolio()).approved is True
+
+
+# --- review-loop round-1 follow-ups (codex findings f2 and f3) ---
+
+
+@pytest.mark.asyncio
+async def test_executor_categorizes_submission_unknown_distinctly_from_venue_rejection() -> None:
+    """Codex finding f2: a `PolymarketSubmissionUnknownError` (timeout)
+    must be released distinctly from `venue_rejection` so retries do not
+    green-light a duplicate submission of an order that may already be
+    on the venue."""
+    from pms.actuator.adapters.polymarket import PolymarketSubmissionUnknownError
+
+    @dataclass
+    class _UnknownTimeoutAdapter:
+        calls: int = 0
+
+        async def execute(
+            self,
+            decision: TradeDecision,
+            portfolio: Portfolio | None = None,
+        ) -> OrderState:
+            del decision, portfolio
+            self.calls += 1
+            raise PolymarketSubmissionUnknownError(
+                "Polymarket live order submission timed out; reconcile"
+            )
+
+    in_memory_store = InMemoryFeedbackStore()
+    store = cast(FeedbackStore, in_memory_store)
+    dedup = InMemoryDedupStore()
+    timeout_adapter = _UnknownTimeoutAdapter()
+    actuator = executor.ActuatorExecutor(
+        adapter=cast(executor.ActuatorAdapter, timeout_adapter),
+        risk=RiskManager(
+            RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
+        ),
+        feedback=ActuatorFeedback(store),
+        dedup_store=dedup,
+    )
+
+    with pytest.raises(PolymarketSubmissionUnknownError):
+        await actuator.execute(_decision(decision_id="d-unknown"), _portfolio())
+
+    feedbacks = await in_memory_store.all()
+    submission_unknown = [
+        f for f in feedbacks if getattr(f, "category", None) == "submission_unknown"
+    ]
+    venue_rejection = [
+        f for f in feedbacks if getattr(f, "category", None) == "venue_rejection"
+    ]
+    # The point of this test: the unknown timeout must NOT be logged as
+    # venue_rejection; it gets its own category.
+    assert len(submission_unknown) == 1
+    assert len(venue_rejection) == 0
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_parses_partial_fill_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f3: an SDK response with explicit `filled_notional`
+    and status != MATCHED (e.g. IOC limit with partial match) must
+    surface positive fill values — not get silently dropped."""
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        FAK = "FAK"
+        FOK = "FOK"
+        GTC = "GTC"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> dict[str, object]:
+            del kwargs
+            # IOC limit that filled $4 of a $10 order, half a share at 0.5,
+            # and was then cancelled. Status is `live`/`cancelled` post-IOC.
+            return {
+                "orderID": "sdk-partial-1",
+                "status": "live",
+                "errorMsg": "",
+                "filled_notional_usdc": 4.0,
+                "filled_quantity": 8.0,
+                "fill_price": 0.5,
+            }
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    result = await PolymarketSDKClient().submit_order(
+        PolymarketOrderRequest(
+            market_id="m-cp06",
+            token_id="t-yes",
+            side=Side.BUY.value,
+            price=0.5,
+            size=20.0,
+            notional_usdc=10.0,
+            estimated_quantity=20.0,
+            order_type="limit",
+            time_in_force=TimeInForce.IOC.value,
+            max_slippage_bps=50,
+        ),
+        _live_settings().polymarket.credentials(),
+    )
+
+    # Pre-fix: filled_notional would be 0 because status != "matched".
+    assert result.filled_notional_usdc == pytest.approx(4.0)
+    assert result.filled_quantity == pytest.approx(8.0)
+    assert result.fill_price == pytest.approx(0.5)
+    assert result.remaining_notional_usdc == pytest.approx(6.0)
+    assert result.status == "live"
+
+
+def test_fill_from_order_emits_fill_for_partial_status() -> None:
+    """Codex finding f3, runner side: `_fill_from_order` must emit a
+    FillRecord whenever filled_notional > 0 AND fill_price > 0 — not
+    only on status == MATCHED."""
+    from pms.runner import _fill_from_order
+
+    decision = _decision(notional_usdc=10.0)
+    partial_fill_state = OrderState(
+        order_id="sdk-partial-1",
+        decision_id=decision.decision_id,
+        status="live",  # partial fill, not matched
+        market_id=decision.market_id,
+        token_id=decision.token_id,
+        venue=decision.venue,
+        requested_notional_usdc=decision.notional_usdc,
+        filled_notional_usdc=4.0,
+        remaining_notional_usdc=6.0,
+        fill_price=0.5,
+        submitted_at=datetime(2026, 4, 25, tzinfo=UTC),
+        last_updated_at=datetime(2026, 4, 25, tzinfo=UTC),
+        raw_status="live",
+        strategy_id=decision.strategy_id,
+        strategy_version_id=decision.strategy_version_id,
+        filled_quantity=8.0,
+    )
+
+    fill = _fill_from_order(partial_fill_state, decision, None)
+
+    assert fill is not None, "partial fill must produce a FillRecord"
+    assert fill.fill_notional_usdc == pytest.approx(4.0)
+    assert fill.fill_quantity == pytest.approx(8.0)
+    assert fill.fill_price == pytest.approx(0.5)
+    assert fill.status == "live"
+
+
+def test_fill_from_order_drops_zero_filled_state() -> None:
+    """Sanity: status=live with NO fill data must still drop (no fill
+    record for a resting limit order that hasn't matched anything)."""
+    from pms.runner import _fill_from_order
+
+    decision = _decision(notional_usdc=10.0)
+    no_fill_state = OrderState(
+        order_id="sdk-resting-1",
+        decision_id=decision.decision_id,
+        status="live",
+        market_id=decision.market_id,
+        token_id=decision.token_id,
+        venue=decision.venue,
+        requested_notional_usdc=decision.notional_usdc,
+        filled_notional_usdc=0.0,
+        remaining_notional_usdc=decision.notional_usdc,
+        fill_price=None,
+        submitted_at=datetime(2026, 4, 25, tzinfo=UTC),
+        last_updated_at=datetime(2026, 4, 25, tzinfo=UTC),
+        raw_status="live",
+        strategy_id=decision.strategy_id,
+        strategy_version_id=decision.strategy_version_id,
+        filled_quantity=0.0,
+    )
+
+    assert _fill_from_order(no_fill_state, decision, None) is None

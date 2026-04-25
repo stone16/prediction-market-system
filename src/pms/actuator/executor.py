@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 from uuid import uuid4
 
+from pms.actuator.adapters.polymarket import PolymarketSubmissionUnknownError
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
 from pms.core.enums import OrderStatus, Venue
@@ -76,6 +77,18 @@ class ActuatorExecutor:
                     reason="insufficient_liquidity",
                 )
                 return final_state
+            except PolymarketSubmissionUnknownError:
+                # Order may have reached the venue. Categorize distinctly
+                # from venue_rejection so the operator knows to reconcile,
+                # and so dedup release does not green-light a retry that
+                # could double-spend.
+                final_state = _rejected_order_state(decision, "submission_unknown")
+                release_outcome = "submission_unknown"
+                await self.feedback.generate(
+                    final_state,
+                    reason="submission_unknown",
+                )
+                raise
             except Exception:
                 final_state = _rejected_order_state(decision, "venue_rejection")
                 release_outcome = "venue_rejection"
