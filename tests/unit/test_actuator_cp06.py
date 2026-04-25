@@ -1508,3 +1508,161 @@ def test_fill_from_order_drops_zero_filled_state() -> None:
     )
 
     assert _fill_from_order(no_fill_state, decision, None) is None
+
+
+# --- review-loop round-2 follow-ups (codex findings f7 and f8) ---
+
+
+def test_coerce_float_or_none_rejects_nan_and_infinity() -> None:
+    """Codex finding f8: a venue response surfacing `NaN` / `inf` (in
+    floats or strings) must produce `None`, not corrupt the persisted
+    fill with a non-finite numeric value."""
+    from pms.actuator.adapters.polymarket import _coerce_float_or_none
+
+    assert _coerce_float_or_none(float("nan")) is None
+    assert _coerce_float_or_none(float("inf")) is None
+    assert _coerce_float_or_none(float("-inf")) is None
+    assert _coerce_float_or_none("nan") is None
+    assert _coerce_float_or_none("inf") is None
+    assert _coerce_float_or_none("Infinity") is None
+    # Sanity: well-formed values still pass through.
+    assert _coerce_float_or_none(0.0) == 0.0
+    assert _coerce_float_or_none(0.5) == 0.5
+    assert _coerce_float_or_none("0.5") == 0.5
+    assert _coerce_float_or_none(True) is None  # bool subclass of int
+    assert _coerce_float_or_none("nope") is None
+
+
+def _partial_fill_request() -> PolymarketOrderRequest:
+    return PolymarketOrderRequest(
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        price=0.5,
+        size=20.0,
+        notional_usdc=10.0,
+        estimated_quantity=20.0,
+        order_type="limit",
+        time_in_force=TimeInForce.GTC.value,
+        max_slippage_bps=50,
+    )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_rejects_overfilled_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f8: filled_notional > requested_notional must be
+    rejected — the venue cannot fill more than was ordered."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 15.0,  # > 10.0 requested
+            "filled_quantity": 30.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="exceeds requested"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_rejects_negative_filled_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f8: negative filled_quantity is malformed and must
+    be rejected."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 4.0,
+            "filled_quantity": -8.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="negative filled_quantity"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_rejects_out_of_range_fill_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f8: fill_price outside (0, 1] is invalid for a
+    Polymarket probability market and must be rejected."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 4.0,
+            "filled_quantity": 8.0,
+            "fill_price": 1.5,  # impossible probability
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="outside"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+def _install_partial_fill_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    response: dict[str, object],
+) -> None:
+    """Wires a fake `py_clob_client_v2` whose limit-order endpoint
+    returns the given response. Used by the f8 validation tests."""
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        FAK = "FAK"
+        FOK = "FOK"
+        GTC = "GTC"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> dict[str, object]:
+            del kwargs
+            return response
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)

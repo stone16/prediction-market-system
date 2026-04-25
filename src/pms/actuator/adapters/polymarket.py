@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Final, Protocol, cast
 from uuid import uuid4
 
 from pms.config import PMSSettings, validate_live_mode_ready
@@ -515,13 +515,49 @@ def _order_result_from_sdk_response(
     fill_price: float | None
 
     if explicit_filled_notional is not None and explicit_filled_notional > 0.0:
-        # Partial-or-full fill with explicit data from the venue.
+        # Partial-or-full fill with explicit data from the venue. Validate
+        # ranges before persisting: a malformed SDK response must not be
+        # able to corrupt portfolio accounting with negative shares,
+        # over-filled notional, or out-of-range probability prices.
+        if explicit_filled_notional > order.notional_usdc + _NOTIONAL_OVERFILL_TOLERANCE:
+            msg = (
+                "Polymarket reported filled_notional exceeds requested "
+                "notional; refusing to persist suspect fill"
+            )
+            raise LiveTradingDisabledError(msg)
         filled_notional_usdc = explicit_filled_notional
-        filled_quantity = explicit_filled_quantity or 0.0
-        if explicit_fill_price is not None and explicit_fill_price > 0.0:
+        if explicit_filled_quantity is not None and explicit_filled_quantity < 0.0:
+            msg = (
+                "Polymarket reported negative filled_quantity; refusing "
+                "to persist suspect fill"
+            )
+            raise LiveTradingDisabledError(msg)
+        filled_quantity = (
+            explicit_filled_quantity
+            if explicit_filled_quantity is not None and explicit_filled_quantity > 0.0
+            else 0.0
+        )
+        if explicit_fill_price is not None:
+            if not (
+                _PROBABILITY_PRICE_MIN < explicit_fill_price <= _PROBABILITY_PRICE_MAX
+            ):
+                msg = (
+                    "Polymarket reported fill_price outside (0, 1] range; "
+                    "refusing to persist suspect fill"
+                )
+                raise LiveTradingDisabledError(msg)
             fill_price = explicit_fill_price
         elif filled_quantity > 0.0:
-            fill_price = filled_notional_usdc / filled_quantity
+            implied_price = filled_notional_usdc / filled_quantity
+            if not (
+                _PROBABILITY_PRICE_MIN < implied_price <= _PROBABILITY_PRICE_MAX
+            ):
+                msg = (
+                    "Polymarket implied fill_price (notional/quantity) "
+                    "outside (0, 1] range; refusing to persist suspect fill"
+                )
+                raise LiveTradingDisabledError(msg)
+            fill_price = implied_price
         else:
             # Avoid div-by-zero; fall back to the limit price (best
             # available estimate when the venue elided fill_quantity).
@@ -564,13 +600,26 @@ def _coerce_float_or_none(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+        f = float(value)
+    elif isinstance(value, str):
         try:
-            return float(value)
+            f = float(value)
         except ValueError:
             return None
-    return None
+    else:
+        return None
+    # Reject NaN / +/- infinity. Persisting either as `filled_notional`
+    # / `filled_quantity` / `fill_price` would silently corrupt the
+    # portfolio and downstream metrics. A malformed venue response that
+    # parses to a non-finite number must be treated as "no fill data".
+    if not math.isfinite(f):
+        return None
+    return f
+
+
+_PROBABILITY_PRICE_MIN: Final[float] = 0.0
+_PROBABILITY_PRICE_MAX: Final[float] = 1.0
+_NOTIONAL_OVERFILL_TOLERANCE: Final[float] = 1e-6
 
 
 def _response_value(response: object, *keys: str) -> object | None:
