@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import socket
 import subprocess
 import time
@@ -52,9 +53,8 @@ def _wait_for_http_ok(process: subprocess.Popen[str], url: str) -> None:
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            stdout, stderr = process.communicate()
             raise AssertionError(
-                f"process for {url} exited early\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                f"process for {url} exited early with code {process.returncode}"
             )
         try:
             response = httpx.get(url, timeout=0.5)
@@ -63,11 +63,38 @@ def _wait_for_http_ok(process: subprocess.Popen[str], url: str) -> None:
         except Exception as exc:  # noqa: BLE001
             last_error = exc
         time.sleep(0.1)
-    process.terminate()
-    stdout, stderr = process.communicate(timeout=10)
-    raise AssertionError(
-        f"{url} never became ready: {last_error}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    )
+    _stop_process_tree(process)
+    raise AssertionError(f"{url} never became ready: {last_error}")
+
+
+def _stop_process_tree(process: subprocess.Popen[str], *, timeout: float = 20.0) -> None:
+    if process.poll() is not None:
+        process.wait(timeout=5)
+        return
+    try:
+        # Callers launch with start_new_session=True, so the child owns a process group.
+        pgid = os.getpgid(process.pid)
+    except ProcessLookupError:
+        process.wait(timeout=5)
+        return
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        process.wait(timeout=5)
+        return
+
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(f"process group {pgid} did not exit after SIGKILL") from exc
 
 
 @contextmanager
@@ -92,15 +119,15 @@ def _run_api_server(database_url: str, port: int) -> Iterator[subprocess.Popen[s
         cwd=ROOT,
         env=env,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     try:
         _wait_for_http_ok(process, f"http://127.0.0.1:{port}/status")
         yield process
     finally:
-        process.terminate()
-        process.communicate(timeout=20)
+        _stop_process_tree(process)
 
 
 @contextmanager
@@ -132,10 +159,10 @@ def _run_dashboard_server(
     )
 
     start_env = build_env.copy()
+    next_binary = DASHBOARD_DIR / "node_modules" / ".bin" / "next"
     process = subprocess.Popen(
         [
-            "npx",
-            "next",
+            str(next_binary),
             "start",
             "--hostname",
             "127.0.0.1",
@@ -145,15 +172,15 @@ def _run_dashboard_server(
         cwd=DASHBOARD_DIR,
         env=start_env,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     try:
         _wait_for_http_ok(process, f"http://127.0.0.1:{dashboard_port}/share/alpha")
         yield process
     finally:
-        process.terminate()
-        process.communicate(timeout=20)
+        _stop_process_tree(process)
 
 
 def _config_json(strategy_id: str) -> str:
@@ -292,10 +319,6 @@ async def test_share_page_revalidates_cached_projection_in_next_start_mode(
     api_port = _free_port()
     dashboard_port = _free_port()
     revalidate_seconds = 2
-
-    async with pg_pool.acquire() as connection:
-        async with connection.transaction():
-            pass
 
     with _run_api_server(PMS_TEST_DATABASE_URL, api_port):
         with _run_dashboard_server(
