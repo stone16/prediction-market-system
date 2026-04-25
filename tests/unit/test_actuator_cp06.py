@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import inspect
 import logging
@@ -318,6 +319,19 @@ class RecordingOperatorGate:
         return self.approved
 
 
+@dataclass
+class BlockingOperatorGate:
+    previews: list[LiveOrderPreview] = field(default_factory=list)
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+        self.previews.append(preview)
+        self.entered.set()
+        await self.release.wait()
+        return True
+
+
 def _live_settings() -> PMSSettings:
     return PMSSettings(
         live_trading_enabled=True,
@@ -378,6 +392,25 @@ async def test_polymarket_actuator_submits_mocked_live_order_after_first_order_g
     assert state.strategy_version_id == "default-v1"
     assert len(client.submitted) == 1
     assert len(gate.previews) == 1
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_first_order_gate_is_serialized() -> None:
+    client = RecordingPolymarketClient()
+    gate = BlockingOperatorGate()
+    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+
+    first = asyncio.create_task(actuator.execute(_decision(decision_id="d-first"), _portfolio()))
+    await asyncio.wait_for(gate.entered.wait(), timeout=1.0)
+    second = asyncio.create_task(actuator.execute(_decision(decision_id="d-second"), _portfolio()))
+    await asyncio.sleep(0)
+    assert len(gate.previews) == 1
+
+    gate.release.set()
+    await asyncio.gather(first, second)
+
+    assert len(gate.previews) == 1
+    assert len(client.submitted) == 2
 
 
 @pytest.mark.asyncio
@@ -572,8 +605,97 @@ async def test_polymarket_sdk_client_posts_limit_order_through_v2_sdk(
 
 
 @pytest.mark.asyncio
+async def test_polymarket_sdk_client_posts_market_order_with_consistent_order_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    @dataclass
+    class FakeApiCreds:
+        api_key: str
+        api_secret: str
+        api_passphrase: str
+
+    @dataclass
+    class FakeOrderArgs:
+        token_id: str
+        price: float
+        side: object
+        size: float
+
+    @dataclass
+    class FakeMarketOrderArgs:
+        token_id: str
+        amount: float
+        side: object
+        price: float
+        order_type: object
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        GTC = "GTC"
+        FOK = "FOK"
+        FAK = "FAK"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+        SELL = "SDK_SELL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_market_order(
+            self,
+            *,
+            order_args: FakeMarketOrderArgs,
+            options: FakePartialCreateOrderOptions,
+            order_type: object,
+        ) -> dict[str, object]:
+            del options
+            calls["market_order"] = order_args
+            calls["market_order_type"] = order_type
+            return {"orderID": "sdk-market-order-1", "status": "live", "errorMsg": ""}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeMarketOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    await PolymarketSDKClient().submit_order(
+        PolymarketOrderRequest(
+            market_id="m-cp06",
+            token_id="t-yes",
+            side=Side.BUY.value,
+            price=0.4,
+            size=10.0,
+            notional_usdc=10.0,
+            estimated_quantity=25.0,
+            order_type="market",
+            time_in_force=TimeInForce.IOC.value,
+            max_slippage_bps=50,
+        ),
+        _live_settings().polymarket.credentials(),
+    )
+
+    order_args = cast(FakeMarketOrderArgs, calls["market_order"])
+    assert order_args.order_type == "FAK"
+    assert calls["market_order_type"] == "FAK"
+
+
+@pytest.mark.asyncio
 async def test_polymarket_sdk_client_redacts_secrets_from_sdk_errors(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     class FakeApiCreds:
         def __init__(
@@ -616,6 +738,7 @@ async def test_polymarket_sdk_client_redacts_secrets_from_sdk_errors(
         Side=FakeSide,
     )
     monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+    caplog.set_level(logging.WARNING, logger="pms.actuator.adapters.polymarket")
 
     with pytest.raises(LiveTradingDisabledError) as exc_info:
         await PolymarketSDKClient().submit_order(
@@ -639,6 +762,11 @@ async def test_polymarket_sdk_client_redacts_secrets_from_sdk_errors(
     assert "api-secret" not in message
     assert "passphrase" not in message
     assert "Polymarket live order submission failed" in message
+    rendered_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "venue rejected" in rendered_logs
+    assert "private-key" not in rendered_logs
+    assert "api-secret" not in rendered_logs
+    assert "passphrase" not in rendered_logs
 
 
 @pytest.mark.asyncio

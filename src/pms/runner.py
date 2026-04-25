@@ -862,8 +862,18 @@ class Runner:
 
             try:
                 work_item = _coerce_actuator_work_item(raw_work_item)
-                decision = work_item.decision
-                signal = work_item.signal
+            except Exception as error:
+                await self.event_bus.publish(
+                    "error",
+                    f"malformed actuator work item: {error}",
+                )
+                logger.warning("malformed actuator work item: %s", error)
+                self._decision_queue.task_done()
+                continue
+
+            decision = work_item.decision
+            signal = work_item.signal
+            try:
                 if self.config.mode == RunMode.PAPER and signal is not None:
                     self._paper_orderbooks[decision.market_id] = signal.orderbook
                 order_state = await _execute_actuator_work_item(
@@ -1726,6 +1736,6 @@ def _decision_expires_at(
     candidates = [created_at + DECISION_PENDING_TTL]
     if opportunity is not None and opportunity.expiry is not None:
         candidates.append(opportunity.expiry)
-    elif signal.resolves_at is not None:
+    if signal.resolves_at is not None:
         candidates.append(signal.resolves_at)
     return min(candidates)

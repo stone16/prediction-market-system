@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -19,6 +20,9 @@ from pms.core.models import (
     TradeDecision,
     VenueCredentials,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class OperatorApprovalRequiredError(LiveTradingDisabledError):
@@ -80,6 +84,11 @@ class DenyFirstLiveOrderGate:
         return False
 
 
+@dataclass
+class FirstLiveOrderApprovalState:
+    approved: bool = False
+
+
 @dataclass(frozen=True)
 class FileFirstLiveOrderGate:
     path: Path
@@ -123,6 +132,12 @@ class PolymarketSDKClient:
             client = _build_sdk_client(sdk, credentials)
             response = _post_sdk_order(sdk, client, order)
         except Exception as exc:  # noqa: BLE001
+            redacted = _redacted_exception_message(exc, credentials)
+            logger.warning(
+                "Polymarket live order submission failed (%s): %s",
+                type(exc).__name__,
+                redacted,
+            )
             msg = (
                 "Polymarket live order submission failed "
                 f"({type(exc).__name__}); venue error redacted"
@@ -152,7 +167,18 @@ class PolymarketActuator:
     settings: PMSSettings = field(default_factory=PMSSettings)
     client: PolymarketClient = field(default_factory=MissingPolymarketClient)
     operator_gate: FirstLiveOrderGate = field(default_factory=DenyFirstLiveOrderGate)
-    _first_order_approved: bool = field(default=False, init=False, repr=False)
+    _approval_state: FirstLiveOrderApprovalState = field(
+        default_factory=FirstLiveOrderApprovalState,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _approval_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     async def execute(
         self,
@@ -169,29 +195,35 @@ class PolymarketActuator:
         return _order_state_from_result(decision, result)
 
     async def _require_first_order_approval(self, decision: TradeDecision) -> None:
-        if self._first_order_approved:
+        if self._first_order_approved():
             return
-        preview = LiveOrderPreview(
-            max_notional_usdc=decision.notional_usdc,
-            venue=decision.venue,
-            market_id=decision.market_id,
-            token_id=decision.token_id,
-            side=decision.side,
-            limit_price=decision.limit_price,
-            max_slippage_bps=decision.max_slippage_bps,
-        )
-        approved = await self.operator_gate.approve_first_order(preview)
-        if not approved:
-            msg = (
-                "First Polymarket live order requires operator approval: "
-                f"venue={preview.venue} market={preview.market_id} "
-                f"token={preview.token_id} side={preview.side} "
-                f"max_notional_usdc={preview.max_notional_usdc} "
-                f"limit_price={preview.limit_price} "
-                f"max_slippage_bps={preview.max_slippage_bps}"
+        async with self._approval_lock:
+            if self._first_order_approved():
+                return
+            preview = LiveOrderPreview(
+                max_notional_usdc=decision.notional_usdc,
+                venue=decision.venue,
+                market_id=decision.market_id,
+                token_id=decision.token_id,
+                side=decision.side,
+                limit_price=decision.limit_price,
+                max_slippage_bps=decision.max_slippage_bps,
             )
-            raise OperatorApprovalRequiredError(msg)
-        object.__setattr__(self, "_first_order_approved", True)
+            approved = await self.operator_gate.approve_first_order(preview)
+            if not approved:
+                msg = (
+                    "First Polymarket live order requires operator approval: "
+                    f"venue={preview.venue} market={preview.market_id} "
+                    f"token={preview.token_id} side={preview.side} "
+                    f"max_notional_usdc={preview.max_notional_usdc} "
+                    f"limit_price={preview.limit_price} "
+                    f"max_slippage_bps={preview.max_slippage_bps}"
+                )
+                raise OperatorApprovalRequiredError(msg)
+            self._approval_state.approved = True
+
+    def _first_order_approved(self) -> bool:
+        return self._approval_state.approved
 
 
 def _order_request(decision: TradeDecision) -> PolymarketOrderRequest:
@@ -285,7 +317,7 @@ def _build_sdk_client(sdk: object, credentials: VenueCredentials) -> object:
     )
     return getattr(sdk, "ClobClient")(
         host=credentials.host,
-        chain_id=credentials.chain_id or 137,
+        chain_id=credentials.chain_id,
         key=_required_secret(credentials.private_key, "private_key"),
         creds=api_creds,
         signature_type=credentials.signature_type,
@@ -393,3 +425,19 @@ def _required_secret(value: str | None, field_name: str) -> str:
         msg = f"Missing Polymarket credential fields: {field_name}"
         raise LiveTradingDisabledError(msg)
     return value
+
+
+def _redacted_exception_message(
+    error: Exception,
+    credentials: VenueCredentials,
+) -> str:
+    message = str(error)
+    for secret in (
+        credentials.private_key,
+        credentials.api_key,
+        credentials.api_secret,
+        credentials.api_passphrase,
+    ):
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+    return message

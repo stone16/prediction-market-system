@@ -179,6 +179,7 @@ def test_live_mode_validation_requires_all_polymarket_credentials() -> None:
     assert "api_secret" in message
     assert "api_passphrase" in message
     assert "signature_type" in message
+    assert "funder_address" in message
     assert "private-key" not in message
 
 

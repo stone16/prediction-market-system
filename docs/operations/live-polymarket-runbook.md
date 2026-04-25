@@ -34,8 +34,8 @@ export PMS_POLYMARKET__FIRST_LIVE_ORDER_APPROVAL_PATH=/secure/pms/first-order.js
 ```
 
 Required fields are validated before LIVE mode starts:
-`private_key`, `api_key`, `api_secret`, `api_passphrase`, and
-`signature_type`.
+`private_key`, `api_key`, `api_secret`, `api_passphrase`, `signature_type`,
+and `funder_address`.
 
 ## First Live Order
 

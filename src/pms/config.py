@@ -151,6 +151,7 @@ def _missing_polymarket_fields(credentials: VenueCredentials) -> list[str]:
         "api_key": credentials.api_key,
         "api_secret": credentials.api_secret,
         "api_passphrase": credentials.api_passphrase,
+        "funder_address": credentials.funder_address,
     }
     for field_name, value in required_text_fields.items():
         if value is None or value.strip() == "":
