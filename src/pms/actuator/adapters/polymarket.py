@@ -684,15 +684,24 @@ def _is_sdk_transport_failure(exc: BaseException) -> bool:
     (no HTTP response from the venue) — distinct from the venue
     rejecting the order with an HTTP error response.
 
-    `py_clob_client_v2.exceptions.PolyApiException(resp=None, ...)`
-    is the wrapped form of httpx timeouts, connection drops, etc. We
-    duck-type via class name + attribute presence so this module does
-    not take a hard import dependency on the SDK exception class.
+    `py_clob_client_v2.exceptions.PolyApiException` takes `resp` in
+    its constructor but does NOT retain it as an attribute — the
+    instance stores `status_code` (extracted from `resp.status_code`,
+    or None if `resp` was None) plus `error_msg`. So the right
+    transport-failure signal is `status_code is None`. Verified against
+    real SDK 1.0.0:
+        PolyApiException(resp=None).__dict__ ==
+            {'status_code': None, 'error_msg': ...}
+        PolyApiException(resp=<httpx_response>).__dict__ ==
+            {'status_code': 400, 'error_msg': ...}
+
+    Duck-typed (class name + attribute) so this module does not take a
+    hard import dependency on the SDK exception class.
     """
     if type(exc).__name__ != "PolyApiException":
         return False
-    resp = getattr(exc, "resp", _MISSING_SENTINEL)
-    return resp is None
+    status_code = getattr(exc, "status_code", _MISSING_SENTINEL)
+    return status_code is None
 
 
 _MISSING_SENTINEL: Final[object] = object()

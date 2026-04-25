@@ -1992,7 +1992,12 @@ async def test_polymarket_sdk_polyapiexception_no_resp_routes_as_submission_unkn
         BUY = "SDK_BUY"
 
     class PolyApiException(Exception):
-        """Mirror the real SDK class shape just enough for duck-typing."""
+        """Mirror the REAL SDK class shape — verified against
+        `py_clob_client_v2==1.0.0`: stores `status_code` (extracted from
+        `resp.status_code`, or None if resp is None) plus `error_msg`.
+        Crucially, does NOT retain `resp` as an attribute. An earlier
+        version of this fake exposed `self.resp` and silently diverged
+        from the real SDK — caught by the fresh-final consensus pass."""
 
         def __init__(
             self,
@@ -2000,7 +2005,11 @@ async def test_polymarket_sdk_polyapiexception_no_resp_routes_as_submission_unkn
             error_msg: str | None = None,
         ) -> None:
             super().__init__(error_msg or "Request exception!")
-            self.resp = resp
+            # Match real SDK: extract status_code from resp (if any),
+            # do NOT store resp itself.
+            self.status_code: int | None = (
+                getattr(resp, "status_code", None) if resp is not None else None
+            )
             self.error_msg = error_msg
 
     class FakeClobClient:
@@ -2062,13 +2071,18 @@ async def test_polymarket_sdk_polyapiexception_with_resp_routes_as_venue_rejecti
         text = "venue rejected"
 
     class PolyApiException(Exception):
+        """Same real-SDK-mirror shape — `status_code` populated from
+        `resp.status_code` when resp is present, plus `error_msg`."""
+
         def __init__(
             self,
             resp: object | None = None,
             error_msg: str | None = None,
         ) -> None:
             super().__init__(error_msg or "")
-            self.resp = resp
+            self.status_code: int | None = (
+                getattr(resp, "status_code", None) if resp is not None else None
+            )
             self.error_msg = error_msg
 
     class FakeClobClient:
