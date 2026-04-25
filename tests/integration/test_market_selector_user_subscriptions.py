@@ -11,10 +11,14 @@ import asyncpg
 import httpx
 import pytest
 
+from pms.actuator.adapters.polymarket import (
+    PolymarketOrderRequest,
+    PolymarketOrderResult,
+)
 from pms.api.app import create_app
 from pms.config import DatabaseSettings, PMSSettings, PolymarketSettings
 from pms.core.enums import RunMode
-from pms.core.models import Market, MarketSignal, Token
+from pms.core.models import Market, MarketSignal, Token, VenueCredentials
 from pms.runner import Runner
 from pms.storage.market_data_store import PostgresMarketDataStore
 
@@ -101,6 +105,16 @@ class _NoopFactorService:
         return None
 
 
+class _NoopPolymarketClient:
+    async def submit_order(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+    ) -> PolymarketOrderResult:
+        del order, credentials
+        raise AssertionError("subscription reselection tests must not submit live orders")
+
+
 def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.LIVE,
@@ -183,6 +197,7 @@ def _install_runner_sensor_doubles(
     monkeypatch.setattr("pms.runner.FactorService", _NoopFactorService)
     monkeypatch.setattr("pms.runner.MarketDiscoverySensor", sensors.discovery_factory)
     monkeypatch.setattr("pms.runner.MarketDataSensor", sensors.market_data_factory)
+    monkeypatch.setattr("pms.runner.PolymarketSDKClient", _NoopPolymarketClient)
     return sensors
 
 

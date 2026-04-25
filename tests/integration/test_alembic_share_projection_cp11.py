@@ -120,6 +120,9 @@ def test_alembic_share_projection_upgrade_and_downgrade_round_trip() -> None:
             "created_at|timestamp with time zone|NO|now()",
             "metadata_json|jsonb|NO|'{}'::jsonb",
         ]
+
+        reupgrade = _run_alembic(temp_database_url, "upgrade", "head")
+        assert reupgrade.returncode == 0, reupgrade.stderr
     finally:
         _run_psql(
             admin_database_url,

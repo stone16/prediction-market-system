@@ -19,8 +19,8 @@ from pms.storage.market_data_store import PostgresMarketDataStore
 
 
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
-ACTIVE_MARKET_NOW = datetime(2035, 4, 23, 12, 0, tzinfo=UTC)
-EXPIRED_MARKET_AT = datetime(2020, 1, 1, 12, 0, tzinfo=UTC)
+ACTIVE_MARKET_NOW = datetime.now(tz=UTC).replace(microsecond=0) + timedelta(days=365)
+EXPIRED_MARKET_AT = datetime.now(tz=UTC).replace(microsecond=0) - timedelta(days=30)
 
 pytestmark = [
     pytest.mark.integration,
