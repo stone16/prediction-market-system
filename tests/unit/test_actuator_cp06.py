@@ -1695,6 +1695,64 @@ async def test_polymarket_matched_status_rejects_negative_explicit_notional(
         )
 
 
+# --- review-loop round-4 follow-ups (codex finding f11) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_derives_quantity_when_only_notional_and_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f11: a venue response with filled_notional > 0 and
+    fill_price > 0 but NO filled_quantity must derive quantity from
+    notional/price — not silently persist filled_quantity=0 (which
+    would corrupt share accounting)."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 4.0,
+            "fill_price": 0.5,
+            # filled_quantity intentionally omitted
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        _partial_fill_request(),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert result.filled_notional_usdc == pytest.approx(4.0)
+    # 4.0 / 0.5 = 8.0 shares — derived, not silent zero.
+    assert result.filled_quantity == pytest.approx(8.0)
+    assert result.fill_price == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_rejects_zero_quantity_with_positive_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f11: an explicit `filled_quantity == 0` paired
+    with positive `filled_notional` is contradictory (a $4 fill of zero
+    shares) and must be rejected, not persisted."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 4.0,
+            "filled_quantity": 0.0,  # contradicts positive notional
+            "fill_price": 0.5,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="filled_quantity == 0"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
 def _install_partial_fill_sdk(
     monkeypatch: pytest.MonkeyPatch,
     *,

@@ -528,16 +528,22 @@ def _order_result_from_sdk_response(
 
     if explicit_filled_notional is not None and explicit_filled_notional > 0.0:
         # Partial-or-full fill with explicit data from the venue.
+        # A positive filled_notional MUST imply positive filled_quantity —
+        # a fill of $4 worth of zero shares is contradictory and would
+        # corrupt portfolio share accounting (`_fill_from_order` would
+        # persist a row with shares=0). Resolve in two passes: first
+        # determine fill_price (from explicit or fall back to limit),
+        # then derive quantity from notional/price when the venue
+        # omitted it; reject explicit-zero quantity with positive
+        # notional outright.
         filled_notional_usdc = explicit_filled_notional
-        filled_quantity = (
-            explicit_filled_quantity
-            if explicit_filled_quantity is not None and explicit_filled_quantity > 0.0
-            else 0.0
-        )
         if explicit_fill_price is not None:
             fill_price = explicit_fill_price
-        elif filled_quantity > 0.0:
-            implied_price = filled_notional_usdc / filled_quantity
+        elif (
+            explicit_filled_quantity is not None
+            and explicit_filled_quantity > 0.0
+        ):
+            implied_price = filled_notional_usdc / explicit_filled_quantity
             if not (
                 _PROBABILITY_PRICE_MIN < implied_price <= _PROBABILITY_PRICE_MAX
             ):
@@ -548,9 +554,30 @@ def _order_result_from_sdk_response(
                 raise LiveTradingDisabledError(msg)
             fill_price = implied_price
         else:
-            # Avoid div-by-zero; fall back to the limit price (best
-            # available estimate when the venue elided fill_quantity).
+            # Neither explicit price nor quantity available — fall back
+            # to the limit price (best estimate). Range-valid by the
+            # `TradeDecision.__post_init__` invariant `0 < limit_price < 1`.
             fill_price = order.price
+        if explicit_filled_quantity is not None:
+            if explicit_filled_quantity == 0.0:
+                msg = (
+                    "Polymarket reported filled_notional > 0 with explicit "
+                    "filled_quantity == 0; refusing to persist suspect fill"
+                )
+                raise LiveTradingDisabledError(msg)
+            filled_quantity = explicit_filled_quantity
+        elif fill_price > 0.0:
+            # Derive quantity from notional/price so share accounting
+            # remains consistent across all venue response shapes.
+            filled_quantity = filled_notional_usdc / fill_price
+        else:
+            # Defensive: should be unreachable given the price-resolution
+            # logic above, but raise rather than persist a bad fill.
+            msg = (
+                "Polymarket fill price resolved to zero; cannot derive "
+                "filled_quantity for positive notional"
+            )
+            raise LiveTradingDisabledError(msg)
     elif status == OrderStatus.MATCHED.value:
         # Backwards-compat: status=matched without explicit fill data
         # implies full fill at limit price. Explicit fields were
