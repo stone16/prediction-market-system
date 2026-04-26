@@ -58,6 +58,7 @@ filterwarnings = ["error"]
 markers = [
     "slow: marks tests as slow / integration (deselect with '-m \"not slow\"')",
     "integration: real-network/real-subprocess integration tests (deselect with '-m \"not integration\"')",
+    "real_fill_store: opt out of the conftest FillStore.read_positions stub (used by tests that exercise the real implementation directly)",
 ]
 
 # ---------------------------------------------------------------------------

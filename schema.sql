@@ -296,7 +296,7 @@ CREATE TABLE IF NOT EXISTS order_intents (
     worker_pid INTEGER,
     outcome TEXT,
     CONSTRAINT order_intents_outcome_check
-        CHECK (outcome IS NULL OR outcome IN ('matched', 'invalid', 'rejected', 'venue_rejection', 'cancelled_ttl', 'cancelled_limit_invalidated', 'cancelled_session_end'))
+        CHECK (outcome IS NULL OR outcome IN ('matched', 'invalid', 'rejected', 'venue_rejection', 'submission_unknown', 'cancelled_ttl', 'cancelled_limit_invalidated', 'cancelled_session_end'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_order_intents_strategy_acquired_at_desc

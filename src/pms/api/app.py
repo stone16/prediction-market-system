@@ -101,10 +101,12 @@ def create_app(
         auto_start = os.environ.get("PMS_AUTO_START", "").lower() in {"1", "true", "yes"}
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app_inst: FastAPI) -> AsyncIterator[None]:
         pool_was_bound = active_runner.pg_pool is not None
         runner_pool_initialized = False
         startup_complete = False
+        app_inst.state.autostart_attempted = False
+        app_inst.state.autostart_error = None
         try:
             await _ensure_runner_pool(active_runner)
             runner_pool_initialized = active_runner.pg_pool is not None and not pool_was_bound
@@ -114,11 +116,34 @@ def create_app(
             ):
                 await ensure_schema_current(active_runner.pg_pool)
             if auto_start and not _is_runner_running(active_runner):
+                app_inst.state.autostart_attempted = True
                 logger.info(
                     "PMS_AUTO_START enabled — starting runner in %s mode",
                     active_runner.state.mode.value,
                 )
-                await active_runner.start()
+                try:
+                    await active_runner.start()
+                except Exception as exc:  # noqa: BLE001
+                    # Capture the failure so /status can surface it. We
+                    # *intentionally* keep the API process alive so an
+                    # operator can hit /status, see the failure mode, and
+                    # remediate (e.g. create the missing DB) without losing
+                    # the API control plane. The previous behaviour
+                    # (silent escape, 32-hour zombie) is the load-bearing
+                    # incident this guard exists for.
+                    #
+                    # `/status` is unauthenticated, so the exposed value is
+                    # restricted to the exception class name. Connection
+                    # errors / schema failures / OSError can otherwise leak
+                    # DSNs, hostnames, paths, and user info via the raw
+                    # str(exc). Full detail stays in the server-side log
+                    # below so the operator can still diagnose.
+                    app_inst.state.autostart_error = type(exc).__name__
+                    logger.critical(
+                        "PMS_AUTO_START failed: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
             if active_runner.pg_pool is not None:
                 await scan_orphaned_backtest_runs(active_runner.pg_pool)
             startup_complete = True
@@ -140,13 +165,17 @@ def create_app(
     app.state.settings = active_runner.config
 
     @app.get("/status")
-    async def status() -> dict[str, Any]:
+    async def status(request: Request) -> dict[str, Any]:
         records = await active_runner.eval_store.all()
         metrics_snapshot = MetricsCollector(records).global_ops_snapshot()
         return {
             "mode": active_runner.state.mode.value,
             "runner_started_at": _jsonable(active_runner.state.runner_started_at),
             "running": _is_runner_running(active_runner),
+            "autostart_attempted": getattr(
+                request.app.state, "autostart_attempted", False
+            ),
+            "autostart_error": getattr(request.app.state, "autostart_error", None),
             "sensors": _sensor_statuses(active_runner),
             "controller": {
                 "decisions_total": len(active_runner.state.decisions),

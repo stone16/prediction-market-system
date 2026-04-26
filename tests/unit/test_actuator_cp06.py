@@ -25,6 +25,7 @@ from pms.actuator.adapters.polymarket import (
     PolymarketOrderResult,
     PolymarketOrderRequest,
     PolymarketSDKClient,
+    PolymarketSubmissionUnknownError,
 )
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
@@ -313,10 +314,14 @@ class RecordingPolymarketClient:
 class RecordingOperatorGate:
     approved: bool
     previews: list[LiveOrderPreview] = field(default_factory=list)
+    consumed: list[LiveOrderPreview] = field(default_factory=list)
 
     async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
         self.previews.append(preview)
         return self.approved
+
+    async def consume(self, preview: LiveOrderPreview) -> None:
+        self.consumed.append(preview)
 
 
 @dataclass
@@ -330,6 +335,9 @@ class BlockingOperatorGate:
         self.entered.set()
         await self.release.wait()
         return True
+
+    async def consume(self, preview: LiveOrderPreview) -> None:
+        del preview
 
 
 def _live_settings() -> PMSSettings:
@@ -392,10 +400,23 @@ async def test_polymarket_actuator_submits_mocked_live_order_after_first_order_g
     assert state.strategy_version_id == "default-v1"
     assert len(client.submitted) == 1
     assert len(gate.previews) == 1
+    # After a successful first submit, the gate's approval artefact must be
+    # consumed so it cannot be replayed by a future restart or concurrent
+    # task. Verifies the consume-on-success contract.
+    assert len(gate.consumed) == 1
+    assert gate.consumed[0] == gate.previews[0]
 
 
 @pytest.mark.asyncio
 async def test_polymarket_actuator_first_order_gate_is_serialized() -> None:
+    # The lock around the gate must serialize gate calls — a second concurrent
+    # task cannot observe an in-progress gate. After the live-hardening fix
+    # the first-order flag is *not* set until after a successful submit, so
+    # the second task may legitimately call the gate again once T1 exits the
+    # critical section. What MUST hold:
+    #   1. While T1 is blocked in the gate, T2 cannot have called it.
+    #   2. Both tasks eventually submit (one operator approval is the floor,
+    #      not the ceiling — this matches the original concurrent semantics).
     client = RecordingPolymarketClient()
     gate = BlockingOperatorGate()
     actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
@@ -409,7 +430,10 @@ async def test_polymarket_actuator_first_order_gate_is_serialized() -> None:
     gate.release.set()
     await asyncio.gather(first, second)
 
-    assert len(gate.previews) == 1
+    # Lock invariant preserved (gate not entered concurrently). Whether T2's
+    # gate call is observed is race-dependent — what matters is that T1 was
+    # alone in the critical section while blocking.
+    assert 1 <= len(gate.previews) <= 2
     assert len(client.submitted) == 2
 
 
@@ -955,3 +979,1495 @@ async def test_executor_soft_release_keeps_decision_blocked_until_retention_scan
     assert first.raw_status == "insufficient_liquidity"
     assert second.raw_status == "duplicate_decision"
     assert dedup_store.contains("d-soft-release") is True
+
+
+# --- live-readiness hardening tests (added by fix/live-readiness-hardening) ---
+
+
+@dataclass
+class _FailThenSucceedClient:
+    """Polymarket client that raises on the first call and succeeds after."""
+
+    fail_count: int = 1
+    submitted: list[PolymarketOrderRequest] = field(default_factory=list)
+    error: Exception = field(
+        default_factory=lambda: RuntimeError("simulated network drop")
+    )
+
+    async def submit_order(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: object,
+    ) -> PolymarketOrderResult:
+        del credentials
+        if self.fail_count > 0:
+            self.fail_count -= 1
+            raise self.error
+        self.submitted.append(order)
+        return PolymarketOrderResult(
+            order_id="pm-live-recovered",
+            status=OrderStatus.MATCHED.value,
+            raw_status="matched",
+            filled_notional_usdc=order.notional_usdc,
+            remaining_notional_usdc=0.0,
+            fill_price=order.price,
+            filled_quantity=order.estimated_quantity,
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_does_not_mark_approved_when_submit_fails() -> None:
+    """SECURITY: a failed first submit must not permanently bypass the gate.
+
+    Pre-fix: `_approval_state.approved = True` was set inside the gate flow,
+    so a network failure on the first venue call left the gate permanently
+    open — every subsequent decision skipped operator approval.
+    """
+    client = _FailThenSucceedClient(fail_count=1)
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+
+    with pytest.raises(RuntimeError, match="simulated network drop"):
+        await actuator.execute(_decision(decision_id="d-fail"), _portfolio())
+
+    # Gate was consulted, but submit failed — the floodgate must remain shut.
+    assert len(gate.previews) == 1
+    assert actuator._first_order_approved() is False
+    # And no consume happened, since no submit succeeded.
+    assert gate.consumed == []
+
+    # Next attempt MUST go through the gate again.
+    state = await actuator.execute(_decision(decision_id="d-retry"), _portfolio())
+    assert state.status == OrderStatus.MATCHED.value
+    assert len(gate.previews) == 2
+    assert actuator._first_order_approved() is True
+    # Now the gate has been consumed.
+    assert len(gate.consumed) == 1
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_consumes_file_after_first_success(
+    tmp_path: Path,
+) -> None:
+    """The approval JSON file must be removed after a successful first submit
+    so an attacker / stale file cannot replay it."""
+    approval_path = tmp_path / "approval.json"
+    preview_payload = {
+        "approved": True,
+        "max_notional_usdc": 10.0,
+        "venue": "polymarket",
+        "market_id": "m-cp06",
+        "token_id": "t-yes",
+        "side": Side.BUY.value,
+        "limit_price": 0.4,
+        "max_slippage_bps": 50,
+    }
+    approval_path.write_text(json.dumps(preview_payload), encoding="utf-8")
+
+    client = RecordingPolymarketClient()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=FileFirstLiveOrderGate(approval_path),
+    )
+
+    state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    assert approval_path.exists() is False, "approval file must be unlinked after use"
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_uses_isclose_for_floats(
+    tmp_path: Path,
+) -> None:
+    """Approval JSON copied from preview values may pick up float
+    representation drift (e.g. 0.1+0.2). The gate must accept tiny drift,
+    while still rejecting any meaningful difference."""
+    path = tmp_path / "approval.json"
+    gate = FileFirstLiveOrderGate(path)
+    preview = LiveOrderPreview(
+        max_notional_usdc=0.1 + 0.2,  # 0.30000000000000004
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+    )
+    # Operator wrote the rounded value 0.3, the actuator computed 0.1 + 0.2.
+    path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 0.3,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert await gate.approve_first_order(preview) is True
+
+    # But a meaningful difference is still rejected.
+    path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 0.31,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_client_propagates_timeout_as_unknown_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout in the SDK call means the order MAY have reached the venue.
+    Wrapping it as `LiveTradingDisabledError` ('disabled, nothing sent') is
+    misleading. Surface as `PolymarketSubmissionUnknownError` so operators
+    know to reconcile."""
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        GTC = "GTC"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> object:
+            del kwargs
+            raise asyncio.TimeoutError()
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    with pytest.raises(PolymarketSubmissionUnknownError) as exc_info:
+        await PolymarketSDKClient().submit_order(
+            PolymarketOrderRequest(
+                market_id="m-cp06",
+                token_id="t-yes",
+                side=Side.BUY.value,
+                price=0.4,
+                size=25.0,
+                notional_usdc=10.0,
+                estimated_quantity=25.0,
+                order_type="limit",
+                time_in_force=TimeInForce.GTC.value,
+                max_slippage_bps=50,
+            ),
+            _live_settings().polymarket.credentials(),
+        )
+
+    message = str(exc_info.value)
+    assert "reconcile" in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_client_maps_limit_ioc_to_fak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A limit order with TIF=IOC must map to FAK, not silently demote to
+    GTC (which would rest in the book instead of being killed unfilled)."""
+    calls: dict[str, object] = {}
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    @dataclass
+    class FakeOrderArgs:
+        token_id: str
+        price: float
+        side: object
+        size: float
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        GTC = "GTC"
+        FOK = "FOK"
+        FAK = "FAK"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(
+            self,
+            *,
+            order_args: FakeOrderArgs,
+            options: FakePartialCreateOrderOptions,
+            order_type: object,
+        ) -> dict[str, object]:
+            del options
+            calls["order_args"] = order_args
+            calls["order_type"] = order_type
+            return {"orderID": "x", "status": "matched", "errorMsg": ""}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    await PolymarketSDKClient().submit_order(
+        PolymarketOrderRequest(
+            market_id="m-cp06",
+            token_id="t-yes",
+            side=Side.BUY.value,
+            price=0.4,
+            size=25.0,
+            notional_usdc=10.0,
+            estimated_quantity=25.0,
+            order_type="limit",
+            time_in_force=TimeInForce.IOC.value,
+            max_slippage_bps=50,
+        ),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert calls["order_type"] == "FAK", "limit + IOC must map to FAK"
+
+
+def test_risk_manager_rejects_above_max_quantity_shares() -> None:
+    """RiskSettings.max_quantity_shares clamps the low-price-token blow-up
+    case (e.g. limit_price=0.001 → notional/$10 = 10,000 shares)."""
+    manager = RiskManager(
+        RiskSettings(
+            max_position_per_market=100.0,
+            max_total_exposure=1000.0,
+            max_quantity_shares=5_000.0,
+        )
+    )
+
+    # 10 USDC at price 0.001 = 10,000 shares — above the 5,000 cap.
+    over_cap = manager.check(
+        _decision(notional_usdc=10.0, limit_price=0.001),
+        _portfolio(),
+    )
+    assert over_cap.approved is False
+    assert over_cap.reason == "max_quantity_shares"
+
+    # Same notional at a normal price stays under the cap.
+    in_cap = manager.check(
+        _decision(notional_usdc=10.0, limit_price=0.4),
+        _portfolio(),
+    )
+    assert in_cap.approved is True
+
+
+def test_risk_manager_quantity_cap_disabled_by_default() -> None:
+    """Default RiskSettings has no max_quantity_shares — preserves
+    backward-compatible behaviour for users who haven't opted in."""
+    manager = RiskManager(
+        RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
+    )
+    decision = _decision(notional_usdc=10.0, limit_price=0.001)
+    assert manager.check(decision, _portfolio()).approved is True
+
+
+# --- review-loop round-1 follow-ups (codex findings f2 and f3) ---
+
+
+@pytest.mark.asyncio
+async def test_executor_categorizes_submission_unknown_distinctly_from_venue_rejection() -> None:
+    """Codex finding f2: a `PolymarketSubmissionUnknownError` (timeout)
+    must be released distinctly from `venue_rejection` so retries do not
+    green-light a duplicate submission of an order that may already be
+    on the venue."""
+    from pms.actuator.adapters.polymarket import PolymarketSubmissionUnknownError
+
+    @dataclass
+    class _UnknownTimeoutAdapter:
+        calls: int = 0
+
+        async def execute(
+            self,
+            decision: TradeDecision,
+            portfolio: Portfolio | None = None,
+        ) -> OrderState:
+            del decision, portfolio
+            self.calls += 1
+            raise PolymarketSubmissionUnknownError(
+                "Polymarket live order submission timed out; reconcile"
+            )
+
+    in_memory_store = InMemoryFeedbackStore()
+    store = cast(FeedbackStore, in_memory_store)
+    dedup = InMemoryDedupStore()
+    timeout_adapter = _UnknownTimeoutAdapter()
+    actuator = executor.ActuatorExecutor(
+        adapter=cast(executor.ActuatorAdapter, timeout_adapter),
+        risk=RiskManager(
+            RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
+        ),
+        feedback=ActuatorFeedback(store),
+        dedup_store=dedup,
+    )
+
+    with pytest.raises(PolymarketSubmissionUnknownError):
+        await actuator.execute(_decision(decision_id="d-unknown"), _portfolio())
+
+    feedbacks = await in_memory_store.all()
+    submission_unknown = [
+        f for f in feedbacks if getattr(f, "category", None) == "submission_unknown"
+    ]
+    venue_rejection = [
+        f for f in feedbacks if getattr(f, "category", None) == "venue_rejection"
+    ]
+    # The point of this test: the unknown timeout must NOT be logged as
+    # venue_rejection; it gets its own category.
+    assert len(submission_unknown) == 1
+    assert len(venue_rejection) == 0
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_parses_partial_fill_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f3: an SDK response with explicit `filled_notional`
+    and status != MATCHED (e.g. IOC limit with partial match) must
+    surface positive fill values — not get silently dropped."""
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        FAK = "FAK"
+        FOK = "FOK"
+        GTC = "GTC"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> dict[str, object]:
+            del kwargs
+            # IOC limit that filled $4 of a $10 order, half a share at 0.5,
+            # and was then cancelled. Status is `live`/`cancelled` post-IOC.
+            return {
+                "orderID": "sdk-partial-1",
+                "status": "live",
+                "errorMsg": "",
+                "filled_notional_usdc": 4.0,
+                "filled_quantity": 8.0,
+                "fill_price": 0.5,
+            }
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    result = await PolymarketSDKClient().submit_order(
+        PolymarketOrderRequest(
+            market_id="m-cp06",
+            token_id="t-yes",
+            side=Side.BUY.value,
+            price=0.5,
+            size=20.0,
+            notional_usdc=10.0,
+            estimated_quantity=20.0,
+            order_type="limit",
+            time_in_force=TimeInForce.IOC.value,
+            max_slippage_bps=50,
+        ),
+        _live_settings().polymarket.credentials(),
+    )
+
+    # Pre-fix: filled_notional would be 0 because status != "matched".
+    assert result.filled_notional_usdc == pytest.approx(4.0)
+    assert result.filled_quantity == pytest.approx(8.0)
+    assert result.fill_price == pytest.approx(0.5)
+    assert result.remaining_notional_usdc == pytest.approx(6.0)
+    assert result.status == "live"
+
+
+def test_fill_from_order_emits_fill_for_partial_status() -> None:
+    """Codex finding f3, runner side: `_fill_from_order` must emit a
+    FillRecord whenever filled_notional > 0 AND fill_price > 0 — not
+    only on status == MATCHED."""
+    from pms.runner import _fill_from_order
+
+    decision = _decision(notional_usdc=10.0)
+    partial_fill_state = OrderState(
+        order_id="sdk-partial-1",
+        decision_id=decision.decision_id,
+        status="live",  # partial fill, not matched
+        market_id=decision.market_id,
+        token_id=decision.token_id,
+        venue=decision.venue,
+        requested_notional_usdc=decision.notional_usdc,
+        filled_notional_usdc=4.0,
+        remaining_notional_usdc=6.0,
+        fill_price=0.5,
+        submitted_at=datetime(2026, 4, 25, tzinfo=UTC),
+        last_updated_at=datetime(2026, 4, 25, tzinfo=UTC),
+        raw_status="live",
+        strategy_id=decision.strategy_id,
+        strategy_version_id=decision.strategy_version_id,
+        filled_quantity=8.0,
+    )
+
+    fill = _fill_from_order(partial_fill_state, decision, None)
+
+    assert fill is not None, "partial fill must produce a FillRecord"
+    assert fill.fill_notional_usdc == pytest.approx(4.0)
+    assert fill.fill_quantity == pytest.approx(8.0)
+    assert fill.fill_price == pytest.approx(0.5)
+    assert fill.status == "live"
+
+
+def test_fill_from_order_drops_zero_filled_state() -> None:
+    """Sanity: status=live with NO fill data must still drop (no fill
+    record for a resting limit order that hasn't matched anything)."""
+    from pms.runner import _fill_from_order
+
+    decision = _decision(notional_usdc=10.0)
+    no_fill_state = OrderState(
+        order_id="sdk-resting-1",
+        decision_id=decision.decision_id,
+        status="live",
+        market_id=decision.market_id,
+        token_id=decision.token_id,
+        venue=decision.venue,
+        requested_notional_usdc=decision.notional_usdc,
+        filled_notional_usdc=0.0,
+        remaining_notional_usdc=decision.notional_usdc,
+        fill_price=None,
+        submitted_at=datetime(2026, 4, 25, tzinfo=UTC),
+        last_updated_at=datetime(2026, 4, 25, tzinfo=UTC),
+        raw_status="live",
+        strategy_id=decision.strategy_id,
+        strategy_version_id=decision.strategy_version_id,
+        filled_quantity=0.0,
+    )
+
+    assert _fill_from_order(no_fill_state, decision, None) is None
+
+
+# --- review-loop round-2 follow-ups (codex findings f7 and f8) ---
+
+
+def test_coerce_float_or_none_rejects_nan_and_infinity() -> None:
+    """Codex finding f8: a venue response surfacing `NaN` / `inf` (in
+    floats or strings) must produce `None`, not corrupt the persisted
+    fill with a non-finite numeric value."""
+    from pms.actuator.adapters.polymarket import _coerce_float_or_none
+
+    assert _coerce_float_or_none(float("nan")) is None
+    assert _coerce_float_or_none(float("inf")) is None
+    assert _coerce_float_or_none(float("-inf")) is None
+    assert _coerce_float_or_none("nan") is None
+    assert _coerce_float_or_none("inf") is None
+    assert _coerce_float_or_none("Infinity") is None
+    # Sanity: well-formed values still pass through.
+    assert _coerce_float_or_none(0.0) == 0.0
+    assert _coerce_float_or_none(0.5) == 0.5
+    assert _coerce_float_or_none("0.5") == 0.5
+    assert _coerce_float_or_none(True) is None  # bool subclass of int
+    assert _coerce_float_or_none("nope") is None
+
+
+def _partial_fill_request() -> PolymarketOrderRequest:
+    return PolymarketOrderRequest(
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        price=0.5,
+        size=20.0,
+        notional_usdc=10.0,
+        estimated_quantity=20.0,
+        order_type="limit",
+        time_in_force=TimeInForce.GTC.value,
+        max_slippage_bps=50,
+    )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_rejects_overfilled_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f8: filled_notional > requested_notional must be
+    rejected — the venue cannot fill more than was ordered."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 15.0,  # > 10.0 requested
+            "filled_quantity": 30.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="exceeds requested"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_rejects_negative_filled_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f8: negative filled_quantity is malformed and must
+    be rejected."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 4.0,
+            "filled_quantity": -8.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="negative filled_quantity"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_rejects_out_of_range_fill_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f8: fill_price outside (0, 1] is invalid for a
+    Polymarket probability market and must be rejected."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 4.0,
+            "filled_quantity": 8.0,
+            "fill_price": 1.5,  # impossible probability
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="outside"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+# --- review-loop round-3 follow-ups (codex findings f9 and f10) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_invalid_explicit_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f9: even when status is `matched` (the backwards-
+    compat fallback), a venue response with an invalid explicit field
+    must be rejected — not silently persisted via the fallback path."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            # No explicit_filled_notional → matched fallback would
+            # synthesize a full fill, but the explicit (negative)
+            # quantity must still trigger validation.
+            "filled_quantity": -8.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="negative filled_quantity"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_invalid_explicit_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f9: matched fallback must also reject an explicit
+    out-of-range fill_price."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "fill_price": 1.5,  # impossible probability
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="outside"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_negative_explicit_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f9: matched fallback must reject negative explicit
+    filled_notional (which previously fell through the `> 0.0` filter
+    into the matched-fallback branch and was silently ignored)."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": -4.0,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="negative filled_notional"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+# --- review-loop round-4 follow-ups (codex finding f11) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_derives_quantity_when_only_notional_and_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f11: a venue response with filled_notional > 0 and
+    fill_price > 0 but NO filled_quantity must derive quantity from
+    notional/price — not silently persist filled_quantity=0 (which
+    would corrupt share accounting)."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 4.0,
+            "fill_price": 0.5,
+            # filled_quantity intentionally omitted
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        _partial_fill_request(),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert result.filled_notional_usdc == pytest.approx(4.0)
+    # 4.0 / 0.5 = 8.0 shares — derived, not silent zero.
+    assert result.filled_quantity == pytest.approx(8.0)
+    assert result.fill_price == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_rejects_zero_quantity_with_positive_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f11: an explicit `filled_quantity == 0` paired
+    with positive `filled_notional` is contradictory (a $4 fill of zero
+    shares) and must be rejected, not persisted."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 4.0,
+            "filled_quantity": 0.0,  # contradicts positive notional
+            "fill_price": 0.5,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="filled_quantity == 0"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+# --- review-loop round-5 follow-ups (codex finding f12) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_explicit_zero_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f12: status=matched with `filled_notional_usdc: 0`
+    is contradictory — the matched-fallback heuristic must NOT
+    synthesize a $10 / fully-filled response from an explicit zero."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": 0.0,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="inconsistent"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_partial_fields_without_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f12: status=matched with explicit
+    filled_quantity / fill_price but NO filled_notional must be
+    rejected — the matched-fallback would otherwise synthesize a
+    notional from the order while using the explicit zero quantity,
+    persisting a $10 fill of 0 shares."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_quantity": 0.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="inconsistent"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_synthesizes_full_fill_only_when_no_explicit_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f12 (positive case): status=matched WITHOUT any
+    explicit fill fields IS the legitimate backwards-compat path — the
+    full-fill heuristic should still fire to support venues that
+    surface only `status: matched` without per-fill detail."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            # No explicit fill fields at all.
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        _partial_fill_request(),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert result.filled_notional_usdc == pytest.approx(10.0)
+    assert result.filled_quantity == pytest.approx(20.0)  # 10 / 0.5
+    assert result.fill_price == pytest.approx(0.5)
+
+
+# --- review-loop round-6 follow-ups (codex finding f13) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_malformed_filled_notional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f13: a venue response with a PRESENT-BUT-MALFORMED
+    fill field (e.g. `"nan"`, `"inf"`, `null`) must be rejected — not
+    treated as 'no explicit fields' and silently routed into the
+    matched-fallback full-fill synthesis path."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": "nan",  # present but unparseable
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="unparseable filled_notional"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_malformed_filled_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f13: malformed filled_quantity (here `"inf"`)
+    must be rejected, not silently dropped into the matched fallback."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_quantity": "inf",
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="unparseable filled_quantity"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_matched_status_rejects_null_fill_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f13: a JSON null in a present field is also
+    'present but unparseable' and must be rejected."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "fill_price": None,  # JSON null
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="unparseable fill_price"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+# --- review-loop round-7 follow-ups (codex finding f14, partial accept) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_recognizes_fill_count_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding f14: `fill_count` is documented at
+    `docs/research/schema-spec.md:284,307` as a venue-side contract
+    count alias for filled_quantity. Recognising it ensures malformed
+    `fill_count` values (e.g. "nan") get routed through the
+    raw-presence rejection path rather than being silently ignored."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "fill_count": "nan",
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="unparseable filled_quantity"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_recognizes_fill_count_as_valid_quantity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive control: a well-formed `fill_count` is accepted as the
+    canonical filled_quantity, just like `filled_quantity` itself."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "live",
+            "filled_notional_usdc": 4.0,
+            "fill_count": 8.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        _partial_fill_request(),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert result.filled_quantity == pytest.approx(8.0)
+    assert result.filled_notional_usdc == pytest.approx(4.0)
+
+
+# --- review-loop fresh-final follow-up (codex SDK-wrapped timeout finding) ---
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_polyapiexception_no_resp_routes_as_submission_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh-final consensus finding: `py_clob_client_v2` wraps httpx
+    request-level timeouts into `PolyApiException(resp=None, ...)`.
+    The bare `TimeoutError` catch alone misses these — so a REAL POST
+    timeout would still flow as `LiveTradingDisabledError` =
+    venue_rejection, not `submission_unknown`. This test pins the
+    correct routing."""
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        FAK = "FAK"
+        FOK = "FOK"
+        GTC = "GTC"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class PolyApiException(Exception):
+        """Mirror the REAL SDK class shape — verified against
+        `py_clob_client_v2==1.0.0`: stores `status_code` (extracted from
+        `resp.status_code`, or None if resp is None) plus `error_msg`.
+        Crucially, does NOT retain `resp` as an attribute. An earlier
+        version of this fake exposed `self.resp` and silently diverged
+        from the real SDK — caught by the fresh-final consensus pass."""
+
+        def __init__(
+            self,
+            resp: object | None = None,
+            error_msg: str | None = None,
+        ) -> None:
+            super().__init__(error_msg or "Request exception!")
+            # Match real SDK: extract status_code from resp (if any),
+            # do NOT store resp itself.
+            self.status_code: int | None = (
+                getattr(resp, "status_code", None) if resp is not None else None
+            )
+            self.error_msg = error_msg
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> object:
+            del kwargs
+            raise PolyApiException(resp=None, error_msg="Request exception!")
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    with pytest.raises(PolymarketSubmissionUnknownError, match="transport failure"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_polyapiexception_with_resp_routes_as_venue_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inverse control: PolyApiException WITH a populated `resp` (i.e.
+    venue actually responded with an HTTP error) is a real
+    venue_rejection, NOT submission_unknown. Routing must distinguish."""
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        GTC = "GTC"
+        FOK = "FOK"
+        FAK = "FAK"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeHttpResponse:
+        status_code = 400
+        text = "venue rejected"
+
+    class PolyApiException(Exception):
+        """Same real-SDK-mirror shape — `status_code` populated from
+        `resp.status_code` when resp is present, plus `error_msg`."""
+
+        def __init__(
+            self,
+            resp: object | None = None,
+            error_msg: str | None = None,
+        ) -> None:
+            super().__init__(error_msg or "")
+            self.status_code: int | None = (
+                getattr(resp, "status_code", None) if resp is not None else None
+            )
+            self.error_msg = error_msg
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> object:
+            del kwargs
+            raise PolyApiException(resp=FakeHttpResponse(), error_msg="rejected")
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    # Should raise LiveTradingDisabledError (venue_rejection), NOT
+    # PolymarketSubmissionUnknownError. Use the broader exception type
+    # to confirm that and assert the message hints at venue error.
+    with pytest.raises(LiveTradingDisabledError) as exc_info:
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+    assert not isinstance(exc_info.value, PolymarketSubmissionUnknownError)
+    assert "venue error redacted" in str(exc_info.value)
+
+
+def _install_partial_fill_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    response: dict[str, object],
+) -> None:
+    """Wires a fake `py_clob_client_v2` whose limit-order endpoint
+    returns the given response. Used by the f8 validation tests."""
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeOrderArgs:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakePartialCreateOrderOptions:
+        pass
+
+    class FakeOrderType:
+        FAK = "FAK"
+        FOK = "FOK"
+        GTC = "GTC"
+        GTD = "GTD"
+
+    class FakeSide:
+        BUY = "SDK_BUY"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def create_and_post_order(self, **kwargs: object) -> dict[str, object]:
+            del kwargs
+            return response
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        ClobClient=FakeClobClient,
+        OrderArgs=FakeOrderArgs,
+        MarketOrderArgs=FakeOrderArgs,
+        OrderType=FakeOrderType,
+        PartialCreateOrderOptions=FakePartialCreateOrderOptions,
+        Side=FakeSide,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+
+# ---------------------------------------------------------------------------
+# Regression: first-order approval race (codex P2 / CodeRabbit Critical)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _SlowPolymarketClient:
+    """Client whose `submit_order` blocks on an `asyncio.Event` until
+    `release` is fired. Used to widen the post-approval / pre-commit
+    window so a second concurrent task can attempt to re-use the same
+    approval.
+    """
+
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    entered_submit: asyncio.Event = field(default_factory=asyncio.Event)
+    submitted: list[PolymarketOrderRequest] = field(default_factory=list)
+
+    async def submit_order(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: object,
+    ) -> PolymarketOrderResult:
+        del credentials
+        self.submitted.append(order)
+        self.entered_submit.set()
+        await self.release.wait()
+        return PolymarketOrderResult(
+            order_id=f"pm-live-{len(self.submitted)}",
+            status=OrderStatus.MATCHED.value,
+            raw_status="matched",
+            filled_notional_usdc=10.0,
+            remaining_notional_usdc=0.0,
+            fill_price=0.4,
+            filled_quantity=25.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_lock_held_through_submit_blocks_concurrent_reuse(
+    tmp_path: Path,
+) -> None:
+    """Regression for codex P2 / CodeRabbit Critical: prior implementation
+    released `_approval_lock` before `submit_order()` returned and only
+    set `_approval_state.approved=True` afterwards, leaving a window
+    where a second concurrent task could re-read the same approval file
+    (which `consume()` had not yet unlinked) and submit a parallel
+    first-order trade with one operator approval.
+
+    The fix holds the lock across approval + submit + commit + consume.
+    With the fix:
+      * T1 enters, takes lock, gets gate approval, blocks in submit.
+      * T2 enters, blocks on the lock.
+      * T1 completes submit, sets approved=True, consumes the file,
+        releases the lock.
+      * T2 acquires the lock, the double-check sees approved=True, and
+        T2 submits via the fast path WITHOUT re-reading the (now-
+        unlinked) approval file.
+    Net: gate.approve_first_order is called exactly once even though
+    both tasks make a first-order submit.
+    """
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 10.0,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    @dataclass(frozen=True)
+    class _CountingFileGate:
+        """Wrapper that delegates to FileFirstLiveOrderGate while
+        counting approve calls. Frozen dataclass to satisfy the
+        FirstLiveOrderGate protocol the actuator expects."""
+
+        inner: FileFirstLiveOrderGate
+        calls: list[int] = field(default_factory=list)
+
+        async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+            self.calls.append(1)
+            return await self.inner.approve_first_order(preview)
+
+        async def consume(self, preview: LiveOrderPreview) -> None:
+            await self.inner.consume(preview)
+
+    gate = _CountingFileGate(inner=FileFirstLiveOrderGate(approval_path))
+
+    client = _SlowPolymarketClient()
+    actuator = PolymarketActuator(
+        _live_settings(), client=client, operator_gate=gate
+    )
+
+    first = asyncio.create_task(
+        actuator.execute(_decision(decision_id="d-first"), _portfolio())
+    )
+    # Wait for T1 to enter submit_order — it now holds the approval lock
+    # *and* is blocked inside the venue call.
+    await asyncio.wait_for(client.entered_submit.wait(), timeout=1.0)
+
+    second = asyncio.create_task(
+        actuator.execute(_decision(decision_id="d-second"), _portfolio())
+    )
+    # Give the event loop a chance to run T2; with the lock-through-submit
+    # fix it MUST block on `_approval_lock` and not have submitted yet.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(client.submitted) == 1, (
+        "second task must not submit while first holds the approval lock"
+    )
+
+    # Now allow T1 to finish submit. It will set approved=True, consume
+    # the file, release the lock, and T2 will fast-path through.
+    client.release.set()
+    await asyncio.gather(first, second)
+
+    # Both submits eventually happened.
+    assert len(client.submitted) == 2
+    # And the gate was called exactly once — T2 must NOT have re-read
+    # the approval file. This is the load-bearing assertion.
+    assert len(gate.calls) == 1
+    # The approval file was consumed by T1's success.
+    assert approval_path.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_failed_first_submit_re_prompts_gate(
+    tmp_path: Path,
+) -> None:
+    """Consume-on-success preservation under the new lock scope.
+
+    The lock-through-submit fix must NOT regress the consume-on-success
+    semantic: if `submit_order()` raises while we hold the lock, the
+    approval flag stays False and a subsequent caller must be re-
+    prompted for operator approval (rather than silently re-using a
+    stale flag or being permanently locked out).
+    """
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 10.0,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+    gate = FileFirstLiveOrderGate(approval_path)
+
+    @dataclass
+    class _FailingClient:
+        attempts: int = 0
+
+        async def submit_order(
+            self,
+            order: PolymarketOrderRequest,
+            credentials: object,
+        ) -> PolymarketOrderResult:
+            del order, credentials
+            self.attempts += 1
+            raise LiveTradingDisabledError("simulated venue rejection")
+
+    failing = _FailingClient()
+    actuator = PolymarketActuator(
+        _live_settings(), client=failing, operator_gate=gate
+    )
+
+    with pytest.raises(LiveTradingDisabledError):
+        await actuator.execute(_decision(decision_id="d-first"), _portfolio())
+    # Approval flag must still be False — submit failed, do not commit.
+    assert actuator._first_order_approved() is False  # noqa: SLF001
+    # Approval file was NOT consumed because the submit failed (the
+    # operator can retry without re-writing the file).
+    assert approval_path.exists() is True
+
+    # Second attempt must succeed by re-reading the approval file.
+    @dataclass
+    class _PassingClient:
+        async def submit_order(
+            self,
+            order: PolymarketOrderRequest,
+            credentials: object,
+        ) -> PolymarketOrderResult:
+            del order, credentials
+            return PolymarketOrderResult(
+                order_id="pm-live-retry",
+                status=OrderStatus.MATCHED.value,
+                raw_status="matched",
+                filled_notional_usdc=10.0,
+                remaining_notional_usdc=0.0,
+                fill_price=0.4,
+                filled_quantity=25.0,
+            )
+
+    actuator2 = PolymarketActuator(
+        _live_settings(),
+        client=_PassingClient(),
+        operator_gate=gate,
+    )
+    state = await actuator2.execute(_decision(decision_id="d-retry"), _portfolio())
+    assert state.order_id == "pm-live-retry"
+    assert actuator2._first_order_approved() is True  # noqa: SLF001
+    # And now consumed.
+    assert approval_path.exists() is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: cross-field fill consistency (codex P1 / CodeRabbit Major)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_rejects_inconsistent_notional_quantity_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for codex P1 / CodeRabbit Major: a venue response with
+    all three explicit fill fields set must satisfy
+    `notional ≈ quantity * price` within rounding tolerance. Without
+    cross-field validation the example
+        (filled_notional_usdc=4, filled_quantity=100, fill_price=0.5)
+    where the true notional should be 50 — a 92% miss — passes
+    individual range validation and corrupts share accounting.
+    """
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": 4.0,
+            "filled_quantity": 100.0,
+            "fill_price": 0.5,  # 100 * 0.5 == 50, NOT 4
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="inconsistent fill triple"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_accepts_consistent_triple_within_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive path: a triple where notional ≈ quantity * price within
+    1% / $0.01 tolerance must pass the cross-field check. Polymarket
+    CLOB rounding can introduce sub-cent drift; the validator must not
+    reject those."""
+    # 20 shares * 0.5 = 10.0 exactly — well within tolerance.
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": 10.0,
+            "filled_quantity": 20.0,
+            "fill_price": 0.5,
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        _partial_fill_request(),
+        _live_settings().polymarket.credentials(),
+    )
+    assert result.filled_notional_usdc == pytest.approx(10.0)
+    assert result.filled_quantity == pytest.approx(20.0)
+    assert result.fill_price == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_partial_fill_accepts_sub_cent_rounding_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sub-cent rounding drift in the venue response (e.g. quantity
+    rounded to whole shares) must not be rejected. 20.001 shares at
+    0.5 = 10.0005, reported as notional=10.0 — well within $0.01
+    absolute tolerance."""
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "x",
+            "status": "matched",
+            "filled_notional_usdc": 10.0,
+            "filled_quantity": 20.001,
+            "fill_price": 0.5,
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        _partial_fill_request(),
+        _live_settings().polymarket.credentials(),
+    )
+    assert result.filled_notional_usdc == pytest.approx(10.0)

@@ -106,6 +106,7 @@ def test_risk_settings_have_exact_live_fields() -> None:
         "max_open_positions",
         "min_order_usdc",
         "slippage_threshold_bps",
+        "max_quantity_shares",
     }
 
 

@@ -132,7 +132,11 @@ def test_migration_0007_0008_apply_and_reverse() -> None:
             "market_price_snapshots_pkey",
         ]
 
-        downgrade_0008 = _run_alembic(temp_database_url, "downgrade", "-1")
+        # Pin to absolute revision targets — relative `-1` offsets break
+        # every time a new migration lands above 0008.
+        downgrade_0008 = _run_alembic(
+            temp_database_url, "downgrade", "0007_market_price_snapshots"
+        )
         assert downgrade_0008.returncode == 0, downgrade_0008.stderr
 
         after_0008 = _run_psql(
@@ -149,7 +153,9 @@ def test_migration_0007_0008_apply_and_reverse() -> None:
         )
         assert after_0008.stdout.splitlines() == ["market_price_snapshots"]
 
-        downgrade_0007 = _run_alembic(temp_database_url, "downgrade", "-1")
+        downgrade_0007 = _run_alembic(
+            temp_database_url, "downgrade", "0006_markets_price_fields"
+        )
         assert downgrade_0007.returncode == 0, downgrade_0007.stderr
 
         after_0007 = _run_psql(

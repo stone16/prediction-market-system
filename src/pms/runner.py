@@ -390,6 +390,13 @@ class Runner:
                     signal_stream=factor_signal_stream,
                 )
                 self._factor_service_task = asyncio.create_task(self._factor_service.run())
+                # Rebuild the portfolio from persisted fills BEFORE sensors
+                # start producing signals. Without this, a restart in LIVE
+                # mode would forget open Polymarket exposure: every new BUY
+                # would size against the hardcoded `Portfolio(free_usdc=…)`
+                # default while the venue actually holds real exposure. See
+                # also `_reconcile_portfolio_from_db`.
+                await self._reconcile_portfolio_from_db()
             self._active_sensors = self._build_sensors()
             self._wire_active_perception(self._active_sensors)
             await self._configure_controllers()
@@ -1110,6 +1117,91 @@ class Runner:
         if stop_error is not None:
             raise stop_error
 
+    async def _reconcile_portfolio_from_db(self) -> None:
+        """Rebuild the in-memory portfolio from persisted fills.
+
+        On a fresh process start the default Runner portfolio is hardcoded
+        (`Portfolio(total_usdc=1000, free_usdc=1000, locked_usdc=0,
+        open_positions=[])`). Without this step, restarting in LIVE mode
+        forgets all open Polymarket exposure: every new BUY decision sizes
+        against the hardcoded `free_usdc` while the venue actually holds
+        real positions. Empirically observed during the 2026-04-25 PAPER
+        soak — DB held 44 positions / $1984 locked while a fresh runner
+        instance reported `locked_usdc=0`.
+
+        Reconciliation aggregates fills via `FillStore.read_positions`,
+        sums `locked_usdc`, and rebuilds the in-memory `Portfolio`. We
+        clamp `free_usdc` to 0 if reconciled exposure exceeds
+        `total_usdc` and surface a warning so operators tighten risk
+        caps before resuming.
+        """
+        pool = self._pg_pool
+        if pool is None:
+            return
+        try:
+            persisted_positions = await self.fill_store.read_positions()
+        except Exception as error:  # noqa: BLE001
+            if self.config.mode == RunMode.LIVE:
+                # Fail closed in LIVE: silent degradation here recreates
+                # the exact restart-exposure bug this method exists to
+                # prevent. Operator gets a clear signal via the
+                # autostart_error path on /status (see api/app.py
+                # lifespan). Do not start trading without a verified
+                # baseline.
+                msg = (
+                    "LIVE portfolio reconciliation failed "
+                    f"({type(error).__name__}: {error}); refusing to start "
+                    "without a verified portfolio"
+                )
+                raise RuntimeError(msg) from error
+            logger.warning("portfolio reconciliation failed: %s", error)
+            return
+        open_positions = [p for p in persisted_positions if p.shares_held > 0.0]
+        if not open_positions:
+            # Reset to baseline so a stop/start cycle on a runner that
+            # previously held positions does not leave stale `locked_usdc`,
+            # `free_usdc`, or `open_positions` in `self.portfolio`. Without
+            # this, a second `start()` on the same Runner instance after
+            # all positions closed would still report the old locked
+            # exposure and undercount free budget, even though the DB
+            # is empty.
+            total_budget = self.portfolio.total_usdc
+            self.portfolio = replace(
+                self.portfolio,
+                locked_usdc=0.0,
+                free_usdc=total_budget,
+                open_positions=[],
+            )
+            logger.info(
+                "Reconciled portfolio from DB: 0 positions, $0.00 locked of $%.2f total",
+                total_budget,
+            )
+            return
+        total_locked = sum(position.locked_usdc for position in open_positions)
+        total_budget = self.portfolio.total_usdc
+        if total_locked > total_budget:
+            logger.warning(
+                "Reconciled locked exposure $%.2f exceeds total budget $%.2f"
+                " — clamping free_usdc=0; review risk caps before resuming",
+                total_locked,
+                total_budget,
+            )
+            free_usdc = 0.0
+        else:
+            free_usdc = total_budget - total_locked
+        self.portfolio = replace(
+            self.portfolio,
+            locked_usdc=total_locked,
+            free_usdc=free_usdc,
+            open_positions=open_positions,
+        )
+        logger.info(
+            "Reconciled portfolio from DB: %d positions, $%.2f locked of $%.2f total",
+            len(open_positions),
+            total_locked,
+            total_budget,
+        )
+
     async def _reselect(self) -> None:
         selector = self._market_selector
         subscription_controller = self._subscription_controller
@@ -1541,11 +1633,16 @@ def _fill_from_order(
     decision: TradeDecision,
     signal: MarketSignal | None,
 ) -> FillRecord | None:
-    if order_state.status != OrderStatus.MATCHED.value or order_state.fill_price is None:
+    # Emit a FillRecord whenever the venue reports a non-zero positive
+    # fill, regardless of the order's terminal status. Polymarket can
+    # return PARTIAL/LIVE statuses with positive `filled_notional_usdc`
+    # (e.g. an IOC limit that filled half its size and cancelled the
+    # rest). Pre-fix, only `MATCHED` produced a FillRecord — every
+    # partial fill was silently dropped from the inner ring, breaking
+    # both portfolio accounting and evaluator metrics.
+    if order_state.fill_price is None or order_state.fill_price <= 0.0:
         return None
     if order_state.filled_notional_usdc <= 0.0:
-        return None
-    if order_state.fill_price <= 0.0:
         return None
 
     return FillRecord(

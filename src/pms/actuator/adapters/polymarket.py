@@ -4,11 +4,12 @@ import asyncio
 import importlib
 import json
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Final, Protocol, cast
 from uuid import uuid4
 
 from pms.config import PMSSettings, validate_live_mode_ready
@@ -27,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 class OperatorApprovalRequiredError(LiveTradingDisabledError):
     """Raised when the first live order has not been approved by an operator."""
+
+
+class PolymarketSubmissionUnknownError(RuntimeError):
+    """Raised when a Polymarket order submission timed out — the order may
+    have reached the venue. Operators must reconcile before retrying.
+    """
 
 
 @dataclass(frozen=True)
@@ -76,12 +83,17 @@ class PolymarketClient(Protocol):
 class FirstLiveOrderGate(Protocol):
     async def approve_first_order(self, preview: LiveOrderPreview) -> bool: ...
 
+    async def consume(self, preview: LiveOrderPreview) -> None: ...
+
 
 @dataclass(frozen=True)
 class DenyFirstLiveOrderGate:
     async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
         del preview
         return False
+
+    async def consume(self, preview: LiveOrderPreview) -> None:
+        del preview
 
 
 @dataclass
@@ -103,6 +115,15 @@ class FileFirstLiveOrderGate:
         if not isinstance(payload, dict):
             return False
         return _approval_payload_matches(cast(dict[str, object], payload), preview)
+
+    async def consume(self, preview: LiveOrderPreview) -> None:
+        # Atomically consume the approval artefact so it cannot be replayed
+        # by a future restart or a concurrent `approve_first_order` call.
+        del preview
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -131,8 +152,49 @@ class PolymarketSDKClient:
         try:
             client = _build_sdk_client(sdk, credentials)
             response = _post_sdk_order(sdk, client, order)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Cooperative cancellation — caller decides what to do. The
+            # underlying request may still be in flight on Polymarket; the
+            # caller is responsible for reconciliation if it suppresses this.
+            raise
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            # Bare timeout — the venue never responded. Surface as
+            # submission_unknown so operators reconcile before retrying.
+            redacted = _redacted_exception_message(exc, credentials)
+            logger.warning(
+                "Polymarket live order submission timed out (%s): %s",
+                type(exc).__name__,
+                redacted,
+            )
+            msg = (
+                "Polymarket live order submission timed out; order status is "
+                "unknown — reconcile with venue before retrying"
+            )
+            raise PolymarketSubmissionUnknownError(msg) from None
         except Exception as exc:  # noqa: BLE001
             redacted = _redacted_exception_message(exc, credentials)
+            # `py_clob_client_v2.exceptions.PolyApiException` wraps httpx
+            # request errors (timeouts, connection drops) with `resp=None`,
+            # and HTTP-level venue errors with a populated httpx Response.
+            # The bare `except (TimeoutError, ...)` block above misses
+            # these wrapped transport failures — without this branch a
+            # real timeout still routes to `LiveTradingDisabledError` =
+            # venue_rejection, defeating the f2 contract that timeouts
+            # must surface as submission_unknown. Duck-typed (class name
+            # + attribute) so polymarket.py keeps no hard dependency on
+            # the SDK's exception class.
+            if _is_sdk_transport_failure(exc):
+                logger.warning(
+                    "Polymarket live order submission transport failure (%s): %s; "
+                    "treating as submission_unknown",
+                    type(exc).__name__,
+                    redacted,
+                )
+                msg = (
+                    "Polymarket live order submission transport failure; "
+                    "order status is unknown — reconcile with venue before retrying"
+                )
+                raise PolymarketSubmissionUnknownError(msg) from None
             logger.warning(
                 "Polymarket live order submission failed (%s): %s",
                 type(exc).__name__,
@@ -189,17 +251,34 @@ class PolymarketActuator:
             raise LiveTradingDisabledError("Polymarket live trading is disabled")
         del portfolio
         credentials = validate_live_mode_ready(self.settings)
-        await self._require_first_order_approval(decision)
         request = _order_request(decision)
-        result = await self.client.submit_order(request, credentials)
-        return _order_state_from_result(decision, result)
 
-    async def _require_first_order_approval(self, decision: TradeDecision) -> None:
+        # Fast path: once the first order has been confirmed by the venue
+        # the floodgates are open and subsequent submits do not serialize
+        # on `_approval_lock`. This keeps live throughput unaffected after
+        # the one-time gate.
         if self._first_order_approved():
-            return
+            result = await self.client.submit_order(request, credentials)
+            return _order_state_from_result(decision, result)
+
+        # Slow path: hold `_approval_lock` across the *entire* approval +
+        # submit + commit window. The previous implementation released
+        # the lock before `submit_order()` and only flipped
+        # `_approval_state.approved` after the venue replied — leaving a
+        # window where a second concurrent task could re-read the same
+        # approval file (which `consume()` had not yet unlinked) and
+        # authorize a parallel first-order submit. Holding the lock
+        # through submit serializes only the first-order path while
+        # preserving "consume-on-success" semantics: if `submit_order`
+        # raises, the lock releases without flipping the flag and the
+        # next caller will re-prompt the gate.
         async with self._approval_lock:
+            # Double-check after acquiring — another task may have just
+            # opened the floodgates while we were waiting.
             if self._first_order_approved():
-                return
+                result = await self.client.submit_order(request, credentials)
+                return _order_state_from_result(decision, result)
+
             preview = LiveOrderPreview(
                 max_notional_usdc=decision.notional_usdc,
                 venue=decision.venue,
@@ -220,7 +299,23 @@ class PolymarketActuator:
                     f"max_slippage_bps={preview.max_slippage_bps}"
                 )
                 raise OperatorApprovalRequiredError(msg)
+
+            # Submit while still holding the lock. If this raises, the
+            # `async with` releases the lock and `_approval_state.approved`
+            # stays False — the next caller will see no commit and
+            # re-prompt the gate (correct consume-on-success behavior).
+            result = await self.client.submit_order(request, credentials)
+
+            # First venue submission succeeded: lock in first-order
+            # completion and consume the operator-side approval artefact
+            # so it cannot be replayed by a future restart.
             self._approval_state.approved = True
+            try:
+                await self.operator_gate.consume(preview)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("first-order gate consume failed: %s", exc)
+
+        return _order_state_from_result(decision, result)
 
     def _first_order_approved(self) -> bool:
         return self._approval_state.approved
@@ -294,16 +389,32 @@ def _approval_payload_matches(
 ) -> bool:
     if payload.get("approved") is not True:
         return False
-    expected = {
-        "max_notional_usdc": preview.max_notional_usdc,
-        "venue": preview.venue,
-        "market_id": preview.market_id,
-        "token_id": preview.token_id,
-        "side": preview.side,
-        "limit_price": preview.limit_price,
-        "max_slippage_bps": preview.max_slippage_bps,
-    }
-    return all(payload.get(key) == value for key, value in expected.items())
+    if payload.get("venue") != preview.venue:
+        return False
+    if payload.get("market_id") != preview.market_id:
+        return False
+    if payload.get("token_id") != preview.token_id:
+        return False
+    if payload.get("side") != preview.side:
+        return False
+    if payload.get("max_slippage_bps") != preview.max_slippage_bps:
+        return False
+    if not _float_close(payload.get("max_notional_usdc"), preview.max_notional_usdc):
+        return False
+    if not _float_close(payload.get("limit_price"), preview.limit_price):
+        return False
+    return True
+
+
+def _float_close(value: object, expected: float) -> bool:
+    # Operators copy/paste preview values into the approval JSON. Strict `==`
+    # comparison fails on harmless float representation differences (e.g.
+    # 0.1 + 0.2) and trains the operator to massage values until equality
+    # holds. `math.isclose` keeps the gate strict (rel/abs tolerances are
+    # tight) without introducing such drift.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isclose(float(value), expected, rel_tol=1e-9, abs_tol=1e-12)
 
 
 def _build_sdk_client(sdk: object, credentials: VenueCredentials) -> object:
@@ -360,9 +471,18 @@ def _post_sdk_order(
 
 
 def _sdk_order_type(order_type_cls: object, order: PolymarketOrderRequest) -> object:
+    # Polymarket SDK enum: GTC (rest), FAK (fill-and-kill = IOC), FOK (all-or-nothing),
+    # GTD (good-till-date). PMS TimeInForce maps GTC→GTC, IOC→FAK, FOK→FOK
+    # symmetrically across market and limit orders. Without explicit IOC/FOK
+    # mapping for limit orders, an IOC limit silently rests in the book as
+    # GTC — a real behaviour change.
+    if order.time_in_force == "IOC":
+        return getattr(order_type_cls, "FAK")
+    if order.time_in_force == "FOK":
+        return getattr(order_type_cls, "FOK")
     if order.order_type.lower() == "market":
-        if order.time_in_force == "IOC":
-            return getattr(order_type_cls, "FAK")
+        # Default for market orders without an explicit TIF is FOK
+        # (all-or-nothing) — the SDK's own MarketOrderArgs default.
         return getattr(order_type_cls, "FOK")
     return getattr(order_type_cls, "GTC")
 
@@ -384,15 +504,180 @@ def _order_result_from_sdk_response(
         raise LiveTradingDisabledError(msg)
 
     status = str(_response_value(response, "status") or OrderStatus.LIVE.value).lower()
-    filled_notional_usdc = 0.0
-    remaining_notional_usdc = order.notional_usdc
-    fill_price: float | None = None
-    filled_quantity = 0.0
-    if status == OrderStatus.MATCHED.value:
+
+    # Parse explicit partial-fill data from the SDK response. Polymarket
+    # can return positive `filled_notional` with status != MATCHED (e.g.
+    # an IOC limit that filled half its size and cancelled the rest, or
+    # a GTC limit with a partial match still resting in the book). Field
+    # names vary across SDK versions; we accept any of the documented
+    # aliases and fall back to the status-based heuristic when none are
+    # present. Pre-fix, only MATCHED produced fill data — every partial
+    # fill was silently dropped.
+    # Track raw key presence and coerced value separately. A
+    # `_coerce_float_or_none` of "nan"/"inf"/null returns None, but the
+    # field IS still in the venue response — we must NOT treat that as
+    # "no explicit data" (which would trigger the matched-fallback
+    # full-fill synthesis). Reject unparseable values up front.
+    notional_field_present = _response_field_present(
+        response, "filled_notional_usdc", "filledNotional", "filled_amount"
+    )
+    raw_notional = _response_value(
+        response, "filled_notional_usdc", "filledNotional", "filled_amount"
+    )
+    explicit_filled_notional = _coerce_float_or_none(raw_notional)
+    if notional_field_present and explicit_filled_notional is None:
+        msg = (
+            "Polymarket reported unparseable filled_notional "
+            "(non-finite or null); refusing to persist suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
+
+    # `fill_count` is the venue-side contract count alias documented at
+    # `docs/research/schema-spec.md:284,307` — order-response contract
+    # count used for order-state reconciliation. Including it here
+    # closes the bypass codex called out in Round 7 finding f14: a
+    # response with `fill_count: "nan"` was previously not seen by the
+    # raw-presence check and therefore could route through the matched
+    # full-fill synthesis path. NOTE: `price` is intentionally NOT
+    # aliased to fill_price — in `py_clob_client_v2.OrderArgs`/
+    # `MarketOrderArgs`, `price` is the *request* price, not the fill
+    # price. Aliasing it would conflate request and execution data.
+    quantity_field_present = _response_field_present(
+        response, "filled_quantity", "filledQuantity", "filled_size", "filled", "fill_count"
+    )
+    raw_quantity = _response_value(
+        response, "filled_quantity", "filledQuantity", "filled_size", "filled", "fill_count"
+    )
+    explicit_filled_quantity = _coerce_float_or_none(raw_quantity)
+    if quantity_field_present and explicit_filled_quantity is None:
+        msg = (
+            "Polymarket reported unparseable filled_quantity "
+            "(non-finite or null); refusing to persist suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
+
+    price_field_present = _response_field_present(
+        response, "fill_price", "fillPrice", "average_price", "avg_price"
+    )
+    raw_price = _response_value(
+        response, "fill_price", "fillPrice", "average_price", "avg_price"
+    )
+    explicit_fill_price = _coerce_float_or_none(raw_price)
+    if price_field_present and explicit_fill_price is None:
+        msg = (
+            "Polymarket reported unparseable fill_price "
+            "(non-finite or null); refusing to persist suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
+
+    filled_notional_usdc: float
+    filled_quantity: float
+    fill_price: float | None
+
+    # Validate every non-None explicit fill field BEFORE branching. A
+    # malformed venue response must not be able to corrupt accounting
+    # via the matched fallback (which previously trusted explicit values
+    # without checking) — a status="matched" response with negative
+    # filled_quantity or fill_price=1.5 used to slip through.
+    _validate_explicit_fill_fields(
+        order=order,
+        notional=explicit_filled_notional,
+        quantity=explicit_filled_quantity,
+        price=explicit_fill_price,
+    )
+
+    # Use *raw* presence here, not coerced. A field that arrived but
+    # failed to coerce was already rejected above; this flag is for
+    # legitimately-set but zero-valued fields (e.g. resting limit with
+    # filled_notional=0).
+    explicit_field_present = (
+        notional_field_present or quantity_field_present or price_field_present
+    )
+
+    if explicit_filled_notional is not None and explicit_filled_notional > 0.0:
+        # Partial-or-full fill with explicit data from the venue.
+        # A positive filled_notional MUST imply positive filled_quantity —
+        # a fill of $4 worth of zero shares is contradictory and would
+        # corrupt portfolio share accounting (`_fill_from_order` would
+        # persist a row with shares=0). Resolve in two passes: first
+        # determine fill_price (from explicit or fall back to limit),
+        # then derive quantity from notional/price when the venue
+        # omitted it; reject explicit-zero quantity with positive
+        # notional outright.
+        filled_notional_usdc = explicit_filled_notional
+        if explicit_fill_price is not None:
+            fill_price = explicit_fill_price
+        elif (
+            explicit_filled_quantity is not None
+            and explicit_filled_quantity > 0.0
+        ):
+            implied_price = filled_notional_usdc / explicit_filled_quantity
+            if not (
+                _PROBABILITY_PRICE_MIN < implied_price <= _PROBABILITY_PRICE_MAX
+            ):
+                msg = (
+                    "Polymarket implied fill_price (notional/quantity) "
+                    "outside (0, 1] range; refusing to persist suspect fill"
+                )
+                raise LiveTradingDisabledError(msg)
+            fill_price = implied_price
+        else:
+            # Neither explicit price nor quantity available — fall back
+            # to the limit price (best estimate). Range-valid by the
+            # `TradeDecision.__post_init__` invariant `0 < limit_price < 1`.
+            fill_price = order.price
+        if explicit_filled_quantity is not None:
+            if explicit_filled_quantity == 0.0:
+                msg = (
+                    "Polymarket reported filled_notional > 0 with explicit "
+                    "filled_quantity == 0; refusing to persist suspect fill"
+                )
+                raise LiveTradingDisabledError(msg)
+            filled_quantity = explicit_filled_quantity
+        elif fill_price > 0.0:
+            # Derive quantity from notional/price so share accounting
+            # remains consistent across all venue response shapes.
+            filled_quantity = filled_notional_usdc / fill_price
+        else:
+            # Defensive: should be unreachable given the price-resolution
+            # logic above, but raise rather than persist a bad fill.
+            msg = (
+                "Polymarket fill price resolved to zero; cannot derive "
+                "filled_quantity for positive notional"
+            )
+            raise LiveTradingDisabledError(msg)
+    elif status == OrderStatus.MATCHED.value and not explicit_field_present:
+        # Backwards-compat: status=matched WITH NO EXPLICIT FILL DATA
+        # implies full fill at limit price. The full-fill heuristic must
+        # only fire when the venue offered no fill fields at all —
+        # otherwise a partial response (e.g. status=matched with explicit
+        # filled_notional=0, or with explicit_quantity=0 + price set)
+        # would silently synthesize a fake $10 / 0-share fill.
         filled_notional_usdc = order.notional_usdc
-        remaining_notional_usdc = 0.0
-        fill_price = order.price
         filled_quantity = order.estimated_quantity
+        fill_price = order.price
+    elif status == OrderStatus.MATCHED.value:
+        # Status=matched but the explicit fields disagree with a full
+        # fill (zero notional, or partial fields without positive
+        # notional). The partial-fill branch above only fires for
+        # `explicit_filled_notional > 0`, so reaching here means the
+        # response is contradictory. Refuse to fabricate a fill.
+        msg = (
+            "Polymarket reported status=matched with inconsistent "
+            "explicit fill fields (zero notional or partial data); "
+            "refusing to persist contradictory fill"
+        )
+        raise LiveTradingDisabledError(msg)
+    else:
+        # Live / pending / cancelled with no positive fill — pass
+        # through any explicit zeros from the venue without synthesis.
+        filled_notional_usdc = 0.0
+        filled_quantity = (
+            explicit_filled_quantity if explicit_filled_quantity is not None else 0.0
+        )
+        fill_price = explicit_fill_price
+
+    remaining_notional_usdc = max(0.0, order.notional_usdc - filled_notional_usdc)
 
     order_id = _response_value(response, "orderID", "order_id", "id")
     return PolymarketOrderResult(
@@ -404,6 +689,130 @@ def _order_result_from_sdk_response(
         fill_price=fill_price,
         filled_quantity=filled_quantity,
     )
+
+
+def _is_sdk_transport_failure(exc: BaseException) -> bool:
+    """Detect SDK exceptions that represent a transport-level failure
+    (no HTTP response from the venue) — distinct from the venue
+    rejecting the order with an HTTP error response.
+
+    `py_clob_client_v2.exceptions.PolyApiException` takes `resp` in
+    its constructor but does NOT retain it as an attribute — the
+    instance stores `status_code` (extracted from `resp.status_code`,
+    or None if `resp` was None) plus `error_msg`. So the right
+    transport-failure signal is `status_code is None`. Verified against
+    real SDK 1.0.0:
+        PolyApiException(resp=None).__dict__ ==
+            {'status_code': None, 'error_msg': ...}
+        PolyApiException(resp=<httpx_response>).__dict__ ==
+            {'status_code': 400, 'error_msg': ...}
+
+    Duck-typed (class name + attribute) so this module does not take a
+    hard import dependency on the SDK exception class.
+    """
+    if type(exc).__name__ != "PolyApiException":
+        return False
+    status_code = getattr(exc, "status_code", _MISSING_SENTINEL)
+    return status_code is None
+
+
+_MISSING_SENTINEL: Final[object] = object()
+
+
+def _validate_explicit_fill_fields(
+    *,
+    order: PolymarketOrderRequest,
+    notional: float | None,
+    quantity: float | None,
+    price: float | None,
+) -> None:
+    """Reject malformed venue-supplied fill fields before any branch
+    consumes them. Runs ahead of the matched/partial/no-fill branches so
+    a `status=matched` response with `filled_quantity=-8.0` (for
+    example) cannot be persisted via the backwards-compat fallback.
+    """
+    if notional is not None:
+        if notional < 0.0:
+            msg = (
+                "Polymarket reported negative filled_notional; refusing "
+                "to persist suspect fill"
+            )
+            raise LiveTradingDisabledError(msg)
+        if notional > order.notional_usdc + _NOTIONAL_OVERFILL_TOLERANCE:
+            msg = (
+                "Polymarket reported filled_notional exceeds requested "
+                "notional; refusing to persist suspect fill"
+            )
+            raise LiveTradingDisabledError(msg)
+    if quantity is not None and quantity < 0.0:
+        msg = (
+            "Polymarket reported negative filled_quantity; refusing to "
+            "persist suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
+    if price is not None and not (
+        _PROBABILITY_PRICE_MIN < price <= _PROBABILITY_PRICE_MAX
+    ):
+        msg = (
+            "Polymarket reported fill_price outside (0, 1] range; "
+            "refusing to persist suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
+    # Cross-field consistency: when the venue surfaces all three of
+    # `filled_notional_usdc`, `filled_quantity`, and `fill_price` with
+    # positive values, the identity `notional == quantity * price` must
+    # hold within rounding tolerance. Without this check a malformed
+    # triple like (notional=4, quantity=100, price=0.5) — where the
+    # true notional should be 50 — passes individual range validation
+    # and is silently persisted, corrupting share accounting.
+    #
+    # `math.isclose` with rel_tol=1% and abs_tol=$0.01 accommodates
+    # legitimate venue rounding (Polymarket CLOB matches at discrete
+    # prices) while catching the kind of order-of-magnitude divergence
+    # the example above exhibits.
+    if (
+        notional is not None
+        and notional > 0.0
+        and quantity is not None
+        and quantity > 0.0
+        and price is not None
+        and price > 0.0
+        and not math.isclose(notional, quantity * price, rel_tol=0.01, abs_tol=0.01)
+    ):
+        expected = quantity * price
+        msg = (
+            "Polymarket reported inconsistent fill triple "
+            f"(notional={notional}, quantity={quantity}, price={price}; "
+            f"expected notional≈{expected:.4f}); refusing to persist "
+            "suspect fill"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _coerce_float_or_none(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        f = float(value)
+    elif isinstance(value, str):
+        try:
+            f = float(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    # Reject NaN / +/- infinity. Persisting either as `filled_notional`
+    # / `filled_quantity` / `fill_price` would silently corrupt the
+    # portfolio and downstream metrics. A malformed venue response that
+    # parses to a non-finite number must be treated as "no fill data".
+    if not math.isfinite(f):
+        return None
+    return f
+
+
+_PROBABILITY_PRICE_MIN: Final[float] = 0.0
+_PROBABILITY_PRICE_MAX: Final[float] = 1.0
+_NOTIONAL_OVERFILL_TOLERANCE: Final[float] = 1e-6
 
 
 def _response_value(response: object, *keys: str) -> object | None:
@@ -418,6 +827,18 @@ def _response_value(response: object, *keys: str) -> object | None:
         if value is not None:
             return cast(object, value)
     return None
+
+
+def _response_field_present(response: object, *keys: str) -> bool:
+    """Distinct from `_response_value`: returns True iff the venue
+    actually surfaced one of the keys (regardless of whether the value
+    parses). Used to detect malformed-but-present fields, which must be
+    rejected before the matched-fallback can synthesize a full fill.
+    """
+    if isinstance(response, Mapping):
+        mapping = cast(Mapping[str, object], response)
+        return any(key in mapping for key in keys)
+    return any(hasattr(response, key) for key in keys)
 
 
 def _required_secret(value: str | None, field_name: str) -> str:

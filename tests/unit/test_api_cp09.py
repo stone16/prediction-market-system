@@ -475,3 +475,63 @@ async def test_api_lifespan_stops_runner_started_via_api(
         assert any(not task.done() for task in runner.tasks)
 
     assert all(task.done() for task in runner.tasks)
+
+
+@pytest.mark.asyncio
+async def test_api_status_redacts_autostart_error_to_class_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for CodeRabbit Major: /status is unauthenticated and
+    must NOT echo the raw exception text from a failed `runner.start()`.
+    Connection errors / OSError / schema failures can otherwise leak
+    DSNs, hostnames, file paths, and user info to anyone who can hit
+    the endpoint.
+
+    The fix exposes only `type(exc).__name__`. Full detail stays in the
+    server-side log so an operator can still diagnose.
+    """
+    _stub_schema_check(monkeypatch)
+    _stub_orphan_scan(monkeypatch)
+
+    secret_dsn = (
+        "postgresql://admin:supersecret@db.internal.example.com:5432/prod_db"
+    )
+
+    class _LeakyConnectionError(ConnectionError):
+        pass
+
+    runner = Runner(
+        config=PMSSettings(mode=RunMode.BACKTEST, auto_migrate_default_v2=False),
+        historical_data_path=FIXTURE_PATH,
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+
+    async def _failing_start() -> None:
+        # Sensitive DSN intentionally embedded in the message to simulate
+        # the kind of leak this redaction prevents.
+        raise _LeakyConnectionError(
+            f"could not connect to {secret_dsn} (host=/var/secret/path)"
+        )
+
+    monkeypatch.setattr(runner, "start", _failing_start)
+    app = create_app(runner, auto_start=True)
+    transport = httpx.ASGITransport(app=app)
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["autostart_attempted"] is True
+    # Only the class name leaks; full message stays server-side.
+    assert payload["autostart_error"] == "_LeakyConnectionError"
+    # Defence in depth: no token from the secret DSN appears anywhere
+    # in the JSON body, even if a future change re-introduced a leak via
+    # a different field.
+    body_text = response.text
+    for forbidden in ("supersecret", "db.internal.example.com", "prod_db", "/var/secret"):
+        assert forbidden not in body_text, (
+            f"sensitive token {forbidden!r} must not appear in /status payload"
+        )
