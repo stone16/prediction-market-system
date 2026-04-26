@@ -77,12 +77,13 @@ class ActuatorExecutor:
                     reason="insufficient_liquidity",
                 )
                 return final_state
-            except PolymarketSubmissionUnknownError:
+            except PolymarketSubmissionUnknownError as error:
                 # Order may have reached the venue. Categorize distinctly
                 # from venue_rejection so the operator knows to reconcile,
                 # and so dedup release does not green-light a retry that
                 # could double-spend.
                 final_state = _rejected_order_state(decision, "submission_unknown")
+                error.order_state = final_state
                 release_outcome = "submission_unknown"
                 await self.feedback.generate(
                     final_state,

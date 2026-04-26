@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
 import json
@@ -13,12 +13,25 @@ from pms.strategies.projections import FactorCompositionStep
 
 
 FactorKey = tuple[str, str]
+RAW_FACTOR_ROLES = frozenset(
+    {
+        "weighted",
+        "precedence_rank",
+        "threshold_edge",
+        "posterior_prior",
+        "posterior_success",
+        "posterior_failure",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
 class FactorSnapshot:
     values: Mapping[FactorKey, float]
     missing_factors: tuple[FactorKey, ...] = ()
+    timestamps: Mapping[FactorKey, datetime] = field(default_factory=dict)
+    ages_ms: Mapping[FactorKey, float] = field(default_factory=dict)
+    stale_factors: tuple[FactorKey, ...] = ()
     snapshot_hash: str | None = None
 
 
@@ -45,9 +58,7 @@ class NullFactorSnapshotReader:
         strategy_id: str,
         strategy_version_id: str,
     ) -> FactorSnapshot:
-        missing_factors = tuple(
-            dict.fromkeys((step.factor_id, step.param) for step in required)
-        )
+        missing_factors = required_factor_keys(required)
         return FactorSnapshot(
             values={},
             missing_factors=missing_factors,
@@ -59,6 +70,7 @@ class NullFactorSnapshotReader:
                 required_keys=missing_factors,
                 values={},
                 missing_factors=missing_factors,
+                stale_factors=(),
             ),
         )
 
@@ -76,9 +88,7 @@ class PostgresFactorSnapshotReader:
         strategy_id: str,
         strategy_version_id: str,
     ) -> FactorSnapshot:
-        required_keys = tuple(
-            dict.fromkeys((step.factor_id, step.param) for step in required)
-        )
+        required_keys = required_factor_keys(required)
         if not required_keys:
             return FactorSnapshot(
                 values={},
@@ -91,6 +101,7 @@ class PostgresFactorSnapshotReader:
                     required_keys=(),
                     values={},
                     missing_factors=(),
+                    stale_factors=(),
                 ),
             )
 
@@ -106,7 +117,8 @@ class PostgresFactorSnapshotReader:
                     SELECT DISTINCT ON (fv.factor_id, fv.param)
                         fv.factor_id,
                         fv.param,
-                        fv.value
+                        fv.value,
+                        fv.ts
                     FROM factor_values AS fv
                     INNER JOIN required
                         ON required.factor_id = fv.factor_id
@@ -118,7 +130,8 @@ class PostgresFactorSnapshotReader:
                 SELECT
                     required.factor_id,
                     required.param,
-                    latest.value
+                    latest.value,
+                    latest.ts
                 FROM required
                 LEFT JOIN latest
                     ON latest.factor_id = required.factor_id
@@ -131,7 +144,11 @@ class PostgresFactorSnapshotReader:
                 params,
             )
         values: dict[FactorKey, float] = {}
+        timestamps: dict[FactorKey, datetime] = {}
+        ages_ms: dict[FactorKey, float] = {}
         missing_factors: list[FactorKey] = []
+        stale_factors: list[FactorKey] = []
+        freshness_slas = _freshness_slas(required)
         for row in rows:
             key = (row["factor_id"], row["param"])
             value = row["value"]
@@ -139,9 +156,20 @@ class PostgresFactorSnapshotReader:
                 missing_factors.append(key)
                 continue
             values[key] = float(value)
+            ts = row["ts"]
+            if isinstance(ts, datetime):
+                timestamps[key] = ts
+                age_ms = max(0.0, (as_of - ts).total_seconds() * 1000.0)
+                ages_ms[key] = age_ms
+                freshness_sla_s = freshness_slas.get(key)
+                if freshness_sla_s is not None and age_ms > freshness_sla_s * 1000.0:
+                    stale_factors.append(key)
         return FactorSnapshot(
             values=values,
             missing_factors=tuple(missing_factors),
+            timestamps=timestamps,
+            ages_ms=ages_ms,
+            stale_factors=tuple(stale_factors),
             snapshot_hash=_snapshot_hash(
                 market_id=market_id,
                 as_of=as_of,
@@ -150,6 +178,7 @@ class PostgresFactorSnapshotReader:
                 required_keys=required_keys,
                 values=values,
                 missing_factors=tuple(missing_factors),
+                stale_factors=tuple(stale_factors),
             ),
         )
 
@@ -163,6 +192,7 @@ def _snapshot_hash(
     required_keys: Sequence[FactorKey],
     values: Mapping[FactorKey, float],
     missing_factors: Sequence[FactorKey],
+    stale_factors: Sequence[FactorKey] = (),
 ) -> str:
     payload = {
         "market_id": market_id,
@@ -181,9 +211,50 @@ def _snapshot_hash(
             [factor_id, param]
             for factor_id, param in sorted(missing_factors)
         ],
+        "stale_factors": [
+            [factor_id, param]
+            for factor_id, param in sorted(stale_factors)
+        ],
     }
     return sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
             "utf-8"
         )
     ).hexdigest()
+
+
+def required_factor_keys(
+    steps: Sequence[FactorCompositionStep],
+) -> tuple[FactorKey, ...]:
+    return tuple(
+        dict.fromkeys(
+            (step.factor_id, step.param)
+            for step in steps
+            if _requires_raw_factor(step)
+        )
+    )
+
+
+def _requires_raw_factor(step: FactorCompositionStep) -> bool:
+    if getattr(step, "required", True) is False:
+        return False
+    return step.role in RAW_FACTOR_ROLES
+
+
+def _freshness_slas(
+    steps: Sequence[FactorCompositionStep],
+) -> dict[FactorKey, float | None]:
+    slas: dict[FactorKey, float | None] = {}
+    for step in steps:
+        if not _requires_raw_factor(step):
+            continue
+        raw_sla = getattr(step, "freshness_sla_s", None)
+        if raw_sla is None:
+            slas[(step.factor_id, step.param)] = None
+            continue
+        freshness_sla_s = float(raw_sla)
+        key = (step.factor_id, step.param)
+        current = slas.get(key)
+        if current is None or freshness_sla_s < current:
+            slas[key] = freshness_sla_s
+    return slas

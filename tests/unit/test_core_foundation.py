@@ -9,6 +9,7 @@ from typing import Any, get_type_hints
 import pytest
 
 from pms.config import (
+    ControllerSettings,
     MissingPolymarketCredentialsError,
     PMSSettings,
     PolymarketSettings,
@@ -187,6 +188,7 @@ def test_live_mode_validation_returns_redacted_credentials() -> None:
     settings = PMSSettings(
         mode=RunMode.LIVE,
         live_trading_enabled=True,
+        controller=ControllerSettings(time_in_force="IOC"),
         polymarket=PolymarketSettings(
             host="https://clob.polymarket.com",
             private_key="private-key",

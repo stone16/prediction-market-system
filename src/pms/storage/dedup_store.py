@@ -62,10 +62,16 @@ class InMemoryDedupStore:
     async def acquire(self, decision: TradeDecision) -> bool:
         if decision.decision_id in self._entries:
             return False
+        if decision.intent_key is not None and any(
+            entry.intent_key == decision.intent_key
+            for entry in self._entries.values()
+        ):
+            return False
 
         now = datetime.now(tz=UTC)
         self._entries[decision.decision_id] = _DedupEntry(
             decision_id=decision.decision_id,
+            intent_key=decision.intent_key,
             strategy_id=decision.strategy_id,
             strategy_version_id=decision.strategy_version_id,
             acquired_at=now,
@@ -102,6 +108,7 @@ class InMemoryDedupStore:
 @dataclass(frozen=True, slots=True)
 class _DedupEntry:
     decision_id: str
+    intent_key: str | None
     strategy_id: str
     strategy_version_id: str
     acquired_at: datetime
@@ -156,15 +163,17 @@ async def _insert_order_intent(
         """
         INSERT INTO order_intents (
             decision_id,
+            intent_key,
             strategy_id,
             strategy_version_id,
             worker_host,
             worker_pid
-        ) VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (decision_id) DO NOTHING
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT DO NOTHING
         RETURNING decision_id
         """,
         decision.decision_id,
+        decision.intent_key,
         decision.strategy_id,
         decision.strategy_version_id,
         worker_host,

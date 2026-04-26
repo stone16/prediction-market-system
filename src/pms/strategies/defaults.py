@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pms.strategies.projections import FactorCompositionStep
 
+DEFAULT_REQUIRED_FACTOR_FRESHNESS_S = 300.0
+
 DEFAULT_STRATEGY_COMPOSITION: tuple[FactorCompositionStep, ...] = (
     FactorCompositionStep(
         factor_id="fair_value_spread",
@@ -9,6 +11,7 @@ DEFAULT_STRATEGY_COMPOSITION: tuple[FactorCompositionStep, ...] = (
         param="",
         weight=1.0,
         threshold=None,
+        freshness_sla_s=DEFAULT_REQUIRED_FACTOR_FRESHNESS_S,
     ),
     FactorCompositionStep(
         factor_id="subset_pricing_violation",
@@ -16,6 +19,7 @@ DEFAULT_STRATEGY_COMPOSITION: tuple[FactorCompositionStep, ...] = (
         param="",
         weight=2.0,
         threshold=None,
+        freshness_sla_s=DEFAULT_REQUIRED_FACTOR_FRESHNESS_S,
     ),
     FactorCompositionStep(
         factor_id="fair_value_spread",
@@ -23,6 +27,7 @@ DEFAULT_STRATEGY_COMPOSITION: tuple[FactorCompositionStep, ...] = (
         param="",
         weight=1.0,
         threshold=0.02,
+        freshness_sla_s=DEFAULT_REQUIRED_FACTOR_FRESHNESS_S,
     ),
     FactorCompositionStep(
         factor_id="subset_pricing_violation",
@@ -30,6 +35,7 @@ DEFAULT_STRATEGY_COMPOSITION: tuple[FactorCompositionStep, ...] = (
         param="",
         weight=1.0,
         threshold=0.02,
+        freshness_sla_s=DEFAULT_REQUIRED_FACTOR_FRESHNESS_S,
     ),
     FactorCompositionStep(
         factor_id="metaculus_prior",
@@ -37,6 +43,7 @@ DEFAULT_STRATEGY_COMPOSITION: tuple[FactorCompositionStep, ...] = (
         param="",
         weight=2.0,
         threshold=None,
+        freshness_sla_s=DEFAULT_REQUIRED_FACTOR_FRESHNESS_S,
     ),
     FactorCompositionStep(
         factor_id="yes_count",
@@ -44,6 +51,7 @@ DEFAULT_STRATEGY_COMPOSITION: tuple[FactorCompositionStep, ...] = (
         param="",
         weight=1.0,
         threshold=None,
+        freshness_sla_s=DEFAULT_REQUIRED_FACTOR_FRESHNESS_S,
     ),
     FactorCompositionStep(
         factor_id="no_count",
@@ -51,6 +59,7 @@ DEFAULT_STRATEGY_COMPOSITION: tuple[FactorCompositionStep, ...] = (
         param="",
         weight=1.0,
         threshold=None,
+        freshness_sla_s=DEFAULT_REQUIRED_FACTOR_FRESHNESS_S,
     ),
     FactorCompositionStep(
         factor_id="llm",

@@ -19,6 +19,7 @@ from pms.actuator.adapters.polymarket import (
     FileFirstLiveOrderGate,
     PolymarketActuator,
     PolymarketSDKClient,
+    PolymarketSubmissionUnknownError,
 )
 from pms.actuator.executor import ActuatorAdapter, ActuatorExecutor
 from pms.actuator.feedback import ActuatorFeedback
@@ -246,6 +247,7 @@ class Runner:
     _paper_orderbooks: dict[str, dict[str, Any]] = field(
         init=False, default_factory=dict
     )
+    _live_trading_suspended_reason: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self.state = RunnerState(mode=self.config.mode)
@@ -352,6 +354,10 @@ class Runner:
             tasks.append(self.evaluator_task)
         return tuple(tasks)
 
+    @property
+    def live_trading_suspended(self) -> bool:
+        return self._live_trading_suspended_reason is not None
+
     async def start(self) -> None:
         if any(not task.done() for task in self.tasks):
             msg = "Runner is already started"
@@ -362,6 +368,7 @@ class Runner:
 
         self._stop_event.clear()
         self._controller_pipeline_error = None
+        self._live_trading_suspended_reason = None
         self.state = RunnerState(
             mode=self.config.mode,
             runner_started_at=datetime.now(tz=UTC),
@@ -377,6 +384,8 @@ class Runner:
                     raise RuntimeError(msg)
                 self._strategy_registry = PostgresStrategyRegistry(self._pg_pool)
                 await ensure_factor_catalog(self._pg_pool)
+                if self.config.mode == RunMode.LIVE:
+                    await self._assert_no_unresolved_submission_unknown_incidents()
                 await self._ensure_default_v2_version()
                 if self._pg_pool is None:
                     msg = "Runner PostgreSQL pool is not initialized"
@@ -824,6 +833,18 @@ class Runner:
                             created_at=created_at,
                             expires_at=expires_at,
                         )
+                        update_status = getattr(
+                            self.decision_store,
+                            "update_status",
+                            None,
+                        )
+                        if callable(update_status):
+                            await update_status(
+                                decision.decision_id,
+                                current_status="pending",
+                                next_status="accepted",
+                                updated_at=created_at,
+                            )
                         _append_bounded(self.state.decisions, decision)
                         await self.event_bus.publish(
                             "controller.decision",
@@ -881,6 +902,20 @@ class Runner:
             decision = work_item.decision
             signal = work_item.signal
             try:
+                if (
+                    self.config.mode == RunMode.LIVE
+                    and self._live_trading_suspended_reason is not None
+                ):
+                    await self.event_bus.publish(
+                        "error",
+                        (
+                            "live trading suspended: "
+                            f"{self._live_trading_suspended_reason}"
+                        ),
+                        market_id=decision.market_id,
+                        decision_id=decision.decision_id,
+                    )
+                    continue
                 if self.config.mode == RunMode.PAPER and signal is not None:
                     self._paper_orderbooks[decision.market_id] = signal.orderbook
                 order_state = await _execute_actuator_work_item(
@@ -911,6 +946,26 @@ class Runner:
                         logger.warning("fill persistence failed: %s", error)
                     self.portfolio = _portfolio_with_fill(self.portfolio, fill)
                     self._evaluator_spool.enqueue(fill, decision)
+            except PolymarketSubmissionUnknownError as error:
+                self._live_trading_suspended_reason = "submission_unknown"
+                self._stop_event.set()
+                unknown_order_state = error.order_state
+                if unknown_order_state is not None:
+                    _append_bounded(self.state.orders, unknown_order_state)
+                    try:
+                        await self.order_store.insert(unknown_order_state)
+                    except Exception as store_error:  # noqa: BLE001
+                        logger.warning(
+                            "submission_unknown order persistence failed: %s",
+                            store_error,
+                        )
+                await self.event_bus.publish(
+                    "error",
+                    f"live trading suspended for submission_unknown: {error}",
+                    market_id=decision.market_id,
+                    decision_id=decision.decision_id,
+                )
+                logger.warning("live trading suspended for submission_unknown: %s", error)
             except Exception as error:
                 await self.event_bus.publish(
                     "error",
@@ -963,6 +1018,28 @@ class Runner:
         return await self.decision_store.expire_pending(
             before=now or datetime.now(tz=UTC)
         )
+
+    async def _assert_no_unresolved_submission_unknown_incidents(self) -> None:
+        pool = self._pg_pool
+        if pool is None:
+            return
+        acquire = getattr(pool, "acquire", None)
+        if acquire is None:
+            return
+        async with acquire() as connection:
+            count = await connection.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM order_intents
+                WHERE outcome = 'submission_unknown'
+                """
+            )
+        if int(count or 0) > 0:
+            msg = (
+                "LIVE start refused: unresolved submission_unknown incident "
+                "requires venue reconciliation before resume"
+            )
+            raise RuntimeError(msg)
 
     async def _metrics_by_strategy(
         self,

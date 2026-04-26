@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 
 from pms.config import (
+    ControllerSettings,
     DatabaseSettings,
     PMSSettings,
     PolymarketSettings,
@@ -167,6 +168,9 @@ def _settings(mode: RunMode) -> PMSSettings:
         risk=RiskSettings(
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
+        ),
+        controller=ControllerSettings(
+            time_in_force="IOC" if mode == RunMode.LIVE else "GTC"
         ),
         polymarket=_live_polymarket_settings() if mode == RunMode.LIVE else PolymarketSettings(),
     )
@@ -606,6 +610,7 @@ async def test_reselection_caps_subscription_asset_ids(
                 pool_max_size=10,
             ),
             sensor=SensorSettings(max_subscription_asset_ids=2),
+            controller=ControllerSettings(time_in_force="IOC"),
             polymarket=_live_polymarket_settings(),
         ),
         historical_data_path=FIXTURE_PATH,
@@ -710,6 +715,7 @@ async def test_refresh_subscription_caps_asset_ids() -> None:
                 pool_max_size=10,
             ),
             sensor=SensorSettings(max_subscription_asset_ids=2),
+            controller=ControllerSettings(time_in_force="IOC"),
             polymarket=_live_polymarket_settings(),
         ),
         historical_data_path=FIXTURE_PATH,

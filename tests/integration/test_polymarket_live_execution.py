@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Literal, cast
 
 import pytest
 
 from pms.actuator.adapters.polymarket import (
+    LivePreSubmitQuote,
     LiveOrderPreview,
     PolymarketActuator,
     PolymarketOrderResult,
@@ -14,7 +16,7 @@ from pms.actuator.adapters.polymarket import (
 from pms.actuator.executor import ActuatorExecutor
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
-from pms.config import PMSSettings, PolymarketSettings, RiskSettings
+from pms.config import ControllerSettings, PMSSettings, PolymarketSettings, RiskSettings
 from pms.core.enums import OrderStatus, RunMode, Side, TimeInForce
 from pms.core.models import FillRecord, OrderState, TradeDecision
 from pms.runner import Runner
@@ -57,6 +59,27 @@ class AllowFirstOrderGate:
         self.consumed += 1
 
 
+@dataclass(frozen=True)
+class AllowQuoteProvider:
+    async def quote(
+        self,
+        order: object,
+        credentials: object,
+    ) -> LivePreSubmitQuote:
+        del credentials
+        notional = getattr(order, "notional_usdc")
+        price = getattr(order, "price")
+        return LivePreSubmitQuote(
+            market_status="open",
+            book_age_ms=20.0,
+            executable_notional_usdc=float(notional),
+            best_executable_price=float(price),
+            spread_bps=10.0,
+            quote_hash="quote-integration",
+            book_ts=datetime(2026, 4, 26, tzinfo=UTC),
+        )
+
+
 @dataclass
 class MockPolymarketClient:
     submitted: list[object] = field(default_factory=list)
@@ -96,7 +119,12 @@ async def test_live_polymarket_order_uses_runner_order_and_fill_persistence_path
     client = MockPolymarketClient()
     gate = AllowFirstOrderGate()
     runner.actuator_executor = ActuatorExecutor(
-        adapter=PolymarketActuator(settings, client=client, operator_gate=gate),
+        adapter=PolymarketActuator(
+            settings,
+            client=client,
+            operator_gate=gate,
+            quote_provider=AllowQuoteProvider(),
+        ),
         risk=RiskManager(settings.risk),
         feedback=ActuatorFeedback(cast(FeedbackStore, feedback_store)),
         dedup_store=InMemoryDedupStore(),
@@ -125,6 +153,7 @@ def _live_settings() -> PMSSettings:
         mode=RunMode.LIVE,
         live_trading_enabled=True,
         auto_migrate_default_v2=False,
+        controller=ControllerSettings(time_in_force="IOC"),
         risk=RiskSettings(
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
@@ -156,7 +185,7 @@ def _decision(
         stop_conditions=["integration-test"],
         prob_estimate=0.6,
         expected_edge=0.2,
-        time_in_force=TimeInForce.GTC,
+        time_in_force=TimeInForce.IOC,
         opportunity_id="op-live-integration",
         strategy_id="default",
         strategy_version_id="default-v1",

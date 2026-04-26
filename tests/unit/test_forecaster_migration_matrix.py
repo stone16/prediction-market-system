@@ -53,8 +53,13 @@ class PreMigrationRules:
 class PreMigrationStatistical:
     prior_strength: float = 2.0
 
-    def predict(self, signal: MarketSignal) -> ForecastResult:
+    def predict(self, signal: MarketSignal) -> ForecastResult | None:
         metaculus = signal.external_signal.get("metaculus_prob")
+        has_counts = (
+            "yes_count" in signal.external_signal or "no_count" in signal.external_signal
+        )
+        if metaculus is None and not has_counts:
+            return None
         if metaculus is None:
             alpha = 1.0
             beta = 1.0
@@ -268,7 +273,9 @@ def test_default_strategy_composition_matches_present_branch_average(
     rules_result = PreMigrationRules().predict(signal)
     if rules_result is not None:
         expected_probabilities.append(rules_result[0])
-    expected_probabilities.append(PreMigrationStatistical().predict(signal)[0])
+    statistical_result = PreMigrationStatistical().predict(signal)
+    if statistical_result is not None:
+        expected_probabilities.append(statistical_result[0])
     factor_values = _factor_values(signal)
     if llm_probability is not None:
         expected_probabilities.append(llm_probability)

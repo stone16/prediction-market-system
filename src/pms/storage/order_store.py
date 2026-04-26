@@ -127,6 +127,7 @@ def _order_payload(order: OrderState) -> dict[str, object]:
         "fill_price": order.fill_price,
         "last_updated_at": order.last_updated_at.isoformat(),
         "raw_status": order.raw_status,
+        "pre_submit_quote": dict(order.pre_submit_quote),
     }
 
 
@@ -149,6 +150,10 @@ def _order_from_row(row: asyncpg.Record) -> OrderState:
         strategy_id=cast(str, row["strategy_id"]),
         strategy_version_id=cast(str, row["strategy_version_id"]),
         filled_quantity=cast(float, row["filled_quantity"]),
+        pre_submit_quote=cast(
+            dict[str, Any],
+            payload.get("pre_submit_quote", {}),
+        ),
     )
 
 

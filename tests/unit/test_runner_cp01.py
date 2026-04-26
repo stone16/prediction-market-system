@@ -16,7 +16,13 @@ from pms.actuator.adapters.polymarket import (
     PolymarketActuator,
     PolymarketSDKClient,
 )
-from pms.config import DatabaseSettings, PMSSettings, PolymarketSettings, RiskSettings
+from pms.config import (
+    ControllerSettings,
+    DatabaseSettings,
+    PMSSettings,
+    PolymarketSettings,
+    RiskSettings,
+)
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, OrderState, Portfolio
 from pms.market_selection.merge import StrategyMarketSet
@@ -137,6 +143,7 @@ def _settings() -> PMSSettings:
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
         ),
+        controller=ControllerSettings(time_in_force="IOC"),
         polymarket=_live_polymarket_settings(),
     )
 
@@ -157,6 +164,7 @@ def test_runner_builds_live_polymarket_adapter_with_sdk_client_and_file_gate(
             funder_address="0xabc",
             first_live_order_approval_path=str(tmp_path / "approval.json"),
         ),
+        controller=ControllerSettings(time_in_force="IOC"),
     )
     runner = Runner(config=settings, historical_data_path=FIXTURE_PATH)
 

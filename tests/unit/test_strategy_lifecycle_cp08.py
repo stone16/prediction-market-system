@@ -11,7 +11,13 @@ from typing import Any, cast
 
 import pytest
 
-from pms.config import DatabaseSettings, PMSSettings, PolymarketSettings, RiskSettings
+from pms.config import (
+    ControllerSettings,
+    DatabaseSettings,
+    PMSSettings,
+    PolymarketSettings,
+    RiskSettings,
+)
 from pms.core.enums import RunMode, TimeInForce
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
 from pms.market_selection.merge import StrategyMarketSet
@@ -202,6 +208,7 @@ def _settings() -> PMSSettings:
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
         ),
+        controller=ControllerSettings(time_in_force="IOC"),
         polymarket=_live_polymarket_settings(),
     )
 

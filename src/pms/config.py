@@ -54,6 +54,8 @@ class ControllerSettings(BaseModel):
     min_volume: float = 0.0
     max_slippage_bps: int = 50
     time_in_force: str = "GTC"
+    max_book_age_ms: float = 1_000.0
+    max_spread_bps: float = 100.0
 
 
 class RiskSettings(BaseModel):
@@ -145,6 +147,12 @@ def validate_live_mode_ready(settings: PMSSettings) -> VenueCredentials:
         fields = ", ".join(missing)
         msg = f"Missing Polymarket credential fields: {fields}"
         raise MissingPolymarketCredentialsError(msg)
+    if settings.controller.time_in_force.upper() == "GTC":
+        msg = (
+            "LIVE GTC disabled until an open-order ledger reserves "
+            "resting order exposure"
+        )
+        raise LiveTradingDisabledError(msg)
     return credentials
 
 
