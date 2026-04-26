@@ -11,6 +11,7 @@ import asyncpg
 
 from pms.core.models import Market, MarketSignal
 from pms.factors.base import FactorDefinition, FactorValueRow
+from pms.factors.catalog import ensure_factor_catalog
 from pms.research.cache import FactorPanel, load_factor_panel
 from pms.storage.market_data_store import PostgresMarketDataStore
 
@@ -97,10 +98,26 @@ class FactorService:
                 dedupe_key = (row.factor_id, row.market_id, row.param)
                 if self._last_persisted_ts.get(dedupe_key) == row.ts:
                     continue
-                await persist_factor_value(self.pool, row)
+                await self._persist_factor_value(row, signal)
                 self._last_persisted_ts[dedupe_key] = row.ts
                 persisted += 1
         return persisted
+
+    async def _persist_factor_value(
+        self,
+        row: FactorValueRow,
+        signal: MarketSignal,
+    ) -> None:
+        try:
+            await persist_factor_value(self.pool, row)
+        except asyncpg.ForeignKeyViolationError as exc:
+            if _is_constraint_violation(exc, "factor_values_factor_id_fkey"):
+                await ensure_factor_catalog(self.pool, factor_ids=(row.factor_id,))
+            elif _is_constraint_violation(exc, "factor_values_market_id_fkey"):
+                await self._ensure_market_shell(signal)
+            else:
+                raise
+            await persist_factor_value(self.pool, row)
 
     async def get_panel(
         self,
@@ -163,3 +180,11 @@ class FactorService:
                 last_seen_at=signal.timestamp,
             )
         )
+
+
+def _is_constraint_violation(
+    exc: asyncpg.ForeignKeyViolationError,
+    constraint_name: str,
+) -> bool:
+    actual_constraint = getattr(exc, "constraint_name", None)
+    return actual_constraint == constraint_name or constraint_name in str(exc)

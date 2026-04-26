@@ -260,6 +260,27 @@ async def test_api_config_rejects_live_mode_when_credentials_are_missing() -> No
 
 
 @pytest.mark.asyncio
+async def test_api_run_start_rejects_live_mode_when_credentials_are_missing() -> None:
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.LIVE,
+            live_trading_enabled=True,
+            auto_migrate_default_v2=False,
+        ),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/run/start")
+
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Missing Polymarket credential fields:")
+
+
+@pytest.mark.asyncio
 async def test_api_run_start_stop_cycle(tmp_path: Path) -> None:
     runner = Runner(
         config=PMSSettings(

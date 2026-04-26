@@ -62,7 +62,7 @@ from pms.api.routes.strategies import list_strategies as list_strategies_items
 from pms.api.routes.trades import list_trades as list_trades_items
 from pms.config import MissingPolymarketCredentialsError, PMSSettings, validate_live_mode_ready
 from pms.core.enums import RunMode
-from pms.core.models import EvalRecord, MarketSignal, TradeDecision
+from pms.core.models import EvalRecord, LiveTradingDisabledError, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
 from pms.metrics import metrics_snapshot
 from pms.runner import Runner
@@ -601,7 +601,10 @@ def create_app(
     async def run_start() -> dict[str, Any]:
         if _is_runner_running(active_runner):
             raise HTTPException(status_code=409, detail=RUNNER_ALREADY_RUNNING_DETAIL)
-        await active_runner.start()
+        try:
+            await active_runner.start()
+        except LiveTradingDisabledError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {
             "status": "started",
             "mode": active_runner.state.mode.value,

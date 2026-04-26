@@ -14,6 +14,7 @@ from pms.config import DatabaseSettings, PMSSettings
 from pms.core.enums import MarketStatus, RunMode
 from pms.core.models import Market, MarketSignal, Token
 from pms.factors.base import FactorDefinition, FactorValueRow
+from pms.factors.service import FactorService
 from pms.runner import Runner
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
@@ -74,6 +75,24 @@ class AlwaysFactor(FactorDefinition):
             ts=signal.timestamp,
             value=0.25,
         )
+
+
+class DeleteMarketAfterReadStore(PostgresMarketDataStore):
+    def __init__(self, pool: asyncpg.Pool, *, market_id: str) -> None:
+        super().__init__(pool)
+        self._market_id = market_id
+        self._deleted = False
+
+    async def read_market(self, market_id: str) -> Market | None:
+        market = await super().read_market(market_id)
+        if market is not None and market_id == self._market_id and not self._deleted:
+            async with self.pool.acquire() as connection:
+                await connection.execute(
+                    "DELETE FROM markets WHERE condition_id = $1",
+                    market_id,
+                )
+            self._deleted = True
+        return market
 
 
 def _settings(*, factor_cadence_s: float = 0.05) -> PMSSettings:
@@ -140,6 +159,76 @@ async def _assert_pool_still_works(pg_pool: asyncpg.Pool) -> None:
     async with pg_pool.acquire() as connection:
         value = await connection.fetchval("SELECT 1")
     assert value == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_factor_service_reseeds_source_factor_after_catalog_truncation(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    async with pg_pool.acquire() as connection:
+        await connection.execute("DELETE FROM factor_values")
+        await connection.execute(
+            "DELETE FROM factors WHERE factor_id = 'orderbook_imbalance'"
+        )
+
+    service = FactorService(
+        pool=pg_pool,
+        store=PostgresMarketDataStore(pg_pool),
+        cadence_s=0.05,
+        factors=(AlwaysFactor,),
+        signal_stream=RepeatingSensor(_signal()),
+    )
+
+    persisted = await service.compute_once([_signal()])
+
+    async with pg_pool.acquire() as connection:
+        factor_exists = await connection.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM factors WHERE factor_id = 'orderbook_imbalance')"
+        )
+        factor_values = await connection.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM factor_values
+            WHERE factor_id = 'orderbook_imbalance'
+            """
+        )
+
+    assert persisted == 1
+    assert factor_exists is True
+    assert factor_values == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_factor_service_recreates_market_shell_after_runtime_delete(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    await _seed_boot_prereqs(pg_pool)
+    service = FactorService(
+        pool=pg_pool,
+        store=DeleteMarketAfterReadStore(pg_pool, market_id="factor-lifecycle"),
+        cadence_s=0.05,
+        factors=(AlwaysFactor,),
+        signal_stream=RepeatingSensor(_signal()),
+    )
+
+    persisted = await service.compute_once([_signal()])
+
+    async with pg_pool.acquire() as connection:
+        market_exists = await connection.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM markets WHERE condition_id = 'factor-lifecycle')"
+        )
+        factor_values = await connection.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM factor_values
+            WHERE factor_id = 'orderbook_imbalance'
+              AND market_id = 'factor-lifecycle'
+            """
+        )
+
+    assert persisted == 1
+    assert market_exists is True
+    assert factor_values == 1
 
 
 @pytest.mark.asyncio(loop_scope="session")
