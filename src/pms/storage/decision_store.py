@@ -295,6 +295,7 @@ def _decision_payload(decision: TradeDecision) -> dict[str, object]:
         "action": decision.action,
         "outcome": decision.outcome,
         "model_id": decision.model_id,
+        "intent_key": decision.intent_key,
     }
 
 
@@ -340,6 +341,7 @@ def _decision_from_payload(payload: Mapping[str, Any]) -> TradeDecision:
         action=cast(Literal["BUY", "SELL"] | None, payload.get("action")),
         outcome=cast(Literal["YES", "NO"], payload.get("outcome", "YES")),
         model_id=cast(str | None, payload.get("model_id")),
+        intent_key=cast(str | None, payload.get("intent_key")),
     )
 
 

@@ -20,6 +20,7 @@ from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.adapters.polymarket import (
     FileFirstLiveOrderGate,
     LiveOrderPreview,
+    LivePreSubmitQuote,
     OperatorApprovalRequiredError,
     PolymarketActuator,
     PolymarketOrderResult,
@@ -29,7 +30,7 @@ from pms.actuator.adapters.polymarket import (
 )
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
-from pms.config import PMSSettings, PolymarketSettings, RiskSettings
+from pms.config import ControllerSettings, PMSSettings, PolymarketSettings, RiskSettings
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side, TimeInForce
 from pms.core.models import LiveTradingDisabledError, OrderState, Portfolio, TradeDecision
 from pms.storage.dedup_store import InMemoryDedupStore
@@ -60,7 +61,7 @@ def _decision(
         stop_conditions=["unit-test"],
         prob_estimate=0.6,
         expected_edge=0.2,
-        time_in_force=TimeInForce.GTC,
+        time_in_force=TimeInForce.IOC,
         opportunity_id=f"op-{decision_id}",
         strategy_id="default",
         strategy_version_id="default-v1",
@@ -340,9 +341,29 @@ class BlockingOperatorGate:
         del preview
 
 
+@dataclass(frozen=True)
+class AllowQuoteProvider:
+    async def quote(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: object,
+    ) -> LivePreSubmitQuote:
+        del credentials
+        return LivePreSubmitQuote(
+            market_status="open",
+            book_age_ms=25.0,
+            executable_notional_usdc=order.notional_usdc,
+            best_executable_price=order.price,
+            spread_bps=10.0,
+            quote_hash="quote-unit",
+            book_ts=datetime(2026, 4, 26, tzinfo=UTC),
+        )
+
+
 def _live_settings() -> PMSSettings:
     return PMSSettings(
         live_trading_enabled=True,
+        controller=ControllerSettings(time_in_force="IOC"),
         polymarket=PolymarketSettings(
             private_key="private-key",
             api_key="api-key",
@@ -366,7 +387,12 @@ async def test_polymarket_actuator_rejects_missing_live_credentials() -> None:
 async def test_polymarket_actuator_requires_operator_approval_for_first_live_order() -> None:
     client = RecordingPolymarketClient()
     gate = RecordingOperatorGate(approved=False)
-    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
 
     with pytest.raises(OperatorApprovalRequiredError):
         await actuator.execute(_decision(), _portfolio())
@@ -386,7 +412,12 @@ async def test_polymarket_actuator_requires_operator_approval_for_first_live_ord
 async def test_polymarket_actuator_submits_mocked_live_order_after_first_order_gate() -> None:
     client = RecordingPolymarketClient()
     gate = RecordingOperatorGate(approved=True)
-    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
 
     state = await actuator.execute(_decision(), _portfolio())
 
@@ -419,7 +450,12 @@ async def test_polymarket_actuator_first_order_gate_is_serialized() -> None:
     #      not the ceiling — this matches the original concurrent semantics).
     client = RecordingPolymarketClient()
     gate = BlockingOperatorGate()
-    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
 
     first = asyncio.create_task(actuator.execute(_decision(decision_id="d-first"), _portfolio()))
     await asyncio.wait_for(gate.entered.wait(), timeout=1.0)
@@ -441,7 +477,12 @@ async def test_polymarket_actuator_first_order_gate_is_serialized() -> None:
 async def test_polymarket_actuator_converts_limit_notional_to_order_shares() -> None:
     client = RecordingPolymarketClient()
     gate = RecordingOperatorGate(approved=True)
-    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
 
     await actuator.execute(_decision(notional_usdc=10.0, limit_price=0.4), _portfolio())
 
@@ -454,7 +495,12 @@ async def test_polymarket_actuator_converts_limit_notional_to_order_shares() -> 
 async def test_polymarket_actuator_converts_market_sell_notional_to_shares() -> None:
     client = RecordingPolymarketClient()
     gate = RecordingOperatorGate(approved=True)
-    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
     decision = _decision(
         side=Side.SELL.value,
         action=Side.SELL.value,
@@ -1025,7 +1071,12 @@ async def test_polymarket_actuator_does_not_mark_approved_when_submit_fails() ->
     """
     client = _FailThenSucceedClient(fail_count=1)
     gate = RecordingOperatorGate(approved=True)
-    actuator = PolymarketActuator(_live_settings(), client=client, operator_gate=gate)
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
 
     with pytest.raises(RuntimeError, match="simulated network drop"):
         await actuator.execute(_decision(decision_id="d-fail"), _portfolio())
@@ -1069,6 +1120,7 @@ async def test_file_first_live_order_gate_consumes_file_after_first_success(
         _live_settings(),
         client=client,
         operator_gate=FileFirstLiveOrderGate(approval_path),
+        quote_provider=AllowQuoteProvider(),
     )
 
     state = await actuator.execute(_decision(), _portfolio())
@@ -2261,7 +2313,10 @@ async def test_polymarket_actuator_lock_held_through_submit_blocks_concurrent_re
 
     client = _SlowPolymarketClient()
     actuator = PolymarketActuator(
-        _live_settings(), client=client, operator_gate=gate
+        _live_settings(),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
     )
 
     first = asyncio.create_task(
@@ -2341,7 +2396,10 @@ async def test_polymarket_actuator_failed_first_submit_re_prompts_gate(
 
     failing = _FailingClient()
     actuator = PolymarketActuator(
-        _live_settings(), client=failing, operator_gate=gate
+        _live_settings(),
+        client=failing,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
     )
 
     with pytest.raises(LiveTradingDisabledError):
@@ -2375,6 +2433,7 @@ async def test_polymarket_actuator_failed_first_submit_re_prompts_gate(
         _live_settings(),
         client=_PassingClient(),
         operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
     )
     state = await actuator2.execute(_decision(decision_id="d-retry"), _portfolio())
     assert state.order_id == "pm-live-retry"

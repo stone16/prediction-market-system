@@ -288,6 +288,7 @@ CREATE TABLE IF NOT EXISTS orders (
 
 CREATE TABLE IF NOT EXISTS order_intents (
     decision_id TEXT PRIMARY KEY,
+    intent_key TEXT,
     strategy_id TEXT NOT NULL CHECK (strategy_id != ''),
     strategy_version_id TEXT NOT NULL CHECK (strategy_version_id != ''),
     acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -304,6 +305,10 @@ CREATE INDEX IF NOT EXISTS idx_order_intents_strategy_acquired_at_desc
 
 CREATE INDEX IF NOT EXISTS idx_order_intents_released_at_nulls_first
     ON order_intents(released_at NULLS FIRST);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_order_intents_intent_key_unique
+    ON order_intents(intent_key)
+    WHERE intent_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS fills (
     fill_id TEXT PRIMARY KEY,

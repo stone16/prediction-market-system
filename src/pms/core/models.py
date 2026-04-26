@@ -84,8 +84,12 @@ class TradeDecision:
     action: BookSide | None = None
     outcome: Outcome = "YES"
     model_id: str | None = None
+    intent_key: str | None = None
 
     def __post_init__(self) -> None:
+        if self.action is not None and self.side != self.action:
+            msg = "TradeDecision.side/action mismatch"
+            raise ValueError(msg)
         if self.notional_usdc <= 0.0:
             msg = "TradeDecision.notional_usdc must be > 0.0"
             raise ValueError(msg)
@@ -120,6 +124,7 @@ class OrderState:
     strategy_id: str
     strategy_version_id: str
     filled_quantity: float = 0.0
+    pre_submit_quote: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

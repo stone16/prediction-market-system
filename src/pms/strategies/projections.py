@@ -18,6 +18,9 @@ class FactorCompositionStep:
     param: str
     weight: float
     threshold: float | None
+    required: bool = True
+    freshness_sla_s: float | None = None
+    allow_neutral_fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)

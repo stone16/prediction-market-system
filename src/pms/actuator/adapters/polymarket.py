@@ -35,6 +35,17 @@ class PolymarketSubmissionUnknownError(RuntimeError):
     have reached the venue. Operators must reconcile before retrying.
     """
 
+    order_state: OrderState | None
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        order_state: OrderState | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.order_state = order_state
+
 
 @dataclass(frozen=True)
 class LiveOrderPreview:
@@ -72,12 +83,46 @@ class PolymarketOrderResult:
     filled_quantity: float
 
 
+@dataclass(frozen=True)
+class LivePreSubmitQuote:
+    market_status: str
+    book_age_ms: float
+    executable_notional_usdc: float
+    best_executable_price: float
+    spread_bps: float
+    quote_hash: str
+    book_ts: datetime
+
+
 class PolymarketClient(Protocol):
     async def submit_order(
         self,
         order: PolymarketOrderRequest,
         credentials: VenueCredentials,
     ) -> PolymarketOrderResult: ...
+
+
+class LiveQuoteProvider(Protocol):
+    async def quote(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+    ) -> LivePreSubmitQuote: ...
+
+
+@dataclass(frozen=True)
+class MissingLiveQuoteProvider:
+    async def quote(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+    ) -> LivePreSubmitQuote:
+        del order, credentials
+        msg = (
+            "Polymarket pre-submit quote guard is not configured; "
+            "LIVE submit requires a fresh venue book check"
+        )
+        raise LiveTradingDisabledError(msg)
 
 
 class FirstLiveOrderGate(Protocol):
@@ -229,6 +274,7 @@ class PolymarketActuator:
     settings: PMSSettings = field(default_factory=PMSSettings)
     client: PolymarketClient = field(default_factory=MissingPolymarketClient)
     operator_gate: FirstLiveOrderGate = field(default_factory=DenyFirstLiveOrderGate)
+    quote_provider: LiveQuoteProvider = field(default_factory=MissingLiveQuoteProvider)
     _approval_state: FirstLiveOrderApprovalState = field(
         default_factory=FirstLiveOrderApprovalState,
         init=False,
@@ -258,8 +304,10 @@ class PolymarketActuator:
         # on `_approval_lock`. This keeps live throughput unaffected after
         # the one-time gate.
         if self._first_order_approved():
+            quote = await self.quote_provider.quote(request, credentials)
+            _validate_pre_submit_quote(request, quote, self.settings)
             result = await self.client.submit_order(request, credentials)
-            return _order_state_from_result(decision, result)
+            return _order_state_from_result(decision, result, quote=quote)
 
         # Slow path: hold `_approval_lock` across the *entire* approval +
         # submit + commit window. The previous implementation released
@@ -304,6 +352,8 @@ class PolymarketActuator:
             # `async with` releases the lock and `_approval_state.approved`
             # stays False — the next caller will see no commit and
             # re-prompt the gate (correct consume-on-success behavior).
+            quote = await self.quote_provider.quote(request, credentials)
+            _validate_pre_submit_quote(request, quote, self.settings)
             result = await self.client.submit_order(request, credentials)
 
             # First venue submission succeeded: lock in first-order
@@ -315,7 +365,7 @@ class PolymarketActuator:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("first-order gate consume failed: %s", exc)
 
-        return _order_state_from_result(decision, result)
+        return _order_state_from_result(decision, result, quote=quote)
 
     def _first_order_approved(self) -> bool:
         return self._approval_state.approved
@@ -329,7 +379,7 @@ def _order_request(decision: TradeDecision) -> PolymarketOrderRequest:
     return PolymarketOrderRequest(
         market_id=decision.market_id,
         token_id=decision.token_id,
-        side=decision.side,
+        side=decision.action if decision.action is not None else decision.side,
         price=decision.limit_price,
         size=_sdk_order_size(decision, estimated_quantity=estimated_quantity),
         notional_usdc=decision.notional_usdc,
@@ -343,6 +393,8 @@ def _order_request(decision: TradeDecision) -> PolymarketOrderRequest:
 def _order_state_from_result(
     decision: TradeDecision,
     result: PolymarketOrderResult,
+    *,
+    quote: LivePreSubmitQuote | None = None,
 ) -> OrderState:
     now = datetime.now(tz=UTC)
     status = result.status or OrderStatus.LIVE.value
@@ -363,7 +415,60 @@ def _order_state_from_result(
         strategy_id=decision.strategy_id,
         strategy_version_id=decision.strategy_version_id,
         filled_quantity=result.filled_quantity,
+        pre_submit_quote={} if quote is None else _quote_payload(quote),
     )
+
+
+def _validate_pre_submit_quote(
+    request: PolymarketOrderRequest,
+    quote: LivePreSubmitQuote,
+    settings: PMSSettings,
+) -> None:
+    if quote.market_status.lower() != "open":
+        msg = f"Polymarket market is not open at submit: {quote.market_status}"
+        raise LiveTradingDisabledError(msg)
+    if quote.book_age_ms > settings.controller.max_book_age_ms:
+        msg = (
+            "Polymarket book is stale at submit: "
+            f"{quote.book_age_ms:.0f}ms > {settings.controller.max_book_age_ms:.0f}ms"
+        )
+        raise LiveTradingDisabledError(msg)
+    if quote.executable_notional_usdc + 1e-9 < request.notional_usdc:
+        msg = (
+            "Polymarket executable depth is below requested notional at submit: "
+            f"{quote.executable_notional_usdc:.2f} < {request.notional_usdc:.2f}"
+        )
+        raise LiveTradingDisabledError(msg)
+    if request.side == "BUY" and quote.best_executable_price > request.price:
+        msg = (
+            "Polymarket best executable price exceeds limit at submit: "
+            f"{quote.best_executable_price:.4f} > {request.price:.4f}"
+        )
+        raise LiveTradingDisabledError(msg)
+    if request.side == "SELL" and quote.best_executable_price < request.price:
+        msg = (
+            "Polymarket best executable price is below limit at submit: "
+            f"{quote.best_executable_price:.4f} < {request.price:.4f}"
+        )
+        raise LiveTradingDisabledError(msg)
+    if quote.spread_bps > settings.controller.max_spread_bps:
+        msg = (
+            "Polymarket spread exceeds pre-submit guard: "
+            f"{quote.spread_bps:.1f}bps > {settings.controller.max_spread_bps:.1f}bps"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _quote_payload(quote: LivePreSubmitQuote) -> dict[str, object]:
+    return {
+        "market_status": quote.market_status,
+        "book_age_ms": quote.book_age_ms,
+        "executable_notional_usdc": quote.executable_notional_usdc,
+        "best_executable_price": quote.best_executable_price,
+        "spread_bps": quote.spread_bps,
+        "quote_hash": quote.quote_hash,
+        "book_ts": quote.book_ts.isoformat(),
+    }
 
 
 def _decision_quantity(decision: TradeDecision) -> float:

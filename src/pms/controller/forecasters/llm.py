@@ -43,6 +43,8 @@ class LLMForecaster:
             self.config = LLMSettings()
 
     def predict(self, signal: MarketSignal) -> LLMForecastResult | None:
+        if self.config is None or not self.config.enabled:
+            return None
         return LLMForecastResult(
             prob_estimate=signal.yes_price,
             confidence=0.0,

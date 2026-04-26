@@ -171,15 +171,18 @@ def test_llm_forecaster_returns_neutral_tuple_without_calling_client() -> None:
     assert client.messages.calls == []
 
 
-def test_llm_forecaster_returns_neutral_tuple_regardless_of_enablement(
+def test_llm_forecaster_returns_none_when_disabled_and_neutral_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    assert LLMForecaster(
-        config=LLMSettings(enabled=False),
-        client=FakeClaudeClient(),
-    ).predict(_signal()) == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
+    assert (
+        LLMForecaster(
+            config=LLMSettings(enabled=False),
+            client=FakeClaudeClient(),
+        ).predict(_signal())
+        is None
+    )
     assert LLMForecaster(
         config=LLMSettings(enabled=True),
         client=FakeClaudeClient(),

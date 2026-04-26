@@ -23,6 +23,9 @@ EXPECTED_FIELD_TYPES: dict[str, dict[str, Any]] = {
         "param": str,
         "weight": float,
         "threshold": float | None,
+        "required": bool,
+        "freshness_sla_s": float | None,
+        "allow_neutral_fallback": bool,
     },
     "StrategyConfig": {
         "strategy_id": str,

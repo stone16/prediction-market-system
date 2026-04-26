@@ -20,6 +20,15 @@ class FactorCompositionStep(Protocol):
     @property
     def threshold(self) -> float | None: ...
 
+    @property
+    def required(self) -> bool: ...
+
+    @property
+    def freshness_sla_s(self) -> float | None: ...
+
+    @property
+    def allow_neutral_fallback(self) -> bool: ...
+
 
 def apply_composition(
     composition: Sequence[FactorCompositionStep],
@@ -178,6 +187,16 @@ def _apply_posterior(
     success_steps = tuple(step for step in composition if step.role == "posterior_success")
     failure_steps = tuple(step for step in composition if step.role == "posterior_failure")
     if not prior_steps and not success_steps and not failure_steps:
+        return None
+    has_real_input = any(
+        (step.factor_id, step.param) in factor_values
+        for step in (*prior_steps, *success_steps, *failure_steps)
+    )
+    allow_neutral_fallback = any(
+        step.allow_neutral_fallback
+        for step in (*prior_steps, *success_steps, *failure_steps)
+    )
+    if not has_real_input and not allow_neutral_fallback:
         return None
 
     prior_strength = 0.0

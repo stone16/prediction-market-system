@@ -522,6 +522,20 @@ def _json_factor_composition(value: object) -> tuple[FactorCompositionStep, ...]
                     step_payload.get("threshold"),
                     "config.factor_composition.step.threshold",
                 ),
+                required=_json_optional_bool(
+                    step_payload.get("required"),
+                    "config.factor_composition.step.required",
+                    default=True,
+                ),
+                freshness_sla_s=_json_optional_float(
+                    step_payload.get("freshness_sla_s"),
+                    "config.factor_composition.step.freshness_sla_s",
+                ),
+                allow_neutral_fallback=_json_optional_bool(
+                    step_payload.get("allow_neutral_fallback"),
+                    "config.factor_composition.step.allow_neutral_fallback",
+                    default=False,
+                ),
             )
         )
     return tuple(steps)
@@ -568,6 +582,15 @@ def _json_optional_float(value: object, field_name: str) -> float | None:
     if value is None:
         return None
     return _json_float(value, field_name)
+
+
+def _json_optional_bool(value: object, field_name: str, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        msg = f"{field_name} must decode to a boolean or null"
+        raise TypeError(msg)
+    return value
 
 
 def _json_float(value: object, field_name: str) -> float:

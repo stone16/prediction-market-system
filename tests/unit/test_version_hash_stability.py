@@ -12,7 +12,7 @@ import pytest
 
 
 EXPECTED_DEFAULT_VERSION_ID = (
-    "948a16db12a4e8b9d79cc467eed253eaf911e088abbd3f763c882e2d4c048548"
+    "5c79a9e6f63cc4fdcfe22cf6970494eed63b5e379072aef380d71f7d47120451"
 )
 
 
