@@ -801,6 +801,11 @@ class Runner:
             quote_provider=quote_provider,
         )
 
+    def _remember_paper_orderbook(self, signal: MarketSignal) -> None:
+        if signal.token_id is not None:
+            self._paper_orderbooks[signal.token_id] = signal.orderbook
+        self._paper_orderbooks[signal.market_id] = signal.orderbook
+
     async def _controller_loop(self) -> None:
         while True:
             if self._should_stop_controller():
@@ -813,7 +818,7 @@ class Runner:
             try:
                 _append_bounded(self.state.signals, signal)
                 if self.config.mode == RunMode.PAPER:
-                    self._paper_orderbooks[signal.market_id] = signal.orderbook
+                    self._remember_paper_orderbook(signal)
                 await self.event_bus.publish(
                     "sensor.signal",
                     _signal_event_summary(signal),
@@ -968,7 +973,7 @@ class Runner:
                     )
                     continue
                 if self.config.mode == RunMode.PAPER and signal is not None:
-                    self._paper_orderbooks[decision.market_id] = signal.orderbook
+                    self._remember_paper_orderbook(signal)
                 await self._update_decision_status_if_supported(
                     decision.decision_id,
                     current_status="queued",
