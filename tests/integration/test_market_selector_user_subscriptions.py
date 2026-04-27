@@ -23,7 +23,15 @@ from pms.config import (
     PolymarketSettings,
 )
 from pms.core.enums import RunMode
-from pms.core.models import Market, MarketSignal, Token, VenueCredentials
+from pms.core.models import (
+    Market,
+    MarketSignal,
+    Portfolio,
+    ReconciliationReport,
+    Token,
+    VenueAccountSnapshot,
+    VenueCredentials,
+)
 from pms.runner import Runner
 from pms.storage.market_data_store import PostgresMarketDataStore
 
@@ -118,6 +126,24 @@ class _NoopPolymarketClient:
     ) -> PolymarketOrderResult:
         del order, credentials
         raise AssertionError("subscription reselection tests must not submit live orders")
+
+
+class _MatchingVenueReconciler:
+    async def snapshot(self, credentials: VenueCredentials) -> VenueAccountSnapshot:
+        del credentials
+        return VenueAccountSnapshot(
+            balances={"USDC": 1000.0},
+            open_orders=(),
+            positions=(),
+        )
+
+    async def compare(
+        self,
+        db_portfolio: Portfolio,
+        venue_snapshot: VenueAccountSnapshot,
+    ) -> ReconciliationReport:
+        del db_portfolio, venue_snapshot
+        return ReconciliationReport(ok=True, mismatches=())
 
 
 def _settings() -> PMSSettings:
@@ -234,7 +260,10 @@ async def test_subscription_survives_runner_restart(
         market_id="cp07-restart-market",
         token_id=token_id,
     )
-    runner = Runner(config=_settings())
+    runner = Runner(
+        config=_settings(),
+        venue_account_reconciler=_MatchingVenueReconciler(),
+    )
     runner.bind_pg_pool(pg_pool)
     app = create_app(runner, auto_start=False)
 
@@ -279,7 +308,10 @@ async def test_live_reselection_reads_user_subscriptions_without_restart(
         market_id="cp07-live-market",
         token_id=token_id,
     )
-    runner = Runner(config=_settings())
+    runner = Runner(
+        config=_settings(),
+        venue_account_reconciler=_MatchingVenueReconciler(),
+    )
     runner.bind_pg_pool(pg_pool)
     app = create_app(runner, auto_start=False)
 
