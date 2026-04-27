@@ -23,22 +23,35 @@ class SubmissionUnknownReconciliationStore:
         note: str | None = None,
     ) -> bool:
         async with self.pool.acquire() as connection:
-            row = await connection.fetchrow(
-                """
-                UPDATE order_intents
-                SET reconciled_at = now(),
-                    venue_order_id = $2,
-                    reconciliation_status = $3,
-                    reconciled_by = $4,
-                    reconciliation_note = $5
-                WHERE decision_id = $1
-                  AND outcome = 'submission_unknown'
-                RETURNING decision_id
-                """,
-                decision_id,
-                venue_order_id,
-                status,
-                reconciled_by,
-                note,
-            )
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    UPDATE order_intents
+                    SET reconciled_at = now(),
+                        venue_order_id = $2,
+                        reconciliation_status = $3,
+                        reconciled_by = $4,
+                        reconciliation_note = $5
+                    WHERE decision_id = $1
+                      AND outcome = 'submission_unknown'
+                    RETURNING decision_id
+                    """,
+                    decision_id,
+                    venue_order_id,
+                    status,
+                    reconciled_by,
+                    note,
+                )
+                if row is None:
+                    return False
+                await connection.execute(
+                    """
+                    UPDATE decisions
+                    SET status = 'reconciled',
+                        updated_at = now()
+                    WHERE decision_id = $1
+                      AND status = 'submission_unknown'
+                    """,
+                    decision_id,
+                )
         return row is not None

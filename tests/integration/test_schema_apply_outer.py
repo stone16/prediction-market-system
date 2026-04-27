@@ -31,6 +31,10 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("liquidity", "numeric"),
         ("spread_bps", "integer"),
         ("price_updated_at", "timestamp with time zone"),
+        ("active", "boolean"),
+        ("closed", "boolean"),
+        ("accepting_orders", "boolean"),
+        ("status_updated_at", "timestamp with time zone"),
     ],
     "market_price_snapshots": [
         ("condition_id", "text"),

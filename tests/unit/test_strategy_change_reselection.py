@@ -18,7 +18,13 @@ from pms.config import (
     RiskSettings,
 )
 from pms.core.enums import RunMode
-from pms.core.models import MarketSignal
+from pms.core.models import (
+    MarketSignal,
+    Portfolio,
+    ReconciliationReport,
+    VenueAccountSnapshot,
+    VenueCredentials,
+)
 from pms.market_selection.merge import StrategyMarketSet
 from pms.runner import Runner
 from pms.storage.strategy_registry import PostgresStrategyRegistry
@@ -95,6 +101,28 @@ class FakePool:
 
     def acquire(self) -> FakeAcquire:
         return FakeAcquire(self._connection)
+
+
+class MatchingVenueReconciler:
+    async def snapshot(self, credentials: VenueCredentials) -> VenueAccountSnapshot:
+        del credentials
+        return VenueAccountSnapshot(balances={"USDC": 10_000.0}, open_orders=(), positions=())
+
+    async def compare(
+        self,
+        db_portfolio: Portfolio,
+        venue_snapshot: VenueAccountSnapshot,
+    ) -> ReconciliationReport:
+        del db_portfolio, venue_snapshot
+        return ReconciliationReport(ok=True, mismatches=())
+
+
+@pytest.fixture(autouse=True)
+def _stub_live_venue_reconciler(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "pms.runner.PolymarketVenueAccountReconciler",
+        MatchingVenueReconciler,
+    )
 
 
 @dataclass

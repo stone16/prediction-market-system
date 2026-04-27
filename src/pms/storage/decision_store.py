@@ -285,7 +285,7 @@ class DecisionStore:
                 UPDATE decisions
                 SET status = 'expired',
                     updated_at = $1
-                WHERE status = 'pending'
+                WHERE status IN ('pending', 'accepted', 'queued')
                   AND expires_at < $1
                 RETURNING decision_id
                 """,

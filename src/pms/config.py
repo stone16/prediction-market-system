@@ -3,7 +3,7 @@ from __future__ import annotations
 import getpass
 import os
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import yaml
 from pydantic import BaseModel, Field
@@ -55,8 +55,14 @@ class ControllerSettings(BaseModel):
     max_slippage_bps: int = 50
     time_in_force: str = "GTC"
     max_book_age_ms: float = 1_000.0
+    allowed_book_clock_skew_ms: float = 250.0
     max_spread_bps: float = 100.0
     strict_factor_gates: bool = True
+    quote_source: Literal["postgres_snapshot", "venue_direct", "dual"] = (
+        "postgres_snapshot"
+    )
+    direct_quote_min_notional_usdc: float | None = 100.0
+    dual_quote_max_price_delta_bps: float = 25.0
 
 
 class RiskSettings(BaseModel):
@@ -109,7 +115,8 @@ class PMSSettings(BaseSettings):
     factor_cadence_s: float = 1.0
     api_host: str = "127.0.0.1"
     api_token: str | None = None
-    live_account_reconciliation_required: bool = False
+    live_account_reconciliation_required: bool = True
+    live_emergency_audit_path: str = ".data/live-emergency-audit.jsonl"
     polymarket: PolymarketSettings = Field(default_factory=PolymarketSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
@@ -153,6 +160,12 @@ def validate_live_mode_ready(settings: PMSSettings) -> VenueCredentials:
         msg = (
             "LIVE GTC disabled until an open-order ledger reserves "
             "resting order exposure"
+        )
+        raise LiveTradingDisabledError(msg)
+    if settings.mode == RunMode.LIVE and not settings.live_account_reconciliation_required:
+        msg = (
+            "LIVE account reconciliation must be required before autonomous "
+            "live trading can start"
         )
         raise LiveTradingDisabledError(msg)
     return credentials

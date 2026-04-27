@@ -5,11 +5,11 @@ import importlib
 import json
 import logging
 import math
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Final, Protocol, cast
+from typing import Any, Callable, Final, Literal, Protocol, cast
 from uuid import uuid4
 
 from pms.config import PMSSettings, validate_live_mode_ready
@@ -20,8 +20,11 @@ from pms.core.models import (
     LiveTradingDisabledError,
     Market,
     OrderState,
+    Position,
     Portfolio,
+    ReconciliationReport,
     TradeDecision,
+    VenueAccountSnapshot,
     VenueCredentials,
 )
 
@@ -98,6 +101,18 @@ class LivePreSubmitQuote:
     spread_bps: float
     quote_hash: str
     book_ts: datetime
+    source: Literal["postgres_snapshot", "venue_direct", "dual"] = "postgres_snapshot"
+
+
+@dataclass(frozen=True)
+class LiveVenueBook:
+    market_id: str
+    token_id: str
+    bids: tuple[BookLevel, ...]
+    asks: tuple[BookLevel, ...]
+    book_ts: datetime
+    quote_hash: str
+    market_status: str = "open"
 
 
 class PolymarketClient(Protocol):
@@ -114,6 +129,21 @@ class LiveQuoteProvider(Protocol):
         order: PolymarketOrderRequest,
         credentials: VenueCredentials,
     ) -> LivePreSubmitQuote: ...
+
+
+class LiveOrderBookClient(Protocol):
+    async def read_order_book(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+    ) -> LiveVenueBook: ...
+
+
+class LiveVenueAccountClient(Protocol):
+    async def read_account_snapshot(
+        self,
+        credentials: VenueCredentials,
+    ) -> VenueAccountSnapshot: ...
 
 
 class BookQuoteStore(Protocol):
@@ -147,6 +177,7 @@ class MissingLiveQuoteProvider:
 class PolymarketBookQuoteProvider:
     store: BookQuoteStore
     clock: Callable[[], datetime] = field(default_factory=lambda: _utc_now)
+    allowed_clock_skew_ms: float = 250.0
 
     async def quote(
         self,
@@ -163,40 +194,95 @@ class PolymarketBookQuoteProvider:
         if snapshot is None:
             msg = f"Polymarket book snapshot missing for token {order.token_id}"
             raise LiveTradingDisabledError(msg)
+        _raise_if_future_book_ts(
+            snapshot.ts,
+            now=now,
+            allowed_clock_skew_ms=self.allowed_clock_skew_ms,
+        )
         levels = await self.store.read_levels_for_snapshot(snapshot.id)
-        bid_levels = sorted(
-            (level for level in levels if level.side == "BUY"),
-            key=lambda level: level.price,
-            reverse=True,
-        )
-        ask_levels = sorted(
-            (level for level in levels if level.side == "SELL"),
-            key=lambda level: level.price,
-        )
-        executable_levels = (
-            [level for level in ask_levels if level.price <= order.price]
-            if order.side == "BUY"
-            else [level for level in bid_levels if level.price >= order.price]
-        )
-        best_executable_price = (
-            executable_levels[0].price if executable_levels else order.price
-        )
-        executable_notional_usdc = sum(
-            max(0.0, level.price) * max(0.0, level.size)
-            for level in executable_levels
-        )
-        book_age_ms = max(0.0, (now - snapshot.ts).total_seconds() * 1000.0)
-        best_bid = bid_levels[0].price if bid_levels else None
-        best_ask = ask_levels[0].price if ask_levels else None
-        return LivePreSubmitQuote(
+        return _quote_from_levels(
+            order=order,
             market_status=_market_status(market, now),
-            book_age_ms=book_age_ms,
-            executable_notional_usdc=executable_notional_usdc,
-            best_executable_price=best_executable_price,
-            spread_bps=_spread_bps(best_bid=best_bid, best_ask=best_ask),
+            bid_levels=[level for level in levels if level.side == "BUY"],
+            ask_levels=[level for level in levels if level.side == "SELL"],
             quote_hash=snapshot.hash or f"snapshot:{snapshot.id}",
             book_ts=snapshot.ts,
+            now=now,
+            source="postgres_snapshot",
         )
+
+
+@dataclass(frozen=True)
+class PolymarketDirectQuoteProvider:
+    book_client: LiveOrderBookClient
+    clock: Callable[[], datetime] = field(default_factory=lambda: _utc_now)
+    allowed_clock_skew_ms: float = 250.0
+
+    async def quote(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+    ) -> LivePreSubmitQuote:
+        now = self.clock()
+        book = await self.book_client.read_order_book(order, credentials)
+        _raise_if_future_book_ts(
+            book.book_ts,
+            now=now,
+            allowed_clock_skew_ms=self.allowed_clock_skew_ms,
+        )
+        return _quote_from_levels(
+            order=order,
+            market_status=book.market_status,
+            bid_levels=book.bids,
+            ask_levels=book.asks,
+            quote_hash=book.quote_hash,
+            book_ts=book.book_ts,
+            now=now,
+            source="venue_direct",
+        )
+
+
+@dataclass(frozen=True)
+class PolymarketRoutingQuoteProvider:
+    snapshot_provider: LiveQuoteProvider
+    direct_provider: LiveQuoteProvider
+    settings: PMSSettings
+
+    async def quote(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+    ) -> LivePreSubmitQuote:
+        return await self.quote_for_order(
+            order,
+            credentials,
+            first_live_order=False,
+        )
+
+    async def quote_for_order(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+        *,
+        first_live_order: bool,
+    ) -> LivePreSubmitQuote:
+        source = self.settings.controller.quote_source
+        if (
+            source == "venue_direct"
+            or first_live_order
+            or _requires_direct_quote(order, self.settings)
+        ):
+            return await self.direct_provider.quote(order, credentials)
+        if source == "dual":
+            snapshot_quote = await self.snapshot_provider.quote(order, credentials)
+            direct_quote = await self.direct_provider.quote(order, credentials)
+            _validate_dual_quote_match(
+                snapshot_quote,
+                direct_quote,
+                self.settings,
+            )
+            return replace(direct_quote, source="dual")
+        return await self.snapshot_provider.quote(order, credentials)
 
 
 class FirstLiveOrderGate(Protocol):
@@ -253,6 +339,19 @@ class PolymarketSDKClient:
         credentials: VenueCredentials,
     ) -> PolymarketOrderResult:
         return await asyncio.to_thread(self._submit_order_sync, order, credentials)
+
+    async def read_order_book(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+    ) -> LiveVenueBook:
+        return await asyncio.to_thread(self._read_order_book_sync, order, credentials)
+
+    async def read_account_snapshot(
+        self,
+        credentials: VenueCredentials,
+    ) -> VenueAccountSnapshot:
+        return await asyncio.to_thread(self._read_account_snapshot_sync, credentials)
 
     def _submit_order_sync(
         self,
@@ -326,6 +425,126 @@ class PolymarketSDKClient:
             raise LiveTradingDisabledError(msg) from None
 
         return _order_result_from_sdk_response(order, response)
+
+    def _read_order_book_sync(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+    ) -> LiveVenueBook:
+        try:
+            sdk = importlib.import_module("py_clob_client_v2")
+        except ModuleNotFoundError:
+            msg = (
+                "Polymarket live SDK is not installed. Install the live extra "
+                "with `uv sync --extra live` before enabling LIVE mode."
+            )
+            raise LiveTradingDisabledError(msg) from None
+
+        try:
+            client = _build_sdk_client(sdk, credentials)
+            response = _get_sdk_order_book(client, order.token_id)
+        except Exception as exc:  # noqa: BLE001
+            redacted = _redacted_exception_message(exc, credentials)
+            logger.warning(
+                "Polymarket live order book fetch failed (%s): %s",
+                type(exc).__name__,
+                redacted,
+            )
+            msg = (
+                "Polymarket live order book fetch failed "
+                f"({type(exc).__name__}); venue error redacted"
+            )
+            raise LiveTradingDisabledError(msg) from None
+
+        return _venue_book_from_sdk_response(
+            response,
+            market_id=order.market_id,
+            token_id=order.token_id,
+        )
+
+    def _read_account_snapshot_sync(
+        self,
+        credentials: VenueCredentials,
+    ) -> VenueAccountSnapshot:
+        try:
+            sdk = importlib.import_module("py_clob_client_v2")
+        except ModuleNotFoundError:
+            msg = (
+                "Polymarket live SDK is not installed. Install the live extra "
+                "with `uv sync --extra live` before enabling LIVE mode."
+            )
+            raise LiveTradingDisabledError(msg) from None
+
+        try:
+            client = _build_sdk_client(sdk, credentials)
+            open_orders = _order_states_from_open_orders(
+                _get_sdk_open_orders(client),
+                credentials=credentials,
+            )
+            positions = _positions_from_sdk_positions(
+                _get_sdk_positions(client, credentials),
+                credentials=credentials,
+            )
+            balances = _get_sdk_balances(client, sdk)
+        except Exception as exc:  # noqa: BLE001
+            redacted = _redacted_exception_message(exc, credentials)
+            logger.warning(
+                "Polymarket live account snapshot failed (%s): %s",
+                type(exc).__name__,
+                redacted,
+            )
+            msg = (
+                "Polymarket live account snapshot failed "
+                f"({type(exc).__name__}); venue error redacted"
+            )
+            raise LiveTradingDisabledError(msg) from None
+
+        return VenueAccountSnapshot(
+            balances=balances,
+            open_orders=tuple(open_orders),
+            positions=tuple(positions),
+        )
+
+
+@dataclass(frozen=True)
+class PolymarketVenueAccountReconciler:
+    client: LiveVenueAccountClient = field(default_factory=PolymarketSDKClient)
+    position_tolerance_shares: float = 1e-6
+    notional_tolerance_usdc: float = 1e-4
+    cash_tolerance_usdc: float = 1e-4
+
+    async def snapshot(self, credentials: VenueCredentials) -> VenueAccountSnapshot:
+        return await self.client.read_account_snapshot(credentials)
+
+    async def compare(
+        self,
+        db_portfolio: Portfolio,
+        venue_snapshot: VenueAccountSnapshot,
+    ) -> ReconciliationReport:
+        mismatches: list[str] = []
+        if venue_snapshot.open_orders:
+            mismatches.append(
+                f"venue has {len(venue_snapshot.open_orders)} open orders; "
+                "PMS has no durable live open-order ledger yet"
+            )
+        usdc_balance = _venue_usdc_balance(venue_snapshot.balances)
+        if (
+            usdc_balance is not None
+            and usdc_balance + self.cash_tolerance_usdc < db_portfolio.free_usdc
+        ):
+            mismatches.append(
+                "venue USDC balance below PMS free cash: "
+                f"venue={usdc_balance:.8f} DB={db_portfolio.free_usdc:.8f}"
+            )
+        mismatches.extend(
+            _compare_positions(
+                db_portfolio.open_positions,
+                venue_snapshot.positions,
+                share_tolerance=self.position_tolerance_shares,
+                notional_tolerance=self.notional_tolerance_usdc,
+            )
+        )
+        return ReconciliationReport(ok=not mismatches, mismatches=tuple(mismatches))
 
 
 @dataclass(frozen=True)
@@ -462,9 +681,12 @@ class PolymarketActuator:
         self,
         market_id: str,
     ) -> tuple[str | None, str | None]:
-        if not isinstance(self.quote_provider, PolymarketBookQuoteProvider):
+        quote_provider = self.quote_provider
+        if isinstance(quote_provider, PolymarketRoutingQuoteProvider):
+            quote_provider = quote_provider.snapshot_provider
+        if not isinstance(quote_provider, PolymarketBookQuoteProvider):
             return None, None
-        market = await self.quote_provider.store.read_market(market_id)
+        market = await quote_provider.store.read_market(market_id)
         if market is None:
             return None, None
         return market.slug, market.question
@@ -476,7 +698,15 @@ class PolymarketActuator:
         request: PolymarketOrderRequest,
         credentials: VenueCredentials,
     ) -> OrderState:
-        quote = await self.quote_provider.quote(request, credentials)
+        quote_for_order = getattr(self.quote_provider, "quote_for_order", None)
+        if callable(quote_for_order):
+            quote = await quote_for_order(
+                request,
+                credentials,
+                first_live_order=not self._first_order_approved(),
+            )
+        else:
+            quote = await self.quote_provider.quote(request, credentials)
         _validate_pre_submit_quote(request, quote, self.settings)
         result = await self.client.submit_order(request, credentials)
         order_state = _order_state_from_result(decision, result, quote=quote)
@@ -605,6 +835,7 @@ def _quote_payload(quote: LivePreSubmitQuote) -> dict[str, object]:
         "spread_bps": quote.spread_bps,
         "quote_hash": quote.quote_hash,
         "book_ts": quote.book_ts.isoformat(),
+        "source": quote.source,
     }
 
 
@@ -613,9 +844,107 @@ def _utc_now() -> datetime:
 
 
 def _market_status(market: Market, now: datetime) -> str:
+    if market.closed is True:
+        return "closed"
+    if market.active is False:
+        return "inactive"
+    if market.accepting_orders is False:
+        return "not_accepting_orders"
     if market.resolves_at is not None and market.resolves_at <= now:
         return "closed"
     return "open"
+
+
+def _quote_from_levels(
+    *,
+    order: PolymarketOrderRequest,
+    market_status: str,
+    bid_levels: Sequence[BookLevel],
+    ask_levels: Sequence[BookLevel],
+    quote_hash: str,
+    book_ts: datetime,
+    now: datetime,
+    source: Literal["postgres_snapshot", "venue_direct", "dual"],
+) -> LivePreSubmitQuote:
+    sorted_bids = sorted(
+        bid_levels,
+        key=lambda level: level.price,
+        reverse=True,
+    )
+    sorted_asks = sorted(ask_levels, key=lambda level: level.price)
+    executable_levels = (
+        [level for level in sorted_asks if level.price <= order.price]
+        if order.side == "BUY"
+        else [level for level in sorted_bids if level.price >= order.price]
+    )
+    best_executable_price = (
+        executable_levels[0].price if executable_levels else order.price
+    )
+    executable_notional_usdc = sum(
+        max(0.0, level.price) * max(0.0, level.size)
+        for level in executable_levels
+    )
+    best_bid = sorted_bids[0].price if sorted_bids else None
+    best_ask = sorted_asks[0].price if sorted_asks else None
+    return LivePreSubmitQuote(
+        market_status=market_status,
+        book_age_ms=max(0.0, (now - book_ts).total_seconds() * 1000.0),
+        executable_notional_usdc=executable_notional_usdc,
+        best_executable_price=best_executable_price,
+        spread_bps=_spread_bps(best_bid=best_bid, best_ask=best_ask),
+        quote_hash=quote_hash,
+        book_ts=book_ts,
+        source=source,
+    )
+
+
+def _raise_if_future_book_ts(
+    book_ts: datetime,
+    *,
+    now: datetime,
+    allowed_clock_skew_ms: float,
+) -> None:
+    skew_ms = (book_ts - now).total_seconds() * 1000.0
+    if skew_ms <= allowed_clock_skew_ms:
+        return
+    msg = (
+        "Polymarket book snapshot timestamp is in the future; "
+        f"refusing live submit ({skew_ms:.0f}ms > {allowed_clock_skew_ms:.0f}ms)"
+    )
+    raise LiveTradingDisabledError(msg)
+
+
+def _requires_direct_quote(
+    order: PolymarketOrderRequest,
+    settings: PMSSettings,
+) -> bool:
+    threshold = settings.controller.direct_quote_min_notional_usdc
+    return threshold is not None and order.notional_usdc >= threshold
+
+
+def _validate_dual_quote_match(
+    snapshot_quote: LivePreSubmitQuote,
+    direct_quote: LivePreSubmitQuote,
+    settings: PMSSettings,
+) -> None:
+    delta_bps = _price_delta_bps(
+        snapshot_quote.best_executable_price,
+        direct_quote.best_executable_price,
+    )
+    if delta_bps > settings.controller.dual_quote_max_price_delta_bps:
+        msg = (
+            "Polymarket dual quote mismatch: best executable price delta "
+            f"{delta_bps:.1f}bps > "
+            f"{settings.controller.dual_quote_max_price_delta_bps:.1f}bps"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _price_delta_bps(first: float, second: float) -> float:
+    midpoint = (abs(first) + abs(second)) / 2.0
+    if midpoint <= 0.0:
+        return math.inf if first != second else 0.0
+    return (abs(first - second) / midpoint) * 10_000.0
 
 
 def _spread_bps(*, best_bid: float | None, best_ask: float | None) -> float:
@@ -730,6 +1059,115 @@ def _post_sdk_order(
         order_args=order_args,
         options=options,
         order_type=order_type,
+    )
+
+
+def _get_sdk_order_book(client: object, token_id: str) -> object:
+    for method_name in ("get_order_book", "get_orderbook", "get_book"):
+        method = getattr(client, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            return method(token_id)
+        except TypeError:
+            return method(token_id=token_id)
+    msg = "Polymarket SDK client does not expose an order-book fetch method"
+    raise LiveTradingDisabledError(msg)
+
+
+def _get_sdk_open_orders(client: object) -> object:
+    for method_name in ("get_orders", "get_open_orders", "getOpenOrders"):
+        method = getattr(client, method_name, None)
+        if callable(method):
+            return method()
+    return ()
+
+
+def _get_sdk_positions(client: object, credentials: VenueCredentials) -> object:
+    for method_name in ("get_positions", "get_current_positions", "getPositions"):
+        method = getattr(client, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            return method(user=credentials.funder_address)
+        except TypeError:
+            try:
+                return method(credentials.funder_address)
+            except TypeError:
+                return method()
+    return ()
+
+
+def _get_sdk_balances(client: object, sdk: object) -> dict[str, float]:
+    for response in _sdk_balance_responses(client, sdk):
+        usdc = _usdc_balance_from_response(response)
+        if usdc is not None:
+            return {"USDC": usdc}
+    return {}
+
+
+def _sdk_balance_responses(client: object, sdk: object) -> list[object]:
+    responses: list[object] = []
+    balance_allowance = getattr(client, "get_balance_allowance", None)
+    if callable(balance_allowance):
+        params_cls = getattr(sdk, "BalanceAllowanceParams", None)
+        asset_type_cls = getattr(sdk, "AssetType", None)
+        asset_type = getattr(asset_type_cls, "COLLATERAL", "COLLATERAL")
+        if callable(params_cls):
+            try:
+                params = params_cls(asset_type=asset_type)
+                responses.append(balance_allowance(params=params))
+            except TypeError:
+                try:
+                    params = params_cls(asset_type=asset_type)
+                    responses.append(balance_allowance(params))
+                except TypeError:
+                    pass
+        try:
+            responses.append(balance_allowance(asset_type=asset_type))
+        except TypeError:
+            pass
+    for method_name in ("get_balance", "get_balances", "getBalance", "getBalances"):
+        method = getattr(client, method_name, None)
+        if callable(method):
+            try:
+                responses.append(method())
+            except TypeError:
+                pass
+    return responses
+
+
+def _usdc_balance_from_response(response: object) -> float | None:
+    direct = _coerce_float_or_none(response)
+    if direct is not None:
+        return direct
+    if isinstance(response, Sequence) and not isinstance(response, (str, bytes)):
+        for item in response:
+            asset = _response_value(item, "asset", "asset_type", "currency", "token")
+            if asset is None or str(asset).upper() in {"USDC", "COLLATERAL"}:
+                value = _coerce_float_or_none(
+                    _response_value(
+                        item,
+                        "balance",
+                        "available",
+                        "available_balance",
+                        "cash",
+                        "usdc",
+                    )
+                )
+                if value is not None:
+                    return value
+        return None
+    return _coerce_float_or_none(
+        _response_value(
+            response,
+            "balance",
+            "available",
+            "available_balance",
+            "cash",
+            "usdc",
+            "collateral",
+        )
     )
 
 
@@ -952,6 +1390,255 @@ def _order_result_from_sdk_response(
         fill_price=fill_price,
         filled_quantity=filled_quantity,
     )
+
+
+def _venue_book_from_sdk_response(
+    response: object,
+    *,
+    market_id: str,
+    token_id: str,
+) -> LiveVenueBook:
+    book_ts = _coerce_datetime_or_now(
+        _response_value(response, "timestamp", "ts", "created_at", "createdAt")
+    )
+    raw_hash = _response_value(response, "hash", "book_hash", "bookHash")
+    quote_hash = str(raw_hash or f"venue:{token_id}:{book_ts.isoformat()}")
+    market_status = _venue_market_status_from_response(response)
+    return LiveVenueBook(
+        market_id=market_id,
+        token_id=token_id,
+        bids=tuple(
+            _book_levels_from_response_side(
+                _response_value(response, "bids", "buy"),
+                market_id=market_id,
+                side="BUY",
+            )
+        ),
+        asks=tuple(
+            _book_levels_from_response_side(
+                _response_value(response, "asks", "sell"),
+                market_id=market_id,
+                side="SELL",
+            )
+        ),
+        book_ts=book_ts,
+        quote_hash=quote_hash,
+        market_status=market_status,
+    )
+
+
+def _book_levels_from_response_side(
+    raw_levels: object,
+    *,
+    market_id: str,
+    side: Literal["BUY", "SELL"],
+) -> list[BookLevel]:
+    if raw_levels is None:
+        return []
+    if not isinstance(raw_levels, Sequence) or isinstance(raw_levels, (str, bytes)):
+        msg = "Polymarket order book levels must be a sequence"
+        raise LiveTradingDisabledError(msg)
+    levels: list[BookLevel] = []
+    for raw_level in raw_levels:
+        price = _coerce_float_or_none(_response_value(raw_level, "price", "p"))
+        size = _coerce_float_or_none(_response_value(raw_level, "size", "s"))
+        if price is None or size is None:
+            msg = "Polymarket order book level has unparseable price or size"
+            raise LiveTradingDisabledError(msg)
+        levels.append(
+            BookLevel(
+                snapshot_id=0,
+                market_id=market_id,
+                side=side,
+                price=price,
+                size=size,
+            )
+        )
+    return levels
+
+
+def _venue_market_status_from_response(response: object) -> str:
+    if _coerce_bool_or_none(_response_value(response, "closed", "is_closed")) is True:
+        return "closed"
+    if _coerce_bool_or_none(_response_value(response, "active", "is_active")) is False:
+        return "inactive"
+    accepting_orders = _coerce_bool_or_none(
+        _response_value(response, "accepting_orders", "acceptingOrders")
+    )
+    if accepting_orders is False:
+        return "not_accepting_orders"
+    raw_status = _response_value(response, "market_status", "status")
+    if raw_status is None:
+        return "open"
+    normalized = str(raw_status).strip().lower()
+    return normalized or "open"
+
+
+def _coerce_bool_or_none(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    return None
+
+
+def _coerce_datetime_or_now(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        raw = float(value)
+        if raw > 10_000_000_000:
+            raw = raw / 1000.0
+        return datetime.fromtimestamp(raw, tz=UTC)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return _utc_now()
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return _utc_now()
+
+
+def _order_states_from_open_orders(
+    raw_orders: object,
+    *,
+    credentials: VenueCredentials,
+) -> list[OrderState]:
+    if raw_orders is None:
+        return []
+    if not isinstance(raw_orders, Sequence) or isinstance(raw_orders, (str, bytes)):
+        return []
+    states: list[OrderState] = []
+    for raw_order in raw_orders:
+        now = _utc_now()
+        order_id = str(_response_value(raw_order, "order_id", "id", "orderID") or "")
+        if not order_id:
+            continue
+        market_id = str(
+            _response_value(raw_order, "market_id", "condition_id", "market") or ""
+        )
+        token_id_value = _response_value(raw_order, "token_id", "asset_id", "assetId")
+        remaining = _coerce_float_or_none(
+            _response_value(raw_order, "remaining_notional_usdc", "remaining", "size")
+        )
+        price = _coerce_float_or_none(_response_value(raw_order, "price"))
+        remaining_notional = remaining or 0.0
+        states.append(
+            OrderState(
+                order_id=order_id,
+                decision_id=f"venue-open-{order_id}",
+                status=OrderStatus.LIVE.value,
+                market_id=market_id or "unknown",
+                token_id=None if token_id_value is None else str(token_id_value),
+                venue=credentials.venue,
+                requested_notional_usdc=remaining_notional,
+                filled_notional_usdc=0.0,
+                remaining_notional_usdc=remaining_notional,
+                fill_price=price,
+                submitted_at=now,
+                last_updated_at=now,
+                raw_status=str(_response_value(raw_order, "status") or "open"),
+                strategy_id="venue",
+                strategy_version_id="venue",
+            )
+        )
+    return states
+
+
+def _positions_from_sdk_positions(
+    raw_positions: object,
+    *,
+    credentials: VenueCredentials,
+) -> list[Position]:
+    if raw_positions is None:
+        return []
+    if not isinstance(raw_positions, Sequence) or isinstance(raw_positions, (str, bytes)):
+        return []
+    positions: list[Position] = []
+    for raw_position in raw_positions:
+        shares = _coerce_float_or_none(
+            _response_value(raw_position, "shares", "size", "quantity", "balance")
+        )
+        if shares is None or shares <= 0.0:
+            continue
+        market_id = str(
+            _response_value(raw_position, "market_id", "condition_id", "market") or ""
+        )
+        token_id_value = _response_value(raw_position, "token_id", "asset_id", "assetId")
+        avg_price = _coerce_float_or_none(
+            _response_value(raw_position, "avg_entry_price", "avgPrice", "price")
+        )
+        current_price = _coerce_float_or_none(
+            _response_value(raw_position, "current_price", "curPrice")
+        )
+        entry_price = avg_price or current_price or 0.0
+        positions.append(
+            Position(
+                market_id=market_id or "unknown",
+                token_id=None if token_id_value is None else str(token_id_value),
+                venue=credentials.venue,
+                side=str(_response_value(raw_position, "side", "outcome") or "BUY"),
+                shares_held=shares,
+                avg_entry_price=entry_price,
+                unrealized_pnl=0.0,
+                locked_usdc=shares * entry_price,
+            )
+        )
+    return positions
+
+
+def _compare_positions(
+    db_positions: Sequence[Position],
+    venue_positions: Sequence[Position],
+    *,
+    share_tolerance: float,
+    notional_tolerance: float,
+) -> list[str]:
+    mismatches: list[str] = []
+    db_by_key = {_position_key(position): position for position in db_positions}
+    venue_by_key = {_position_key(position): position for position in venue_positions}
+    for key in sorted(set(db_by_key) | set(venue_by_key)):
+        db_position = db_by_key.get(key)
+        venue_position = venue_by_key.get(key)
+        if db_position is None:
+            mismatches.append(f"venue position missing from DB: {key}")
+            continue
+        if venue_position is None:
+            mismatches.append(f"DB position missing from venue: {key}")
+            continue
+        if abs(db_position.shares_held - venue_position.shares_held) > share_tolerance:
+            mismatches.append(
+                "position shares mismatch "
+                f"{key}: DB={db_position.shares_held:.8f} "
+                f"venue={venue_position.shares_held:.8f}"
+            )
+        if abs(db_position.locked_usdc - venue_position.locked_usdc) > notional_tolerance:
+            mismatches.append(
+                "position notional mismatch "
+                f"{key}: DB={db_position.locked_usdc:.8f} "
+                f"venue={venue_position.locked_usdc:.8f}"
+            )
+    return mismatches
+
+
+def _venue_usdc_balance(balances: Mapping[str, float]) -> float | None:
+    for key, value in balances.items():
+        if key.upper() in {"USDC", "COLLATERAL"}:
+            return value
+    return None
+
+
+def _position_key(position: Position) -> tuple[str, str | None, str]:
+    return position.market_id, position.token_id, position.venue
 
 
 def _is_sdk_transport_failure(exc: BaseException) -> bool:

@@ -31,6 +31,16 @@ def test_readme_and_claude_explicitly_document_gated_polymarket_live_mode() -> N
     assert "operator gate" in claude_text
 
 
+def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_gate() -> None:
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"outcome": "NO"' in runbook_text
+    assert "PMS_LIVE_ACCOUNT_RECONCILIATION_REQUIRED=true" in runbook_text
+    assert "PMS_CONTROLLER__TIME_IN_FORCE=IOC" in runbook_text
+
+
 def test_live_and_kalshi_mentions_are_stubbed_not_capability_claims() -> None:
     offending_lines: list[str] = []
 

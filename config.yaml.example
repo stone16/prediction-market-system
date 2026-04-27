@@ -12,6 +12,8 @@
 
 mode: backtest                 # backtest | paper | live
 live_trading_enabled: false    # must be true to switch into live mode
+live_account_reconciliation_required: true
+live_emergency_audit_path: .data/live-emergency-audit.jsonl
 
 risk:
   max_position_per_market: 100.0
@@ -28,6 +30,13 @@ controller:
   min_volume: 0.0
   max_slippage_bps: 50
   time_in_force: GTC
+  max_book_age_ms: 1000.0
+  allowed_book_clock_skew_ms: 250.0
+  max_spread_bps: 100.0
+  strict_factor_gates: true
+  quote_source: postgres_snapshot  # postgres_snapshot | venue_direct | dual
+  direct_quote_min_notional_usdc: 100.0
+  dual_quote_max_price_delta_bps: 25.0
 
 polymarket:
   host: https://clob.polymarket.com

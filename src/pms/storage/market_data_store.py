@@ -51,6 +51,10 @@ class MarketCatalogRow:
     spread_bps: int | None = None
     price_updated_at: datetime | None = None
     subscription_source: str | None = None
+    active: bool | None = None
+    closed: bool | None = None
+    accepting_orders: bool | None = None
+    status_updated_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,14 @@ def _optional_float(value: object) -> float | None:
     return float(cast(Any, value))
 
 
+def _row_value(row: object, key: str) -> object | None:
+    try:
+        value: object = cast(Any, row)[key]
+    except KeyError:
+        return None
+    return value
+
+
 class PostgresMarketDataStore:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
@@ -81,7 +93,19 @@ class PostgresMarketDataStore:
 
     async def read_market(self, market_id: str) -> Market | None:
         query = """
-        SELECT condition_id, slug, question, venue, resolves_at, created_at, last_seen_at, volume_24h
+        SELECT
+            condition_id,
+            slug,
+            question,
+            venue,
+            resolves_at,
+            created_at,
+            last_seen_at,
+            volume_24h,
+            active,
+            closed,
+            accepting_orders,
+            status_updated_at
         FROM markets
         WHERE condition_id = $1
         """
@@ -98,6 +122,16 @@ class PostgresMarketDataStore:
             created_at=row["created_at"],
             last_seen_at=row["last_seen_at"],
             volume_24h=row["volume_24h"],
+            active=cast(bool | None, _row_value(row, "active")),
+            closed=cast(bool | None, _row_value(row, "closed")),
+            accepting_orders=cast(
+                bool | None,
+                _row_value(row, "accepting_orders"),
+            ),
+            status_updated_at=cast(
+                datetime | None,
+                _row_value(row, "status_updated_at"),
+            ),
         )
 
     async def read_tokens_for_market(self, market_id: str) -> list[Token]:
@@ -144,6 +178,10 @@ class PostgresMarketDataStore:
             markets.liquidity,
             markets.spread_bps,
             markets.price_updated_at,
+            markets.active,
+            markets.closed,
+            markets.accepting_orders,
+            markets.status_updated_at,
             MAX(CASE WHEN tokens.outcome = 'YES' THEN tokens.token_id END) AS yes_token_id,
             MAX(CASE WHEN tokens.outcome = 'NO' THEN tokens.token_id END) AS no_token_id,
             MAX(market_subscriptions.source) AS subscription_source,
@@ -231,7 +269,11 @@ class PostgresMarketDataStore:
             markets.last_trade_price,
             markets.liquidity,
             markets.spread_bps,
-            markets.price_updated_at
+            markets.price_updated_at,
+            markets.active,
+            markets.closed,
+            markets.accepting_orders,
+            markets.status_updated_at
         ORDER BY
             COALESCE(markets.volume_24h, 0) DESC,
             markets.last_seen_at DESC,
@@ -285,6 +327,16 @@ class PostgresMarketDataStore:
                 spread_bps=cast(int | None, row["spread_bps"]),
                 price_updated_at=cast(datetime | None, row["price_updated_at"]),
                 subscription_source=cast(str | None, row["subscription_source"]),
+                active=cast(bool | None, _row_value(row, "active")),
+                closed=cast(bool | None, _row_value(row, "closed")),
+                accepting_orders=cast(
+                    bool | None,
+                    _row_value(row, "accepting_orders"),
+                ),
+                status_updated_at=cast(
+                    datetime | None,
+                    _row_value(row, "status_updated_at"),
+                ),
             )
             for row in rows
         ], total
@@ -384,6 +436,10 @@ class PostgresMarketDataStore:
             markets.created_at,
             markets.last_seen_at,
             markets.volume_24h,
+            markets.active,
+            markets.closed,
+            markets.accepting_orders,
+            markets.status_updated_at,
             tokens.token_id,
             tokens.outcome
         FROM markets
@@ -440,6 +496,16 @@ class PostgresMarketDataStore:
                             created_at=cast(datetime, row["created_at"]),
                             last_seen_at=cast(datetime, row["last_seen_at"]),
                             volume_24h=cast(float | None, row["volume_24h"]),
+                            active=cast(bool | None, _row_value(row, "active")),
+                            closed=cast(bool | None, _row_value(row, "closed")),
+                            accepting_orders=cast(
+                                bool | None,
+                                _row_value(row, "accepting_orders"),
+                            ),
+                            status_updated_at=cast(
+                                datetime | None,
+                                _row_value(row, "status_updated_at"),
+                            ),
                         ),
                         current_tokens,
                     )
@@ -480,10 +546,15 @@ class PostgresMarketDataStore:
             last_trade_price,
             liquidity,
             spread_bps,
-            price_updated_at
+            price_updated_at,
+            active,
+            closed,
+            accepting_orders,
+            status_updated_at
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8,
-            $9, $10, $11, $12, $13, $14, $15, $16
+            $9, $10, $11, $12, $13, $14, $15, $16,
+            $17, $18, $19, $20
         )
         ON CONFLICT (condition_id) DO UPDATE
         SET slug = EXCLUDED.slug,
@@ -499,7 +570,11 @@ class PostgresMarketDataStore:
             last_trade_price = EXCLUDED.last_trade_price,
             liquidity = EXCLUDED.liquidity,
             spread_bps = EXCLUDED.spread_bps,
-            price_updated_at = EXCLUDED.price_updated_at
+            price_updated_at = EXCLUDED.price_updated_at,
+            active = EXCLUDED.active,
+            closed = EXCLUDED.closed,
+            accepting_orders = EXCLUDED.accepting_orders,
+            status_updated_at = EXCLUDED.status_updated_at
         """
         async with self._pool.acquire() as connection:
             await connection.execute(
@@ -520,6 +595,10 @@ class PostgresMarketDataStore:
                 market.liquidity,
                 market.spread_bps,
                 market.price_updated_at,
+                market.active,
+                market.closed,
+                market.accepting_orders,
+                market.status_updated_at,
             )
 
     async def write_price_snapshot(

@@ -24,6 +24,8 @@ Export credentials in the operator shell or secret manager that launches PMS:
 ```bash
 export PMS_MODE=live
 export PMS_LIVE_TRADING_ENABLED=true
+export PMS_LIVE_ACCOUNT_RECONCILIATION_REQUIRED=true
+export PMS_CONTROLLER__TIME_IN_FORCE=IOC
 export PMS_POLYMARKET__PRIVATE_KEY=...
 export PMS_POLYMARKET__API_KEY=...
 export PMS_POLYMARKET__API_SECRET=...
@@ -41,9 +43,9 @@ and `funder_address`.
 
 The Polymarket adapter requires a first-order operator approval before any
 venue submission. The preview includes max notional, venue, market, token,
-side, limit price, and max slippage. If the approval gate is absent or denies
-the preview, the adapter raises `OperatorApprovalRequiredError` and submits
-nothing.
+side, outcome, market slug/question when available, limit price, and max
+slippage. If the approval gate is absent or denies the preview, the adapter
+raises `OperatorApprovalRequiredError` and submits nothing.
 
 For the built-in file gate, write a JSON approval file that exactly matches the
 preview:
@@ -56,6 +58,7 @@ preview:
   "market_id": "market-condition-id",
   "token_id": "outcome-token-id",
   "side": "BUY",
+  "outcome": "NO",
   "limit_price": 0.4,
   "max_slippage_bps": 50
 }
