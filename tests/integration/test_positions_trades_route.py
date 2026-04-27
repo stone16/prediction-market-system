@@ -168,72 +168,75 @@ async def test_positions_and_trades_routes_reflect_persisted_paper_fill(
     )
     runner.bind_pg_pool(pg_pool)
 
-    await runner.start()
-    await _wait_for(lambda: len(runner.state.fills) == 1)
-    await _wait_for(
-        lambda: runner.controller_task is not None
-        and runner.controller_task.done()
-        and runner.actuator_task is not None
-        and runner.actuator_task.done()
-    )
-
-    async with pg_pool.acquire() as connection:
-        fill_row = await connection.fetchrow(
-            """
-            SELECT fill_id, market_id, fill_notional_usdc, fill_quantity
-            FROM fills
-            WHERE market_id = 'market-cp06'
-            """
+    try:
+        await runner.start()
+        await _wait_for(lambda: len(runner.state.fills) == 1)
+        await _wait_for(
+            lambda: runner.controller_task is not None
+            and runner.controller_task.done()
+            and runner.actuator_task is not None
+            and runner.actuator_task.done()
         )
 
-    assert fill_row is not None
-    assert fill_row["market_id"] == "market-cp06"
-    assert fill_row["fill_notional_usdc"] == pytest.approx(20.5)
-    assert fill_row["fill_quantity"] == pytest.approx(50.0)
+        async with pg_pool.acquire() as connection:
+            fill_row = await connection.fetchrow(
+                """
+                SELECT fill_id, market_id, fill_notional_usdc, fill_quantity
+                FROM fills
+                WHERE market_id = 'market-cp06'
+                """
+            )
 
-    async with _client(runner) as client:
-        positions = await client.get(
-            "/positions",
-            headers={"Authorization": "Bearer expected-token"},
-        )
-        trades = await client.get(
-            "/trades?limit=10",
-            headers={"Authorization": "Bearer expected-token"},
-        )
+        assert fill_row is not None
+        assert fill_row["market_id"] == "market-cp06"
+        assert fill_row["fill_notional_usdc"] == pytest.approx(20.5)
+        assert fill_row["fill_quantity"] == pytest.approx(50.0)
 
-    assert positions.status_code == 200
-    assert positions.json() == {
-        "positions": [
-            {
-                "market_id": "market-cp06",
-                "token_id": "market-cp06-yes",
-                "venue": "polymarket",
-                "side": "BUY",
-                "shares_held": 50.0,
-                "avg_entry_price": 0.41,
-                "unrealized_pnl": 2.5,
-                "locked_usdc": 20.5,
-            }
-        ]
-    }
-    assert trades.status_code == 200
-    trade_payload = trades.json()
-    assert trade_payload["limit"] == 10
-    assert len(trade_payload["trades"]) == 1
-    trade = trade_payload["trades"][0]
-    assert trade["trade_id"] == trade["order_id"]
-    assert trade["fill_id"] == trade["order_id"]
-    assert trade["decision_id"] == "decision-cp06"
-    assert trade["market_id"] == "market-cp06"
-    assert trade["question"] == "Will CP06 route persisted fills?"
-    assert trade["token_id"] == "market-cp06-yes"
-    assert trade["venue"] == "polymarket"
-    assert trade["side"] == "BUY"
-    assert trade["fill_price"] == pytest.approx(0.41)
-    assert trade["fill_notional_usdc"] == pytest.approx(20.5)
-    assert trade["fill_quantity"] == pytest.approx(50.0)
-    assert trade["status"] == "matched"
-    assert trade["strategy_id"] == "default"
-    assert trade["strategy_version_id"] == "default-v1"
-    assert trade["executed_at"].endswith("Z")
-    assert trade["filled_at"].endswith("Z")
+        async with _client(runner) as client:
+            positions = await client.get(
+                "/positions",
+                headers={"Authorization": "Bearer expected-token"},
+            )
+            trades = await client.get(
+                "/trades?limit=10",
+                headers={"Authorization": "Bearer expected-token"},
+            )
+
+        assert positions.status_code == 200
+        assert positions.json() == {
+            "positions": [
+                {
+                    "market_id": "market-cp06",
+                    "token_id": "market-cp06-yes",
+                    "venue": "polymarket",
+                    "side": "BUY",
+                    "shares_held": 50.0,
+                    "avg_entry_price": 0.41,
+                    "unrealized_pnl": 2.5,
+                    "locked_usdc": 20.5,
+                }
+            ]
+        }
+        assert trades.status_code == 200
+        trade_payload = trades.json()
+        assert trade_payload["limit"] == 10
+        assert len(trade_payload["trades"]) == 1
+        trade = trade_payload["trades"][0]
+        assert trade["trade_id"] == trade["order_id"]
+        assert trade["fill_id"] == trade["order_id"]
+        assert trade["decision_id"] == "decision-cp06"
+        assert trade["market_id"] == "market-cp06"
+        assert trade["question"] == "Will CP06 route persisted fills?"
+        assert trade["token_id"] == "market-cp06-yes"
+        assert trade["venue"] == "polymarket"
+        assert trade["side"] == "BUY"
+        assert trade["fill_price"] == pytest.approx(0.41)
+        assert trade["fill_notional_usdc"] == pytest.approx(20.5)
+        assert trade["fill_quantity"] == pytest.approx(50.0)
+        assert trade["status"] == "matched"
+        assert trade["strategy_id"] == "default"
+        assert trade["strategy_version_id"] == "default-v1"
+        assert trade["executed_at"].endswith("Z")
+        assert trade["filled_at"].endswith("Z")
+    finally:
+        await runner.stop()

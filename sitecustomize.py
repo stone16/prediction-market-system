@@ -22,4 +22,8 @@ def _is_pytest_process() -> bool:
 
 
 if platform.system() == "Darwin" and _is_pytest_process():
-    sys.modules.setdefault("readline", types.ModuleType("readline"))
+    readline_stub = types.ModuleType("readline")
+    setattr(readline_stub, "set_completer", lambda completer=None: None)
+    setattr(readline_stub, "get_completer", lambda: None)
+    setattr(readline_stub, "parse_and_bind", lambda spec: None)
+    sys.modules.setdefault("readline", readline_stub)

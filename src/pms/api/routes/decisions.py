@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
 
 from pydantic import BaseModel
 
@@ -66,6 +66,17 @@ class AcceptDecisionResponse(BaseModel):
     decision_id: str
     status: Literal["accepted"]
     fill_id: str | None = None
+
+
+_ACCEPTED_DOWNSTREAM_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "accepted",
+        "queued",
+        "submitted",
+        "partially_filled",
+        "filled",
+    }
+)
 
 
 class StoredDecisionLike(Protocol):
@@ -172,7 +183,7 @@ async def accept_decision(
     row = await store.get_decision(decision_id, include_opportunity=False)
     if row is None:
         raise DecisionNotFoundError("Decision not found")
-    if row.status == "accepted":
+    if row.status in _ACCEPTED_DOWNSTREAM_STATUSES:
         return _accepted_response(row.decision.decision_id)
     if row.status != "pending":
         raise DecisionNotFoundError("Decision not found")

@@ -187,7 +187,7 @@ async def test_accept_endpoint_is_idempotent_and_creates_single_fill(
         "status": "accepted",
         "fill_id": None,
     }
-    assert await _decision_status(pg_pool, "decision-cp08") == "accepted"
+    assert await _decision_status(pg_pool, "decision-cp08") == "queued"
 
     _mark_controller_done(runner)
     await asyncio.wait_for(runner._actuator_loop(), timeout=1.0)  # noqa: SLF001
@@ -208,6 +208,7 @@ async def test_accept_endpoint_is_idempotent_and_creates_single_fill(
         "status": "accepted",
         "fill_id": None,
     }
+    assert await _decision_status(pg_pool, "decision-cp08") == "filled"
     assert await _fill_count(pg_pool, "decision-cp08") == 1
 
 

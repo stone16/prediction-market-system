@@ -50,6 +50,7 @@ _VALID_STATUS_TRANSITIONS: Final[dict[DecisionStatus, frozenset[DecisionStatus]]
             "submitted",
             "partially_filled",
             "filled",
+            "rejected",
             "venue_rejected",
             "cancelled",
             "submission_unknown",
