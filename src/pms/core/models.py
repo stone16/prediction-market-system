@@ -180,6 +180,19 @@ class Portfolio:
 
 
 @dataclass(frozen=True)
+class VenueAccountSnapshot:
+    balances: Mapping[str, float]
+    open_orders: tuple[OrderState, ...]
+    positions: tuple[Position, ...]
+
+
+@dataclass(frozen=True)
+class ReconciliationReport:
+    ok: bool
+    mismatches: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class VenueCredentials:
     venue: Venue
     host: str
@@ -212,6 +225,10 @@ class Market:
     liquidity: float | None = None
     spread_bps: int | None = None
     price_updated_at: datetime | None = None
+    active: bool | None = None
+    closed: bool | None = None
+    accepting_orders: bool | None = None
+    status_updated_at: datetime | None = None
 
 
 @dataclass(frozen=True)

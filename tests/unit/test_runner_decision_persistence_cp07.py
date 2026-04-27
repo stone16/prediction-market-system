@@ -120,6 +120,7 @@ class _RecordingDecisionStore:
     def __init__(self, runner: Runner) -> None:
         self.runner = runner
         self.calls: list[tuple[str, str | None, str]] = []
+        self.transitions: list[tuple[str, str, str, datetime]] = []
         self.created_at: datetime | None = None
         self.expires_at: datetime | None = None
 
@@ -137,6 +138,19 @@ class _RecordingDecisionStore:
         self.calls.append((decision.decision_id, factor_snapshot_hash, status))
         self.created_at = created_at
         self.expires_at = expires_at
+
+    async def update_status(
+        self,
+        decision_id: str,
+        *,
+        current_status: str,
+        next_status: str,
+        updated_at: datetime,
+    ) -> bool:
+        self.transitions.append(
+            (decision_id, current_status, next_status, updated_at)
+        )
+        return True
 
 
 class _RecordingSweepStore:
@@ -180,6 +194,20 @@ async def test_controller_pipeline_persists_decision_before_enqueuing_it() -> No
 
     decision_store = cast(_RecordingDecisionStore, runner.decision_store)
     assert decision_store.calls == [("decision-cp07", "snapshot-cp07", "pending")]
+    assert decision_store.transitions == [
+        (
+            "decision-cp07",
+            "pending",
+            "accepted",
+            datetime(2026, 4, 23, 10, 0, tzinfo=UTC),
+        ),
+        (
+            "decision-cp07",
+            "accepted",
+            "queued",
+            datetime(2026, 4, 23, 10, 0, tzinfo=UTC),
+        ),
+    ]
     assert decision_store.created_at == datetime(2026, 4, 23, 10, 0, tzinfo=UTC)
     assert decision_store.expires_at == datetime(2026, 4, 23, 10, 15, tzinfo=UTC)
 

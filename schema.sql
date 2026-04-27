@@ -24,7 +24,11 @@ ALTER TABLE markets
     ADD COLUMN IF NOT EXISTS last_trade_price NUMERIC(6,4),
     ADD COLUMN IF NOT EXISTS liquidity NUMERIC,
     ADD COLUMN IF NOT EXISTS spread_bps INTEGER,
-    ADD COLUMN IF NOT EXISTS price_updated_at TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS price_updated_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS active BOOLEAN,
+    ADD COLUMN IF NOT EXISTS closed BOOLEAN,
+    ADD COLUMN IF NOT EXISTS accepting_orders BOOLEAN,
+    ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_markets_price_updated_at
     ON markets (price_updated_at DESC)
@@ -314,7 +318,7 @@ CREATE TABLE IF NOT EXISTS order_intents (
         OR reconciliation_status IN ('filled', 'not_found', 'open')
     ),
     CONSTRAINT order_intents_outcome_check
-        CHECK (outcome IS NULL OR outcome IN ('matched', 'invalid', 'rejected', 'venue_rejection', 'submission_unknown', 'cancelled_ttl', 'cancelled_limit_invalidated', 'cancelled_session_end'))
+        CHECK (outcome IS NULL OR outcome IN ('matched', 'invalid', 'rejected', 'venue_rejection', 'submission_unknown', 'cancelled_ttl', 'cancelled_limit_invalidated', 'cancelled_session_end', 'cancelled_market_resolved'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_order_intents_strategy_acquired_at_desc

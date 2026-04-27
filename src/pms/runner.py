@@ -17,11 +17,15 @@ from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.adapters.polymarket import (
     DenyFirstLiveOrderGate,
     FileFirstLiveOrderGate,
+    LiveQuoteProvider,
     MissingLiveQuoteProvider,
     PolymarketActuator,
     PolymarketBookQuoteProvider,
+    PolymarketDirectQuoteProvider,
+    PolymarketRoutingQuoteProvider,
     PolymarketSDKClient,
     PolymarketSubmissionUnknownError,
+    PolymarketVenueAccountReconciler,
 )
 from pms.actuator.executor import ActuatorAdapter, ActuatorExecutor
 from pms.actuator.feedback import ActuatorFeedback
@@ -48,7 +52,9 @@ from pms.core.models import (
     OrderState,
     Portfolio,
     Position,
+    ReconciliationReport as ReconciliationReport,
     TradeDecision,
+    VenueAccountSnapshot as VenueAccountSnapshot,
     VenueCredentials,
 )
 from pms.evaluation.adapters.scoring import Scorer
@@ -77,6 +83,7 @@ from pms.storage.decision_store import DecisionStore
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 from pms.storage.fill_store import FillStore
+from pms.storage.live_emergency_audit import LiveEmergencyAuditWriter
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.market_subscription_store import PostgresMarketSubscriptionStore
 from pms.storage.opportunity_store import OpportunityStore
@@ -117,6 +124,12 @@ RAW_FACTOR_COMPOSITION_ROLES = frozenset(
 REGISTERED_FACTOR_IDS = frozenset(factor_cls.factor_id for factor_cls in REGISTERED)
 DEFAULT_V2_FACTOR_COMPOSITION = DEFAULT_STRATEGY_COMPOSITION
 T = TypeVar("T")
+
+
+class LivePersistenceFailureError(RuntimeError):
+    """Raised after a venue submit when LIVE persistence safety is broken."""
+
+
 ControllerReleaseCancelPoint = Literal[
     "before_first_cleanup_await",
     "between_cleanup_awaits",
@@ -163,19 +176,6 @@ class ActuatorWorkItem:
     def __iter__(self) -> Iterator[TradeDecision | MarketSignal | None]:
         yield self.decision
         yield self.signal
-
-
-@dataclass(frozen=True)
-class VenueAccountSnapshot:
-    balances: Mapping[str, float]
-    open_orders: tuple[OrderState, ...]
-    positions: tuple[Position, ...]
-
-
-@dataclass(frozen=True)
-class ReconciliationReport:
-    ok: bool
-    mismatches: tuple[str, ...] = ()
 
 
 class VenueAccountReconciler(Protocol):
@@ -777,15 +777,28 @@ class Runner:
             return BacktestActuator(self.historical_data_path)
         if mode == RunMode.PAPER:
             return PaperActuator(orderbooks=self._paper_orderbooks)
+        quote_provider: LiveQuoteProvider = MissingLiveQuoteProvider()
+        if self._pg_pool is not None:
+            quote_provider = PolymarketRoutingQuoteProvider(
+                snapshot_provider=PolymarketBookQuoteProvider(
+                    PostgresMarketDataStore(self._pg_pool),
+                    allowed_clock_skew_ms=(
+                        self.config.controller.allowed_book_clock_skew_ms
+                    ),
+                ),
+                direct_provider=PolymarketDirectQuoteProvider(
+                    book_client=PolymarketSDKClient(),
+                    allowed_clock_skew_ms=(
+                        self.config.controller.allowed_book_clock_skew_ms
+                    ),
+                ),
+                settings=self.config,
+            )
         return PolymarketActuator(
             self.config,
             client=PolymarketSDKClient(),
             operator_gate=_first_live_order_gate(self.config),
-            quote_provider=(
-                PolymarketBookQuoteProvider(PostgresMarketDataStore(self._pg_pool))
-                if self._pg_pool is not None
-                else MissingLiveQuoteProvider()
-            ),
+            quote_provider=quote_provider,
         )
 
     async def _controller_loop(self) -> None:
@@ -887,7 +900,11 @@ class Runner:
                             market_id=decision.market_id,
                             decision_id=decision.decision_id,
                         )
-                        await self._enqueue_decision(decision, signal=signal)
+                        await self._enqueue_decision(
+                            decision,
+                            signal=signal,
+                            queued_at=created_at,
+                        )
                 finally:
                     queue.task_done()
         except asyncio.CancelledError:
@@ -952,6 +969,11 @@ class Runner:
                     continue
                 if self.config.mode == RunMode.PAPER and signal is not None:
                     self._paper_orderbooks[decision.market_id] = signal.orderbook
+                await self._update_decision_status_if_supported(
+                    decision.decision_id,
+                    current_status="queued",
+                    next_status="submitted",
+                )
                 order_state = await _execute_actuator_work_item(
                     self.actuator_executor,
                     decision,
@@ -962,10 +984,30 @@ class Runner:
                 try:
                     await self.order_store.insert(order_state)
                 except Exception as error:  # noqa: BLE001
+                    if self.config.mode == RunMode.LIVE:
+                        await self._hard_halt_live_persistence_failure(
+                            phase="order_state",
+                            decision=decision,
+                            order_state=order_state,
+                            error=error,
+                        )
                     logger.warning("order persistence failed: %s", error)
                 fill = _fill_from_order(order_state, decision, signal)
                 if fill is not None:
                     _append_bounded(self.state.fills, fill)
+                    try:
+                        await self.fill_store.insert(fill)
+                    except Exception as error:  # noqa: BLE001
+                        if self.config.mode == RunMode.LIVE:
+                            await self._hard_halt_live_persistence_failure(
+                                phase="fill",
+                                decision=decision,
+                                order_state=order_state,
+                                error=error,
+                            )
+                        logger.warning("fill persistence failed: %s", error)
+                    self.portfolio = _portfolio_with_fill(self.portfolio, fill)
+                    self._evaluator_spool.enqueue(fill, decision)
                     await self.event_bus.publish(
                         "actuator.fill",
                         _fill_event_summary(fill),
@@ -974,12 +1016,11 @@ class Runner:
                         decision_id=fill.decision_id,
                         fill_id=fill.fill_id or fill.order_id,
                     )
-                    try:
-                        await self.fill_store.insert(fill)
-                    except Exception as error:  # noqa: BLE001
-                        logger.warning("fill persistence failed: %s", error)
-                    self.portfolio = _portfolio_with_fill(self.portfolio, fill)
-                    self._evaluator_spool.enqueue(fill, decision)
+                await self._update_decision_status_if_supported(
+                    decision.decision_id,
+                    current_status="submitted",
+                    next_status=_decision_status_from_order(order_state),
+                )
             except PolymarketSubmissionUnknownError as error:
                 self._live_trading_suspended_reason = "submission_unknown"
                 self._stop_event.set()
@@ -989,10 +1030,22 @@ class Runner:
                     try:
                         await self.order_store.insert(unknown_order_state)
                     except Exception as store_error:  # noqa: BLE001
+                        if self.config.mode == RunMode.LIVE:
+                            await self._hard_halt_live_persistence_failure(
+                                phase="submission_unknown_order_state",
+                                decision=decision,
+                                order_state=unknown_order_state,
+                                error=store_error,
+                            )
                         logger.warning(
                             "submission_unknown order persistence failed: %s",
                             store_error,
                         )
+                await self._update_decision_status_if_supported(
+                    decision.decision_id,
+                    current_status="submitted",
+                    next_status="submission_unknown",
+                )
                 await self.event_bus.publish(
                     "error",
                     f"live trading suspended for submission_unknown: {error}",
@@ -1000,6 +1053,8 @@ class Runner:
                     decision_id=decision.decision_id,
                 )
                 logger.warning("live trading suspended for submission_unknown: %s", error)
+            except LivePersistenceFailureError:
+                raise
             except Exception as error:
                 await self.event_bus.publish(
                     "error",
@@ -1035,6 +1090,7 @@ class Runner:
         *,
         signal: MarketSignal | None,
         dedup_acquired: bool = False,
+        queued_at: datetime | None = None,
     ) -> None:
         await self._decision_queue.put(
             ActuatorWorkItem(
@@ -1043,6 +1099,73 @@ class Runner:
                 dedup_acquired=dedup_acquired,
             )
         )
+        await self._update_decision_status_if_supported(
+            decision.decision_id,
+            current_status="accepted",
+            next_status="queued",
+            updated_at=queued_at or (signal.fetched_at if signal is not None else None),
+        )
+
+    async def _update_decision_status_if_supported(
+        self,
+        decision_id: str,
+        *,
+        current_status: str,
+        next_status: str,
+        updated_at: datetime | None = None,
+    ) -> bool:
+        update_status = getattr(self.decision_store, "update_status", None)
+        if not callable(update_status):
+            return False
+        try:
+            return bool(
+                await update_status(
+                    decision_id,
+                    current_status=current_status,
+                    next_status=next_status,
+                    updated_at=updated_at or datetime.now(tz=UTC),
+                )
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "decision status update failed for decision_id=%s %s->%s: %s",
+                decision_id,
+                current_status,
+                next_status,
+                error,
+            )
+            return False
+
+    async def _hard_halt_live_persistence_failure(
+        self,
+        *,
+        phase: str,
+        decision: TradeDecision,
+        order_state: OrderState | None,
+        error: BaseException,
+    ) -> None:
+        self._live_trading_suspended_reason = "persistence_failure"
+        self._stop_event.set()
+        audit_writer = LiveEmergencyAuditWriter(
+            Path(self.config.live_emergency_audit_path)
+        )
+        try:
+            await audit_writer.append(
+                phase=phase,
+                decision=decision,
+                order_state=order_state,
+                error=error,
+            )
+        except Exception as audit_error:  # noqa: BLE001
+            logger.warning("live emergency audit append failed: %s", audit_error)
+        await self.event_bus.publish(
+            "error",
+            f"live trading suspended: persistence failure during {phase}: {error}",
+            market_id=decision.market_id,
+            decision_id=decision.decision_id,
+        )
+        msg = f"LIVE persistence failure during {phase}: {error}"
+        raise LivePersistenceFailureError(msg) from error
 
     async def _sweep_expired_decisions_once(
         self,
@@ -1319,11 +1442,10 @@ class Runner:
             return
         reconciler = self.venue_account_reconciler
         if reconciler is None:
-            if self.config.live_account_reconciliation_required:
-                msg = "LIVE venue account reconciliation is required but not configured"
-                raise RuntimeError(msg)
-            logger.warning("LIVE venue account reconciliation is not configured")
-            return
+            if not self.config.live_account_reconciliation_required:
+                logger.warning("LIVE venue account reconciliation is not configured")
+                return
+            reconciler = PolymarketVenueAccountReconciler()
         credentials = validate_live_mode_ready(self.config)
         snapshot = await reconciler.snapshot(credentials)
         report = await reconciler.compare(self.portfolio, snapshot)
@@ -1794,6 +1916,31 @@ def _fill_from_order(
         strategy_version_id=decision.strategy_version_id,
         resolved_outcome=_resolved_outcome(signal),
     )
+
+
+def _decision_status_from_order(order_state: OrderState) -> str:
+    normalized_status = order_state.status.lower()
+    raw_status = order_state.raw_status.lower()
+    if (
+        order_state.filled_notional_usdc > 0.0
+        and order_state.remaining_notional_usdc > 1e-9
+    ):
+        return "partially_filled"
+    if order_state.filled_notional_usdc > 0.0:
+        return "filled"
+    if normalized_status == OrderStatus.MATCHED.value:
+        return "filled"
+    if normalized_status in {
+        OrderStatus.CANCELLED.value,
+        OrderStatus.CANCELED_MARKET_RESOLVED.value,
+        "canceled",
+    }:
+        return "cancelled"
+    if raw_status == "venue_rejection" or normalized_status == "rejected":
+        return "venue_rejected"
+    if normalized_status == OrderStatus.INVALID.value:
+        return "rejected"
+    return "submitted"
 
 
 def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:

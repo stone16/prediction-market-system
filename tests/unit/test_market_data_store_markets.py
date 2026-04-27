@@ -407,6 +407,10 @@ async def test_write_market_upserts_current_price_fields() -> None:
         1500.0,
         200,
         price_updated_at,
+        None,
+        None,
+        None,
+        None,
     )
 
 

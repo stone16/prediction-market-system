@@ -197,6 +197,15 @@ def _gamma_market_to_market(row: dict[str, Any], fetched_at: datetime) -> Market
         liquidity=prices.liquidity,
         spread_bps=prices.spread_bps,
         price_updated_at=prices.price_updated_at,
+        active=_optional_bool(row.get("active")),
+        closed=_optional_bool(row.get("closed")),
+        accepting_orders=_optional_bool(
+            _first_non_empty_value(
+                row.get("acceptingOrders"),
+                row.get("accepting_orders"),
+            )
+        ),
+        status_updated_at=fetched_at,
     )
 
 
@@ -423,6 +432,21 @@ def _optional_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed
+
+
+def _optional_bool(value: object) -> bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    msg = "expected a bool-compatible value"
+    raise TypeError(msg)
 
 
 def _first_non_empty_value(*values: object) -> object | None:

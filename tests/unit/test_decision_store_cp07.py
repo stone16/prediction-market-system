@@ -296,6 +296,6 @@ async def test_decision_store_expire_pending_updates_matching_rows() -> None:
     assert len(connection.fetch_calls) == 1
     query, args = connection.fetch_calls[0]
     assert "UPDATE decisions" in query
-    assert "status = 'pending'" in query
+    assert "status IN ('pending', 'accepted', 'queued')" in query
     assert "RETURNING decision_id" in query
     assert args == (cutoff,)

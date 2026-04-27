@@ -387,6 +387,24 @@ def test_alembic_order_intents_table_shape_constraints_and_idempotency() -> None
         assert invalid_outcome_result.returncode != 0
         assert "order_intents_outcome_check" in invalid_outcome_result.stderr
 
+        _run_psql(
+            temp_database_url,
+            "-c",
+            """
+            INSERT INTO order_intents (
+                decision_id,
+                strategy_id,
+                strategy_version_id,
+                outcome
+            ) VALUES (
+                'd-cancelled-market-resolved',
+                's1',
+                'v1',
+                'cancelled_market_resolved'
+            )
+            """,
+        )
+
         invalid_reconciliation_status_result = _run_psql_allow_failure(
             temp_database_url,
             "-c",

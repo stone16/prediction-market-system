@@ -22,6 +22,7 @@ dist/
 # Local output directories (pms-v1 harness artifacts — kept ignored so a
 # stale working copy can't accidentally commit them into v2).
 reports/
+.data/
 
 # Rust
 target/
