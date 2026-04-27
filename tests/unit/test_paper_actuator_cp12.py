@@ -219,3 +219,28 @@ async def test_paper_actuator_rejects_zero_fill_price() -> None:
 
     with pytest.raises(InsufficientLiquidityError):
         await actuator.execute(_decision(limit_price=0.01), _portfolio())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "level",
+    [
+        {"size": 1_000.0},
+        {"price": "not-a-price", "size": 1_000.0},
+        {"price": 0.25, "size": "not-a-size"},
+    ],
+)
+async def test_paper_actuator_rejects_malformed_depth_rows(
+    level: dict[str, object],
+) -> None:
+    actuator = PaperActuator(
+        orderbooks={
+            "market-cp12": {
+                "bids": [{"price": 0.24, "size": 1_000.0}],
+                "asks": [level],
+            }
+        }
+    )
+
+    with pytest.raises(InsufficientLiquidityError, match="asks depth is invalid"):
+        await actuator.execute(_decision(), _portfolio())

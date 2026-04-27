@@ -319,6 +319,8 @@ class ControllerPipeline:
             factor_snapshot_hash=factor_snapshot_hash,
             composition_trace={
                 **composition_trace,
+                "selected_probability": decision_probability,
+                "expected_edge": decision_edge,
                 "yes_probability": yes_probability,
                 "yes_reference_price": yes_reference_price,
                 "yes_edge": yes_edge,

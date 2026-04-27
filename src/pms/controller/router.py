@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import inf
+from math import inf, isfinite
 from typing import Any
 
 from pms.config import ControllerSettings
@@ -18,7 +18,11 @@ class Router:
             and signal.volume_24h < self.controller.min_volume
         ):
             return False
-        if signal.yes_price < 0.02 or signal.yes_price > 0.98:
+        if (
+            not isfinite(signal.yes_price)
+            or signal.yes_price < 0.02
+            or signal.yes_price > 0.98
+        ):
             return False
         if signal.resolves_at is not None and signal.resolves_at <= signal.timestamp:
             return False
@@ -49,6 +53,7 @@ def _optional_float(value: Any) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return inf
+    return parsed if isfinite(parsed) else inf

@@ -804,6 +804,7 @@ class Runner:
     def _remember_paper_orderbook(self, signal: MarketSignal) -> None:
         if signal.token_id is not None:
             self._paper_orderbooks[signal.token_id] = signal.orderbook
+            return
         self._paper_orderbooks[signal.market_id] = signal.orderbook
 
     async def _controller_loop(self) -> None:

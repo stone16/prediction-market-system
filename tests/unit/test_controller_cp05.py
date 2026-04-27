@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from math import inf, nan
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -533,3 +534,32 @@ def test_router_gate_filters_low_volume_and_near_resolution_markets() -> None:
     assert router.gate(_signal(yes_price=0.01)) is False
     assert router.gate(_signal(yes_price=0.99)) is False
     assert router.gate(_signal(yes_price=0.5, volume_24h=100.0)) is True
+
+
+@pytest.mark.parametrize("yes_price", [nan, inf, -inf])
+def test_router_gate_rejects_non_finite_yes_price(yes_price: float) -> None:
+    router = Router(ControllerSettings(min_volume=100.0))
+
+    assert router.gate(_signal(yes_price=yes_price)) is False
+
+
+@pytest.mark.parametrize(
+    "metric,value",
+    [
+        ("spread_bps", nan),
+        ("spread_bps", "NaN"),
+        ("spread_bps", inf),
+        ("spread_bps", "Inf"),
+        ("book_age_ms", nan),
+        ("book_age_ms", "NaN"),
+        ("book_age_ms", inf),
+        ("book_age_ms", "Inf"),
+    ],
+)
+def test_router_gate_rejects_non_finite_quote_metrics(
+    metric: str,
+    value: object,
+) -> None:
+    router = Router(ControllerSettings(min_volume=100.0))
+
+    assert router.gate(_signal(external_signal={metric: value})) is False

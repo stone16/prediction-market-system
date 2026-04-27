@@ -234,7 +234,7 @@ def test_paper_runner_caches_signal_orderbook_by_token_id() -> None:
     runner._remember_paper_orderbook(signal)  # noqa: SLF001
 
     assert runner._paper_orderbooks["no-token"]["asks"][0]["price"] == pytest.approx(0.44)  # noqa: SLF001
-    assert runner._paper_orderbooks["paper-buy-no"]["asks"][0]["price"] == pytest.approx(0.44)  # noqa: SLF001
+    assert "paper-buy-no" not in runner._paper_orderbooks  # noqa: SLF001
 
 
 @pytest.mark.asyncio

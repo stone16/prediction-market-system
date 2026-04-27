@@ -180,6 +180,8 @@ async def test_negative_edge_maps_to_buy_no_with_resolved_no_token() -> None:
     assert opportunity.expected_edge == pytest.approx(0.35)
     assert decision.expected_edge == pytest.approx(0.35)
     assert decision.prob_estimate == pytest.approx(0.70)
+    assert opportunity.composition_trace["selected_probability"] == pytest.approx(0.70)
+    assert opportunity.composition_trace["expected_edge"] == pytest.approx(0.35)
     assert opportunity.composition_trace["yes_probability"] == pytest.approx(0.30)
     assert opportunity.composition_trace["yes_reference_price"] == pytest.approx(0.65)
     assert opportunity.composition_trace["traded_outcome"] == "NO"
