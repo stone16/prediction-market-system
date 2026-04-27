@@ -482,8 +482,6 @@ def _effective_time_in_force(
 
 def _side_key(decision: TradeDecision) -> str:
     action = _action(decision)
-    if decision.outcome == "NO":
-        return "bids" if action == Side.BUY.value else "asks"
     return "asks" if action == Side.BUY.value else "bids"
 
 
@@ -502,10 +500,8 @@ def _best_available_price(orderbook: dict[str, Any], decision: TradeDecision) ->
 
 
 def _effective_level_price(decision: TradeDecision, raw_level: dict[str, Any]) -> float:
-    raw_price = float(cast(str | int | float, raw_level["price"]))
-    if decision.outcome == "NO":
-        return 1.0 - raw_price
-    return raw_price
+    del decision
+    return float(cast(str | int | float, raw_level["price"]))
 
 
 def _apply_slippage(price: float, *, action: str, slippage_bps: float) -> float:
