@@ -10,7 +10,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -70,6 +70,7 @@ from pms.storage.schema_check import ensure_schema_current
 from pms.storage.decision_store import DecisionStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.market_subscription_store import PostgresMarketSubscriptionStore
+from pms.storage.live_reconciliation import SubmissionUnknownReconciliationStore
 
 
 T = TypeVar("T")
@@ -89,6 +90,14 @@ class SubscriptionStateResponse(BaseModel):
     asset_ids: list[str]
     count: int
     last_updated_at: str | None
+
+
+class SubmissionUnknownReconcileRequest(BaseModel):
+    decision_id: str
+    venue_order_id: str | None = None
+    status: Literal["filled", "not_found", "open"]
+    reconciled_by: str
+    note: str | None = None
 
 
 def create_app(
@@ -584,6 +593,35 @@ def create_app(
         if resolved is None:
             raise HTTPException(status_code=404, detail="Feedback not found")
         return cast(dict[str, Any], _jsonable(resolved))
+
+    @app.post(
+        "/live/reconcile-submission-unknown",
+        dependencies=[Depends(require_api_token)],
+    )
+    async def reconcile_submission_unknown(
+        payload: SubmissionUnknownReconcileRequest,
+    ) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        updated = await SubmissionUnknownReconciliationStore(
+            active_runner.pg_pool
+        ).reconcile_submission_unknown(
+            decision_id=payload.decision_id,
+            venue_order_id=payload.venue_order_id,
+            status=payload.status,
+            reconciled_by=payload.reconciled_by,
+            note=payload.note,
+        )
+        if not updated:
+            raise HTTPException(
+                status_code=404,
+                detail="submission_unknown incident not found",
+            )
+        return {
+            "status": "reconciled",
+            "decision_id": payload.decision_id,
+            "resolution": payload.status,
+        }
 
     @app.post("/config", dependencies=[Depends(require_api_token)])
     async def update_config(update: ConfigUpdate) -> dict[str, str]:

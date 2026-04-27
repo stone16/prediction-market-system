@@ -56,6 +56,7 @@ class ControllerSettings(BaseModel):
     time_in_force: str = "GTC"
     max_book_age_ms: float = 1_000.0
     max_spread_bps: float = 100.0
+    strict_factor_gates: bool = True
 
 
 class RiskSettings(BaseModel):
@@ -108,6 +109,7 @@ class PMSSettings(BaseSettings):
     factor_cadence_s: float = 1.0
     api_host: str = "127.0.0.1"
     api_token: str | None = None
+    live_account_reconciliation_required: bool = False
     polymarket: PolymarketSettings = Field(default_factory=PolymarketSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -17,7 +17,9 @@ from pms.actuator.adapters.paper import PaperActuator
 from pms.actuator.adapters.polymarket import (
     DenyFirstLiveOrderGate,
     FileFirstLiveOrderGate,
+    MissingLiveQuoteProvider,
     PolymarketActuator,
+    PolymarketBookQuoteProvider,
     PolymarketSDKClient,
     PolymarketSubmissionUnknownError,
 )
@@ -47,6 +49,7 @@ from pms.core.models import (
     Portfolio,
     Position,
     TradeDecision,
+    VenueCredentials,
 )
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
@@ -162,6 +165,29 @@ class ActuatorWorkItem:
         yield self.signal
 
 
+@dataclass(frozen=True)
+class VenueAccountSnapshot:
+    balances: Mapping[str, float]
+    open_orders: tuple[OrderState, ...]
+    positions: tuple[Position, ...]
+
+
+@dataclass(frozen=True)
+class ReconciliationReport:
+    ok: bool
+    mismatches: tuple[str, ...] = ()
+
+
+class VenueAccountReconciler(Protocol):
+    async def snapshot(self, credentials: VenueCredentials) -> VenueAccountSnapshot: ...
+
+    async def compare(
+        self,
+        db_portfolio: Portfolio,
+        venue_snapshot: VenueAccountSnapshot,
+    ) -> ReconciliationReport: ...
+
+
 @dataclass
 class RunnerState:
     mode: RunMode
@@ -185,6 +211,7 @@ class Runner:
     order_store: OrderStore = field(default_factory=OrderStore)
     fill_store: FillStore = field(default_factory=FillStore)
     opportunity_store: OpportunityStore = field(default_factory=OpportunityStore)
+    venue_account_reconciler: VenueAccountReconciler | None = None
     portfolio: Portfolio = field(default_factory=lambda: Portfolio(
         total_usdc=1000.0,
         free_usdc=1000.0,
@@ -406,6 +433,8 @@ class Runner:
                 # default while the venue actually holds real exposure. See
                 # also `_reconcile_portfolio_from_db`.
                 await self._reconcile_portfolio_from_db()
+                if self.config.mode == RunMode.LIVE:
+                    await self._reconcile_venue_account()
             self._active_sensors = self._build_sensors()
             self._wire_active_perception(self._active_sensors)
             await self._configure_controllers()
@@ -752,6 +781,11 @@ class Runner:
             self.config,
             client=PolymarketSDKClient(),
             operator_gate=_first_live_order_gate(self.config),
+            quote_provider=(
+                PolymarketBookQuoteProvider(PostgresMarketDataStore(self._pg_pool))
+                if self._pg_pool is not None
+                else MissingLiveQuoteProvider()
+            ),
         )
 
     async def _controller_loop(self) -> None:
@@ -1032,6 +1066,7 @@ class Runner:
                 SELECT COUNT(*)
                 FROM order_intents
                 WHERE outcome = 'submission_unknown'
+                  AND reconciled_at IS NULL
                 """
             )
         if int(count or 0) > 0:
@@ -1278,6 +1313,24 @@ class Runner:
             total_locked,
             total_budget,
         )
+
+    async def _reconcile_venue_account(self) -> None:
+        if self.config.mode != RunMode.LIVE:
+            return
+        reconciler = self.venue_account_reconciler
+        if reconciler is None:
+            if self.config.live_account_reconciliation_required:
+                msg = "LIVE venue account reconciliation is required but not configured"
+                raise RuntimeError(msg)
+            logger.warning("LIVE venue account reconciliation is not configured")
+            return
+        credentials = validate_live_mode_ready(self.config)
+        snapshot = await reconciler.snapshot(credentials)
+        report = await reconciler.compare(self.portfolio, snapshot)
+        if not report.ok:
+            details = "; ".join(report.mismatches) or "unknown mismatch"
+            msg = f"LIVE venue account reconciliation mismatch: {details}"
+            raise RuntimeError(msg)
 
     async def _reselect(self) -> None:
         selector = self._market_selector

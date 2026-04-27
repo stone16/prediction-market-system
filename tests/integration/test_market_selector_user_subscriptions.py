@@ -16,7 +16,12 @@ from pms.actuator.adapters.polymarket import (
     PolymarketOrderResult,
 )
 from pms.api.app import create_app
-from pms.config import DatabaseSettings, PMSSettings, PolymarketSettings
+from pms.config import (
+    ControllerSettings,
+    DatabaseSettings,
+    PMSSettings,
+    PolymarketSettings,
+)
 from pms.core.enums import RunMode
 from pms.core.models import Market, MarketSignal, Token, VenueCredentials
 from pms.runner import Runner
@@ -120,6 +125,7 @@ def _settings() -> PMSSettings:
         mode=RunMode.LIVE,
         live_trading_enabled=True,
         auto_migrate_default_v2=False,
+        controller=ControllerSettings(time_in_force="IOC"),
         polymarket=PolymarketSettings(
             private_key="private-key",
             api_key="api-key",

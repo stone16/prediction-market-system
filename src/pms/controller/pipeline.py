@@ -166,7 +166,7 @@ class ControllerPipeline:
             unresolved_missing_factors = tuple(
                 key for key in reported_missing_factors if key not in factor_values
             )
-            if self.settings.mode == RunMode.LIVE and unresolved_missing_factors:
+            if _strict_factor_gates(self.settings) and unresolved_missing_factors:
                 self.last_diagnostic = _composition_diagnostic(
                     code="missing_required_factors",
                     message="Skipping decision because required raw factors are missing.",
@@ -185,7 +185,7 @@ class ControllerPipeline:
             unresolved_stale_factors = tuple(
                 key for key in factor_snapshot.stale_factors if key not in signal_factor_values
             )
-            if self.settings.mode == RunMode.LIVE and unresolved_stale_factors:
+            if _strict_factor_gates(self.settings) and unresolved_stale_factors:
                 self.last_diagnostic = _composition_diagnostic(
                     code="stale_required_factors",
                     message="Skipping decision because required raw factors are stale.",
@@ -424,13 +424,11 @@ def _is_placeholder_forecast(
 
 
 def _signal_factor_values(signal: MarketSignal) -> dict[tuple[str, str], float]:
-    factor_values = {
-        (key, ""): float(value)
-        for key, value in signal.external_signal.items()
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
-    }
-    factor_values[("yes_price", "")] = signal.yes_price
-    return factor_values
+    return {("yes_price", ""): signal.yes_price}
+
+
+def _strict_factor_gates(settings: PMSSettings) -> bool:
+    return settings.mode == RunMode.LIVE or settings.controller.strict_factor_gates
 
 
 def _factor_key_label(key: FactorKey) -> str:

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import asyncpg
 import pytest
 
-from pms.config import DatabaseSettings, PMSSettings, RiskSettings
+from pms.config import ControllerSettings, DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode
 from pms.core.models import Market, MarketSignal
 from pms.runner import Runner
@@ -60,6 +60,7 @@ def _settings(*, auto_migrate_default_v2: bool = True) -> PMSSettings:
     return PMSSettings(
         mode=RunMode.PAPER,
         auto_migrate_default_v2=auto_migrate_default_v2,
+        controller=ControllerSettings(strict_factor_gates=False),
         database=DatabaseSettings(
             dsn=PMS_TEST_DATABASE_URL,
             pool_min_size=1,

@@ -82,7 +82,10 @@ class ActuatorExecutor:
                 # from venue_rejection so the operator knows to reconcile,
                 # and so dedup release does not green-light a retry that
                 # could double-spend.
-                final_state = _rejected_order_state(decision, "submission_unknown")
+                final_state = error.order_state or _rejected_order_state(
+                    decision,
+                    "submission_unknown",
+                )
                 error.order_state = final_state
                 release_outcome = "submission_unknown"
                 await self.feedback.generate(

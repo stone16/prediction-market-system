@@ -60,6 +60,16 @@ def _app(api_token: str | None) -> Any:
         ("/research/backtest", {"content": ""}),
         ("/research/backtest/any-id/compare", {"json": {"denominator": "backtest_set"}}),
         ("/feedback/fb-pending/resolve", {}),
+        (
+            "/live/reconcile-submission-unknown",
+            {
+                "json": {
+                    "decision_id": "d-unknown",
+                    "status": "filled",
+                    "reconciled_by": "operator",
+                }
+            },
+        ),
         ("/config", {"json": {"mode": "backtest"}}),
         ("/run/start", {}),
         ("/run/stop", {}),

@@ -256,7 +256,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     opportunity_id TEXT NOT NULL,
     strategy_id TEXT NOT NULL,
     strategy_version_id TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected', 'expired')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'queued', 'submitted', 'partially_filled', 'filled', 'rejected', 'venue_rejected', 'cancelled', 'expired', 'submission_unknown', 'reconciled')),
     factor_snapshot_hash TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -278,6 +278,15 @@ CREATE TABLE IF NOT EXISTS orders (
     order_id TEXT PRIMARY KEY,
     market_id TEXT NOT NULL,
     ts TIMESTAMPTZ NOT NULL,
+    status TEXT,
+    raw_status TEXT,
+    token_id TEXT,
+    venue TEXT,
+    action TEXT,
+    outcome TEXT,
+    time_in_force TEXT,
+    pre_submit_quote_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    intent_key TEXT,
     requested_notional_usdc DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     filled_notional_usdc DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     remaining_notional_usdc DOUBLE PRECISION NOT NULL DEFAULT 0.0,
@@ -296,6 +305,14 @@ CREATE TABLE IF NOT EXISTS order_intents (
     worker_host TEXT,
     worker_pid INTEGER,
     outcome TEXT,
+    reconciled_at TIMESTAMPTZ,
+    reconciliation_note TEXT,
+    reconciled_by TEXT,
+    venue_order_id TEXT,
+    reconciliation_status TEXT CHECK (
+        reconciliation_status IS NULL
+        OR reconciliation_status IN ('filled', 'not_found', 'open')
+    ),
     CONSTRAINT order_intents_outcome_check
         CHECK (outcome IS NULL OR outcome IN ('matched', 'invalid', 'rejected', 'venue_rejection', 'submission_unknown', 'cancelled_ttl', 'cancelled_limit_invalidated', 'cancelled_session_end'))
 );
@@ -309,6 +326,10 @@ CREATE INDEX IF NOT EXISTS idx_order_intents_released_at_nulls_first
 CREATE UNIQUE INDEX IF NOT EXISTS idx_order_intents_intent_key_unique
     ON order_intents(intent_key)
     WHERE intent_key IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_order_intents_submission_unknown_unresolved
+    ON order_intents(acquired_at DESC)
+    WHERE outcome = 'submission_unknown' AND reconciled_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS fills (
     fill_id TEXT PRIMARY KEY,

@@ -145,7 +145,7 @@ def _signal() -> MarketSignal:
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_runner_persists_pending_decision_rows_on_emission(
+async def test_runner_persists_accepted_decision_rows_on_emission(
     pg_pool: asyncpg.Pool,
 ) -> None:
     runner = Runner(
@@ -178,7 +178,7 @@ async def test_runner_persists_pending_decision_rows_on_emission(
         assert row is not None
         assert row["decision_id"] == "decision-cp07"
         assert row["opportunity_id"] == "opportunity-cp07"
-        assert row["status"] == "pending"
+        assert row["status"] == "accepted"
         assert row["factor_snapshot_hash"] == "snapshot-cp07"
         assert row["strategy_id"] == "default"
         assert row["strategy_version_id"] == "default-v1"
