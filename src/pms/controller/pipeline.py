@@ -242,18 +242,19 @@ class ControllerPipeline:
             except (KeyError, ValueError) as exc:
                 logger.warning("composition resolution failed: %s", exc)
                 return None
-        expected_edge = prob_estimate - signal.yes_price
+        yes_probability = prob_estimate
+        yes_reference_price = signal.yes_price
+        yes_edge = yes_probability - yes_reference_price
         active_portfolio = portfolio or _default_portfolio()
         sizer = _required(self.sizer, "sizer")
         now = datetime.now(tz=UTC)
-        opportunity_side: Literal["yes", "no"] = (
-            "yes" if expected_edge >= 0.0 else "no"
-        )
+        opportunity_side: Literal["yes", "no"] = "yes"
         decision_token_id = signal.token_id
         decision_outcome: Literal["YES", "NO"] = "YES"
-        decision_probability = prob_estimate
-        decision_price = signal.yes_price
-        if expected_edge < 0.0:
+        decision_probability = yes_probability
+        decision_price = yes_reference_price
+        decision_edge = yes_edge
+        if yes_edge < 0.0:
             outcome_tokens = await self.outcome_token_resolver.resolve(
                 market_id=signal.market_id,
                 signal_token_id=signal.token_id,
@@ -284,8 +285,12 @@ class ControllerPipeline:
                 return None
             decision_token_id = outcome_tokens.no_token_id
             decision_outcome = "NO"
-            decision_probability = max(0.0, 1.0 - prob_estimate)
-            decision_price = max(0.0, 1.0 - signal.yes_price)
+            opportunity_side = "no"
+            decision_probability = 1.0 - yes_probability
+            decision_price = max(1e-6, min(1.0 - 1e-6, 1.0 - yes_reference_price))
+            decision_edge = decision_probability - decision_price
+        if decision_edge <= 0.0:
+            return None
         size = sizer.size(
             prob=decision_probability,
             market_price=decision_price,
@@ -303,7 +308,7 @@ class ControllerPipeline:
             token_id=decision_token_id,
             side=opportunity_side,
             selected_factor_values=_selected_factor_values(factor_values),
-            expected_edge=expected_edge,
+            expected_edge=decision_edge,
             rationale=_rationale_text(rationales),
             target_size_usdc=size,
             expiry=signal.resolves_at,
@@ -312,7 +317,16 @@ class ControllerPipeline:
             strategy_version_id=self.strategy_version_id,
             created_at=now,
             factor_snapshot_hash=factor_snapshot_hash,
-            composition_trace=composition_trace,
+            composition_trace={
+                **composition_trace,
+                "yes_probability": yes_probability,
+                "yes_reference_price": yes_reference_price,
+                "yes_edge": yes_edge,
+                "traded_outcome": decision_outcome,
+                "traded_probability": decision_probability,
+                "traded_price": decision_price,
+                "traded_edge": decision_edge,
+            },
         )
 
         intent_key = _intent_key(
@@ -338,8 +352,8 @@ class ControllerPipeline:
             order_type="limit",
             max_slippage_bps=self.settings.controller.max_slippage_bps,
             stop_conditions=router.stop_conditions(signal),
-            prob_estimate=prob_estimate,
-            expected_edge=expected_edge,
+            prob_estimate=decision_probability,
+            expected_edge=decision_edge,
             time_in_force=TimeInForce(self.settings.controller.time_in_force.upper()),
             opportunity_id=opportunity.opportunity_id,
             strategy_id=self.strategy_id,
