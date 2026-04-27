@@ -76,5 +76,7 @@ def _has_open_position(portfolio: Portfolio, decision: TradeDecision) -> bool:
     return any(
         position.market_id == decision.market_id
         and position.token_id == decision.token_id
+        and position.venue == decision.venue
+        and position.side == decision.side
         for position in portfolio.open_positions
     )

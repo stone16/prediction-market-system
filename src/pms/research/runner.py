@@ -135,7 +135,7 @@ class _StrategyAccumulator:
             )
         resolved_outcome = _resolved_outcome(signal)
         if resolved_outcome is not None:
-            prob_estimate = Decimal(str(cast(float, getattr(decision, "prob_estimate"))))
+            prob_estimate = _yes_probability(decision)
             resolved = Decimal(str(resolved_outcome))
             self.brier_scores.append((prob_estimate - resolved) ** 2)
 
@@ -699,6 +699,14 @@ def _decision_slippage_bps(*, decision: object, fill_price: float) -> float:
     else:
         slippage = fill_price - limit_price
     return max(0.0, slippage / limit_price * 10_000.0)
+
+
+def _yes_probability(decision: object) -> Decimal:
+    prob_estimate = Decimal(str(cast(float, getattr(decision, "prob_estimate"))))
+    decision_outcome = cast(str, getattr(decision, "outcome", "YES"))
+    if decision_outcome == "NO":
+        return Decimal("1") - prob_estimate
+    return prob_estimate
 
 
 def _same_position(position: Position, fill: FillRecord) -> bool:
