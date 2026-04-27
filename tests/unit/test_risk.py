@@ -253,6 +253,34 @@ def test_risk_manager_rejects_when_open_positions_at_cap() -> None:
     assert result == RiskDecision(approved=False, reason="max_open_positions")
 
 
+def test_risk_manager_allows_existing_position_add_at_open_position_cap() -> None:
+    positions = _open_positions(4)
+    positions.append(
+        Position(
+            market_id="market-risk",
+            token_id="token-risk",
+            venue="polymarket",
+            side="BUY",
+            shares_held=1.0,
+            avg_entry_price=0.5,
+            unrealized_pnl=0.0,
+            locked_usdc=1.0,
+        )
+    )
+    portfolio = _portfolio(
+        free_usdc=995.0,
+        locked_usdc=5.0,
+        open_positions=positions,
+    )
+
+    result = RiskManager(_risk(max_open_positions=5)).check(
+        _decision(notional_usdc=10.0),
+        portfolio,
+    )
+
+    assert result == RiskDecision(approved=True, reason="approved")
+
+
 def test_risk_manager_rejects_slippage_above_threshold() -> None:
     decision = _decision(notional_usdc=10.0, max_slippage_bps=100)
 
