@@ -139,6 +139,13 @@ class LiveOrderBookClient(Protocol):
     ) -> LiveVenueBook: ...
 
 
+class LiveVenueAccountClient(Protocol):
+    async def read_account_snapshot(
+        self,
+        credentials: VenueCredentials,
+    ) -> VenueAccountSnapshot: ...
+
+
 class BookQuoteStore(Protocol):
     async def read_market(self, market_id: str) -> Market | None: ...
 
@@ -340,6 +347,12 @@ class PolymarketSDKClient:
     ) -> LiveVenueBook:
         return await asyncio.to_thread(self._read_order_book_sync, order, credentials)
 
+    async def read_account_snapshot(
+        self,
+        credentials: VenueCredentials,
+    ) -> VenueAccountSnapshot:
+        return await asyncio.to_thread(self._read_account_snapshot_sync, credentials)
+
     def _submit_order_sync(
         self,
         order: PolymarketOrderRequest,
@@ -449,17 +462,10 @@ class PolymarketSDKClient:
             token_id=order.token_id,
         )
 
-
-@dataclass(frozen=True)
-class PolymarketVenueAccountReconciler:
-    client: PolymarketSDKClient = field(default_factory=PolymarketSDKClient)
-    position_tolerance_shares: float = 1e-6
-    notional_tolerance_usdc: float = 1e-4
-
-    async def snapshot(self, credentials: VenueCredentials) -> VenueAccountSnapshot:
-        return await asyncio.to_thread(self._snapshot_sync, credentials)
-
-    def _snapshot_sync(self, credentials: VenueCredentials) -> VenueAccountSnapshot:
+    def _read_account_snapshot_sync(
+        self,
+        credentials: VenueCredentials,
+    ) -> VenueAccountSnapshot:
         try:
             sdk = importlib.import_module("py_clob_client_v2")
         except ModuleNotFoundError:
@@ -468,20 +474,47 @@ class PolymarketVenueAccountReconciler:
                 "with `uv sync --extra live` before enabling LIVE mode."
             )
             raise LiveTradingDisabledError(msg) from None
-        client = _build_sdk_client(sdk, credentials)
-        open_orders = _order_states_from_open_orders(
-            _get_sdk_open_orders(client),
-            credentials=credentials,
-        )
-        positions = _positions_from_sdk_positions(
-            _get_sdk_positions(client, credentials),
-            credentials=credentials,
-        )
+
+        try:
+            client = _build_sdk_client(sdk, credentials)
+            open_orders = _order_states_from_open_orders(
+                _get_sdk_open_orders(client),
+                credentials=credentials,
+            )
+            positions = _positions_from_sdk_positions(
+                _get_sdk_positions(client, credentials),
+                credentials=credentials,
+            )
+            balances = _get_sdk_balances(client, sdk)
+        except Exception as exc:  # noqa: BLE001
+            redacted = _redacted_exception_message(exc, credentials)
+            logger.warning(
+                "Polymarket live account snapshot failed (%s): %s",
+                type(exc).__name__,
+                redacted,
+            )
+            msg = (
+                "Polymarket live account snapshot failed "
+                f"({type(exc).__name__}); venue error redacted"
+            )
+            raise LiveTradingDisabledError(msg) from None
+
         return VenueAccountSnapshot(
-            balances={},
+            balances=balances,
             open_orders=tuple(open_orders),
             positions=tuple(positions),
         )
+
+
+@dataclass(frozen=True)
+class PolymarketVenueAccountReconciler:
+    client: LiveVenueAccountClient = field(default_factory=PolymarketSDKClient)
+    position_tolerance_shares: float = 1e-6
+    notional_tolerance_usdc: float = 1e-4
+    cash_tolerance_usdc: float = 1e-4
+
+    async def snapshot(self, credentials: VenueCredentials) -> VenueAccountSnapshot:
+        return await self.client.read_account_snapshot(credentials)
 
     async def compare(
         self,
@@ -493,6 +526,15 @@ class PolymarketVenueAccountReconciler:
             mismatches.append(
                 f"venue has {len(venue_snapshot.open_orders)} open orders; "
                 "PMS has no durable live open-order ledger yet"
+            )
+        usdc_balance = _venue_usdc_balance(venue_snapshot.balances)
+        if (
+            usdc_balance is not None
+            and usdc_balance + self.cash_tolerance_usdc < db_portfolio.free_usdc
+        ):
+            mismatches.append(
+                "venue USDC balance below PMS free cash: "
+                f"venue={usdc_balance:.8f} DB={db_portfolio.free_usdc:.8f}"
             )
         mismatches.extend(
             _compare_positions(
@@ -1056,6 +1098,79 @@ def _get_sdk_positions(client: object, credentials: VenueCredentials) -> object:
     return ()
 
 
+def _get_sdk_balances(client: object, sdk: object) -> dict[str, float]:
+    for response in _sdk_balance_responses(client, sdk):
+        usdc = _usdc_balance_from_response(response)
+        if usdc is not None:
+            return {"USDC": usdc}
+    return {}
+
+
+def _sdk_balance_responses(client: object, sdk: object) -> list[object]:
+    responses: list[object] = []
+    balance_allowance = getattr(client, "get_balance_allowance", None)
+    if callable(balance_allowance):
+        params_cls = getattr(sdk, "BalanceAllowanceParams", None)
+        asset_type_cls = getattr(sdk, "AssetType", None)
+        asset_type = getattr(asset_type_cls, "COLLATERAL", "COLLATERAL")
+        if callable(params_cls):
+            try:
+                params = params_cls(asset_type=asset_type)
+                responses.append(balance_allowance(params=params))
+            except TypeError:
+                try:
+                    params = params_cls(asset_type=asset_type)
+                    responses.append(balance_allowance(params))
+                except TypeError:
+                    pass
+        try:
+            responses.append(balance_allowance(asset_type=asset_type))
+        except TypeError:
+            pass
+    for method_name in ("get_balance", "get_balances", "getBalance", "getBalances"):
+        method = getattr(client, method_name, None)
+        if callable(method):
+            try:
+                responses.append(method())
+            except TypeError:
+                pass
+    return responses
+
+
+def _usdc_balance_from_response(response: object) -> float | None:
+    direct = _coerce_float_or_none(response)
+    if direct is not None:
+        return direct
+    if isinstance(response, Sequence) and not isinstance(response, (str, bytes)):
+        for item in response:
+            asset = _response_value(item, "asset", "asset_type", "currency", "token")
+            if asset is None or str(asset).upper() in {"USDC", "COLLATERAL"}:
+                value = _coerce_float_or_none(
+                    _response_value(
+                        item,
+                        "balance",
+                        "available",
+                        "available_balance",
+                        "cash",
+                        "usdc",
+                    )
+                )
+                if value is not None:
+                    return value
+        return None
+    return _coerce_float_or_none(
+        _response_value(
+            response,
+            "balance",
+            "available",
+            "available_balance",
+            "cash",
+            "usdc",
+            "collateral",
+        )
+    )
+
+
 def _sdk_order_type(order_type_cls: object, order: PolymarketOrderRequest) -> object:
     # Polymarket SDK enum: GTC (rest), FAK (fill-and-kill = IOC), FOK (all-or-nothing),
     # GTD (good-till-date). PMS TimeInForce maps GTC→GTC, IOC→FAK, FOK→FOK
@@ -1288,7 +1403,7 @@ def _venue_book_from_sdk_response(
     )
     raw_hash = _response_value(response, "hash", "book_hash", "bookHash")
     quote_hash = str(raw_hash or f"venue:{token_id}:{book_ts.isoformat()}")
-    market_status = str(_response_value(response, "market_status", "status") or "open")
+    market_status = _venue_market_status_from_response(response)
     return LiveVenueBook(
         market_id=market_id,
         token_id=token_id,
@@ -1340,6 +1455,40 @@ def _book_levels_from_response_side(
             )
         )
     return levels
+
+
+def _venue_market_status_from_response(response: object) -> str:
+    if _coerce_bool_or_none(_response_value(response, "closed", "is_closed")) is True:
+        return "closed"
+    if _coerce_bool_or_none(_response_value(response, "active", "is_active")) is False:
+        return "inactive"
+    accepting_orders = _coerce_bool_or_none(
+        _response_value(response, "accepting_orders", "acceptingOrders")
+    )
+    if accepting_orders is False:
+        return "not_accepting_orders"
+    raw_status = _response_value(response, "market_status", "status")
+    if raw_status is None:
+        return "open"
+    normalized = str(raw_status).strip().lower()
+    return normalized or "open"
+
+
+def _coerce_bool_or_none(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    return None
 
 
 def _coerce_datetime_or_now(value: object) -> datetime:
@@ -1479,6 +1628,13 @@ def _compare_positions(
                 f"venue={venue_position.locked_usdc:.8f}"
             )
     return mismatches
+
+
+def _venue_usdc_balance(balances: Mapping[str, float]) -> float | None:
+    for key, value in balances.items():
+        if key.upper() in {"USDC", "COLLATERAL"}:
+            return value
+    return None
 
 
 def _position_key(position: Position) -> tuple[str, str | None, str]:

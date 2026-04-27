@@ -115,7 +115,7 @@ class PMSSettings(BaseSettings):
     factor_cadence_s: float = 1.0
     api_host: str = "127.0.0.1"
     api_token: str | None = None
-    live_account_reconciliation_required: bool = False
+    live_account_reconciliation_required: bool = True
     live_emergency_audit_path: str = ".data/live-emergency-audit.jsonl"
     polymarket: PolymarketSettings = Field(default_factory=PolymarketSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
@@ -160,6 +160,12 @@ def validate_live_mode_ready(settings: PMSSettings) -> VenueCredentials:
         msg = (
             "LIVE GTC disabled until an open-order ledger reserves "
             "resting order exposure"
+        )
+        raise LiveTradingDisabledError(msg)
+    if settings.mode == RunMode.LIVE and not settings.live_account_reconciliation_required:
+        msg = (
+            "LIVE account reconciliation must be required before autonomous "
+            "live trading can start"
         )
         raise LiveTradingDisabledError(msg)
     return credentials

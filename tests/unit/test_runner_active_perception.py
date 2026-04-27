@@ -20,7 +20,13 @@ from pms.config import (
     SensorSettings,
 )
 from pms.core.enums import RunMode
-from pms.core.models import MarketSignal
+from pms.core.models import (
+    MarketSignal,
+    Portfolio,
+    ReconciliationReport,
+    VenueAccountSnapshot,
+    VenueCredentials,
+)
 from pms.market_selection.merge import StrategyMarketSet
 from pms.runner import Runner, _default_active_strategy
 from tests.support.default_strategy_seed import build_default_v1_strategy
@@ -155,6 +161,21 @@ class RecordingSubscriptionController:
         return True
 
 
+@dataclass
+class MatchingVenueReconciler:
+    async def snapshot(self, credentials: VenueCredentials) -> VenueAccountSnapshot:
+        del credentials
+        return VenueAccountSnapshot(balances={"USDC": 10_000.0}, open_orders=(), positions=())
+
+    async def compare(
+        self,
+        db_portfolio: Portfolio,
+        venue_snapshot: VenueAccountSnapshot,
+    ) -> ReconciliationReport:
+        del db_portfolio, venue_snapshot
+        return ReconciliationReport(ok=True, mismatches=())
+
+
 def _settings(mode: RunMode) -> PMSSettings:
     return PMSSettings(
         mode=mode,
@@ -242,6 +263,8 @@ class _RecordingDefaultV2Registry:
 
 
 def _runner(mode: RunMode, **kwargs: Any) -> Runner:
+    if mode == RunMode.LIVE and "venue_account_reconciler" not in kwargs:
+        kwargs["venue_account_reconciler"] = MatchingVenueReconciler()
     return Runner(
         config=_settings(mode),
         historical_data_path=FIXTURE_PATH,
@@ -283,6 +306,14 @@ def _stub_factor_service(monkeypatch: pytest.MonkeyPatch) -> None:
             return None
 
     monkeypatch.setattr("pms.runner.FactorService", _NoopFactorService)
+
+
+@pytest.fixture(autouse=True)
+def _stub_live_venue_reconciler(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "pms.runner.PolymarketVenueAccountReconciler",
+        MatchingVenueReconciler,
+    )
 
 
 def _install_live_doubles(

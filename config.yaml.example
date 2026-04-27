@@ -12,7 +12,7 @@
 
 mode: backtest                 # backtest | paper | live
 live_trading_enabled: false    # must be true to switch into live mode
-live_account_reconciliation_required: false
+live_account_reconciliation_required: true
 live_emergency_audit_path: .data/live-emergency-audit.jsonl
 
 risk:

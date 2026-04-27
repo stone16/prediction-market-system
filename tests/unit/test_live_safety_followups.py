@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+import sys
+from types import SimpleNamespace
 from typing import Any, Literal, cast
 
 import asyncpg
@@ -21,9 +23,17 @@ from pms.actuator.adapters.polymarket import (
     PolymarketOrderRequest,
     PolymarketOrderResult,
     PolymarketRoutingQuoteProvider,
+    PolymarketSDKClient,
     PolymarketSubmissionUnknownError,
+    PolymarketVenueAccountReconciler,
 )
-from pms.config import ControllerSettings, PMSSettings, PolymarketSettings, RiskSettings
+from pms.config import (
+    ControllerSettings,
+    PMSSettings,
+    PolymarketSettings,
+    RiskSettings,
+    validate_live_mode_ready,
+)
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.factor_snapshot import FactorSnapshot
 from pms.controller.pipeline import ControllerPipeline
@@ -37,7 +47,9 @@ from pms.core.models import (
     MarketSignal,
     OrderState,
     Portfolio,
+    Position,
     TradeDecision,
+    VenueCredentials,
 )
 from pms.runner import (
     ReconciliationReport,
@@ -183,6 +195,13 @@ def _live_settings(**overrides: object) -> PMSSettings:
     }
     values.update(overrides)
     return PMSSettings(**values)
+
+
+def test_live_mode_ready_requires_account_reconciliation_gate() -> None:
+    settings = _live_settings(live_account_reconciliation_required=False)
+
+    with pytest.raises(LiveTradingDisabledError, match="account reconciliation"):
+        validate_live_mode_ready(settings)
 
 
 def _decision(
@@ -377,6 +396,59 @@ async def test_polymarket_direct_quote_provider_uses_venue_book() -> None:
     assert quote.quote_hash == "venue-book"
     assert quote.book_age_ms == pytest.approx(100.0)
     assert quote.executable_notional_usdc == pytest.approx(16.0)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_direct_quote_honors_venue_accepting_orders_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def get_order_book(self, token_id: str) -> dict[str, object]:
+            assert token_id == "t-yes"
+            return {
+                "timestamp": now.isoformat(),
+                "accepting_orders": False,
+                "bids": [{"price": 0.39, "size": 100.0}],
+                "asks": [{"price": 0.40, "size": 100.0}],
+            }
+
+    monkeypatch.setitem(
+        sys.modules,
+        "py_clob_client_v2",
+        SimpleNamespace(ApiCreds=FakeApiCreds, ClobClient=FakeClobClient),
+    )
+
+    provider = PolymarketDirectQuoteProvider(
+        book_client=PolymarketSDKClient(),
+        clock=lambda: now,
+    )
+
+    quote = await provider.quote(
+        PolymarketOrderRequest(
+            market_id="m-live-safety",
+            token_id="t-yes",
+            side="BUY",
+            price=0.40,
+            size=25.0,
+            notional_usdc=10.0,
+            estimated_quantity=25.0,
+            order_type="limit",
+            time_in_force="IOC",
+            max_slippage_bps=50,
+        ),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert quote.market_status == "not_accepting_orders"
 
 
 @pytest.mark.asyncio
@@ -903,12 +975,21 @@ class _Acquire:
         return None
 
 
+class _Transaction:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
 class _Connection:
     def __init__(self) -> None:
         self.fetchval_result: int = 0
         self.fetchrow_result: dict[str, object] | None = None
         self.fetchval_calls: list[tuple[str, tuple[object, ...]]] = []
         self.fetchrow_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
 
     async def fetchval(self, query: str, *args: object) -> int:
         self.fetchval_calls.append((query, args))
@@ -917,6 +998,13 @@ class _Connection:
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         self.fetchrow_calls.append((query, args))
         return self.fetchrow_result
+
+    async def execute(self, query: str, *args: object) -> str:
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+    def transaction(self) -> _Transaction:
+        return _Transaction()
 
 
 class _Pool:
@@ -970,6 +1058,11 @@ async def test_submission_unknown_reconciliation_store_marks_incident_resolved()
     assert "reconciled_at = now()" in query
     assert "outcome = 'submission_unknown'" in query
     assert args == ("d-unknown", "pm-123", "filled", "operator", "matched venue fill")
+    decision_query, decision_args = connection.execute_calls[0]
+    assert "UPDATE decisions" in decision_query
+    assert "status = 'reconciled'" in decision_query
+    assert "status = 'submission_unknown'" in decision_query
+    assert decision_args == ("d-unknown",)
 
 
 @pytest.mark.asyncio
@@ -1064,6 +1157,54 @@ class MismatchingVenueReconciler(MatchingVenueReconciler):
         return ReconciliationReport(ok=False, mismatches=("position mismatch",))
 
 
+@dataclass
+class FakeVenueAccountClient:
+    snapshot_value: VenueAccountSnapshot
+    calls: int = 0
+
+    async def read_account_snapshot(
+        self,
+        credentials: VenueCredentials,
+    ) -> VenueAccountSnapshot:
+        assert credentials.venue == "polymarket"
+        self.calls += 1
+        return self.snapshot_value
+
+
+def _venue_open_order() -> OrderState:
+    now = datetime(2026, 4, 27, tzinfo=UTC)
+    return OrderState(
+        order_id="pm-open-1",
+        decision_id="venue-open-pm-open-1",
+        status=OrderStatus.LIVE.value,
+        market_id="m-live-safety",
+        token_id="t-yes",
+        venue="polymarket",
+        requested_notional_usdc=5.0,
+        filled_notional_usdc=0.0,
+        remaining_notional_usdc=5.0,
+        fill_price=0.40,
+        submitted_at=now,
+        last_updated_at=now,
+        raw_status="open",
+        strategy_id="venue",
+        strategy_version_id="venue",
+    )
+
+
+def _venue_position(*, shares: float = 25.0) -> Position:
+    return Position(
+        market_id="m-live-safety",
+        token_id="t-yes",
+        venue="polymarket",
+        side=Side.BUY.value,
+        shares_held=shares,
+        avg_entry_price=0.4,
+        unrealized_pnl=0.0,
+        locked_usdc=shares * 0.4,
+    )
+
+
 @pytest.mark.asyncio
 async def test_live_venue_account_reconciliation_blocks_mismatch() -> None:
     runner = Runner(
@@ -1083,3 +1224,41 @@ async def test_live_venue_account_reconciliation_allows_matching_snapshot() -> N
     )
 
     await runner._reconcile_venue_account()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_polymarket_venue_reconciler_reads_snapshot_client_and_blocks_open_orders() -> None:
+    client = FakeVenueAccountClient(
+        VenueAccountSnapshot(
+            balances={"USDC": 1000.0},
+            open_orders=(_venue_open_order(),),
+            positions=(),
+        )
+    )
+    reconciler = PolymarketVenueAccountReconciler(client=client)
+
+    snapshot = await reconciler.snapshot(_live_settings().polymarket.credentials())
+    report = await reconciler.compare(_portfolio(), snapshot)
+
+    assert client.calls == 1
+    assert report.ok is False
+    assert report.mismatches == (
+        "venue has 1 open orders; PMS has no durable live open-order ledger yet",
+    )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_venue_reconciler_blocks_when_venue_cash_below_db_free() -> None:
+    snapshot = VenueAccountSnapshot(
+        balances={"USDC": 999.0},
+        open_orders=(),
+        positions=(),
+    )
+    reconciler = PolymarketVenueAccountReconciler()
+
+    report = await reconciler.compare(_portfolio(), snapshot)
+
+    assert report.ok is False
+    assert report.mismatches == (
+        "venue USDC balance below PMS free cash: venue=999.00000000 DB=1000.00000000",
+    )
