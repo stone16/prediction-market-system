@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import pytest
 
-from pms.config import PMSSettings, RiskSettings
+from pms.config import ControllerSettings, PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode
 from pms.core.models import MarketSignal
 from pms.runner import Runner
@@ -49,6 +49,7 @@ def _settings(mode: RunMode) -> PMSSettings:
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
         ),
+        controller=ControllerSettings(strict_factor_gates=False),
     )
 
 

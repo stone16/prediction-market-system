@@ -21,6 +21,7 @@ from pms.actuator.adapters.polymarket import (
     FileFirstLiveOrderGate,
     LiveOrderPreview,
     LivePreSubmitQuote,
+    MissingLiveQuoteProvider,
     OperatorApprovalRequiredError,
     PolymarketActuator,
     PolymarketOrderResult,
@@ -409,6 +410,25 @@ async def test_polymarket_actuator_requires_operator_approval_for_first_live_ord
 
 
 @pytest.mark.asyncio
+async def test_missing_quote_provider_fails_closed_before_submit() -> None:
+    client = RecordingPolymarketClient()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=MissingLiveQuoteProvider(),
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="pre-submit quote guard is not configured",
+    ):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+
+
+@pytest.mark.asyncio
 async def test_polymarket_actuator_submits_mocked_live_order_after_first_order_gate() -> None:
     client = RecordingPolymarketClient()
     gate = RecordingOperatorGate(approved=True)
@@ -538,6 +558,7 @@ async def test_file_first_live_order_gate_requires_exact_preview(tmp_path: Path)
                 "market_id": "m-cp06",
                 "token_id": "t-yes",
                 "side": Side.BUY.value,
+                "outcome": "YES",
                 "limit_price": 0.4,
                 "max_slippage_bps": 50,
             }
@@ -556,6 +577,7 @@ async def test_file_first_live_order_gate_requires_exact_preview(tmp_path: Path)
                 "market_id": "m-cp06",
                 "token_id": "t-yes",
                 "side": Side.BUY.value,
+                "outcome": "YES",
                 "limit_price": 0.4,
                 "max_slippage_bps": 50,
             }
@@ -1110,6 +1132,7 @@ async def test_file_first_live_order_gate_consumes_file_after_first_success(
         "market_id": "m-cp06",
         "token_id": "t-yes",
         "side": Side.BUY.value,
+        "outcome": "YES",
         "limit_price": 0.4,
         "max_slippage_bps": 50,
     }
@@ -1157,6 +1180,7 @@ async def test_file_first_live_order_gate_uses_isclose_for_floats(
                 "market_id": "m-cp06",
                 "token_id": "t-yes",
                 "side": Side.BUY.value,
+                "outcome": "YES",
                 "limit_price": 0.4,
                 "max_slippage_bps": 50,
             }
@@ -1175,6 +1199,7 @@ async def test_file_first_live_order_gate_uses_isclose_for_floats(
                 "market_id": "m-cp06",
                 "token_id": "t-yes",
                 "side": Side.BUY.value,
+                "outcome": "YES",
                 "limit_price": 0.4,
                 "max_slippage_bps": 50,
             }
@@ -2253,6 +2278,22 @@ class _SlowPolymarketClient:
         )
 
 
+@dataclass
+class _SequencedQuoteProvider:
+    quotes: list[LivePreSubmitQuote]
+    calls: int = 0
+
+    async def quote(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: object,
+    ) -> LivePreSubmitQuote:
+        del order, credentials
+        index = min(self.calls, len(self.quotes) - 1)
+        self.calls += 1
+        return self.quotes[index]
+
+
 @pytest.mark.asyncio
 async def test_polymarket_actuator_lock_held_through_submit_blocks_concurrent_reuse(
     tmp_path: Path,
@@ -2271,8 +2312,8 @@ async def test_polymarket_actuator_lock_held_through_submit_blocks_concurrent_re
       * T1 completes submit, sets approved=True, consumes the file,
         releases the lock.
       * T2 acquires the lock, the double-check sees approved=True, and
-        T2 submits via the fast path WITHOUT re-reading the (now-
-        unlinked) approval file.
+        T2 submits via the post-approval path WITHOUT re-reading the
+        (now-unlinked) approval file.
     Net: gate.approve_first_order is called exactly once even though
     both tasks make a first-order submit.
     """
@@ -2286,6 +2327,7 @@ async def test_polymarket_actuator_lock_held_through_submit_blocks_concurrent_re
                 "market_id": "m-cp06",
                 "token_id": "t-yes",
                 "side": Side.BUY.value,
+                "outcome": "YES",
                 "limit_price": 0.4,
                 "max_slippage_bps": 50,
             }
@@ -2352,6 +2394,76 @@ async def test_polymarket_actuator_lock_held_through_submit_blocks_concurrent_re
 
 
 @pytest.mark.asyncio
+async def test_second_waiter_after_first_order_approval_still_uses_quote_guard(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(
+        json.dumps(
+            {
+                "approved": True,
+                "max_notional_usdc": 10.0,
+                "venue": "polymarket",
+                "market_id": "m-cp06",
+                "token_id": "t-yes",
+                "side": Side.BUY.value,
+                "outcome": "YES",
+                "limit_price": 0.4,
+                "max_slippage_bps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+    valid_quote = LivePreSubmitQuote(
+        market_status="open",
+        book_age_ms=25.0,
+        executable_notional_usdc=10.0,
+        best_executable_price=0.4,
+        spread_bps=10.0,
+        quote_hash="quote-first",
+        book_ts=datetime(2026, 4, 26, tzinfo=UTC),
+    )
+    stale_quote = LivePreSubmitQuote(
+        market_status="open",
+        book_age_ms=10_000.0,
+        executable_notional_usdc=10.0,
+        best_executable_price=0.4,
+        spread_bps=10.0,
+        quote_hash="quote-second-stale",
+        book_ts=datetime(2026, 4, 26, tzinfo=UTC),
+    )
+    quote_provider = _SequencedQuoteProvider([valid_quote, stale_quote])
+    client = _SlowPolymarketClient()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=FileFirstLiveOrderGate(approval_path),
+        quote_provider=quote_provider,
+    )
+
+    first = asyncio.create_task(
+        actuator.execute(_decision(decision_id="d-first"), _portfolio())
+    )
+    await asyncio.wait_for(client.entered_submit.wait(), timeout=1.0)
+
+    second = asyncio.create_task(
+        actuator.execute(_decision(decision_id="d-second"), _portfolio())
+    )
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(client.submitted) == 1
+
+    client.release.set()
+    first_state = await first
+    with pytest.raises(LiveTradingDisabledError, match="book is stale"):
+        await second
+
+    assert first_state.pre_submit_quote["quote_hash"] == "quote-first"
+    assert quote_provider.calls == 2
+    assert len(client.submitted) == 1
+
+
+@pytest.mark.asyncio
 async def test_polymarket_actuator_failed_first_submit_re_prompts_gate(
     tmp_path: Path,
 ) -> None:
@@ -2373,6 +2485,7 @@ async def test_polymarket_actuator_failed_first_submit_re_prompts_gate(
                 "market_id": "m-cp06",
                 "token_id": "t-yes",
                 "side": Side.BUY.value,
+                "outcome": "YES",
                 "limit_price": 0.4,
                 "max_slippage_bps": 50,
             }

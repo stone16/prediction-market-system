@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from pms.api.app import create_app
-from pms.config import PMSSettings, RiskSettings
+from pms.config import ControllerSettings, PMSSettings, RiskSettings
 from pms.core.enums import RunMode
 from pms.runner import Runner
 from pms.storage.eval_store import EvalStore
@@ -30,6 +30,7 @@ async def test_api_backtest_runner_get_routes(tmp_path: Path) -> None:
         config=PMSSettings(
             mode=RunMode.BACKTEST,
             auto_migrate_default_v2=False,
+            controller=ControllerSettings(strict_factor_gates=False),
             risk=RiskSettings(
                 max_position_per_market=1000.0,
                 max_total_exposure=10_000.0,

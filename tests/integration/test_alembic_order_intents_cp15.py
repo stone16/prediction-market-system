@@ -262,6 +262,7 @@ def test_alembic_order_intents_table_shape_constraints_and_idempotency() -> None
         )
         assert _parse_rows(columns_result.stdout) == [
             ("decision_id", "text", "NO", ""),
+            ("intent_key", "text", "YES", ""),
             ("strategy_id", "text", "NO", ""),
             ("strategy_version_id", "text", "NO", ""),
             ("acquired_at", "timestamp with time zone", "NO", "now()"),
@@ -269,6 +270,11 @@ def test_alembic_order_intents_table_shape_constraints_and_idempotency() -> None
             ("worker_host", "text", "YES", ""),
             ("worker_pid", "integer", "YES", ""),
             ("outcome", "text", "YES", ""),
+            ("reconciled_at", "timestamp with time zone", "YES", ""),
+            ("reconciliation_note", "text", "YES", ""),
+            ("reconciled_by", "text", "YES", ""),
+            ("venue_order_id", "text", "YES", ""),
+            ("reconciliation_status", "text", "YES", ""),
         ]
 
         constraint_rows = _parse_rows(
@@ -289,6 +295,7 @@ def test_alembic_order_intents_table_shape_constraints_and_idempotency() -> None
         assert constraint_rows == [
             ("order_intents_outcome_check", "c"),
             ("order_intents_pkey", "p"),
+            ("order_intents_reconciliation_status_check", "c"),
             ("order_intents_strategy_id_check", "c"),
             ("order_intents_strategy_version_id_check", "c"),
         ]
@@ -309,12 +316,20 @@ def test_alembic_order_intents_table_shape_constraints_and_idempotency() -> None
             ).stdout
         )
         assert [name for name, _ in index_rows] == [
+            "idx_order_intents_intent_key_unique",
             "idx_order_intents_released_at_nulls_first",
             "idx_order_intents_strategy_acquired_at_desc",
+            "idx_order_intents_submission_unknown_unresolved",
             "order_intents_pkey",
         ]
+        assert any("intent_key" in definition for _, definition in index_rows)
         assert any("strategy_id, acquired_at DESC" in definition for _, definition in index_rows)
         assert any("released_at NULLS FIRST" in definition for _, definition in index_rows)
+        assert any(
+            "outcome = 'submission_unknown'::text" in definition
+            and "reconciled_at IS NULL" in definition
+            for _, definition in index_rows
+        )
 
         empty_strategy_result = _run_psql_allow_failure(
             temp_database_url,
@@ -371,6 +386,31 @@ def test_alembic_order_intents_table_shape_constraints_and_idempotency() -> None
         )
         assert invalid_outcome_result.returncode != 0
         assert "order_intents_outcome_check" in invalid_outcome_result.stderr
+
+        invalid_reconciliation_status_result = _run_psql_allow_failure(
+            temp_database_url,
+            "-c",
+            """
+            INSERT INTO order_intents (
+                decision_id,
+                strategy_id,
+                strategy_version_id,
+                outcome,
+                reconciliation_status
+            ) VALUES (
+                'd-invalid-reconciliation-status',
+                's1',
+                'v1',
+                'submission_unknown',
+                'ambiguous'
+            )
+            """,
+        )
+        assert invalid_reconciliation_status_result.returncode != 0
+        assert (
+            "order_intents_reconciliation_status_check"
+            in invalid_reconciliation_status_result.stderr
+        )
 
         _run_psql(
             temp_database_url,

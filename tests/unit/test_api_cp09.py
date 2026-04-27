@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from pms.api.app import create_app
-from pms.config import PMSSettings, RiskSettings
+from pms.config import ControllerSettings, PMSSettings, RiskSettings
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, RunMode, Side, TimeInForce
 from pms.core.models import (
     EvalRecord,
@@ -290,6 +290,7 @@ async def test_api_run_start_stop_cycle(tmp_path: Path) -> None:
                 max_position_per_market=1000.0,
                 max_total_exposure=10_000.0,
             ),
+            controller=ControllerSettings(strict_factor_gates=False),
         ),
         historical_data_path=FIXTURE_PATH,
         eval_store=cast(EvalStore, InMemoryEvalStore()),

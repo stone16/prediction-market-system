@@ -12,19 +12,64 @@ from pms.core.enums import TimeInForce
 from pms.core.models import Opportunity, TradeDecision
 
 
-DecisionStatus = Literal["pending", "accepted", "rejected", "expired"]
+DecisionStatus = Literal[
+    "pending",
+    "accepted",
+    "queued",
+    "submitted",
+    "partially_filled",
+    "filled",
+    "rejected",
+    "venue_rejected",
+    "cancelled",
+    "expired",
+    "submission_unknown",
+    "reconciled",
+]
 
 DECISION_STATUSES: Final[tuple[DecisionStatus, ...]] = (
     "pending",
     "accepted",
+    "queued",
+    "submitted",
+    "partially_filled",
+    "filled",
     "rejected",
+    "venue_rejected",
+    "cancelled",
     "expired",
+    "submission_unknown",
+    "reconciled",
 )
 _VALID_STATUS_TRANSITIONS: Final[dict[DecisionStatus, frozenset[DecisionStatus]]] = {
     "pending": frozenset({"pending", "accepted", "rejected", "expired"}),
-    "accepted": frozenset({"accepted"}),
+    "accepted": frozenset({"accepted", "queued", "submitted"}),
+    "queued": frozenset({"queued", "submitted", "rejected", "cancelled"}),
+    "submitted": frozenset(
+        {
+            "submitted",
+            "partially_filled",
+            "filled",
+            "venue_rejected",
+            "cancelled",
+            "submission_unknown",
+        }
+    ),
+    "partially_filled": frozenset(
+        {
+            "partially_filled",
+            "filled",
+            "cancelled",
+            "submission_unknown",
+        }
+    ),
+    "filled": frozenset({"filled", "reconciled"}),
     "rejected": frozenset({"rejected"}),
+    "venue_rejected": frozenset({"venue_rejected"}),
+    "cancelled": frozenset({"cancelled", "reconciled"}),
     "expired": frozenset({"expired"}),
+    "submission_unknown": frozenset({"submission_unknown", "reconciled"}),
+    "reconciled": frozenset({"reconciled"}),
 }
 _CREATE_DECISION_PAYLOADS_TABLE = """
 CREATE TABLE IF NOT EXISTS decision_payloads (

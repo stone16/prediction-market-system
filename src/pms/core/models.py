@@ -125,6 +125,10 @@ class OrderState:
     strategy_version_id: str
     filled_quantity: float = 0.0
     pre_submit_quote: Mapping[str, Any] = field(default_factory=dict)
+    action: str | None = None
+    outcome: Outcome | None = None
+    time_in_force: str | None = None
+    intent_key: str | None = None
 
 
 @dataclass(frozen=True)

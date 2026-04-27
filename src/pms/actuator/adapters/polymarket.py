@@ -9,13 +9,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Protocol, cast
+from typing import Any, Callable, Final, Protocol, cast
 from uuid import uuid4
 
 from pms.config import PMSSettings, validate_live_mode_ready
-from pms.core.enums import OrderStatus
+from pms.core.enums import OrderStatus, RunMode
 from pms.core.models import (
+    BookLevel,
+    BookSnapshot,
     LiveTradingDisabledError,
+    Market,
     OrderState,
     Portfolio,
     TradeDecision,
@@ -56,6 +59,9 @@ class LiveOrderPreview:
     side: str
     limit_price: float
     max_slippage_bps: int
+    outcome: str = "YES"
+    market_slug: str | None = None
+    question: str | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +116,18 @@ class LiveQuoteProvider(Protocol):
     ) -> LivePreSubmitQuote: ...
 
 
+class BookQuoteStore(Protocol):
+    async def read_market(self, market_id: str) -> Market | None: ...
+
+    async def read_latest_snapshot(
+        self,
+        market_id: str,
+        token_id: str,
+    ) -> BookSnapshot | None: ...
+
+    async def read_levels_for_snapshot(self, snapshot_id: int) -> list[BookLevel]: ...
+
+
 @dataclass(frozen=True)
 class MissingLiveQuoteProvider:
     async def quote(
@@ -123,6 +141,62 @@ class MissingLiveQuoteProvider:
             "LIVE submit requires a fresh venue book check"
         )
         raise LiveTradingDisabledError(msg)
+
+
+@dataclass(frozen=True)
+class PolymarketBookQuoteProvider:
+    store: BookQuoteStore
+    clock: Callable[[], datetime] = field(default_factory=lambda: _utc_now)
+
+    async def quote(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+    ) -> LivePreSubmitQuote:
+        del credentials
+        now = self.clock()
+        market = await self.store.read_market(order.market_id)
+        if market is None:
+            msg = f"Polymarket market data missing for {order.market_id}"
+            raise LiveTradingDisabledError(msg)
+        snapshot = await self.store.read_latest_snapshot(order.market_id, order.token_id)
+        if snapshot is None:
+            msg = f"Polymarket book snapshot missing for token {order.token_id}"
+            raise LiveTradingDisabledError(msg)
+        levels = await self.store.read_levels_for_snapshot(snapshot.id)
+        bid_levels = sorted(
+            (level for level in levels if level.side == "BUY"),
+            key=lambda level: level.price,
+            reverse=True,
+        )
+        ask_levels = sorted(
+            (level for level in levels if level.side == "SELL"),
+            key=lambda level: level.price,
+        )
+        executable_levels = (
+            [level for level in ask_levels if level.price <= order.price]
+            if order.side == "BUY"
+            else [level for level in bid_levels if level.price >= order.price]
+        )
+        best_executable_price = (
+            executable_levels[0].price if executable_levels else order.price
+        )
+        executable_notional_usdc = sum(
+            max(0.0, level.price) * max(0.0, level.size)
+            for level in executable_levels
+        )
+        book_age_ms = max(0.0, (now - snapshot.ts).total_seconds() * 1000.0)
+        best_bid = bid_levels[0].price if bid_levels else None
+        best_ask = ask_levels[0].price if ask_levels else None
+        return LivePreSubmitQuote(
+            market_status=_market_status(market, now),
+            book_age_ms=book_age_ms,
+            executable_notional_usdc=executable_notional_usdc,
+            best_executable_price=best_executable_price,
+            spread_bps=_spread_bps(best_bid=best_bid, best_ask=best_ask),
+            quote_hash=snapshot.hash or f"snapshot:{snapshot.id}",
+            book_ts=snapshot.ts,
+        )
 
 
 class FirstLiveOrderGate(Protocol):
@@ -304,10 +378,11 @@ class PolymarketActuator:
         # on `_approval_lock`. This keeps live throughput unaffected after
         # the one-time gate.
         if self._first_order_approved():
-            quote = await self.quote_provider.quote(request, credentials)
-            _validate_pre_submit_quote(request, quote, self.settings)
-            result = await self.client.submit_order(request, credentials)
-            return _order_state_from_result(decision, result, quote=quote)
+            return await self._submit_with_quote_guard(
+                decision=decision,
+                request=request,
+                credentials=credentials,
+            )
 
         # Slow path: hold `_approval_lock` across the *entire* approval +
         # submit + commit window. The previous implementation released
@@ -324,24 +399,20 @@ class PolymarketActuator:
             # Double-check after acquiring — another task may have just
             # opened the floodgates while we were waiting.
             if self._first_order_approved():
-                result = await self.client.submit_order(request, credentials)
-                return _order_state_from_result(decision, result)
+                return await self._submit_with_quote_guard(
+                    decision=decision,
+                    request=request,
+                    credentials=credentials,
+                )
 
-            preview = LiveOrderPreview(
-                max_notional_usdc=decision.notional_usdc,
-                venue=decision.venue,
-                market_id=decision.market_id,
-                token_id=decision.token_id,
-                side=decision.side,
-                limit_price=decision.limit_price,
-                max_slippage_bps=decision.max_slippage_bps,
-            )
+            preview = await self._live_order_preview(decision)
             approved = await self.operator_gate.approve_first_order(preview)
             if not approved:
                 msg = (
                     "First Polymarket live order requires operator approval: "
                     f"venue={preview.venue} market={preview.market_id} "
                     f"token={preview.token_id} side={preview.side} "
+                    f"outcome={preview.outcome} "
                     f"max_notional_usdc={preview.max_notional_usdc} "
                     f"limit_price={preview.limit_price} "
                     f"max_slippage_bps={preview.max_slippage_bps}"
@@ -352,9 +423,11 @@ class PolymarketActuator:
             # `async with` releases the lock and `_approval_state.approved`
             # stays False — the next caller will see no commit and
             # re-prompt the gate (correct consume-on-success behavior).
-            quote = await self.quote_provider.quote(request, credentials)
-            _validate_pre_submit_quote(request, quote, self.settings)
-            result = await self.client.submit_order(request, credentials)
+            order_state = await self._submit_with_quote_guard(
+                decision=decision,
+                request=request,
+                credentials=credentials,
+            )
 
             # First venue submission succeeded: lock in first-order
             # completion and consume the operator-side approval artefact
@@ -365,10 +438,54 @@ class PolymarketActuator:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("first-order gate consume failed: %s", exc)
 
-        return _order_state_from_result(decision, result, quote=quote)
+        return order_state
 
     def _first_order_approved(self) -> bool:
         return self._approval_state.approved
+
+    async def _live_order_preview(self, decision: TradeDecision) -> LiveOrderPreview:
+        market_slug, question = await self._preview_market_metadata(decision.market_id)
+        return LiveOrderPreview(
+            max_notional_usdc=decision.notional_usdc,
+            venue=decision.venue,
+            market_id=decision.market_id,
+            token_id=decision.token_id,
+            side=decision.side,
+            limit_price=decision.limit_price,
+            max_slippage_bps=decision.max_slippage_bps,
+            outcome=decision.outcome,
+            market_slug=market_slug,
+            question=question,
+        )
+
+    async def _preview_market_metadata(
+        self,
+        market_id: str,
+    ) -> tuple[str | None, str | None]:
+        if not isinstance(self.quote_provider, PolymarketBookQuoteProvider):
+            return None, None
+        market = await self.quote_provider.store.read_market(market_id)
+        if market is None:
+            return None, None
+        return market.slug, market.question
+
+    async def _submit_with_quote_guard(
+        self,
+        *,
+        decision: TradeDecision,
+        request: PolymarketOrderRequest,
+        credentials: VenueCredentials,
+    ) -> OrderState:
+        quote = await self.quote_provider.quote(request, credentials)
+        _validate_pre_submit_quote(request, quote, self.settings)
+        result = await self.client.submit_order(request, credentials)
+        order_state = _order_state_from_result(decision, result, quote=quote)
+        _raise_if_unexpected_resting_non_gtc(
+            settings=self.settings,
+            request=request,
+            order_state=order_state,
+        )
+        return order_state
 
 
 def _order_request(decision: TradeDecision) -> PolymarketOrderRequest:
@@ -416,7 +533,27 @@ def _order_state_from_result(
         strategy_version_id=decision.strategy_version_id,
         filled_quantity=result.filled_quantity,
         pre_submit_quote={} if quote is None else _quote_payload(quote),
+        action=decision.action,
+        outcome=decision.outcome,
+        time_in_force=decision.time_in_force.value,
+        intent_key=decision.intent_key,
     )
+
+
+def _raise_if_unexpected_resting_non_gtc(
+    *,
+    settings: PMSSettings,
+    request: PolymarketOrderRequest,
+    order_state: OrderState,
+) -> None:
+    if (
+        settings.mode == RunMode.LIVE
+        and request.time_in_force != "GTC"
+        and order_state.status == OrderStatus.LIVE.value
+        and order_state.remaining_notional_usdc > 1e-9
+    ):
+        msg = "Non-GTC live order appears resting; requires venue reconciliation"
+        raise PolymarketSubmissionUnknownError(msg, order_state=order_state)
 
 
 def _validate_pre_submit_quote(
@@ -471,6 +608,25 @@ def _quote_payload(quote: LivePreSubmitQuote) -> dict[str, object]:
     }
 
 
+def _utc_now() -> datetime:
+    return datetime.now(tz=UTC)
+
+
+def _market_status(market: Market, now: datetime) -> str:
+    if market.resolves_at is not None and market.resolves_at <= now:
+        return "closed"
+    return "open"
+
+
+def _spread_bps(*, best_bid: float | None, best_ask: float | None) -> float:
+    if best_bid is None or best_ask is None:
+        return math.inf
+    midpoint = (best_bid + best_ask) / 2.0
+    if midpoint <= 0.0:
+        return math.inf
+    return ((best_ask - best_bid) / midpoint) * 10_000.0
+
+
 def _decision_quantity(decision: TradeDecision) -> float:
     if decision.limit_price <= 0.0:
         msg = "Polymarket live execution requires a positive limit_price"
@@ -501,6 +657,8 @@ def _approval_payload_matches(
     if payload.get("token_id") != preview.token_id:
         return False
     if payload.get("side") != preview.side:
+        return False
+    if payload.get("outcome") != preview.outcome:
         return False
     if payload.get("max_slippage_bps") != preview.max_slippage_bps:
         return False

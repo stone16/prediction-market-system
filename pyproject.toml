@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 pms-api = "pms.api.__main__:main"
+pms-live = "pms.live_cli:main"
 pms-research = "pms.research.cli:main"
 
 [project.optional-dependencies]

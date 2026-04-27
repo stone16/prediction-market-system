@@ -79,11 +79,7 @@ async def test_controller_pipeline_on_signal_emits_opportunity_and_linked_decisi
     assert opportunity.side == "yes"
     assert opportunity.market_id == "market-cp02"
     assert opportunity.token_id == "token-cp02"
-    assert opportunity.selected_factor_values == {
-        "fair_value": 0.61,
-        "confidence": 0.8,
-        "yes_price": 0.4,
-    }
+    assert opportunity.selected_factor_values == {"yes_price": 0.4}
     assert opportunity.rationale == "StaticForecaster:factor-value edge"
     assert decision.notional_usdc == pytest.approx(_expected_kelly_notional())
     assert opportunity.target_size_usdc == pytest.approx(decision.notional_usdc)

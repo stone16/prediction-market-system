@@ -31,12 +31,13 @@ class _RecordingConnection:
         self.in_transaction = False
         self.transaction_entries = 0
         self.execute_flags: list[bool] = []
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
         self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
         self.fetch_rows: list[object] = []
 
     async def execute(self, query: str, *args: object) -> str:
-        del query, args
         self.execute_flags.append(self.in_transaction)
+        self.execute_calls.append((query, args))
         return "OK"
 
     async def fetch(self, query: str, *args: object) -> list[object]:
@@ -142,6 +143,7 @@ async def test_store_get_short_circuits_without_pool_or_fill_id() -> None:
 
 def test_payload_helpers_cover_dict_and_error_branches() -> None:
     assert order_json_object({"status": "matched"}) == {"status": "matched"}
+    assert order_json_object('{"status": "matched"}') == {"status": "matched"}
     assert fill_json_object({"status": "filled"}) == {"status": "filled"}
     assert _string_list(["a", 2]) == ["a", "2"]
     assert _string_list(None) == []
@@ -162,6 +164,9 @@ async def test_order_store_insert_wraps_shell_and_payload_writes_in_transaction(
 
     assert connection.transaction_entries == 1
     assert connection.execute_flags == [False, True, True]
+    orders_query, orders_args = connection.execute_calls[1]
+    assert "$19" not in orders_query
+    assert len(orders_args) == 18
 
 
 @pytest.mark.asyncio

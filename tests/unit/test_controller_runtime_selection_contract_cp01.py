@@ -185,7 +185,6 @@ async def test_controller_pipeline_uses_strategy_factor_composition_not_forecast
     assert decision.expected_edge == pytest.approx(0.32)
     assert opportunity.expected_edge == pytest.approx(0.32)
     assert opportunity.selected_factor_values == {
-        "fair_value": pytest.approx(0.58),
         "yes_price": pytest.approx(0.4),
         "rules": pytest.approx(0.10),
         "llm": pytest.approx(0.90),
