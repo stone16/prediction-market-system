@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
-from typing import cast
+from typing import Any, cast
 
 import asyncpg
 import pytest
@@ -88,7 +88,7 @@ def _judgement_artifact(**overrides: object) -> StrategyJudgementArtifact:
         "created_at": NOW,
     }
     data.update(overrides)
-    return StrategyJudgementArtifact(**cast(dict[str, object], data))
+    return StrategyJudgementArtifact(**cast(Any, data))
 
 
 def _execution_artifact(**overrides: object) -> StrategyExecutionArtifact:
@@ -112,7 +112,7 @@ def _execution_artifact(**overrides: object) -> StrategyExecutionArtifact:
         "created_at": NOW,
     }
     data.update(overrides)
-    return StrategyExecutionArtifact(**cast(dict[str, object], data))
+    return StrategyExecutionArtifact(**cast(Any, data))
 
 
 def test_judgement_artifact_represents_approved_intent_and_rejected_candidate() -> None:
