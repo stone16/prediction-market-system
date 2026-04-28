@@ -39,6 +39,12 @@ class StrategyArtifactWriter(Protocol):
         artifact: StrategyExecutionArtifact,
     ) -> None: ...
 
+    async def insert_run_artifacts(
+        self,
+        judgement_artifact: StrategyJudgementArtifact | None,
+        execution_artifacts: tuple[StrategyExecutionArtifact, ...],
+    ) -> None: ...
+
 
 class TradeIntentPlanner(Protocol):
     async def plan(self, intent: TradeIntent, *, as_of: datetime) -> ExecutionPlan: ...
@@ -79,12 +85,15 @@ class AgentStrategyRuntimeBridge:
 
         module = self.registry.get(strategy_id, strategy_version_id)
         if module is None:
-            await self.artifact_store.insert_execution_artifact(
-                _unknown_strategy_artifact(
-                    strategy_id=strategy_id,
-                    strategy_version_id=strategy_version_id,
-                    as_of=as_of,
-                )
+            await self.artifact_store.insert_run_artifacts(
+                None,
+                (
+                    _unknown_strategy_artifact(
+                        strategy_id=strategy_id,
+                        strategy_version_id=strategy_version_id,
+                        as_of=as_of,
+                    ),
+                ),
             )
             return AgentStrategyBridgeReport(
                 strategy_id=strategy_id,
@@ -101,17 +110,25 @@ class AgentStrategyRuntimeBridge:
         enqueued_decision_ids: list[str] = []
         rejection_reasons: list[str] = []
         for result in await _run_module_with_artifacts(module, context):
+            judgement_artifact: StrategyJudgementArtifact | None = None
+            execution_artifacts: list[StrategyExecutionArtifact] = []
+            decisions: list[TradeDecision] = []
             if result.judgement is not None:
-                await self.artifact_store.insert_judgement_artifact(
-                    _judgement_artifact(result.judgement, result.intents)
+                judgement_artifact = _judgement_artifact(
+                    result.judgement,
+                    result.intents,
                 )
                 if not result.judgement.approved:
                     rejection_reasons.extend(result.judgement.failure_reasons)
+                    await self.artifact_store.insert_run_artifacts(
+                        judgement_artifact,
+                        (),
+                    )
                     continue
 
             for intent in result.intents:
                 if isinstance(intent, BasketIntent):
-                    await self.artifact_store.insert_execution_artifact(
+                    execution_artifacts.append(
                         _unsupported_basket_artifact(intent, as_of=as_of)
                     )
                     rejection_reasons.append("basket_runtime_not_supported")
@@ -119,14 +136,14 @@ class AgentStrategyRuntimeBridge:
 
                 plan = await self.planner.plan(intent, as_of=as_of)
                 if plan.rejection_reason is not None:
-                    await self.artifact_store.insert_execution_artifact(
+                    execution_artifacts.append(
                         _execution_artifact(intent, plan)
                     )
                     rejection_reasons.append(plan.rejection_reason)
                     continue
                 if len(plan.planned_orders) > 1:
                     reason = "single_leg_plan_multiple_orders"
-                    await self.artifact_store.insert_execution_artifact(
+                    execution_artifacts.append(
                         _bridge_rejection_artifact(
                             intent,
                             plan,
@@ -136,13 +153,20 @@ class AgentStrategyRuntimeBridge:
                     )
                     rejection_reasons.append(reason)
                     continue
-                await self.artifact_store.insert_execution_artifact(
+                execution_artifacts.append(
                     _execution_artifact(intent, plan)
                 )
                 for order in plan.planned_orders:
-                    decision = _decision_from_order(order, intent)
-                    await self.enqueue_decision(decision)
-                    enqueued_decision_ids.append(decision.decision_id)
+                    decisions.append(_decision_from_order(order, intent))
+
+            if judgement_artifact is not None or execution_artifacts:
+                await self.artifact_store.insert_run_artifacts(
+                    judgement_artifact,
+                    tuple(execution_artifacts),
+                )
+            for decision in decisions:
+                await self.enqueue_decision(decision)
+                enqueued_decision_ids.append(decision.decision_id)
 
         return AgentStrategyBridgeReport(
             strategy_id=strategy_id,

@@ -227,6 +227,21 @@ async def test_store_inserts_judgement_artifact_as_json_payloads() -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_inserts_run_artifacts_in_one_transaction() -> None:
+    connection = _RecordingConnection()
+    store = StrategyArtifactStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    await store.insert_run_artifacts(
+        _judgement_artifact(),
+        (_execution_artifact(),),
+    )
+
+    assert connection.transaction_entries == 1
+    assert len(connection.execute_calls) == 2
+    assert all(in_transaction is True for _, _, in_transaction in connection.execute_calls)
+
+
+@pytest.mark.asyncio
 async def test_store_lists_execution_artifacts_by_strategy_version() -> None:
     connection = _RecordingConnection()
     connection.fetch_rows = [

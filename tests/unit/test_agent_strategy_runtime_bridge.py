@@ -79,6 +79,16 @@ class _RecordingArtifactStore:
         self.events.append(f"execution:{artifact.artifact_type}")
         self.execution_artifacts.append(artifact)
 
+    async def insert_run_artifacts(
+        self,
+        judgement_artifact: StrategyJudgementArtifact | None,
+        execution_artifacts: tuple[StrategyExecutionArtifact, ...],
+    ) -> None:
+        if judgement_artifact is not None:
+            await self.insert_judgement_artifact(judgement_artifact)
+        for artifact in execution_artifacts:
+            await self.insert_execution_artifact(artifact)
+
 
 def _settings(*, enabled: bool) -> PMSSettings:
     return PMSSettings(

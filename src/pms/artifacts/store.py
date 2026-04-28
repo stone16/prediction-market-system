@@ -24,93 +24,29 @@ class StrategyArtifactStore:
         self,
         artifact: StrategyJudgementArtifact,
     ) -> None:
-        query = """
-        INSERT INTO strategy_judgement_artifacts (
-            artifact_id,
-            strategy_id,
-            strategy_version_id,
-            artifact_type,
-            observation_refs,
-            candidate_id,
-            judgement_id,
-            judgement_summary,
-            evidence_refs,
-            assumptions,
-            rejection_reasons,
-            intent_payload,
-            created_at
-        ) VALUES (
-            $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb,
-            $11::jsonb, $12::jsonb, $13
-        )
-        ON CONFLICT (artifact_id) DO NOTHING
-        """
         async with self._pool.acquire() as connection:
             async with connection.transaction():
-                await connection.execute(
-                    query,
-                    artifact.artifact_id,
-                    artifact.strategy_id,
-                    artifact.strategy_version_id,
-                    artifact.artifact_type,
-                    _json_list(artifact.observation_refs),
-                    artifact.candidate_id,
-                    artifact.judgement_id,
-                    artifact.judgement_summary,
-                    _json_list(artifact.evidence_refs),
-                    _json_list(artifact.assumptions),
-                    _json_list(artifact.rejection_reasons),
-                    _json_object(artifact.intent_payload),
-                    artifact.created_at,
-                )
+                await _insert_judgement_artifact(connection, artifact)
 
     async def insert_execution_artifact(
         self,
         artifact: StrategyExecutionArtifact,
     ) -> None:
-        query = """
-        INSERT INTO strategy_execution_artifacts (
-            artifact_id,
-            strategy_id,
-            strategy_version_id,
-            artifact_type,
-            intent_id,
-            plan_id,
-            execution_policy,
-            execution_plan_payload,
-            risk_decision_payload,
-            venue_response_ids,
-            reconciliation_status,
-            post_trade_status,
-            evidence_refs,
-            rejection_reasons,
-            created_at
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb,
-            $11, $12, $13::jsonb, $14::jsonb, $15
-        )
-        ON CONFLICT (artifact_id) DO NOTHING
-        """
         async with self._pool.acquire() as connection:
             async with connection.transaction():
-                await connection.execute(
-                    query,
-                    artifact.artifact_id,
-                    artifact.strategy_id,
-                    artifact.strategy_version_id,
-                    artifact.artifact_type,
-                    artifact.intent_id,
-                    artifact.plan_id,
-                    artifact.execution_policy,
-                    _json_object(artifact.execution_plan_payload),
-                    _json_object(artifact.risk_decision_payload),
-                    _json_list(artifact.venue_response_ids),
-                    artifact.reconciliation_status,
-                    artifact.post_trade_status,
-                    _json_list(artifact.evidence_refs),
-                    _json_list(artifact.rejection_reasons),
-                    artifact.created_at,
-                )
+                await _insert_execution_artifact(connection, artifact)
+
+    async def insert_run_artifacts(
+        self,
+        judgement_artifact: StrategyJudgementArtifact | None,
+        execution_artifacts: tuple[StrategyExecutionArtifact, ...],
+    ) -> None:
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                if judgement_artifact is not None:
+                    await _insert_judgement_artifact(connection, judgement_artifact)
+                for artifact in execution_artifacts:
+                    await _insert_execution_artifact(connection, artifact)
 
     async def list_judgement_artifacts(
         self,
@@ -175,6 +111,99 @@ class StrategyArtifactStore:
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(query, strategy_id, strategy_version_id, limit)
         return [_execution_from_row(cast(Mapping[str, object], row)) for row in rows]
+
+
+_INSERT_JUDGEMENT_ARTIFACT_SQL = """
+INSERT INTO strategy_judgement_artifacts (
+    artifact_id,
+    strategy_id,
+    strategy_version_id,
+    artifact_type,
+    observation_refs,
+    candidate_id,
+    judgement_id,
+    judgement_summary,
+    evidence_refs,
+    assumptions,
+    rejection_reasons,
+    intent_payload,
+    created_at
+) VALUES (
+    $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb,
+    $11::jsonb, $12::jsonb, $13
+)
+ON CONFLICT (artifact_id) DO NOTHING
+"""
+
+_INSERT_EXECUTION_ARTIFACT_SQL = """
+INSERT INTO strategy_execution_artifacts (
+    artifact_id,
+    strategy_id,
+    strategy_version_id,
+    artifact_type,
+    intent_id,
+    plan_id,
+    execution_policy,
+    execution_plan_payload,
+    risk_decision_payload,
+    venue_response_ids,
+    reconciliation_status,
+    post_trade_status,
+    evidence_refs,
+    rejection_reasons,
+    created_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb,
+    $11, $12, $13::jsonb, $14::jsonb, $15
+)
+ON CONFLICT (artifact_id) DO NOTHING
+"""
+
+
+async def _insert_judgement_artifact(
+    connection: asyncpg.Connection,
+    artifact: StrategyJudgementArtifact,
+) -> None:
+    await connection.execute(
+        _INSERT_JUDGEMENT_ARTIFACT_SQL,
+        artifact.artifact_id,
+        artifact.strategy_id,
+        artifact.strategy_version_id,
+        artifact.artifact_type,
+        _json_list(artifact.observation_refs),
+        artifact.candidate_id,
+        artifact.judgement_id,
+        artifact.judgement_summary,
+        _json_list(artifact.evidence_refs),
+        _json_list(artifact.assumptions),
+        _json_list(artifact.rejection_reasons),
+        _json_object(artifact.intent_payload),
+        artifact.created_at,
+    )
+
+
+async def _insert_execution_artifact(
+    connection: asyncpg.Connection,
+    artifact: StrategyExecutionArtifact,
+) -> None:
+    await connection.execute(
+        _INSERT_EXECUTION_ARTIFACT_SQL,
+        artifact.artifact_id,
+        artifact.strategy_id,
+        artifact.strategy_version_id,
+        artifact.artifact_type,
+        artifact.intent_id,
+        artifact.plan_id,
+        artifact.execution_policy,
+        _json_object(artifact.execution_plan_payload),
+        _json_object(artifact.risk_decision_payload),
+        _json_list(artifact.venue_response_ids),
+        artifact.reconciliation_status,
+        artifact.post_trade_status,
+        _json_list(artifact.evidence_refs),
+        _json_list(artifact.rejection_reasons),
+        artifact.created_at,
+    )
 
 
 def _json_list(values: tuple[str, ...]) -> str:
