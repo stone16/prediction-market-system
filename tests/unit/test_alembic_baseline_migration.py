@@ -113,6 +113,30 @@ def test_baseline_deferred_filter_preserves_dollar_quoted_blocks() -> None:
     assert kept[0].lstrip().startswith("DO $$")
 
 
+def test_baseline_statement_splitter_ignores_semicolons_in_sql_comments() -> None:
+    module = _load_migration_module()
+
+    statements = module._split_sql_statements(
+        """
+        -- CP00 resolved Q2a to allow duplicates; replay order is (ts, id).
+        CREATE TABLE IF NOT EXISTS price_changes (
+            id TEXT PRIMARY KEY
+        );
+
+        /* Strategy factors are empty in S2; populated by S3. */
+        CREATE TABLE IF NOT EXISTS strategy_factors (
+            id TEXT PRIMARY KEY
+        );
+        """
+    )
+
+    assert len(statements) == 2
+    assert "replay order is (ts, id)" in statements[0]
+    assert statements[0].count("CREATE TABLE") == 1
+    assert "populated by S3" in statements[1]
+    assert statements[1].count("CREATE TABLE") == 1
+
+
 def test_baseline_migration_downgrade_drops_all_tables_in_reverse_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

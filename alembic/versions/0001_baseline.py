@@ -99,6 +99,18 @@ def _split_sql_statements(schema_sql: str) -> tuple[str, ...]:
             in_single_quote = True
             index += 1
             continue
+        if schema_sql.startswith("--", index):
+            newline_index = schema_sql.find("\n", index + 2)
+            if newline_index == -1:
+                break
+            index = newline_index + 1
+            continue
+        if schema_sql.startswith("/*", index):
+            comment_end = schema_sql.find("*/", index + 2)
+            if comment_end == -1:
+                break
+            index = comment_end + 2
+            continue
         if char == "$":
             match = _DOLLAR_QUOTE_RE.match(schema_sql, index)
             if match is not None:

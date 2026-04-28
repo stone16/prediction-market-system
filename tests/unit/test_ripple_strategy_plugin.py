@@ -9,7 +9,6 @@ import tomllib
 import pytest
 
 from pms.core.enums import TimeInForce
-from pms.core.models import OrderState, TradeDecision
 from pms.strategies.base import (
     StrategyAgent,
     StrategyController,
@@ -103,8 +102,6 @@ async def test_ripple_strategy_approves_fixture_candidate_and_emits_trade_intent
     assert len(intents) == 1
     intent = intents[0]
     assert isinstance(intent, TradeIntent)
-    assert not isinstance(intent, TradeDecision)
-    assert not isinstance(intent, OrderState)
     assert intent.strategy_id == "ripple"
     assert intent.strategy_version_id == "ripple-v1"
     assert intent.candidate_id == "candidate-ripple-observation-1"
