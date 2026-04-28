@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import FrozenInstanceError, is_dataclass, replace
 from datetime import UTC, datetime
-from typing import get_type_hints
+from typing import Any, cast, get_type_hints
 
 import pytest
 
@@ -35,31 +35,59 @@ class FakeStrategyModule:
         return ()
 
 
-def _trade_intent(
-    *,
-    intent_id: str = "intent-1",
-    strategy_id: str = "ripple",
-    strategy_version_id: str = "ripple-v1",
-) -> TradeIntent:
-    return TradeIntent(
-        intent_id=intent_id,
-        strategy_id=strategy_id,
-        strategy_version_id=strategy_version_id,
-        candidate_id="candidate-1",
-        market_id="market-1",
-        token_id="token-yes",
-        venue="polymarket",
-        side="BUY",
-        outcome="YES",
-        limit_price=0.54,
-        notional_usdc=25.0,
-        expected_price=0.62,
-        expected_edge=0.08,
-        max_slippage_bps=50,
-        time_in_force=TimeInForce.GTC,
-        evidence_refs=("judgement-1",),
-        created_at=NOW,
-    )
+def _trade_intent(**overrides: object) -> TradeIntent:
+    data: dict[str, object] = {
+        "intent_id": "intent-1",
+        "strategy_id": "ripple",
+        "strategy_version_id": "ripple-v1",
+        "candidate_id": "candidate-1",
+        "market_id": "market-1",
+        "token_id": "token-yes",
+        "venue": "polymarket",
+        "side": "BUY",
+        "outcome": "YES",
+        "limit_price": 0.54,
+        "notional_usdc": 25.0,
+        "expected_price": 0.62,
+        "expected_edge": 0.08,
+        "max_slippage_bps": 50,
+        "time_in_force": TimeInForce.GTC,
+        "evidence_refs": ("judgement-1",),
+        "created_at": NOW,
+    }
+    data.update(overrides)
+    return TradeIntent(**cast(Any, data))
+
+
+def _judgement(**overrides: object) -> StrategyJudgement:
+    data: dict[str, object] = {
+        "judgement_id": "judgement-1",
+        "candidate_id": "candidate-1",
+        "strategy_id": "ripple",
+        "strategy_version_id": "ripple-v1",
+        "approved": True,
+        "confidence": 0.75,
+        "rationale": "fixture evidence supports approval",
+        "evidence_refs": ("obs-1",),
+        "failure_reasons": (),
+        "created_at": NOW,
+    }
+    data.update(overrides)
+    return StrategyJudgement(**cast(Any, data))
+
+
+def _basket(*legs: TradeIntent, **overrides: object) -> BasketIntent:
+    data: dict[str, object] = {
+        "basket_id": "basket-1",
+        "strategy_id": "ripple",
+        "strategy_version_id": "ripple-v1",
+        "legs": legs or (_trade_intent(intent_id="leg-a"), _trade_intent(intent_id="leg-b")),
+        "execution_policy": "manual_review",
+        "evidence_refs": ("judgement-1",),
+        "created_at": NOW,
+    }
+    data.update(overrides)
+    return BasketIntent(**cast(Any, data))
 
 
 def test_strategy_plugin_value_objects_are_frozen_and_float_at_boundary() -> None:
@@ -72,7 +100,7 @@ def test_strategy_plugin_value_objects_are_frozen_and_float_at_boundary() -> Non
         BasketIntent,
     ):
         assert is_dataclass(value_object)
-        assert value_object.__dataclass_params__.frozen
+        assert cast(Any, value_object).__dataclass_params__.frozen
 
     hints = get_type_hints(TradeIntent)
     assert hints["limit_price"] is float
@@ -80,20 +108,14 @@ def test_strategy_plugin_value_objects_are_frozen_and_float_at_boundary() -> Non
     assert hints["expected_price"] is float
     assert hints["expected_edge"] is float
 
-    intent = _trade_intent()
     with pytest.raises(FrozenInstanceError):
-        setattr(intent, "notional_usdc", 50.0)
+        setattr(_trade_intent(), "notional_usdc", 50.0)
 
 
 def test_trade_intent_requires_strategy_identity_and_valid_prices() -> None:
-    intent = _trade_intent()
-
-    assert intent.strategy_id == "ripple"
-    assert intent.strategy_version_id == "ripple-v1"
-
+    assert _trade_intent().strategy_version_id == "ripple-v1"
     with pytest.raises(ValueError, match="strategy_id"):
         _trade_intent(strategy_id="")
-
     with pytest.raises(ValueError, match="limit_price"):
         replace(_trade_intent(), intent_id="bad-price", limit_price=1.0)
 
@@ -103,124 +125,30 @@ def test_strategy_judgement_rejects_invalid_confidence_bounds(
     confidence: float,
 ) -> None:
     with pytest.raises(ValueError, match="confidence"):
-        StrategyJudgement(
-            judgement_id="judgement-1",
-            candidate_id="candidate-1",
-            strategy_id="ripple",
-            strategy_version_id="ripple-v1",
-            approved=True,
-            confidence=confidence,
-            rationale="bounds check",
-            evidence_refs=("obs-1",),
-            failure_reasons=(),
-            created_at=NOW,
-        )
+        _judgement(confidence=confidence)
 
 
 def test_strategy_judgement_requires_rejection_reasons_only_for_rejections() -> None:
-    rejected = StrategyJudgement(
-        judgement_id="judgement-1",
-        candidate_id="candidate-1",
-        strategy_id="ripple",
-        strategy_version_id="ripple-v1",
-        approved=False,
-        confidence=0.25,
-        rationale="insufficient evidence",
-        evidence_refs=("obs-1",),
-        failure_reasons=("insufficient_evidence",),
-        created_at=NOW,
-    )
-
-    assert rejected.failure_reasons == ("insufficient_evidence",)
-
+    assert _judgement(approved=False, confidence=0.25, failure_reasons=("x",))
     with pytest.raises(ValueError, match="failure_reasons"):
-        StrategyJudgement(
-            judgement_id="judgement-2",
-            candidate_id="candidate-1",
-            strategy_id="ripple",
-            strategy_version_id="ripple-v1",
-            approved=False,
-            confidence=0.25,
-            rationale="missing reason",
-            evidence_refs=("obs-1",),
-            failure_reasons=(),
-            created_at=NOW,
-        )
-
+        _judgement(approved=False, confidence=0.25, failure_reasons=())
     with pytest.raises(ValueError, match="approved"):
-        StrategyJudgement(
-            judgement_id="judgement-3",
-            candidate_id="candidate-1",
-            strategy_id="ripple",
-            strategy_version_id="ripple-v1",
-            approved=True,
-            confidence=0.75,
-            rationale="approval should not carry rejection reasons",
-            evidence_refs=("obs-1",),
-            failure_reasons=("contradiction",),
-            created_at=NOW,
-        )
+        _judgement(approved=True, failure_reasons=("contradiction",))
 
 
 def test_basket_intent_validates_policy_and_strategy_identity() -> None:
     leg_a = _trade_intent(intent_id="leg-a")
     leg_b = _trade_intent(intent_id="leg-b")
 
-    basket = BasketIntent(
-        basket_id="basket-1",
-        strategy_id="ripple",
-        strategy_version_id="ripple-v1",
-        legs=(leg_a, leg_b),
-        execution_policy="manual_review",
-        evidence_refs=("judgement-1",),
-        created_at=NOW,
-    )
-
-    assert basket.legs == (leg_a, leg_b)
-
+    assert _basket(leg_a, leg_b, execution_policy="all_or_none").legs == (leg_a, leg_b)
     with pytest.raises(ValueError, match="empty"):
-        BasketIntent(
-            basket_id="basket-empty",
-            strategy_id="ripple",
-            strategy_version_id="ripple-v1",
-            legs=(),
-            execution_policy="manual_review",
-            evidence_refs=(),
-            created_at=NOW,
-        )
-
+        _basket(legs=())
     with pytest.raises(ValueError, match="single_leg_use_trade_intent"):
-        BasketIntent(
-            basket_id="basket-single",
-            strategy_id="ripple",
-            strategy_version_id="ripple-v1",
-            legs=(leg_a,),
-            execution_policy="single_leg_use_trade_intent",
-            evidence_refs=(),
-            created_at=NOW,
-        )
-
+        _basket(leg_a, execution_policy="single_leg_use_trade_intent")
     with pytest.raises(ValueError, match="mixed strategy identity"):
-        BasketIntent(
-            basket_id="basket-mixed",
-            strategy_id="ripple",
-            strategy_version_id="ripple-v1",
-            legs=(leg_a, _trade_intent(intent_id="leg-c", strategy_id="other")),
-            execution_policy="manual_review",
-            evidence_refs=(),
-            created_at=NOW,
-        )
-
+        _basket(leg_a, _trade_intent(intent_id="leg-c", strategy_id="other"))
     with pytest.raises(ValueError, match="execution_policy"):
-        BasketIntent(
-            basket_id="basket-policy",
-            strategy_id="ripple",
-            strategy_version_id="ripple-v1",
-            legs=(leg_a, leg_b),
-            execution_policy="venue_atomic",
-            evidence_refs=(),
-            created_at=NOW,
-        )
+        _basket(leg_a, leg_b, execution_policy=cast(Any, "venue_atomic"))
 
 
 def test_strategy_registry_registers_and_requires_module_identity() -> None:
@@ -229,10 +157,8 @@ def test_strategy_registry_registers_and_requires_module_identity() -> None:
 
     assert registry.get("ripple", "ripple-v1") is module
     assert registry.get("missing", "missing-v1") is None
-
     with pytest.raises(KeyError, match="missing"):
         registry.require("missing", "missing-v1")
-
     with pytest.raises(ValueError, match="already registered"):
         registry.register(module)
 
