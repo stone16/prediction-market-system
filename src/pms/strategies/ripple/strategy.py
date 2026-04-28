@@ -11,6 +11,7 @@ from pms.strategies.base import (
     StrategyObservationSource,
 )
 from pms.strategies.intents import BasketIntent, StrategyContext, TradeIntent
+from pms.strategies.runtime_bridge import StrategyRunResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +26,13 @@ class RippleStrategyModule:
         self,
         context: StrategyContext,
     ) -> Sequence[TradeIntent | BasketIntent]:
+        results = await self.run_with_artifacts(context)
+        return tuple(intent for result in results for intent in result.intents)
+
+    async def run_with_artifacts(
+        self,
+        context: StrategyContext,
+    ) -> Sequence[StrategyRunResult]:
         if (
             context.strategy_id != self.strategy_id
             or context.strategy_version_id != self.strategy_version_id
@@ -34,8 +42,14 @@ class RippleStrategyModule:
 
         observations = await self.source.observe(context)
         candidates = await self.controller.propose(context, observations)
-        intents: list[TradeIntent | BasketIntent] = []
+        results: list[StrategyRunResult] = []
         for candidate in candidates:
             judgement = await self.agent.judge(context, candidate)
-            intents.extend(await self.agent.build_intents(context, candidate, judgement))
-        return tuple(intents)
+            intents = await self.agent.build_intents(context, candidate, judgement)
+            results.append(
+                StrategyRunResult(
+                    judgement=judgement,
+                    intents=tuple(intents),
+                )
+            )
+        return tuple(results)
