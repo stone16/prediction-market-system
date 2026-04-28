@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -45,6 +45,9 @@ class ExecutionPlan:
     rejection_reason: str | None
     audit_metadata: Mapping[str, Any]
     created_at: datetime
+    execution_policy: str | None = None
+    leg_rejection_reasons: Mapping[str, str] = field(default_factory=dict)
+    evidence_refs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.rejection_reason is None and not self.planned_orders:
@@ -63,6 +66,7 @@ class ExecutionPlan:
         quote_hash: str | None,
         audit_metadata: Mapping[str, Any],
         created_at: datetime,
+        evidence_refs: tuple[str, ...] = (),
     ) -> ExecutionPlan:
         return cls(
             plan_id=f"plan-{intent.intent_id}-rejected-{reason}",
@@ -74,6 +78,7 @@ class ExecutionPlan:
             rejection_reason=reason,
             audit_metadata=audit_metadata,
             created_at=created_at,
+            evidence_refs=evidence_refs or intent.evidence_refs,
         )
 
 
@@ -131,6 +136,7 @@ class ExecutionPlanner:
                 edge_after_cost=edge_after_cost,
             ),
             created_at=as_of,
+            evidence_refs=intent.evidence_refs,
         )
 
     def _rejection_reason(

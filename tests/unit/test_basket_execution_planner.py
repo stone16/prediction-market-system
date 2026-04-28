@@ -103,13 +103,28 @@ async def test_basket_planner_accepts_executable_fixture_policies(policy: str) -
 
 
 @pytest.mark.asyncio
-async def test_all_or_none_basket_rejects_without_partial_orders() -> None:
+@pytest.mark.parametrize(
+    ("leg_b_quote", "reason"),
+    [
+        ("stale", "stale_book"),
+        (None, "quote_unavailable"),
+    ],
+)
+async def test_all_or_none_basket_rejects_without_partial_orders(
+    leg_b_quote: str | None,
+    reason: str,
+) -> None:
     leg_a = _intent("leg-a")
     leg_b = _intent("leg-b")
+    rejected_quote = (
+        None
+        if leg_b_quote is None
+        else _quote(leg_b, book_timestamp=NOW - timedelta(seconds=31))
+    )
     provider = FakeQuoteProvider(
         {
             "leg-a": _quote(leg_a),
-            "leg-b": _quote(leg_b, book_timestamp=NOW - timedelta(seconds=31)),
+            "leg-b": rejected_quote,
         }
     )
 
@@ -120,7 +135,7 @@ async def test_all_or_none_basket_rejects_without_partial_orders() -> None:
 
     assert plan.planned_orders == ()
     assert plan.rejection_reason == "basket_leg_rejected"
-    assert plan.leg_rejection_reasons == {"leg-b": "stale_book"}
+    assert plan.leg_rejection_reasons == {"leg-b": reason}
     assert plan.evidence_refs == ("basket-evidence-1",)
 
 
