@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS markets (
     condition_id TEXT PRIMARY KEY,
     slug TEXT NOT NULL,
     question TEXT NOT NULL,
+    -- Kalshi is a reserved venue enum: schema can represent it, while all
+    -- runtime sensor/actuator paths fail closed until a real adapter ships.
     venue TEXT NOT NULL CHECK (venue IN ('polymarket', 'kalshi')),
     resolves_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL,
