@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 
 from pms.core.enums import TimeInForce
-from pms.execution.planner import ExecutionPlanner, ExecutionPlan
+from pms.execution.planner import ExecutionPlanner, ExecutionPlan, PlannedOrder
 from pms.execution.quotes import ExecutableQuote
 from pms.strategies.intents import TradeIntent
 
@@ -67,6 +67,29 @@ def _quote(**overrides: object) -> ExecutableQuote:
     return ExecutableQuote(**cast(Any, data))
 
 
+def _planned_order(**overrides: object) -> PlannedOrder:
+    data: dict[str, object] = {
+        "planned_order_id": "planned-1",
+        "intent_id": "intent-1",
+        "intent_key": "intent-1",
+        "market_id": "market-1",
+        "token_id": "token-yes",
+        "venue": "polymarket",
+        "side": "BUY",
+        "outcome": "YES",
+        "notional_usdc": 25.0,
+        "limit_price": 0.60,
+        "expected_edge": 0.10,
+        "max_slippage_bps": 50,
+        "time_in_force": TimeInForce.GTC,
+        "strategy_id": "ripple",
+        "strategy_version_id": "ripple-v1",
+        "quote_hash": "quote-hash-1",
+    }
+    data.update(overrides)
+    return PlannedOrder(**cast(Any, data))
+
+
 @pytest.mark.asyncio
 async def test_planner_accepts_single_leg_intent_without_network_or_actuator() -> None:
     intent = _intent()
@@ -108,7 +131,9 @@ async def test_planner_accepts_single_leg_intent_without_network_or_actuator() -
         (_quote(min_order_size_usdc=50.0), _intent(), "min_size_violation"),
         (_quote(best_price=1.0), _intent(), "impossible_price"),
         (_quote(tick_size=0.04), _intent(), "invalid_tick_size"),
+        (_quote(side="SELL", best_price=0.30), _intent(side="SELL", limit_price=0.40), "limit_price_not_executable"),
         (_quote(best_price=0.62), _intent(limit_price=0.70, expected_price=0.62), "loss_of_edge_after_costs"),
+        (_quote(side="SELL", best_price=0.50, fee_bps=100), _intent(side="SELL", limit_price=0.40, expected_price=0.55), "loss_of_edge_after_costs"),
         (None, _intent(), "quote_unavailable"),
     ],
 )
@@ -124,3 +149,28 @@ async def test_planner_rejects_non_executable_quotes(
     assert plan.intent_id == intent.intent_id
     assert plan.strategy_id == intent.strategy_id
     assert plan.strategy_version_id == intent.strategy_version_id
+
+
+def test_execution_plan_rejects_ambiguous_state() -> None:
+    base = {
+        "plan_id": "plan-1",
+        "intent_id": "intent-1",
+        "strategy_id": "ripple",
+        "strategy_version_id": "ripple-v1",
+        "quote_hash": "quote-hash-1",
+        "audit_metadata": {},
+        "created_at": NOW,
+    }
+
+    with pytest.raises(ValueError, match="planned_orders"):
+        ExecutionPlan(
+            **cast(Any, base),
+            planned_orders=(),
+            rejection_reason=None,
+        )
+    with pytest.raises(ValueError, match="rejected ExecutionPlan"):
+        ExecutionPlan(
+            **cast(Any, base),
+            planned_orders=(_planned_order(),),
+            rejection_reason="limit_price_not_executable",
+        )
