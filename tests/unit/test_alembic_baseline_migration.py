@@ -86,6 +86,33 @@ def test_baseline_downgrade_list_matches_baseline_created_tables() -> None:
     assert set(module._CREATED_TABLES) == schema_table_names
 
 
+def test_baseline_deferred_filter_preserves_dollar_quoted_blocks() -> None:
+    module = _load_migration_module()
+    statements = module._split_sql_statements(
+        """
+        DO $$
+        BEGIN
+            RAISE NOTICE 'strategy_judgement_artifacts is mentioned only in text';
+        END
+        $$;
+
+        CREATE TABLE IF NOT EXISTS strategy_judgement_artifacts (
+            artifact_id TEXT PRIMARY KEY
+        );
+        """
+    )
+
+    kept = [
+        statement
+        for statement in statements
+        if not module._is_deferred_schema_statement(statement)
+    ]
+
+    assert len(statements) == 2
+    assert kept == [statements[0]]
+    assert kept[0].lstrip().startswith("DO $$")
+
+
 def test_baseline_migration_downgrade_drops_all_tables_in_reverse_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
