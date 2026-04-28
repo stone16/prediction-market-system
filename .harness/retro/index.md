@@ -28,8 +28,8 @@ CLAUDE.md, contributors expected to follow) → `retired` (resolved).
 | domain-math-piecewise                | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 2 |
 | lifecycle-cleanup-exit-paths         | 1           | high     | active     | pms-v1     | pms-v1      | Proposal 3 |
 | document-instead-of-fix              | 1           | medium   | active     | pms-v1     | pms-v1      | Proposal 4 |
-| cross-checkpoint-integration         | 7           | medium   | proposed   | pms-v1     | pms-markets-browser-v1 | Proposal 5 |
-| magnitude-overrun-tests              | 2           | low      | monitoring | pms-v1     | pms-factor-panel-v1 | Proposal 6 |
+| cross-checkpoint-integration         | 8           | medium   | proposed   | pms-v1     | pms-agent-strategy-plugins-v1 | Proposal 5 |
+| magnitude-overrun-tests              | 3           | low      | monitoring | pms-v1     | pms-agent-strategy-plugins-v1 | Proposal 6 |
 | rule-conflict-precedence             | 1           | low      | active     | pms-v1     | pms-v1      | Proposal 7 |
 | runtime-behaviour-vs-design-intent   | 1           | high     | active     | pms-v1     | pms-v1      | Principle |
 | project-ide-tooling-drift            | 2           | low      | monitoring | pms-v1     | pms-strategy-aggregate-v1 | Skill defect |
@@ -40,9 +40,12 @@ CLAUDE.md, contributors expected to follow) → `retired` (resolved).
 | private-helper-boundary-drift        | 1           | medium   | observation| pms-market-data-v1 | pms-market-data-v1 | Observation |
 | skipped-full-verify-pre-merge        | 1           | medium   | observation| pms-factor-panel-v1 | pms-factor-panel-v1 | Observation |
 | empty-harness-phase-artifacts        | 1           | low      | observation| pms-factor-panel-v1 | pms-factor-panel-v1 | Observation |
-| generated-artifact-drift             | 2           | low      | monitoring | pms-research-backtest-v1 | cathedral-v1 | Observation |
+| generated-artifact-drift             | 3           | low      | monitoring | pms-research-backtest-v1 | pms-agent-strategy-plugins-v1 | Observation |
 | npm-build-gate-gap                   | 1           | high     | proposed   | pms-markets-browser-v1 | pms-markets-browser-v1 | Proposal markets-P1 |
 | coverage-below-harness-default       | 1           | medium   | proposed   | pms-markets-browser-v1 | pms-markets-browser-v1 | Proposal markets-P2 |
+| migration-isolation-test-discipline  | 1           | medium   | observation| pms-agent-strategy-plugins-v1 | pms-agent-strategy-plugins-v1 | Observation |
+| artifact-immutability-discipline     | 1           | medium   | observation| pms-agent-strategy-plugins-v1 | pms-agent-strategy-plugins-v1 | Observation |
+| full-verify-catches-post-consensus   | 2           | medium   | proposed   | pms-markets-browser-v1 | pms-agent-strategy-plugins-v1 | Proposal agent-strategy-P3 |
 
 Active rules are codified in `/CLAUDE.md` at the repo root (Phase 3D).
 Cross-checkpoint integration remains `proposed` because the harness-side
@@ -88,6 +91,13 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 13. **markets-P2** — Increase `.harness/config.json` coverage threshold from
     79 to 85%; user-requested issue for coverage improvement
     (medium) — `pms-markets-browser-v1`
+14. **agent-strategy-P3** — Expand SD-1: review-loop verification gate list
+    must mirror full-verify discovery output for the touched surface
+    (medium, harness-side) — `pms-agent-strategy-plugins-v1`
+15. **agent-strategy-P5** — Tighten `prob_estimate` semantics in
+    `runtime_bridge._decision_from_order` before
+    `agent_strategy_runtime_enabled=True` is set in any environment
+    (medium, host-side) — `pms-agent-strategy-plugins-v1`
 
 ### Monitoring (low severity, watching for recurrence)
 
@@ -107,6 +117,17 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 - `generated-artifact-drift` — automated checkpoint or review-loop
   commits stage generated local artifacts (`.coverage`, framework
   stubs, Playwright evidence) that are not intended product changes
+  (3rd occurrence on `pms-agent-strategy-plugins-v1` via untracked WIP
+  test + `dashboard/next-env.d.ts`; correctly excluded from PR scope)
+- `migration-isolation-test-discipline` — schema integration tests
+  must straddle the migration boundary (upgrade to N-1, assert target
+  objects absent, upgrade head, assert new constraints) rather than
+  asserting only post-`upgrade head` shape; first surfaced as
+  review-loop f3 on `pms-agent-strategy-plugins-v1`
+- `artifact-immutability-discipline` — inner-ring artifact rows must
+  be immutable on conflict (`ON CONFLICT DO NOTHING`, not `DO
+  UPDATE`); first surfaced as review-loop f1 on
+  `pms-agent-strategy-plugins-v1`
 
 ### Proposed (issue-ready, rule text drafted)
 
@@ -119,6 +140,14 @@ These are ready for the Orchestrator to auto-create GitHub issues.
   `coverage_threshold` is 79 vs the harness default 85; measured
   coverage is 80.01%. Proposed rule: raise threshold to 85 and add
   contributor guidance. User explicitly requested an issue.
+- `full-verify-catches-post-consensus` (2nd occurrence,
+  `pms-agent-strategy-plugins-v1`) — full-verify iter-1 caught real
+  defects (mypy unreachable assertions on tests, baseline splitter
+  SQL comment lexing) after review-loop returned `CONSENSUS:
+  Approved`. First occurrence was `npm-build-gate-gap` on
+  `pms-markets-browser-v1`. Proposed harness-side fix: review-loop
+  verification gate list must mirror full-verify `discovery.md` for
+  the touched surface — generalisation of SD-1.
 
 ## Skill Defect Log
 
@@ -142,3 +171,8 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 | pms-research-backtest-v1 | 2026-04-20 | 13  | 11         | 15    | 0       | [2026-04-20-pms-research-backtest-v1.md](./2026-04-20-pms-research-backtest-v1.md) |
 | cathedral-v1 | 2026-04-23 | 12  | 11         | 13    | 0       | [2026-04-23-cathedral-v1.md](./2026-04-23-cathedral-v1.md) |
 | pms-markets-browser-v1 | 2026-04-24 | 14  | 13         | 16    | 0       | [2026-04-24-pms-markets-browser-v1.md](./2026-04-24-pms-markets-browser-v1.md) |
+| pms-agent-strategy-plugins-v1 | 2026-04-28 | 7   | 6          | 8     | 0       | [2026-04-28-pms-agent-strategy-plugins-v1.md](./2026-04-28-pms-agent-strategy-plugins-v1.md) |
+
+## Filed Issues
+- Proposal agent-strategy-P5 (host, label not applied): https://github.com/stone16/prediction-market-system/issues/38
+- Proposal agent-strategy-P3 (harness, label not applied): https://github.com/stone16/harness-engineering-skills/issues/17
