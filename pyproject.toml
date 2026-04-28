@@ -82,6 +82,7 @@ ignore_missing_imports = true
 
 [tool.importlinter]
 root_packages = ["pms"]
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Sensor strategy-agnostic: no aggregate import"
@@ -133,3 +134,14 @@ allowed_importers = [
     "pms.research.execution",
 ]
 as_packages = false
+
+[[tool.importlinter.contracts]]
+name = "Strategy plugins: no actuator, controller, or venue adapter imports"
+type = "forbidden"
+source_modules = ["pms.strategies.ripple"]
+forbidden_modules = [
+    "pms.actuator",
+    "pms.actuator.adapters",
+    "pms.controller",
+    "py_clob_client_v2",
+]
