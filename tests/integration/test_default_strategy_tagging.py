@@ -76,12 +76,13 @@ def _settings(*, auto_migrate_default_v2: bool = True) -> PMSSettings:
 def _signal(
     *,
     market_id: str,
+    token_id: str = "yes-token",
     orderbook: dict[str, object],
     external_signal: dict[str, object],
 ) -> MarketSignal:
     return MarketSignal(
         market_id=market_id,
-        token_id="yes-token",
+        token_id=token_id,
         venue="polymarket",
         title="Will CP06 default-tag runtime writes?",
         yes_price=0.4,
@@ -260,14 +261,16 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
                 [
                     _signal(
                         market_id="paper-empty-book",
+                        token_id="empty-token",
                         orderbook={"bids": [], "asks": []},
                         external_signal={"fair_value": 0.7, "resolved_outcome": 1.0},
                     ),
                     _signal(
                         market_id="paper-with-depth",
+                        token_id="depth-token",
                         orderbook={
                             "bids": [{"price": 0.39, "size": 250.0}],
-                            "asks": [{"price": 0.41, "size": 250.0}],
+                            "asks": [{"price": 0.4, "size": 250.0}],
                         },
                         external_signal={"metaculus_prob": 0.9, "resolved_outcome": 1.0},
                     ),

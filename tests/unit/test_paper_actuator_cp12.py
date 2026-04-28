@@ -97,6 +97,86 @@ async def test_paper_actuator_matches_notional_and_quantity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paper_buy_no_uses_no_token_asks_not_yes_complement() -> None:
+    decision = _decision(limit_price=0.45)
+    object.__setattr__(decision, "token_id", "token-no")
+    object.__setattr__(decision, "outcome", "NO")
+    actuator = PaperActuator(
+        orderbooks={
+            "token-yes": {
+                "bids": [{"price": 0.62, "size": 1_000.0}],
+                "asks": [{"price": 0.64, "size": 1_000.0}],
+            },
+            "token-no": {
+                "bids": [{"price": 0.40, "size": 1_000.0}],
+                "asks": [{"price": 0.44, "size": 1_000.0}],
+            },
+        }
+    )
+
+    state = await actuator.execute(decision, _portfolio())
+
+    assert state.fill_price == pytest.approx(0.44)
+    assert state.filled_quantity == pytest.approx(100.0 / 0.44)
+
+
+@pytest.mark.asyncio
+async def test_paper_buy_no_requires_no_token_orderbook() -> None:
+    decision = _decision(limit_price=0.45)
+    object.__setattr__(decision, "token_id", "token-no")
+    object.__setattr__(decision, "outcome", "NO")
+    actuator = PaperActuator(
+        orderbooks={
+            "market-cp12": {
+                "bids": [{"price": 0.62, "size": 1_000.0}],
+                "asks": [{"price": 0.64, "size": 1_000.0}],
+            },
+        }
+    )
+
+    with pytest.raises(InsufficientLiquidityError, match="missing paper orderbook"):
+        await actuator.execute(decision, _portfolio())
+
+
+@pytest.mark.asyncio
+async def test_paper_buy_respects_limit_price() -> None:
+    actuator = PaperActuator(
+        orderbooks={
+            "token-yes": {
+                "bids": [{"price": 0.39, "size": 100.0}],
+                "asks": [{"price": 0.46, "size": 100.0}],
+            }
+        }
+    )
+
+    with pytest.raises(InsufficientLiquidityError, match="executable depth"):
+        await actuator.execute(_decision(limit_price=0.45), _portfolio())
+
+
+@pytest.mark.asyncio
+async def test_paper_fill_consumes_multiple_levels_vwap() -> None:
+    actuator = PaperActuator(
+        orderbooks={
+            "token-yes": {
+                "bids": [{"price": 0.39, "size": 100.0}],
+                "asks": [
+                    {"price": 0.40, "size": 10.0},
+                    {"price": 0.50, "size": 20.0},
+                ],
+            }
+        }
+    )
+
+    state = await actuator.execute(
+        _decision(notional_usdc=10.0, limit_price=0.55),
+        _portfolio(),
+    )
+
+    assert state.fill_price == pytest.approx(10.0 / 22.0)
+    assert state.filled_quantity == pytest.approx(22.0)
+
+
+@pytest.mark.asyncio
 async def test_paper_actuator_rejects_insufficient_notional_depth() -> None:
     actuator = PaperActuator(
         orderbooks={
@@ -139,3 +219,28 @@ async def test_paper_actuator_rejects_zero_fill_price() -> None:
 
     with pytest.raises(InsufficientLiquidityError):
         await actuator.execute(_decision(limit_price=0.01), _portfolio())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "level",
+    [
+        {"size": 1_000.0},
+        {"price": "not-a-price", "size": 1_000.0},
+        {"price": 0.25, "size": "not-a-size"},
+    ],
+)
+async def test_paper_actuator_rejects_malformed_depth_rows(
+    level: dict[str, object],
+) -> None:
+    actuator = PaperActuator(
+        orderbooks={
+            "market-cp12": {
+                "bids": [{"price": 0.24, "size": 1_000.0}],
+                "asks": [level],
+            }
+        }
+    )
+
+    with pytest.raises(InsufficientLiquidityError, match="asks depth is invalid"):
+        await actuator.execute(_decision(), _portfolio())

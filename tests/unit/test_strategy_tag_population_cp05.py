@@ -25,7 +25,7 @@ def _decision(
         token_id="t-yes",
         venue="polymarket",
         side=Side.BUY.value,
-        limit_price=0.4,
+        limit_price=0.41,
         notional_usdc=10.0,
         order_type="limit",
         max_slippage_bps=100,

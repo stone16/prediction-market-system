@@ -28,6 +28,18 @@ class _ReplayLookup:
         return deepcopy(self._book_by_ts[selected_ts])
 
 
+class _MissingTokenReplayLookup:
+    async def book_state_at(
+        self,
+        ts: datetime,
+        *,
+        market_id: str,
+        token_id: str | None,
+    ) -> dict[str, list[dict[str, float]]]:
+        del ts, market_id, token_id
+        raise LookupError("missing token book")
+
+
 def _signal(
     *,
     fetched_at: datetime | None = None,
@@ -72,7 +84,7 @@ def _decision(
     return TradeDecision(
         decision_id="decision-sim",
         market_id="sim-market",
-        token_id="yes-token",
+        token_id="yes-token" if outcome == "YES" else "no-token",
         venue="polymarket",
         side="BUY",
         notional_usdc=notional_usdc,
@@ -479,6 +491,26 @@ async def test_simulator_fok_rejects_when_depth_is_insufficient() -> None:
 
     assert state.status == "rejected"
     assert state.raw_status == "fok_unfillable"
+
+
+@pytest.mark.asyncio
+async def test_simulator_rejects_no_order_when_token_book_is_missing() -> None:
+    simulator = BacktestExecutionSimulator(replay_engine=_MissingTokenReplayLookup())
+
+    state = await simulator.execute(
+        signal=_signal(),
+        decision=_decision(
+            outcome="NO",
+            limit_price=0.30,
+            notional_usdc=50.0,
+        ),
+        portfolio=_portfolio(),
+        execution_model=_execution_model(),
+    )
+
+    assert state.status == "rejected"
+    assert state.raw_status == "missing_token_orderbook"
+    assert state.filled_notional_usdc == 0.0
 
 
 @pytest.mark.asyncio

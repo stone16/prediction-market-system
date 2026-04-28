@@ -21,14 +21,15 @@ class Scorer:
             )
             raise ValueError(msg)
 
-        brier_score = (decision.prob_estimate - fill.resolved_outcome) ** 2
+        yes_prob_estimate = _yes_probability(decision)
+        brier_score = (yes_prob_estimate - fill.resolved_outcome) ** 2
         model_id = _model_id(decision)
         return EvalRecord(
             market_id=fill.market_id,
             decision_id=decision.decision_id,
             strategy_id=fill.strategy_id,
             strategy_version_id=fill.strategy_version_id,
-            prob_estimate=decision.prob_estimate,
+            prob_estimate=yes_prob_estimate,
             resolved_outcome=fill.resolved_outcome,
             brier_score=brier_score,
             fill_status=fill.status,
@@ -44,6 +45,12 @@ class Scorer:
 
 def _model_id(decision: TradeDecision) -> str:
     return "unknown" if decision.model_id is None else decision.model_id
+
+
+def _yes_probability(decision: TradeDecision) -> float:
+    if decision.outcome == "NO":
+        return 1.0 - decision.prob_estimate
+    return decision.prob_estimate
 
 
 def _pnl(fill: FillRecord, decision: TradeDecision) -> float:

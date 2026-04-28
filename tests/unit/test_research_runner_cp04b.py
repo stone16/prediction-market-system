@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 import re
@@ -225,6 +226,67 @@ def _spec() -> BacktestSpec:
         date_range_start=datetime(2026, 4, 1, tzinfo=UTC),
         date_range_end=datetime(2026, 4, 30, tzinfo=UTC),
     )
+
+
+def test_strategy_accumulator_scores_buy_no_brier_on_yes_probability_basis() -> None:
+    from pms.research.runner import _StrategyAccumulator
+
+    signal = replace(
+        _signal(datetime(2026, 4, 20, 0, 0, tzinfo=UTC)),
+        token_id="no-token",
+        external_signal={"resolved_outcome": 0.0},
+    )
+    opportunity = Opportunity(
+        opportunity_id="opp-buy-no",
+        market_id=signal.market_id,
+        token_id="no-token",
+        side="no",
+        selected_factor_values={},
+        expected_edge=0.1,
+        rationale="buy-no-brier-check",
+        target_size_usdc=10.0,
+        expiry=signal.resolves_at,
+        staleness_policy="research",
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        created_at=signal.fetched_at,
+    )
+    decision = TradeDecision(
+        decision_id="decision-buy-no",
+        market_id=signal.market_id,
+        token_id="no-token",
+        venue=signal.venue,
+        side="BUY",
+        limit_price=0.3,
+        notional_usdc=10.0,
+        order_type="limit",
+        max_slippage_bps=50,
+        stop_conditions=[],
+        prob_estimate=0.7,
+        expected_edge=0.2,
+        time_in_force=TimeInForce.IOC,
+        opportunity_id="opp-buy-no",
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        model_id="rules",
+        outcome="NO",
+    )
+    accumulator = _StrategyAccumulator(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        execution_model=ExecutionModel.polymarket_paper(),
+    )
+
+    accumulator.record_decision(
+        signal=signal,
+        opportunity=opportunity,
+        decision=decision,
+    )
+
+    args = accumulator.as_insert_args(
+        run_id="11111111-1111-1111-1111-111111111111"
+    )
+    assert args[4] == pytest.approx(0.09)
 
 
 @pytest.mark.asyncio

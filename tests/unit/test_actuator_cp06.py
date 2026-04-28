@@ -222,7 +222,10 @@ async def test_paper_actuator_fills_buy_at_best_ask() -> None:
         }
     )
 
-    state = await actuator.execute(_decision(notional_usdc=10.0), _portfolio())
+    state = await actuator.execute(
+        _decision(notional_usdc=10.0, limit_price=0.41),
+        _portfolio(),
+    )
 
     assert state.status == OrderStatus.MATCHED.value
     assert state.fill_price == 0.41
@@ -231,12 +234,12 @@ async def test_paper_actuator_fills_buy_at_best_ask() -> None:
 
 
 @pytest.mark.asyncio
-async def test_paper_actuator_derives_no_fill_price_from_yes_bid() -> None:
+async def test_paper_actuator_fills_no_from_no_token_ask() -> None:
     actuator = PaperActuator(
         orderbooks={
-            "m-cp06": {
-                "bids": [{"price": 0.62, "size": 100.0}],
-                "asks": [{"price": 0.64, "size": 100.0}],
+            "t-no": {
+                "bids": [{"price": 0.36, "size": 100.0}],
+                "asks": [{"price": 0.38, "size": 100.0}],
             }
         }
     )

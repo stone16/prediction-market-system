@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from math import inf, nan
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -303,8 +304,7 @@ async def test_controller_pipeline_suppresses_zero_size_decision_and_tracks_metr
 async def test_controller_pipeline_suppresses_sub_min_order_decision_and_tracks_metric() -> None:
     pipeline = ControllerPipeline(
         forecasters=[
-            RulesForecaster(min_edge=0.01),
-            StatisticalForecaster(),
+            ConstantForecaster(0.6),
         ],
         calibrator=NetcalCalibrator(),
         sizer=FixedSizer(0.5),
@@ -322,7 +322,7 @@ async def test_controller_pipeline_uses_default_dependencies_for_neutral_signals
     pipeline = ControllerPipeline()
 
     assert await pipeline.decide(_signal(), portfolio=_portfolio()) is None
-    assert pipeline.suppressed_zero_size == 1
+    assert pipeline.suppressed_zero_size == 0
     assert isinstance(pipeline.forecasters, tuple)
     assert pipeline.calibrator is not None
     assert pipeline.sizer is not None
@@ -367,15 +367,15 @@ async def test_controller_pipeline_uses_strategy_composition_for_positive_emissi
     strategy = ActiveStrategy(
         strategy_id="alpha",
         strategy_version_id="alpha-v1",
-        config=StrategyConfig(
-            strategy_id="alpha",
-            factor_composition=(
-                FactorCompositionStep(
-                    factor_id="yes_price",
-                    role="weighted",
-                    param="",
-                    weight=1.0,
-                    threshold=None,
+            config=StrategyConfig(
+                strategy_id="alpha",
+                factor_composition=(
+                    FactorCompositionStep(
+                        factor_id="rules",
+                        role="runtime_probability",
+                        param="",
+                        weight=1.0,
+                        threshold=None,
                 ),
             ),
             metadata=(),
@@ -410,7 +410,8 @@ async def test_controller_pipeline_uses_strategy_composition_for_positive_emissi
     assert decision.notional_usdc == pytest.approx(2.0)
     assert decision.model_id == "ConstantForecaster"
     assert opportunity.factor_snapshot_hash is not None
-    assert "yes_price" in opportunity.selected_factor_values
+    assert opportunity.expected_edge == pytest.approx(0.2)
+    assert "rules" in opportunity.selected_factor_values
 
 
 @pytest.mark.asyncio
@@ -476,6 +477,9 @@ async def test_controller_pipeline_uses_resolved_no_token_for_bearish_signal() -
     assert decision.token_id == "no-token"
     assert decision.outcome == "NO"
     assert decision.limit_price == pytest.approx(0.4)
+    assert decision.prob_estimate == pytest.approx(0.6)
+    assert decision.expected_edge == pytest.approx(0.2)
+    assert opportunity.expected_edge == pytest.approx(0.2)
 
 
 @pytest.mark.asyncio
@@ -519,7 +523,7 @@ async def test_controller_pipeline_excludes_disabled_llm_and_failed_forecasters(
     emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
 
     assert emission is None
-    assert pipeline.suppressed_zero_size == 1
+    assert pipeline.suppressed_zero_size == 0
     assert "forecaster failed" in caplog.text
 
 
@@ -530,3 +534,32 @@ def test_router_gate_filters_low_volume_and_near_resolution_markets() -> None:
     assert router.gate(_signal(yes_price=0.01)) is False
     assert router.gate(_signal(yes_price=0.99)) is False
     assert router.gate(_signal(yes_price=0.5, volume_24h=100.0)) is True
+
+
+@pytest.mark.parametrize("yes_price", [nan, inf, -inf])
+def test_router_gate_rejects_non_finite_yes_price(yes_price: float) -> None:
+    router = Router(ControllerSettings(min_volume=100.0))
+
+    assert router.gate(_signal(yes_price=yes_price)) is False
+
+
+@pytest.mark.parametrize(
+    "metric,value",
+    [
+        ("spread_bps", nan),
+        ("spread_bps", "NaN"),
+        ("spread_bps", inf),
+        ("spread_bps", "Inf"),
+        ("book_age_ms", nan),
+        ("book_age_ms", "NaN"),
+        ("book_age_ms", inf),
+        ("book_age_ms", "Inf"),
+    ],
+)
+def test_router_gate_rejects_non_finite_quote_metrics(
+    metric: str,
+    value: object,
+) -> None:
+    router = Router(ControllerSettings(min_volume=100.0))
+
+    assert router.gate(_signal(external_signal={metric: value})) is False

@@ -56,15 +56,17 @@ def _settings(mode: RunMode) -> PMSSettings:
 def _signal(
     *,
     market_id: str = "runner-hold",
+    token_id: str = "yes-token",
+    yes_price: float = 0.4,
     orderbook: dict[str, Any] | None = None,
     external_signal: dict[str, Any] | None = None,
 ) -> MarketSignal:
     return MarketSignal(
         market_id=market_id,
-        token_id="yes-token",
+        token_id=token_id,
         venue="polymarket",
         title="Will the runner keep tasks alive?",
-        yes_price=0.4,
+        yes_price=yes_price,
         volume_24h=1000.0,
         resolves_at=datetime(2026, 4, 20, tzinfo=UTC),
         orderbook=orderbook or {
@@ -189,11 +191,12 @@ async def test_paper_runner_fills_against_signal_orderbook_depth(
         config=_settings(RunMode.PAPER),
         sensors=[
             OneShotSensor(
-                _signal(
-                    market_id="paper-with-depth",
-                    orderbook={
-                        "bids": [{"price": 0.39, "size": 250.0}],
-                        "asks": [{"price": 0.41, "size": 250.0}],
+                    _signal(
+                        market_id="paper-with-depth",
+                        yes_price=0.41,
+                        orderbook={
+                            "bids": [{"price": 0.39, "size": 250.0}],
+                            "asks": [{"price": 0.41, "size": 250.0}],
                     },
                     external_signal={"metaculus_prob": 0.9, "resolved_outcome": 1.0},
                 )
@@ -211,6 +214,27 @@ async def test_paper_runner_fills_against_signal_orderbook_depth(
     assert runner.state.orders[0].raw_status == "matched"
     assert runner.state.orders[0].fill_price == pytest.approx(0.41)
     assert len(runner.state.fills) == 1
+
+
+def test_paper_runner_caches_signal_orderbook_by_token_id() -> None:
+    runner = Runner(
+        config=_settings(RunMode.PAPER),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    signal = _signal(
+        market_id="paper-buy-no",
+        token_id="no-token",
+        orderbook={
+            "bids": [{"price": 0.40, "size": 250.0}],
+            "asks": [{"price": 0.44, "size": 250.0}],
+        },
+    )
+
+    runner._remember_paper_orderbook(signal)  # noqa: SLF001
+
+    assert runner._paper_orderbooks["no-token"]["asks"][0]["price"] == pytest.approx(0.44)  # noqa: SLF001
+    assert "paper-buy-no" not in runner._paper_orderbooks  # noqa: SLF001
 
 
 @pytest.mark.asyncio

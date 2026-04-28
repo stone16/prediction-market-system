@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Literal
 
 import pytest
 
@@ -14,6 +15,9 @@ from pms.core.models import Portfolio, Position, TradeDecision
 def _decision(
     *,
     market_id: str = "market-risk",
+    token_id: str = "token-risk",
+    venue: Literal["polymarket", "kalshi"] = "polymarket",
+    side: Literal["BUY", "SELL"] = "BUY",
     notional_usdc: float = 10.0,
     max_slippage_bps: int = 25,
 ) -> TradeDecision:
@@ -21,9 +25,9 @@ def _decision(
     decision = TradeDecision(
         decision_id="decision-risk",
         market_id=market_id,
-        token_id="token-risk",
-        venue="polymarket",
-        side="BUY",
+        token_id=token_id,
+        venue=venue,
+        side=side,
         notional_usdc=construction_notional,
         order_type="limit",
         max_slippage_bps=max_slippage_bps,
@@ -249,6 +253,72 @@ def test_risk_manager_rejects_when_open_positions_at_cap() -> None:
     decision = _decision(notional_usdc=10.0)
 
     result = RiskManager(_risk(max_open_positions=5)).check(decision, portfolio)
+
+    assert result == RiskDecision(approved=False, reason="max_open_positions")
+
+
+def test_risk_manager_allows_existing_position_add_at_open_position_cap() -> None:
+    positions = _open_positions(4)
+    positions.append(
+        Position(
+            market_id="market-risk",
+            token_id="token-risk",
+            venue="polymarket",
+            side="BUY",
+            shares_held=1.0,
+            avg_entry_price=0.5,
+            unrealized_pnl=0.0,
+            locked_usdc=1.0,
+        )
+    )
+    portfolio = _portfolio(
+        free_usdc=995.0,
+        locked_usdc=5.0,
+        open_positions=positions,
+    )
+
+    result = RiskManager(_risk(max_open_positions=5)).check(
+        _decision(notional_usdc=10.0),
+        portfolio,
+    )
+
+    assert result == RiskDecision(approved=True, reason="approved")
+
+
+@pytest.mark.parametrize(
+    "position_venue, position_side",
+    [
+        ("kalshi", "BUY"),
+        ("polymarket", "SELL"),
+    ],
+)
+def test_risk_manager_open_position_cap_bypass_requires_full_position_identity(
+    position_venue: Literal["polymarket", "kalshi"],
+    position_side: Literal["BUY", "SELL"],
+) -> None:
+    positions = _open_positions(4)
+    positions.append(
+        Position(
+            market_id="market-risk",
+            token_id="token-risk",
+            venue=position_venue,
+            side=position_side,
+            shares_held=1.0,
+            avg_entry_price=0.5,
+            unrealized_pnl=0.0,
+            locked_usdc=1.0,
+        )
+    )
+    portfolio = _portfolio(
+        free_usdc=995.0,
+        locked_usdc=5.0,
+        open_positions=positions,
+    )
+
+    result = RiskManager(_risk(max_open_positions=5)).check(
+        _decision(notional_usdc=10.0),
+        portfolio,
+    )
 
     assert result == RiskDecision(approved=False, reason="max_open_positions")
 

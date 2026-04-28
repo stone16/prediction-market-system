@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -14,7 +14,17 @@ from pms.research.execution import BacktestExecutionSimulator
 from pms.research.specs import ExecutionModel
 
 
-def _signal(*, price: float = 0.25, size: float = 1_000.0) -> MarketSignal:
+def _signal(
+    *,
+    price: float = 0.25,
+    size: float = 1_000.0,
+    bids: list[dict[str, float]] | None = None,
+    asks: list[dict[str, float]] | None = None,
+) -> MarketSignal:
+    orderbook: dict[str, Any] = {
+        "bids": [{"price": 0.24, "size": size}] if bids is None else bids,
+        "asks": [{"price": price, "size": size}] if asks is None else asks,
+    }
     return MarketSignal(
         market_id="market-cp12",
         token_id="token-yes",
@@ -23,10 +33,7 @@ def _signal(*, price: float = 0.25, size: float = 1_000.0) -> MarketSignal:
         yes_price=price,
         volume_24h=1_000.0,
         resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
-        orderbook={
-            "bids": [{"price": 0.24, "size": size}],
-            "asks": [{"price": price, "size": size}],
-        },
+        orderbook=orderbook,
         external_signal={},
         fetched_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
         market_status="open",
@@ -132,6 +139,27 @@ async def test_simulator_matches_notional_and_quantity() -> None:
     assert state.fill_price == pytest.approx(expected.fill_price)
     assert state.filled_notional_usdc == pytest.approx(expected.filled_notional_usdc)
     assert state.filled_quantity == pytest.approx(expected.filled_quantity)
+
+
+@pytest.mark.asyncio
+async def test_backtest_buy_no_uses_no_token_ask_without_complement() -> None:
+    signal = _signal(
+        asks=[{"price": 0.42, "size": 100.0}],
+        bids=[{"price": 0.40, "size": 100.0}],
+    )
+    decision = _decision(notional_usdc=10.0, limit_price=0.43)
+    object.__setattr__(decision, "token_id", signal.token_id)
+    object.__setattr__(decision, "outcome", "NO")
+
+    state = await BacktestExecutionSimulator().execute(
+        signal=signal,
+        decision=decision,
+        portfolio=None,
+        execution_model=_execution_model(),
+    )
+
+    assert state.fill_price == pytest.approx(0.42)
+    assert state.filled_quantity == pytest.approx(10.0 / 0.42)
 
 
 @pytest.mark.asyncio

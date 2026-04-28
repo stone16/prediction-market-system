@@ -197,6 +197,13 @@ async def test_controller_pipeline_uses_strategy_factor_composition_not_forecast
         "factor_snapshot_hash": "snapshot-72",
         "missing_factors": [],
         "branch_probabilities": {"snapshot_probability": pytest.approx(0.72)},
+        "yes_probability": pytest.approx(0.72),
+        "yes_reference_price": pytest.approx(0.4),
+        "yes_edge": pytest.approx(0.32),
+        "traded_outcome": "YES",
+        "traded_probability": pytest.approx(0.72),
+        "traded_price": pytest.approx(0.4),
+        "traded_edge": pytest.approx(0.32),
     }
     assert factor_reader.calls == [
         {

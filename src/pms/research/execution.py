@@ -34,6 +34,10 @@ class _FillComputation:
     eligible_notional_usdc: float
 
 
+class MissingReplayOrderbookError(InsufficientLiquidityError):
+    """Raised when replay cannot provide the decision token's own book."""
+
+
 @dataclass(slots=True)
 class _OpenOrderState:
     order_id: str
@@ -100,11 +104,26 @@ class BacktestExecutionSimulator:
                 raw_status="stale_signal",
             )
 
-        orderbook = await self._orderbook_at_fill_time(
-            signal=signal,
-            decision=decision,
-            submitted_at=submitted_at,
-        )
+        try:
+            orderbook = await self._orderbook_at_fill_time(
+                signal=signal,
+                decision=decision,
+                submitted_at=submitted_at,
+            )
+        except MissingReplayOrderbookError:
+            return _order_state(
+                order_id=f"backtest-sim-{uuid4().hex}",
+                decision=decision,
+                status="rejected",
+                submitted_at=submitted_at,
+                last_updated_at=submitted_at,
+                requested_notional_usdc=decision.notional_usdc,
+                filled_notional_usdc=0.0,
+                remaining_notional_usdc=decision.notional_usdc,
+                filled_quantity=0.0,
+                fill_price=None,
+                raw_status="missing_token_orderbook",
+            )
         fill = _walk_book(
             orderbook=orderbook,
             decision=decision,
@@ -271,11 +290,30 @@ class BacktestExecutionSimulator:
             if not _same_market(open_order.decision, signal):
                 continue
 
-            orderbook = await self._orderbook_at_fill_time(
-                signal=signal,
-                decision=open_order.decision,
-                submitted_at=evaluated_at,
-            )
+            try:
+                orderbook = await self._orderbook_at_fill_time(
+                    signal=signal,
+                    decision=open_order.decision,
+                    submitted_at=evaluated_at,
+                )
+            except MissingReplayOrderbookError:
+                results.append(
+                    _order_state(
+                        order_id=order_id,
+                        decision=open_order.decision,
+                        status=OrderStatus.CANCELLED.value,
+                        submitted_at=open_order.submitted_at,
+                        last_updated_at=evaluated_at,
+                        requested_notional_usdc=open_order.requested_notional_usdc,
+                        filled_notional_usdc=open_order.filled_notional_usdc,
+                        remaining_notional_usdc=open_order.remaining_notional_usdc,
+                        filled_quantity=open_order.filled_quantity,
+                        fill_price=open_order.last_fill_price,
+                        raw_status="missing_token_orderbook",
+                    )
+                )
+                self.open_orders_ledger.pop(order_id, None)
+                continue
             best_price = _best_available_price(orderbook, open_order.decision)
             if best_price is None:
                 continue
@@ -390,10 +428,10 @@ class BacktestExecutionSimulator:
         submitted_at: datetime,
     ) -> dict[str, list[dict[str, float]]]:
         if self.replay_engine is None:
-            return _clone_orderbook(signal.orderbook)
+            return _fallback_signal_orderbook(signal, decision)
         lookup = getattr(self.replay_engine, "book_state_at", None)
         if lookup is None:
-            return _clone_orderbook(signal.orderbook)
+            return _fallback_signal_orderbook(signal, decision)
         try:
             return cast(
                 dict[str, list[dict[str, float]]],
@@ -404,7 +442,7 @@ class BacktestExecutionSimulator:
                 ),
             )
         except LookupError:
-            return _clone_orderbook(signal.orderbook)
+            return _fallback_signal_orderbook(signal, decision)
 
 
 def _walk_book(
@@ -482,8 +520,6 @@ def _effective_time_in_force(
 
 def _side_key(decision: TradeDecision) -> str:
     action = _action(decision)
-    if decision.outcome == "NO":
-        return "bids" if action == Side.BUY.value else "asks"
     return "asks" if action == Side.BUY.value else "bids"
 
 
@@ -502,10 +538,8 @@ def _best_available_price(orderbook: dict[str, Any], decision: TradeDecision) ->
 
 
 def _effective_level_price(decision: TradeDecision, raw_level: dict[str, Any]) -> float:
-    raw_price = float(cast(str | int | float, raw_level["price"]))
-    if decision.outcome == "NO":
-        return 1.0 - raw_price
-    return raw_price
+    del decision
+    return float(cast(str | int | float, raw_level["price"]))
 
 
 def _apply_slippage(price: float, *, action: str, slippage_bps: float) -> float:
@@ -547,6 +581,17 @@ def _same_market(decision: TradeDecision, signal: MarketSignal) -> bool:
         decision.market_id == signal.market_id
         and (decision.token_id or "") == (signal.token_id or "")
     )
+
+
+def _fallback_signal_orderbook(
+    signal: MarketSignal,
+    decision: TradeDecision,
+) -> dict[str, list[dict[str, float]]]:
+    if (decision.token_id or "") != (signal.token_id or ""):
+        raise MissingReplayOrderbookError(
+            f"missing replay orderbook for token={decision.token_id}"
+        )
+    return _clone_orderbook(signal.orderbook)
 
 
 def _clone_orderbook(orderbook: dict[str, Any]) -> dict[str, list[dict[str, float]]]:

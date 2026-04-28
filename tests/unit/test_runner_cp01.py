@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -229,6 +229,34 @@ def _signal() -> MarketSignal:
         fetched_at=datetime(2026, 4, 19, tzinfo=UTC),
         market_status="open",
     )
+
+
+def test_runner_only_caches_market_alias_for_market_level_paper_orderbooks() -> None:
+    runner = Runner(
+        config=PMSSettings(mode=RunMode.PAPER, auto_migrate_default_v2=False),
+        historical_data_path=FIXTURE_PATH,
+    )
+    token_orderbook = {
+        "bids": [{"price": 0.38, "size": 10.0}],
+        "asks": [{"price": 0.42, "size": 10.0}],
+    }
+    market_orderbook = {
+        "bids": [{"price": 0.39, "size": 10.0}],
+        "asks": [{"price": 0.41, "size": 10.0}],
+    }
+
+    runner._remember_paper_orderbook(  # noqa: SLF001
+        replace(_signal(), token_id="no-token", orderbook=token_orderbook)
+    )
+
+    assert runner._paper_orderbooks["no-token"] is token_orderbook  # noqa: SLF001
+    assert "runner-cp01" not in runner._paper_orderbooks  # noqa: SLF001
+
+    runner._remember_paper_orderbook(  # noqa: SLF001
+        replace(_signal(), token_id=None, orderbook=market_orderbook)
+    )
+
+    assert runner._paper_orderbooks["runner-cp01"] is market_orderbook  # noqa: SLF001
 
 
 def _active_strategy(

@@ -45,6 +45,7 @@ class RiskManager:
 
         if (
             self.risk.max_open_positions is not None
+            and not _has_open_position(portfolio, decision)
             and len(portfolio.open_positions) >= self.risk.max_open_positions
         ):
             return RiskDecision(False, "max_open_positions")
@@ -68,4 +69,14 @@ def _market_exposure(portfolio: Portfolio, market_id: str) -> float:
         position.locked_usdc
         for position in portfolio.open_positions
         if position.market_id == market_id
+    )
+
+
+def _has_open_position(portfolio: Portfolio, decision: TradeDecision) -> bool:
+    return any(
+        position.market_id == decision.market_id
+        and position.token_id == decision.token_id
+        and position.venue == decision.venue
+        and position.side == decision.side
+        for position in portfolio.open_positions
     )

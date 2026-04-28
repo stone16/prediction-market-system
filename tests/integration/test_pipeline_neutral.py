@@ -104,4 +104,4 @@ async def test_neutral_runtime_emits_no_decisions_or_orders() -> None:
     assert runner.state.orders == []
     assert runner.state.fills == []
     assert not any(order.filled_notional_usdc > 0.0 for order in runner.state.orders)
-    assert controller.suppressed_zero_size == 100
+    assert controller.suppressed_zero_size == 0
