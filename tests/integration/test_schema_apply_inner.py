@@ -20,6 +20,8 @@ STRATEGY_TABLES = [
     "order_intents",
     "opportunities",
     "orders",
+    "strategy_execution_artifacts",
+    "strategy_judgement_artifacts",
 ]
 CHECK_CONSTRAINTS = [
     "eval_records_strategy_identity_check",
@@ -27,6 +29,8 @@ CHECK_CONSTRAINTS = [
     "fills_strategy_identity_check",
     "opportunities_strategy_identity_check",
     "orders_strategy_identity_check",
+    "strategy_execution_artifacts_strategy_identity_check",
+    "strategy_judgement_artifacts_strategy_identity_check",
 ]
 STRATEGY_INDEXES = [
     "idx_eval_records_strategy_identity",
@@ -34,6 +38,8 @@ STRATEGY_INDEXES = [
     "idx_fills_strategy_identity",
     "idx_opportunities_strategy_identity",
     "idx_orders_strategy_identity",
+    "idx_strategy_execution_artifacts_strategy_created_at",
+    "idx_strategy_judgement_artifacts_strategy_created_at",
 ]
 INNER_RING_NOT_NULL_TABLES = [
     *STRATEGY_TABLES,
@@ -224,7 +230,16 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
             SELECT table_name, column_name, is_nullable
             FROM information_schema.columns
             WHERE table_schema = 'public'
-              AND table_name IN ('decisions', 'feedback', 'eval_records', 'orders', 'fills', 'opportunities')
+              AND table_name IN (
+                'decisions',
+                'feedback',
+                'eval_records',
+                'orders',
+                'fills',
+                'opportunities',
+                'strategy_execution_artifacts',
+                'strategy_judgement_artifacts'
+              )
               AND column_name IN ('strategy_id', 'strategy_version_id')
             ORDER BY table_name ASC, column_name ASC
             """,
@@ -247,6 +262,10 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
             ("opportunities", "strategy_version_id", "NO"),
             ("orders", "strategy_id", "NO"),
             ("orders", "strategy_version_id", "NO"),
+            ("strategy_execution_artifacts", "strategy_id", "NO"),
+            ("strategy_execution_artifacts", "strategy_version_id", "NO"),
+            ("strategy_judgement_artifacts", "strategy_id", "NO"),
+            ("strategy_judgement_artifacts", "strategy_version_id", "NO"),
         ]
 
         constraints_result = _run_psql(
@@ -261,7 +280,9 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
                 'eval_records_strategy_identity_check',
                 'orders_strategy_identity_check',
                 'fills_strategy_identity_check',
-                'opportunities_strategy_identity_check'
+                'opportunities_strategy_identity_check',
+                'strategy_execution_artifacts_strategy_identity_check',
+                'strategy_judgement_artifacts_strategy_identity_check'
             )
             ORDER BY conname ASC
             """,
@@ -281,7 +302,9 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
                 'idx_eval_records_strategy_identity',
                 'idx_orders_strategy_identity',
                 'idx_fills_strategy_identity',
-                'idx_opportunities_strategy_identity'
+                'idx_opportunities_strategy_identity',
+                'idx_strategy_execution_artifacts_strategy_created_at',
+                'idx_strategy_judgement_artifacts_strategy_created_at'
             )
             ORDER BY indexname ASC
             """,

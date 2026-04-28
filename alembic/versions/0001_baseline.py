@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Final
 
 from alembic import op
@@ -33,8 +34,20 @@ _CREATED_TABLES: Final[tuple[str, ...]] = (
     "price_changes",
     "book_levels",
     "book_snapshots",
+    "market_subscriptions",
     "tokens",
+    "market_price_snapshots",
     "markets",
+)
+
+_DEFERRED_SCHEMA_STATEMENT_PREFIXES: Final[tuple[str, ...]] = (
+    "CREATE TABLE IF NOT EXISTS strategy_judgement_artifacts",
+    "CREATE TABLE IF NOT EXISTS strategy_execution_artifacts",
+    "CREATE INDEX IF NOT EXISTS idx_strategy_judgement_artifacts",
+    "CREATE INDEX IF NOT EXISTS idx_strategy_execution_artifacts",
+)
+_DOLLAR_QUOTE_RE: Final[re.Pattern[str]] = re.compile(
+    r"\$[A-Za-z_][A-Za-z_0-9]*\$|\$\$"
 )
 
 
@@ -49,7 +62,80 @@ def _migration_schema_sql() -> str:
         lines = lines[1:]
     if lines and lines[-1].strip() == "COMMIT;":
         lines = lines[:-1]
-    return "\n".join(lines).strip() + "\n"
+    statements = [
+        f"{statement};"
+        for statement in _split_sql_statements("\n".join(lines))
+        if not _is_deferred_schema_statement(statement)
+    ]
+    return "\n\n".join(statements).strip() + "\n"
+
+
+def _split_sql_statements(schema_sql: str) -> tuple[str, ...]:
+    statements: list[str] = []
+    start = 0
+    index = 0
+    in_single_quote = False
+    dollar_quote_tag: str | None = None
+    while index < len(schema_sql):
+        if dollar_quote_tag is not None:
+            if schema_sql.startswith(dollar_quote_tag, index):
+                index += len(dollar_quote_tag)
+                dollar_quote_tag = None
+                continue
+            index += 1
+            continue
+
+        char = schema_sql[index]
+        if in_single_quote:
+            if char == "'" and schema_sql[index : index + 2] == "''":
+                index += 2
+                continue
+            if char == "'":
+                in_single_quote = False
+            index += 1
+            continue
+
+        if char == "'":
+            in_single_quote = True
+            index += 1
+            continue
+        if schema_sql.startswith("--", index):
+            newline_index = schema_sql.find("\n", index + 2)
+            if newline_index == -1:
+                break
+            index = newline_index + 1
+            continue
+        if schema_sql.startswith("/*", index):
+            comment_end = schema_sql.find("*/", index + 2)
+            if comment_end == -1:
+                break
+            index = comment_end + 2
+            continue
+        if char == "$":
+            match = _DOLLAR_QUOTE_RE.match(schema_sql, index)
+            if match is not None:
+                dollar_quote_tag = match.group(0)
+                index = match.end()
+                continue
+        if char == ";":
+            statement = schema_sql[start:index].strip()
+            if statement:
+                statements.append(statement)
+            start = index + 1
+        index += 1
+
+    trailing = schema_sql[start:].strip()
+    if trailing:
+        statements.append(trailing)
+    return tuple(statements)
+
+
+def _is_deferred_schema_statement(statement: str) -> bool:
+    normalized = " ".join(statement.split()).upper()
+    return any(
+        normalized.startswith(prefix.upper())
+        for prefix in _DEFERRED_SCHEMA_STATEMENT_PREFIXES
+    )
 
 
 def upgrade() -> None:

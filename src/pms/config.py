@@ -110,6 +110,7 @@ class PMSSettings(BaseSettings):
 
     mode: RunMode = RunMode.BACKTEST
     live_trading_enabled: bool = False
+    agent_strategy_runtime_enabled: bool = False
     auto_migrate_default_v2: bool = True
     enforce_schema_check: bool | None = None
     factor_cadence_s: float = 1.0

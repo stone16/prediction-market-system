@@ -153,6 +153,12 @@ rollback decisions concrete ("pin production to version X").
 - `eval_records(strategy_id, strategy_version_id, ...)` — both
   columns NOT NULL once S5 lands; NULLABLE during S2–S4 with a
   `"default"` strategy tagging legacy rows.
+- `strategy_judgement_artifacts` and `strategy_execution_artifacts`
+  are inner-ring audit ledgers. They require non-empty
+  `(strategy_id, strategy_version_id)` tags but intentionally do not
+  foreign-key to `strategy_versions`, so the disabled-by-default agent
+  bridge can preserve an `unknown_strategy_version` rejection artifact
+  before a registry row exists.
 
 **Anti-patterns.**
 - Recording only `strategy_id` on a downstream entity.
@@ -255,6 +261,14 @@ or execution.
   ruff.toml) — S2 is the first sub-spec where `pms.strategies.*`
   exists, so the rule cannot meaningfully run before S2. Enforced
   in every subsequent spec.
+
+**ExecutionPlanner boundary.** ExecutionPlanner is an executability gate
+between strategy intent and Actuator. It may check quote, depth, freshness,
+min-size, tick-size, and slippage constraints and then emit an execution plan
+for downstream risk review. It does not select strategies, does not override
+risk policy, and does not submit orders to venues. Strategy plugins can
+produce typed intents and evidence, but RiskManager and ActuatorExecutor
+remain the only path to order submission.
 
 ---
 
@@ -389,10 +403,12 @@ rings with strict ownership:
   tables references `strategy_id`.
 - **Inner ring (strategy products, per-strategy).** Tables:
   `strategies`, `strategy_versions`, `strategy_factors`, and the
-  product tables `eval_records`, `feedback`, `orders`, `fills`.
-  Every product-table row carries `(strategy_id,
-  strategy_version_id)`. Written by Controller/Actuator/Evaluator.
-  Read by Dashboard, research tools.
+  product tables `eval_records`, `feedback`, `orders`, `fills`,
+  `strategy_judgement_artifacts`, and
+  `strategy_execution_artifacts`. Every product-table row carries
+  `(strategy_id, strategy_version_id)`. Written by Controller,
+  Actuator, Evaluator, and disabled-by-default strategy runtime
+  bridge. Read by Dashboard, research tools.
 
 **Rationale.** Mixing the rings — e.g. stamping `strategy_id` onto
 `price_changes` — creates artificial per-strategy duplication of
