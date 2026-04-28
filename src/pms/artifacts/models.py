@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+import re
 from typing import Any, Final, Literal, TypeAlias, cast
 
 
@@ -35,13 +36,12 @@ _SECRET_KEY_MARKERS: Final[frozenset[str]] = frozenset(
         "private_key",
     }
 )
-_SECRET_TEXT_MARKERS: Final[tuple[str, ...]] = (
-    "api_key=",
-    "api-secret=",
-    "client_secret=",
-    "password=",
-    "private key",
-    "-----begin",
+_SECRET_TEXT_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(
+        r"\b(?:api[_-]?key|api[_-]?secret|client_secret|password)=\S{12,}",
+        re.IGNORECASE,
+    ),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", re.IGNORECASE),
 )
 
 
@@ -171,8 +171,7 @@ def _contains_raw_secret(value: object) -> bool:
                 return True
         return False
     if isinstance(value, str):
-        lower_value = value.lower()
-        return any(marker in lower_value for marker in _SECRET_TEXT_MARKERS)
+        return any(pattern.search(value) for pattern in _SECRET_TEXT_PATTERNS)
     if isinstance(value, Sequence):
         sequence = cast(Sequence[object], value)
         return any(_contains_raw_secret(child) for child in sequence)

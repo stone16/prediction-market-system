@@ -3,7 +3,7 @@ name = "pms"
 version = "0.1.0"
 description = "Prediction Market System — modular trading pipeline and tool harness"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13,<3.14"
 authors = [{ name = "pms maintainers" }]
 license = { text = "MIT" }
 dependencies = [
@@ -67,7 +67,7 @@ markers = [
 # ---------------------------------------------------------------------------
 [tool.mypy]
 mypy_path = "src"
-python_version = "3.11"
+python_version = "3.13"
 strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true

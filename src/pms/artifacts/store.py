@@ -43,19 +43,7 @@ class StrategyArtifactStore:
             $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb,
             $11::jsonb, $12::jsonb, $13
         )
-        ON CONFLICT (artifact_id) DO UPDATE
-        SET strategy_id = EXCLUDED.strategy_id,
-            strategy_version_id = EXCLUDED.strategy_version_id,
-            artifact_type = EXCLUDED.artifact_type,
-            observation_refs = EXCLUDED.observation_refs,
-            candidate_id = EXCLUDED.candidate_id,
-            judgement_id = EXCLUDED.judgement_id,
-            judgement_summary = EXCLUDED.judgement_summary,
-            evidence_refs = EXCLUDED.evidence_refs,
-            assumptions = EXCLUDED.assumptions,
-            rejection_reasons = EXCLUDED.rejection_reasons,
-            intent_payload = EXCLUDED.intent_payload,
-            created_at = EXCLUDED.created_at
+        ON CONFLICT (artifact_id) DO NOTHING
         """
         async with self._pool.acquire() as connection:
             async with connection.transaction():
@@ -101,21 +89,7 @@ class StrategyArtifactStore:
             $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb,
             $11, $12, $13::jsonb, $14::jsonb, $15
         )
-        ON CONFLICT (artifact_id) DO UPDATE
-        SET strategy_id = EXCLUDED.strategy_id,
-            strategy_version_id = EXCLUDED.strategy_version_id,
-            artifact_type = EXCLUDED.artifact_type,
-            intent_id = EXCLUDED.intent_id,
-            plan_id = EXCLUDED.plan_id,
-            execution_policy = EXCLUDED.execution_policy,
-            execution_plan_payload = EXCLUDED.execution_plan_payload,
-            risk_decision_payload = EXCLUDED.risk_decision_payload,
-            venue_response_ids = EXCLUDED.venue_response_ids,
-            reconciliation_status = EXCLUDED.reconciliation_status,
-            post_trade_status = EXCLUDED.post_trade_status,
-            evidence_refs = EXCLUDED.evidence_refs,
-            rejection_reasons = EXCLUDED.rejection_reasons,
-            created_at = EXCLUDED.created_at
+        ON CONFLICT (artifact_id) DO NOTHING
         """
         async with self._pool.acquire() as connection:
             async with connection.transaction():

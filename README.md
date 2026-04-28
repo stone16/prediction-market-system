@@ -100,13 +100,14 @@ panel that calls these endpoints directly.
 
 ```bash
 uv sync
-uv run pytest -q                              # full suite (246 pass, 54 skip)
+uv run pytest -q                              # full default suite
 uv run mypy src/ tests/ --strict              # strict type check
 PMS_RUN_INTEGRATION=1 uv run pytest -m integration   # PostgreSQL + live-network tests
 ```
 
 Baseline invariants enforced by CI:
-- pytest 246 passing, 54 skipped (integration gated on `PMS_RUN_INTEGRATION=1`).
+- pytest default suite stays green; integration checks are gated on
+  `PMS_RUN_INTEGRATION=1`.
 - mypy strict must be clean on every committed source file.
 - Research sweep and worker spec format: `docs/research/backtest-spec-format.md`
 

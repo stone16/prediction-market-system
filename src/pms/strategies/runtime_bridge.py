@@ -118,12 +118,27 @@ class AgentStrategyRuntimeBridge:
                     continue
 
                 plan = await self.planner.plan(intent, as_of=as_of)
+                if plan.rejection_reason is not None:
+                    await self.artifact_store.insert_execution_artifact(
+                        _execution_artifact(intent, plan)
+                    )
+                    rejection_reasons.append(plan.rejection_reason)
+                    continue
+                if len(plan.planned_orders) > 1:
+                    reason = "single_leg_plan_multiple_orders"
+                    await self.artifact_store.insert_execution_artifact(
+                        _bridge_rejection_artifact(
+                            intent,
+                            plan,
+                            rejection_reason=reason,
+                            as_of=as_of,
+                        )
+                    )
+                    rejection_reasons.append(reason)
+                    continue
                 await self.artifact_store.insert_execution_artifact(
                     _execution_artifact(intent, plan)
                 )
-                if plan.rejection_reason is not None:
-                    rejection_reasons.append(plan.rejection_reason)
-                    continue
                 for order in plan.planned_orders:
                     decision = _decision_from_order(order, intent)
                     await self.enqueue_decision(decision)
@@ -156,12 +171,22 @@ def _judgement_artifact(
     judgement: StrategyJudgement,
     intents: tuple[TradeIntent | BasketIntent, ...],
 ) -> StrategyJudgementArtifact:
+    executable_intents = tuple(
+        intent for intent in intents if isinstance(intent, TradeIntent)
+    )
+    unsupported_baskets = tuple(
+        intent for intent in intents if isinstance(intent, BasketIntent)
+    )
     artifact_type: JudgementArtifactType = (
         "approved_intent" if judgement.approved else "rejected_candidate"
     )
+    rejection_reasons = judgement.failure_reasons
+    if judgement.approved and not executable_intents and unsupported_baskets:
+        artifact_type = "rejected_candidate"
+        rejection_reasons = ("basket_runtime_not_supported",)
     intent_payload: Mapping[str, Any] = (
-        {"intents": [_intent_payload(intent) for intent in intents]}
-        if judgement.approved
+        {"intents": [_intent_payload(intent) for intent in executable_intents]}
+        if artifact_type == "approved_intent"
         else {}
     )
     return StrategyJudgementArtifact(
@@ -175,7 +200,7 @@ def _judgement_artifact(
         judgement_summary=judgement.rationale,
         evidence_refs=judgement.evidence_refs or ("strategy_judgement",),
         assumptions=(),
-        rejection_reasons=judgement.failure_reasons,
+        rejection_reasons=rejection_reasons,
         intent_payload=intent_payload,
         created_at=judgement.created_at,
     )
@@ -199,9 +224,39 @@ def _execution_artifact(
         venue_response_ids=(),
         reconciliation_status=None,
         post_trade_status=None,
-        evidence_refs=plan.evidence_refs or intent.evidence_refs,
+        evidence_refs=plan.evidence_refs or intent.evidence_refs or ("execution_planner",),
         rejection_reasons=(plan.rejection_reason,) if plan.rejection_reason else (),
         created_at=plan.created_at,
+    )
+
+
+def _bridge_rejection_artifact(
+    intent: TradeIntent,
+    plan: ExecutionPlan,
+    *,
+    rejection_reason: str,
+    as_of: datetime,
+) -> StrategyExecutionArtifact:
+    payload = {
+        **_plan_payload(plan),
+        "bridge_rejection_reason": rejection_reason,
+    }
+    return StrategyExecutionArtifact(
+        artifact_id=f"artifact-{plan.plan_id}-bridge-rejected-{rejection_reason}",
+        strategy_id=plan.strategy_id,
+        strategy_version_id=plan.strategy_version_id,
+        artifact_type="rejected_execution_plan",
+        intent_id=intent.intent_id,
+        plan_id=plan.plan_id,
+        execution_policy=plan.execution_policy,
+        execution_plan_payload=payload,
+        risk_decision_payload={},
+        venue_response_ids=(),
+        reconciliation_status=None,
+        post_trade_status=None,
+        evidence_refs=plan.evidence_refs or intent.evidence_refs or ("runtime_bridge",),
+        rejection_reasons=(rejection_reason,),
+        created_at=as_of,
     )
 
 

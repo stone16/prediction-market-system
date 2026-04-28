@@ -76,6 +76,30 @@ def test_strategy_artifacts_schema_round_trip_and_constraints() -> None:
 
     try:
         _run_psql(admin_database_url, "-c", f"CREATE DATABASE {temp_database}")
+        upgrade_before_artifacts = _run_alembic(
+            temp_database_url,
+            "upgrade",
+            "0013_market_status_fields",
+        )
+        assert upgrade_before_artifacts.returncode == 0, upgrade_before_artifacts.stderr
+
+        tables_before_artifacts = _run_psql(
+            temp_database_url,
+            "-At",
+            "-c",
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name IN (
+                'strategy_judgement_artifacts',
+                'strategy_execution_artifacts'
+              )
+            ORDER BY table_name ASC
+            """,
+        )
+        assert tables_before_artifacts.stdout.splitlines() == []
+
         upgrade = _run_alembic(temp_database_url, "upgrade", "head")
         assert upgrade.returncode == 0, upgrade.stderr
 

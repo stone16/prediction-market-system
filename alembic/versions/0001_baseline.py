@@ -17,8 +17,6 @@ _CREATED_TABLES: Final[tuple[str, ...]] = (
     "evaluation_reports",
     "strategy_runs",
     "backtest_runs",
-    "strategy_execution_artifacts",
-    "strategy_judgement_artifacts",
     "opportunities",
     "fills",
     "order_intents",
@@ -35,8 +33,15 @@ _CREATED_TABLES: Final[tuple[str, ...]] = (
     "price_changes",
     "book_levels",
     "book_snapshots",
+    "market_subscriptions",
     "tokens",
+    "market_price_snapshots",
     "markets",
+)
+
+_DEFERRED_TO_LATER_MIGRATIONS: Final[tuple[str, ...]] = (
+    "strategy_judgement_artifacts",
+    "strategy_execution_artifacts",
 )
 
 
@@ -51,7 +56,15 @@ def _migration_schema_sql() -> str:
         lines = lines[1:]
     if lines and lines[-1].strip() == "COMMIT;":
         lines = lines[:-1]
-    return "\n".join(lines).strip() + "\n"
+    statements = []
+    for statement in "\n".join(lines).split(";"):
+        normalized = statement.strip()
+        if not normalized:
+            continue
+        if any(marker in normalized for marker in _DEFERRED_TO_LATER_MIGRATIONS):
+            continue
+        statements.append(f"{normalized};")
+    return "\n\n".join(statements).strip() + "\n"
 
 
 def upgrade() -> None:

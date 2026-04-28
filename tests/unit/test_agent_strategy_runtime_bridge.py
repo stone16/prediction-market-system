@@ -112,6 +112,22 @@ def _intent(**overrides: object) -> TradeIntent:
     return TradeIntent(**cast(Any, data))
 
 
+def _basket(**overrides: object) -> BasketIntent:
+    leg_a = _intent(intent_id="intent-ripple-leg-a", candidate_id="candidate-ripple-a")
+    leg_b = _intent(intent_id="intent-ripple-leg-b", candidate_id="candidate-ripple-b")
+    data: dict[str, object] = {
+        "basket_id": "basket-ripple-1",
+        "strategy_id": "ripple",
+        "strategy_version_id": "ripple-v1",
+        "legs": (leg_a, leg_b),
+        "execution_policy": "all_or_none",
+        "evidence_refs": ("judgement-ripple-1",),
+        "created_at": NOW,
+    }
+    data.update(overrides)
+    return BasketIntent(**cast(Any, data))
+
+
 def _judgement(**overrides: object) -> StrategyJudgement:
     data: dict[str, object] = {
         "judgement_id": "judgement-ripple-1",
@@ -160,6 +176,30 @@ def _accepted_plan(intent: TradeIntent) -> ExecutionPlan:
         strategy_version_id=intent.strategy_version_id,
         quote_hash="quote-ripple-1",
         planned_orders=(_planned_order(intent_id=intent.intent_id),),
+        rejection_reason=None,
+        audit_metadata={"edge_after_cost": 0.08},
+        created_at=NOW,
+        evidence_refs=intent.evidence_refs,
+    )
+
+
+def _accepted_multi_order_plan(intent: TradeIntent) -> ExecutionPlan:
+    return ExecutionPlan(
+        plan_id="plan-ripple-multi-order",
+        intent_id=intent.intent_id,
+        strategy_id=intent.strategy_id,
+        strategy_version_id=intent.strategy_version_id,
+        quote_hash="quote-ripple-1",
+        planned_orders=(
+            _planned_order(
+                planned_order_id="planned-ripple-1",
+                intent_id=intent.intent_id,
+            ),
+            _planned_order(
+                planned_order_id="planned-ripple-2",
+                intent_id=intent.intent_id,
+            ),
+        ),
         rejection_reason=None,
         audit_metadata={"edge_after_cost": 0.08},
         created_at=NOW,
@@ -320,6 +360,95 @@ async def test_bridge_persists_planner_rejection_without_enqueue() -> None:
         "execution:rejected_execution_plan",
     ]
     assert artifacts.execution_artifacts[0].rejection_reasons == ("stale_book",)
+    assert runner._decision_queue.empty()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_bridge_rejects_basket_runtime_without_approved_basket_payload() -> None:
+    basket = _basket()
+    judgement = _judgement()
+    artifacts = _RecordingArtifactStore()
+    runner = Runner(config=_settings(enabled=True))
+    bridge = _bridge(
+        settings=runner.config,
+        module=_FakeModule([StrategyRunResult(judgement=judgement, intents=(basket,))]),
+        planner=_FakePlanner({}),
+        artifact_store=artifacts,
+        enqueue=runner.enqueue_accepted_decision,
+    )
+
+    report = await bridge.run_once(
+        strategy_id="ripple",
+        strategy_version_id="ripple-v1",
+        as_of=NOW,
+    )
+
+    assert report.enqueued_decision_ids == ()
+    assert report.rejection_reasons == ("basket_runtime_not_supported",)
+    assert artifacts.events == [
+        "judgement:rejected_candidate",
+        "execution:rejected_execution_plan",
+    ]
+    assert artifacts.judgement_artifacts[0].intent_payload == {}
+    assert artifacts.judgement_artifacts[0].rejection_reasons == (
+        "basket_runtime_not_supported",
+    )
+    assert artifacts.execution_artifacts[0].intent_id == "basket-ripple-1"
+    assert runner._decision_queue.empty()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_bridge_falls_back_when_rejected_plan_has_no_evidence_refs() -> None:
+    intent = _intent(evidence_refs=())
+    artifacts = _RecordingArtifactStore()
+    runner = Runner(config=_settings(enabled=True))
+    bridge = _bridge(
+        settings=runner.config,
+        module=_FakeModule([StrategyRunResult(judgement=_judgement(), intents=(intent,))]),
+        planner=_FakePlanner({intent.intent_id: _rejected_plan(intent)}),
+        artifact_store=artifacts,
+        enqueue=runner.enqueue_accepted_decision,
+    )
+
+    report = await bridge.run_once(
+        strategy_id="ripple",
+        strategy_version_id="ripple-v1",
+        as_of=NOW,
+    )
+
+    assert report.enqueued_decision_ids == ()
+    assert artifacts.execution_artifacts[0].evidence_refs == ("execution_planner",)
+    assert runner._decision_queue.empty()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_bridge_rejects_multi_order_single_leg_plan_without_enqueue() -> None:
+    intent = _intent()
+    artifacts = _RecordingArtifactStore()
+    runner = Runner(config=_settings(enabled=True))
+    bridge = _bridge(
+        settings=runner.config,
+        module=_FakeModule([StrategyRunResult(judgement=_judgement(), intents=(intent,))]),
+        planner=_FakePlanner({intent.intent_id: _accepted_multi_order_plan(intent)}),
+        artifact_store=artifacts,
+        enqueue=runner.enqueue_accepted_decision,
+    )
+
+    report = await bridge.run_once(
+        strategy_id="ripple",
+        strategy_version_id="ripple-v1",
+        as_of=NOW,
+    )
+
+    assert report.enqueued_decision_ids == ()
+    assert report.rejection_reasons == ("single_leg_plan_multiple_orders",)
+    assert artifacts.events == [
+        "judgement:approved_intent",
+        "execution:rejected_execution_plan",
+    ]
+    assert artifacts.execution_artifacts[0].rejection_reasons == (
+        "single_leg_plan_multiple_orders",
+    )
     assert runner._decision_queue.empty()  # noqa: SLF001
 
 

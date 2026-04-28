@@ -182,6 +182,23 @@ def test_artifacts_reject_raw_secret_material() -> None:
         )
 
 
+def test_judgement_summary_allows_benign_secret_marker_text() -> None:
+    artifact = _judgement_artifact(
+        judgement_summary="Docs mention api_key= placeholders must be rotated."
+    )
+
+    assert "api_key=" in artifact.judgement_summary
+
+
+def test_artifacts_reject_value_shaped_secret_text() -> None:
+    with pytest.raises(ValueError, match="raw secret"):
+        _execution_artifact(
+            execution_plan_payload={
+                "note": "operator supplied password=supersecretvalue"
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_store_inserts_judgement_artifact_as_json_payloads() -> None:
     connection = _RecordingConnection()
@@ -194,6 +211,8 @@ async def test_store_inserts_judgement_artifact_as_json_payloads() -> None:
     query, args, in_transaction = connection.execute_calls[0]
     assert in_transaction is True
     assert "INSERT INTO strategy_judgement_artifacts" in query
+    assert "ON CONFLICT (artifact_id) DO NOTHING" in query
+    assert "DO UPDATE" not in query
     assert args[:7] == (
         "artifact-approved-intent",
         "default",
