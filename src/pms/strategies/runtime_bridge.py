@@ -236,7 +236,7 @@ def _execution_artifact(
 ) -> StrategyExecutionArtifact:
     rejected = plan.rejection_reason is not None
     return StrategyExecutionArtifact(
-        artifact_id=f"artifact-{plan.plan_id}",
+        artifact_id=f"artifact-{plan.plan_id}-{_artifact_run_suffix(plan.created_at)}",
         strategy_id=plan.strategy_id,
         strategy_version_id=plan.strategy_version_id,
         artifact_type="rejected_execution_plan" if rejected else "accepted_execution_plan",
@@ -266,7 +266,10 @@ def _bridge_rejection_artifact(
         "bridge_rejection_reason": rejection_reason,
     }
     return StrategyExecutionArtifact(
-        artifact_id=f"artifact-{plan.plan_id}-bridge-rejected-{rejection_reason}",
+        artifact_id=(
+            f"artifact-{plan.plan_id}-bridge-rejected-{rejection_reason}-"
+            f"{_artifact_run_suffix(as_of)}"
+        ),
         strategy_id=plan.strategy_id,
         strategy_version_id=plan.strategy_version_id,
         artifact_type="rejected_execution_plan",
@@ -291,7 +294,10 @@ def _unknown_strategy_artifact(
     as_of: datetime,
 ) -> StrategyExecutionArtifact:
     return StrategyExecutionArtifact(
-        artifact_id=f"artifact-unknown-{strategy_id}-{strategy_version_id}",
+        artifact_id=(
+            f"artifact-unknown-{strategy_id}-{strategy_version_id}-"
+            f"{_artifact_run_suffix(as_of)}"
+        ),
         strategy_id=strategy_id,
         strategy_version_id=strategy_version_id,
         artifact_type="rejected_execution_plan",
@@ -315,7 +321,10 @@ def _unsupported_basket_artifact(
     as_of: datetime,
 ) -> StrategyExecutionArtifact:
     return StrategyExecutionArtifact(
-        artifact_id=f"artifact-basket-runtime-not-supported-{intent.basket_id}",
+        artifact_id=(
+            f"artifact-basket-runtime-not-supported-{intent.basket_id}-"
+            f"{_artifact_run_suffix(as_of)}"
+        ),
         strategy_id=intent.strategy_id,
         strategy_version_id=intent.strategy_version_id,
         artifact_type="rejected_execution_plan",
@@ -415,3 +424,7 @@ def _planned_order_payload(order: PlannedOrder) -> Mapping[str, Any]:
         "strategy_version_id": order.strategy_version_id,
         "quote_hash": order.quote_hash,
     }
+
+
+def _artifact_run_suffix(created_at: datetime) -> str:
+    return created_at.isoformat(timespec="microseconds").replace("+00:00", "Z")

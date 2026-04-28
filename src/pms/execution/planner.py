@@ -145,10 +145,21 @@ class ExecutionPlanner:
         quote: ExecutableQuote,
         as_of: datetime,
     ) -> str | None:
-        if (as_of - quote.book_timestamp).total_seconds() > self.max_book_age_s:
+        quote_age_s = (as_of - quote.book_timestamp).total_seconds()
+        if quote_age_s < 0.0:
+            return "future_book"
+        if quote_age_s > self.max_book_age_s:
             return "stale_book"
-        if not quote.token_id or quote.token_id != intent.token_id:
+        if quote.market_id != intent.market_id:
+            return "quote_market_mismatch"
+        if quote.venue != intent.venue:
+            return "quote_venue_mismatch"
+        if quote.side != intent.side:
+            return "quote_side_mismatch"
+        if not quote.token_id:
             return "missing_token_id"
+        if quote.token_id != intent.token_id:
+            return "quote_token_mismatch"
         if quote.best_price <= 0.0 or quote.best_price >= 1.0:
             return "impossible_price"
         if quote.tick_size <= 0.0 or _decimal(quote.best_price) % _decimal(quote.tick_size) != 0:

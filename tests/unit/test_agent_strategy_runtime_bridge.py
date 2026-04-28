@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -19,7 +19,11 @@ from pms.strategies.intents import (
     TradeIntent,
 )
 from pms.strategies.registry import StrategyModuleRegistry
-from pms.strategies.runtime_bridge import AgentStrategyRuntimeBridge, StrategyRunResult
+from pms.strategies.runtime_bridge import (
+    AgentStrategyRuntimeBridge,
+    StrategyRunResult,
+    TradeIntentPlanner,
+)
 
 
 NOW = datetime(2026, 4, 28, 13, 0, tzinfo=UTC)
@@ -57,6 +61,16 @@ class _FakePlanner:
         assert as_of == NOW
         self.calls.append(intent)
         return self.plans[intent.intent_id]
+
+
+class _SequentialPlanner:
+    def __init__(self, plans: Sequence[ExecutionPlan]) -> None:
+        self.plans = list(plans)
+        self.calls: list[tuple[TradeIntent, datetime]] = []
+
+    async def plan(self, intent: TradeIntent, *, as_of: datetime) -> ExecutionPlan:
+        self.calls.append((intent, as_of))
+        return self.plans.pop(0)
 
 
 class _RecordingArtifactStore:
@@ -179,6 +193,10 @@ def _planned_order(**overrides: object) -> PlannedOrder:
 
 
 def _accepted_plan(intent: TradeIntent) -> ExecutionPlan:
+    return _accepted_plan_at(intent, created_at=NOW)
+
+
+def _accepted_plan_at(intent: TradeIntent, *, created_at: datetime) -> ExecutionPlan:
     return ExecutionPlan(
         plan_id="plan-ripple-accepted",
         intent_id=intent.intent_id,
@@ -188,7 +206,7 @@ def _accepted_plan(intent: TradeIntent) -> ExecutionPlan:
         planned_orders=(_planned_order(intent_id=intent.intent_id),),
         rejection_reason=None,
         audit_metadata={"edge_after_cost": 0.08},
-        created_at=NOW,
+        created_at=created_at,
         evidence_refs=intent.evidence_refs,
     )
 
@@ -231,7 +249,7 @@ def _bridge(
     *,
     settings: PMSSettings,
     module: _FakeModule | None,
-    planner: _FakePlanner,
+    planner: TradeIntentPlanner,
     artifact_store: _RecordingArtifactStore,
     enqueue: Callable[[TradeDecision], Awaitable[None]],
 ) -> AgentStrategyRuntimeBridge:
@@ -310,6 +328,48 @@ async def test_bridge_persists_artifacts_before_enqueueing_accepted_decision() -
     assert work_item.decision.strategy_id == "ripple"
     assert work_item.decision.strategy_version_id == "ripple-v1"
     assert runner.state.orders == []
+
+
+@pytest.mark.asyncio
+async def test_bridge_uses_run_scoped_execution_artifact_ids_for_repeated_plans() -> None:
+    intent = _intent()
+    judgement = _judgement()
+    later = NOW + timedelta(seconds=1)
+    artifacts = _RecordingArtifactStore()
+    runner = Runner(config=_settings(enabled=True))
+    planner = _SequentialPlanner(
+        (
+            _accepted_plan_at(intent, created_at=NOW),
+            _accepted_plan_at(intent, created_at=later),
+        )
+    )
+    bridge = _bridge(
+        settings=runner.config,
+        module=_FakeModule([StrategyRunResult(judgement=judgement, intents=(intent,))]),
+        planner=planner,
+        artifact_store=artifacts,
+        enqueue=runner.enqueue_accepted_decision,
+    )
+
+    await bridge.run_once(
+        strategy_id="ripple",
+        strategy_version_id="ripple-v1",
+        as_of=NOW,
+    )
+    await bridge.run_once(
+        strategy_id="ripple",
+        strategy_version_id="ripple-v1",
+        as_of=later,
+    )
+
+    artifact_ids = tuple(
+        artifact.artifact_id for artifact in artifacts.execution_artifacts
+    )
+    assert artifact_ids == (
+        "artifact-plan-ripple-accepted-2026-04-28T13:00:00.000000Z",
+        "artifact-plan-ripple-accepted-2026-04-28T13:00:01.000000Z",
+    )
+    assert planner.calls == [(intent, NOW), (intent, later)]
 
 
 @pytest.mark.asyncio

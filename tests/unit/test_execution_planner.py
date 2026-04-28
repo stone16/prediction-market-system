@@ -126,7 +126,12 @@ async def test_planner_accepts_single_leg_intent_without_network_or_actuator() -
     ("quote", "intent", "reason"),
     [
         (_quote(book_timestamp=NOW - timedelta(seconds=31)), _intent(), "stale_book"),
+        (_quote(book_timestamp=NOW + timedelta(milliseconds=1)), _intent(), "future_book"),
+        (_quote(market_id="market-other"), _intent(), "quote_market_mismatch"),
+        (_quote(venue="kalshi"), _intent(), "quote_venue_mismatch"),
+        (_quote(side="SELL"), _intent(), "quote_side_mismatch"),
         (_quote(token_id=None), _intent(), "missing_token_id"),
+        (_quote(token_id="token-no"), _intent(), "quote_token_mismatch"),
         (_quote(available_size=10.0), _intent(), "insufficient_executable_notional"),
         (_quote(min_order_size_usdc=50.0), _intent(), "min_size_violation"),
         (_quote(best_price=1.0), _intent(), "impossible_price"),
