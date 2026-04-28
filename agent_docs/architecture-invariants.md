@@ -256,6 +256,14 @@ or execution.
   exists, so the rule cannot meaningfully run before S2. Enforced
   in every subsequent spec.
 
+**ExecutionPlanner boundary.** ExecutionPlanner is an executability gate
+between strategy intent and Actuator. It may check quote, depth, freshness,
+min-size, tick-size, and slippage constraints and then emit an execution plan
+for downstream risk review. It does not select strategies, does not override
+risk policy, and does not submit orders to venues. Strategy plugins can
+produce typed intents and evidence, but RiskManager and ActuatorExecutor
+remain the only path to order submission.
+
 ---
 
 ## Invariant 6 — Active perception: Controller-derived market ids feed back into Sensor subscription

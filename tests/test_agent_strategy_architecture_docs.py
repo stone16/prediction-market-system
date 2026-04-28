@@ -10,8 +10,12 @@ def _read_repo_file(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def _single_spaced(text: str) -> str:
+    return " ".join(text.split())
+
+
 def test_readme_documents_agent_strategy_execution_boundary() -> None:
-    readme = _read_repo_file("README.md")
+    readme = _single_spaced(_read_repo_file("README.md"))
 
     assert (
         "Agent strategy modules may propose, judge, and explain market actions"
@@ -33,7 +37,7 @@ def test_readme_documents_agent_strategy_execution_boundary() -> None:
 
 
 def test_architecture_invariants_define_execution_planner_boundary() -> None:
-    invariants = _read_repo_file("agent_docs/architecture-invariants.md")
+    invariants = _single_spaced(_read_repo_file("agent_docs/architecture-invariants.md"))
 
     assert "ExecutionPlanner is an executability gate" in invariants
     assert "quote, depth, freshness, min-size, tick-size, and slippage" in invariants

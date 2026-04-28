@@ -2,6 +2,8 @@
 
 Modular prediction market trading system organised as a concurrent cybernetic
 feedback web across Sensor, Controller, Actuator, Evaluator, and feedback edges.
+Sensor, Controller, Actuator, and Evaluator run as concurrent asyncio tasks
+with bidirectional feedback edges; the runtime is not a phased pipeline.
 
 Target venues: Polymarket (primary). Kalshi is reserved in the venue enum but
 has no adapter in v1 — see CP06's stub gate. Implemented run modes are
@@ -14,6 +16,20 @@ for the PAPER soak, credential setup, first live order, rollback, and emergency
 stop runbook.
 Install the optional live SDK with `uv sync --extra live` before starting LIVE
 mode.
+
+## Agent strategy boundary
+
+Agent strategy modules may propose, judge, and explain market actions, but they
+cannot submit orders, cannot override risk, and cannot override reconciliation.
+Their typed output path is `TradeIntent | BasketIntent` -> `ExecutionPlan` ->
+`RiskDecision` -> `OrderState` -> reconciliation -> evaluator.
+
+Execution planning is an executability gate, not execution authority. The
+planner checks quotes, depth, book freshness, minimum size, tick size, and
+slippage before any planned order can reach the existing risk and actuator
+path. RiskManager and ActuatorExecutor remain the only order-submission route.
+Predict-Raven is an external reference pattern for plugin/runtime shape and
+durable artifacts, not an architecture PMS copies wholesale.
 
 ## Layout
 
