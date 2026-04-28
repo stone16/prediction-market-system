@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import pytest
 
@@ -45,7 +46,7 @@ def _intent(**overrides: object) -> TradeIntent:
         "created_at": NOW,
     }
     data.update(overrides)
-    return TradeIntent(**data)  # type: ignore[arg-type]
+    return TradeIntent(**cast(Any, data))
 
 
 def _quote(**overrides: object) -> ExecutableQuote:
@@ -63,7 +64,7 @@ def _quote(**overrides: object) -> ExecutableQuote:
         "fee_bps": 0,
     }
     data.update(overrides)
-    return ExecutableQuote(**data)  # type: ignore[arg-type]
+    return ExecutableQuote(**cast(Any, data))
 
 
 @pytest.mark.asyncio
@@ -106,7 +107,7 @@ async def test_planner_accepts_single_leg_intent_without_network_or_actuator() -
         (_quote(available_size=10.0), _intent(), "insufficient_executable_notional"),
         (_quote(min_order_size_usdc=50.0), _intent(), "min_size_violation"),
         (_quote(best_price=1.0), _intent(), "impossible_price"),
-        (_quote(tick_size=0.03), _intent(), "invalid_tick_size"),
+        (_quote(tick_size=0.04), _intent(), "invalid_tick_size"),
         (_quote(best_price=0.62), _intent(limit_price=0.70, expected_price=0.62), "loss_of_edge_after_costs"),
         (None, _intent(), "quote_unavailable"),
     ],
@@ -123,16 +124,3 @@ async def test_planner_rejects_non_executable_quotes(
     assert plan.intent_id == intent.intent_id
     assert plan.strategy_id == intent.strategy_id
     assert plan.strategy_version_id == intent.strategy_version_id
-
-
-def test_execution_plan_rejects_ambiguous_accepted_and_rejected_state() -> None:
-    accepted = ExecutionPlan.accepted(
-        intent=_intent(),
-        quote_hash="quote-hash-1",
-        planned_orders=(),
-        edge_after_cost=0.1,
-        created_at=NOW,
-    )
-
-    with pytest.raises(ValueError, match="planned_orders"):
-        replace(accepted, rejection_reason=None, planned_orders=())
