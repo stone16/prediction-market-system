@@ -449,3 +449,110 @@ class TestNinetyPercentBoundary:
         # Only the 91% markets should be in the favorite bucket
         assert stats[9].n == 50
         assert stats[8].n == 50
+
+
+# ── Regression: binary-only parser ──────────────────────────────────────────
+
+
+class TestBinaryOnlyParser:
+    """Regression: parser must reject 3+ outcome markets.
+
+    CodeRabbit catch: after fixing outcome ordering, the parser still
+    accepted multi-outcome rows where `outcomes` contained "Yes" among
+    other entries. `no_idx = 1 - yes_idx` is only valid for exactly
+    binary Yes/No markets.
+    """
+
+    def _make_row(self, outcomes: list[str], prices: list[str]) -> dict[str, object]:
+        return {
+            "id": "test-001",
+            "question": "Test market",
+            "outcomes": outcomes,
+            "outcomePrices": prices,
+            "lastTradePrice": 0.75,
+            "volumeNum": 10000.0,
+            "liquidityNum": 500.0,
+            "endDate": "2026-05-01",
+            "slug": "test-market",
+        }
+
+    def test_binary_yes_no_accepted(self) -> None:
+        """Exactly ['Yes', 'No'] should be accepted."""
+        row = self._make_row(["Yes", "No"], ["1.0", "0.0"])
+        assert _parse_market(row) is not None
+
+    def test_binary_no_yes_accepted(self) -> None:
+        """Exactly ['No', 'Yes'] should be accepted."""
+        row = self._make_row(["No", "Yes"], ["0.0", "1.0"])
+        assert _parse_market(row) is not None
+
+    def test_three_outcomes_rejected(self) -> None:
+        """3-outcome market (e.g. Yes/No/Draw) should return None."""
+        row = self._make_row(["Yes", "No", "Draw"], ["0.5", "0.3", "0.2"])
+        assert _parse_market(row) is None
+
+    def test_four_outcomes_rejected(self) -> None:
+        """4-outcome market should return None."""
+        row = self._make_row(
+            ["Yes", "No", "Candidate A", "Candidate B"],
+            ["0.3", "0.3", "0.2", "0.2"],
+        )
+        assert _parse_market(row) is None
+
+    def test_yes_with_extra_outcome_rejected(self) -> None:
+        """['Yes', 'Other'] (not No) should return None."""
+        row = self._make_row(["Yes", "Other"], ["1.0", "0.0"])
+        assert _parse_market(row) is None
+
+    def test_single_outcome_rejected(self) -> None:
+        """Single-outcome row should return None."""
+        row = self._make_row(["Yes"], ["1.0"])
+        assert _parse_market(row) is None
+
+
+# ── Regression: median volume ───────────────────────────────────────────────
+
+
+class TestMedianVolume:
+    """Regression: median volume must use statistics.median().
+
+    Previous implementation used `sorted(volumes)[len(volumes) // 2]`
+    which returns the upper-middle value for even-length lists instead
+    of averaging the two middle values.
+    """
+
+    def test_even_count_averages_middle_two(self) -> None:
+        """4 markets with volumes [100, 200, 300, 400] → median = 250."""
+        markets = [
+            _market(0.50, True, volume=100.0),
+            _market(0.51, True, volume=200.0),
+            _market(0.52, True, volume=300.0),
+            _market(0.53, True, volume=400.0),
+        ]
+        stats = compute_decile_stats(markets)
+        gate = check_sample_gate(stats)
+        report = generate_report(
+            markets=markets,
+            decile_stats=stats,
+            gate=gate,
+            fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
+        )
+        # statistics.median([100, 200, 300, 400]) = 250.0
+        assert "$250" in report
+
+    def test_odd_count_takes_middle(self) -> None:
+        """3 markets with volumes [100, 200, 300] → median = 200."""
+        markets = [
+            _market(0.50, True, volume=100.0),
+            _market(0.51, True, volume=200.0),
+            _market(0.52, True, volume=300.0),
+        ]
+        stats = compute_decile_stats(markets)
+        gate = check_sample_gate(stats)
+        report = generate_report(
+            markets=markets,
+            decile_stats=stats,
+            gate=gate,
+            fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
+        )
+        assert "$200" in report

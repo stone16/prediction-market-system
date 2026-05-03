@@ -34,6 +34,7 @@ import argparse
 import csv
 import json
 import math
+import statistics
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -138,7 +139,14 @@ def _parse_market(row: dict[str, Any]) -> ResolvedMarket | None:
             outcomes = json.loads(outcomes_raw)
         else:
             outcomes = outcomes_raw
-        if not isinstance(outcomes, list) or "Yes" not in outcomes:
+        # Only accept exactly binary Yes/No markets.
+        # 3+ outcome markets (e.g. multi-party elections) have different
+        # resolution semantics and would corrupt the FLB dataset.
+        if (
+            not isinstance(outcomes, list)
+            or len(outcomes) != 2
+            or set(outcomes) != {"Yes", "No"}
+        ):
             return None
 
         # Parse outcome prices to determine resolution and last price.
@@ -150,7 +158,7 @@ def _parse_market(row: dict[str, Any]) -> ResolvedMarket | None:
             prices = json.loads(prices_raw)
         else:
             prices = prices_raw
-        if not isinstance(prices, list) or len(prices) < 2:
+        if not isinstance(prices, list) or len(prices) != 2:
             return None
 
         yes_idx = outcomes.index("Yes")
@@ -481,7 +489,7 @@ def generate_report(
         lines.append("## Volume Statistics")
         lines.append("")
         lines.append(f"- **Min volume:** ${min(volumes):,.0f}")
-        lines.append(f"- **Median volume:** ${sorted(volumes)[len(volumes) // 2]:,.0f}")
+        lines.append(f"- **Median volume:** ${statistics.median(volumes):,.0f}")
         lines.append(f"- **Max volume:** ${max(volumes):,.0f}")
         lines.append(f"- **Total volume:** ${sum(volumes):,.0f}")
         lines.append("")
