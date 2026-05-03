@@ -401,7 +401,7 @@ async def test_live_ripple_raises_entry_threshold_near_resolution() -> None:
                 values={
                     ("metaculus_prior", ""): 0.58,
                     ("yes_count", ""): 9.0,
-                    ("no_count", ""): 7.0,
+                    ("no_count", ""): 6.0,
                 }
             )
         ),
@@ -419,7 +419,10 @@ async def test_live_ripple_raises_entry_threshold_near_resolution() -> None:
 
     judgement = await agent.judge(_context(), candidates[0])
 
-    assert candidates[0].expected_edge == pytest.approx(0.018888888888888844)
+    assert candidates[0].expected_edge == pytest.approx(
+        ((0.58 * 2.0 + 9.0) / (2.0 + 9.0 + 6.0)) - 0.56
+    )
+    assert candidates[0].expected_edge > 0.02
     assert candidates[0].metadata["entry_edge_threshold"] > 0.02
     assert judgement.approved is False
     assert judgement.failure_reasons == ("insufficient_expected_edge",)
