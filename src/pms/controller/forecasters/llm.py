@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -94,10 +95,10 @@ class LLMForecaster:
             return None
         try:
             raw = self._call(client, signal)
+            self._record_cost(estimated_cost, signal)
             result = self._parse(raw)
         except (LLMTimeoutError, LLMTransientError, LLMParseError):
             return None
-        self._record_cost(estimated_cost, signal)
         self._cache_put(signal.market_id, result)
         return result
 
@@ -376,7 +377,10 @@ def _response_text_openai(response: object) -> str:
 
 def _as_float(value: object) -> float:
     if isinstance(value, str | int | float):
-        return float(value)
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError("Expected finite numeric value")
+        return numeric
     raise ValueError(f"Expected numeric value, got {type(value).__name__}")
 
 

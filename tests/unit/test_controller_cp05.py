@@ -4,7 +4,7 @@ import json
 from datetime import UTC, date, datetime
 from math import inf, nan
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
 
@@ -37,6 +37,12 @@ from pms.strategies.projections import (
     RiskParams,
     StrategyConfig,
 )
+
+
+class _MessagesDouble(Protocol):
+    calls: list[dict[str, Any]]
+
+    def create(self, **kwargs: Any) -> object: ...
 
 
 def _signal(
@@ -108,9 +114,20 @@ class FakeMessages:
         return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(self._payload))])
 
 
+class FakeSequenceMessages:
+    def __init__(self, payloads: list[dict[str, Any]]) -> None:
+        self._payloads = list(payloads)
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        payload = self._payloads.pop(0)
+        return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(payload))])
+
+
 class FakeClaudeClient:
     def __init__(self) -> None:
-        self.messages = FakeMessages()
+        self.messages: _MessagesDouble = FakeMessages()
 
 
 class FakeOpenAIChatCompletions:
@@ -392,6 +409,49 @@ def test_llm_forecaster_clamps_probability_away_from_impossible_extremes() -> No
     assert low is not None
     assert low[0] == pytest.approx(0.01)
     assert low[1] == pytest.approx(0.0)
+
+
+def test_llm_forecaster_rejects_non_finite_numeric_fields() -> None:
+    client = FakeClaudeClient()
+    client.messages = FakeMessages(prob_estimate=float("nan"), confidence=0.5)
+    forecaster = LLMForecaster(
+        config=LLMSettings(enabled=True, provider="anthropic", api_key="test-key"),
+        client=client,
+    )
+
+    assert forecaster.predict(_signal()) is None
+    assert len(client.messages.calls) == 1
+
+
+def test_llm_forecaster_counts_malformed_provider_attempt_against_budget() -> None:
+    client = FakeClaudeClient()
+    client.messages = FakeSequenceMessages(
+        [
+            {
+                "prob_estimate": 0.8,
+                "confidence": 0.6,
+            },
+            {
+                "prob_estimate": 0.7,
+                "confidence": 0.5,
+                "rationale": "would be valid if called",
+            },
+        ]
+    )
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
+        ),
+        client=client,
+    )
+
+    assert forecaster.predict(_signal(market_id="m-bad")) is None
+    assert forecaster.predict(_signal(market_id="m-budget")) is None
+    assert len(client.messages.calls) == 1
 
 
 def test_llm_prompt_trims_orderbook_and_serializes_external_signal() -> None:
