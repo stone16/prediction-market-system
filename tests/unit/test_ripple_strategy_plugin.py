@@ -24,7 +24,12 @@ from pms.strategies.intents import (
 )
 from pms.strategies.ripple.agent import RippleAgent
 from pms.strategies.ripple.controller import RippleController
-from pms.strategies.ripple.source import RippleObservationFixture, RippleObservationSource
+from pms.strategies.ripple.source import (
+    LiveRippleSource,
+    RippleMarketSnapshot,
+    RippleObservationFixture,
+    RippleObservationSource,
+)
 from pms.strategies.ripple.strategy import RippleStrategyModule
 
 
@@ -59,6 +64,45 @@ def _fixture(**overrides: object) -> RippleObservationFixture:
     }
     data.update(overrides)
     return RippleObservationFixture(**cast(Any, data))
+
+
+class _FakeFactorSnapshot:
+    values = {
+        ("metaculus_prior", ""): 0.67,
+        ("orderbook_imbalance", ""): 0.21,
+        ("fair_value_spread", ""): 0.08,
+    }
+    missing_factors: tuple[tuple[str, str], ...] = ()
+    stale_factors: tuple[tuple[str, str], ...] = ()
+    snapshot_hash = "factor-hash-1"
+
+
+class _RecordingFactorReader:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def snapshot(self, **kwargs: object) -> _FakeFactorSnapshot:
+        self.calls.append(kwargs)
+        return _FakeFactorSnapshot()
+
+
+class _StaticMarketReader:
+    async def latest(
+        self,
+        market_id: str,
+        *,
+        as_of: datetime,
+    ) -> RippleMarketSnapshot | None:
+        del as_of
+        return RippleMarketSnapshot(
+            market_id=market_id,
+            title="Will the live factor source resolve YES?",
+            token_id="token-ripple-yes",
+            yes_price=0.59,
+            best_bid=0.58,
+            best_ask=0.60,
+            observed_at=NOW,
+        )
 
 
 async def _candidate_from_fixture(
@@ -107,6 +151,56 @@ async def test_ripple_strategy_approves_fixture_candidate_and_emits_trade_intent
     assert intent.candidate_id == "candidate-ripple-observation-1"
     assert intent.token_id == "token-ripple-yes"
     assert intent.time_in_force is TimeInForce.GTC
+
+
+@pytest.mark.asyncio
+async def test_live_ripple_source_reads_factor_snapshot_and_market_price() -> None:
+    factor_reader = _RecordingFactorReader()
+    source = LiveRippleSource(
+        market_ids=("market-ripple-1",),
+        factor_reader=factor_reader,
+        market_reader=_StaticMarketReader(),
+    )
+
+    observations = await source.observe(_context())
+    candidates = await RippleController().propose(_context(), observations)
+
+    assert len(observations) == 1
+    observation = observations[0]
+    assert observation.source == "live_factor_service"
+    assert observation.payload["probability_estimate"] == 0.67
+    assert observation.payload["expected_edge"] == 0.08
+    assert observation.payload["limit_price"] == 0.60
+    assert observation.payload["expected_price"] == 0.67
+    assert observation.payload["metadata"]["yes_price"] == 0.59
+    assert observation.payload["metadata"]["factor_values"] == {
+        "fair_value_spread": 0.08,
+        "metaculus_prior": 0.67,
+        "orderbook_imbalance": 0.21,
+    }
+    assert observation.evidence_refs == (
+        "factor_snapshot:factor-hash-1",
+        "market_snapshot:market-ripple-1:2026-04-28T12:00:00+00:00",
+    )
+    assert len(factor_reader.calls) == 1
+    call = factor_reader.calls[0]
+    assert call["market_id"] == "market-ripple-1"
+    assert call["as_of"] == NOW
+    assert call["strategy_id"] == "ripple"
+    assert call["strategy_version_id"] == "ripple-v1"
+    required_factor_ids = {
+        step.factor_id
+        for step in cast(Any, call["required"])
+    }
+    assert required_factor_ids == {
+        "fair_value_spread",
+        "metaculus_prior",
+        "orderbook_imbalance",
+    }
+    assert candidates[0].metadata["source"] == "live_factor_service"
+    assert candidates[0].metadata["fixture_metadata"]["factor_snapshot_hash"] == (
+        "factor-hash-1"
+    )
 
 
 @pytest.mark.parametrize(
