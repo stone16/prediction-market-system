@@ -1,0 +1,47 @@
+# Tight PAPER soak configuration for the first real-data risk-readiness run.
+# Keep all credentials in environment variables or a secret manager.
+
+mode: paper
+live_trading_enabled: false
+live_account_reconciliation_required: true
+live_emergency_audit_path: .data/live-emergency-audit.jsonl
+
+risk:
+  max_position_per_market: 5.0
+  max_total_exposure: 50.0
+  max_drawdown_pct: 20.0
+  max_open_positions: 5
+  min_order_usdc: 1.0
+  slippage_threshold_bps: 50.0
+  max_quantity_shares: 500.0
+
+sensor:
+  poll_interval_s: 5.0
+
+controller:
+  min_volume: 0.0
+  max_slippage_bps: 50
+  time_in_force: IOC
+  max_book_age_ms: 1000.0
+  allowed_book_clock_skew_ms: 250.0
+  max_spread_bps: 100.0
+  strict_factor_gates: true
+  quote_source: postgres_snapshot
+  direct_quote_min_notional_usdc: 100.0
+  dual_quote_max_price_delta_bps: 25.0
+
+polymarket:
+  host: https://clob.polymarket.com
+  websocket_url: wss://ws-subscriptions-clob.polymarket.com/ws/
+  chain_id: 137
+  private_key: null
+  api_key: null
+  api_secret: null
+  api_passphrase: null
+  signature_type: null
+  funder_address: null
+
+llm:
+  enabled: false
+  provider: null
+  model: claude-3-5-sonnet-latest

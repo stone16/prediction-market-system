@@ -5,11 +5,48 @@ passphrases into chat, issues, PRs, logs, or config files.
 
 ## PAPER Soak
 
-1. Run PAPER mode against live market data with production risk caps:
+1. Start from the first-live soak config:
+   `cp config.live-soak.yaml config.local.live-soak.yaml`.
+2. Confirm the risk envelope before every soak run:
+   `max_position_per_market=$5`, `max_total_exposure=$50`,
+   `max_drawdown_pct=20%`, `max_open_positions=5`,
+   `max_quantity_shares=500`, and `slippage_threshold_bps=50`.
+3. Run PAPER mode against live market data with the soak config:
    `PMS_MODE=paper uv run pms-api`.
-2. Confirm `/status`, `/trades`, `/positions`, and evaluator metrics update.
-3. Review order notional, slippage, rejected orders, and portfolio exposure.
-4. Keep `live_trading_enabled=false` until the soak is accepted.
+4. Confirm `/status`, `/trades`, `/positions`, and evaluator metrics update.
+5. Review order notional, slippage, rejected orders, and portfolio exposure.
+6. Keep `live_trading_enabled=false` until the 30-day soak and compliance
+   checklist are accepted.
+
+## Auto-Halt Triggers
+
+PMS fail-closes before order submission when any of these live-soak triggers
+trip:
+
+- Polymarket API auth failure: HTTP 401 or 403.
+- Drawdown above `risk.max_drawdown_pct`.
+- Five consecutive losing filled trades.
+- Average slippage above 100 bps across the last 10 filled trades.
+- Three HTTP 429 rate-limit responses inside 10 minutes.
+- Any submitted order remains unfilled for more than 30 minutes.
+
+The halt state is explicit and reversible. Operators should first reconcile
+venue state, credentials, open orders, and portfolio exposure, then call the
+runner/admin path that invokes `RiskManager.clear_halt()`. Do not clear a halt
+only to retry the same failing order.
+
+## Daily Paper Report
+
+Generate the daily soak report after each paper run:
+
+```bash
+uv run python scripts/paper-report.py --date 2026-05-03
+```
+
+Reports are written under `docs/paper-reports/YYYY-MM-DD.md` by default. Use
+`--dry-run` to print the report in CI or during review. The report includes
+Gate 3 metrics: decisions, fills, slippage, daily and cumulative P&L, drawdown,
+exposure, Brier score, hit rate, average edge, Sharpe ratio, and risk events.
 
 ## Credential Setup
 
