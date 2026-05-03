@@ -32,19 +32,13 @@ cannot submit orders, cannot override risk, and cannot override reconciliation.
 Their typed output path is `TradeIntent | BasketIntent` -> `ExecutionPlan` ->
 `RiskDecision` -> `OrderState` -> reconciliation -> evaluator.
 
-## Agent strategy boundary
-
-Agent strategy modules may propose, judge, and explain market actions, but they
-cannot submit orders, cannot override risk, and cannot override reconciliation.
-Their typed output path is `TradeIntent | BasketIntent` -> `ExecutionPlan` ->
-`RiskDecision` -> `OrderState` -> reconciliation -> evaluator.
-
 Execution planning is an executability gate, not execution authority. The
 planner checks quotes, depth, book freshness, minimum size, tick size, and
 slippage before any planned order can reach the existing risk and actuator
 path. RiskManager and ActuatorExecutor remain the only order-submission route.
 Predict-Raven is an external reference pattern for plugin/runtime shape and
 durable artifacts, not an architecture PMS copies wholesale.
+
 
 ## Layout
 
