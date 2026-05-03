@@ -28,7 +28,10 @@ pms-research = "pms.research.cli:main"
 # CP05: Anthropic SDK powers the optional LLM forecaster. Install with
 # `uv pip install 'pms[llm]'`. LLMForecaster imports it lazily, so the default
 # rule-based/statistical controller path does not require it.
-llm = ["anthropic>=0.40.0"]
+llm = [
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+]
 live = ["py-clob-client-v2>=1.0.0,<2.0.0"]
 
 [dependency-groups]
