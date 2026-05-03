@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -35,8 +35,8 @@ from pms.controller.diagnostics import ControllerDiagnostic
 from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
 from pms.controller.outcome_tokens import MarketDataOutcomeTokenResolver
-from pms.controller.pipeline import ControllerPipeline
-from pms.core.enums import OrderStatus, RunMode
+from pms.controller.sizers.kelly import KellySizer
+from pms.core.enums import OrderStatus, RunMode, TimeInForce
 from pms.core.interfaces import (
     DiscoveryPollCompleteSensor,
     IController,
@@ -54,6 +54,7 @@ from pms.core.models import (
     Position,
     ReconciliationReport as ReconciliationReport,
     TradeDecision,
+    Venue,
     VenueAccountSnapshot as VenueAccountSnapshot,
     VenueCredentials,
 )
@@ -91,6 +92,13 @@ from pms.storage.order_store import OrderStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
 from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
+from pms.strategies.flb import FlbAgent, FlbController, FlbStrategyModule
+from pms.strategies.flb.source import (
+    FlbMarketSnapshot,
+    FlbMarketSnapshotReader,
+    LiveFlbSource,
+)
+from pms.strategies.intents import StrategyContext
 from pms.strategies.projections import (
     ActiveStrategy,
     EvalSpec,
@@ -100,6 +108,7 @@ from pms.strategies.projections import (
     RiskParams,
     StrategyConfig,
 )
+from pms.strategies.runtime_bridge import StrategyRunResult
 from pms.strategies.versioning import compute_strategy_version_id
 
 
@@ -579,6 +588,71 @@ class Runner:
     async def wait_for_signals(self, count: int) -> None:
         while len(self.state.signals) < count:
             await asyncio.sleep(0.1)
+
+    def build_flb_strategy_module(
+        self,
+        *,
+        strategy_id: str,
+        strategy_version_id: str,
+        market_ids: Sequence[str],
+        market_reader: FlbMarketSnapshotReader | None = None,
+    ) -> FlbStrategyModule:
+        if not market_ids:
+            msg = "market_ids must not be empty"
+            raise ValueError(msg)
+        reader = market_reader
+        if reader is None:
+            if self._pg_pool is None:
+                msg = (
+                    "Runner PostgreSQL pool is required to build the production "
+                    "FLB market reader"
+                )
+                raise RuntimeError(msg)
+            reader = _PostgresFlbMarketSnapshotReader(
+                PostgresMarketDataStore(self._pg_pool)
+            )
+
+        return FlbStrategyModule(
+            source=LiveFlbSource(
+                market_ids=tuple(market_ids),
+                market_reader=reader,
+                position_sizer=KellySizer(self.config.risk),
+                portfolio=self.portfolio,
+                max_slippage_bps=self.config.controller.max_slippage_bps,
+                time_in_force=TimeInForce(
+                    self.config.controller.time_in_force.upper()
+                ),
+            ),
+            controller=FlbController(),
+            agent=FlbAgent(),
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+        )
+
+    async def run_flb_strategy_once(
+        self,
+        *,
+        strategy_id: str,
+        strategy_version_id: str,
+        market_ids: Sequence[str],
+        as_of: datetime | None = None,
+        market_reader: FlbMarketSnapshotReader | None = None,
+    ) -> Sequence[StrategyRunResult]:
+        module = self.build_flb_strategy_module(
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+            market_ids=market_ids,
+            market_reader=market_reader,
+        )
+        return tuple(
+            await module.run_with_artifacts(
+                StrategyContext(
+                    strategy_id=strategy_id,
+                    strategy_version_id=strategy_version_id,
+                    as_of=as_of or datetime.now(tz=UTC),
+                )
+            )
+        )
 
     def _build_sensors(self) -> tuple[ISensor, ...]:
         if self.sensors is not None:
@@ -1758,6 +1832,192 @@ class Runner:
                 asset_ids=None,
             )
         ]
+
+
+@dataclass(frozen=True)
+class _PostgresFlbMarketSnapshotReader:
+    store: PostgresMarketDataStore
+
+    async def latest(
+        self,
+        market_id: str,
+        *,
+        as_of: datetime,
+    ) -> FlbMarketSnapshot | None:
+        async with self.store.pool.acquire() as connection:
+            resolved_market_id = await _resolve_flb_market_id(connection, market_id)
+            if resolved_market_id is None:
+                return None
+            market_row = await _read_flb_market_row(connection, resolved_market_id)
+            if market_row is None:
+                return None
+            price_row = await _read_flb_price_row(
+                connection,
+                resolved_market_id,
+                as_of=as_of,
+            )
+
+        if _future_market_status_change(market_row, as_of=as_of):
+            return None
+        if market_row["closed"] is True or market_row["accepting_orders"] is False:
+            return None
+
+        yes_price_source = price_row if price_row is not None else market_row
+        observed_at = _observed_at(yes_price_source)
+        if observed_at is None or observed_at > as_of:
+            return None
+
+        yes_price = _open_probability_or_none(yes_price_source["yes_price"])
+        yes_token_id = market_row["yes_token_id"]
+        no_token_id = market_row["no_token_id"]
+        if (
+            yes_price is None
+            or not isinstance(yes_token_id, str)
+            or not isinstance(no_token_id, str)
+        ):
+            return None
+
+        return FlbMarketSnapshot(
+            market_id=cast(str, market_row["market_id"]),
+            title=cast(str, market_row["question"]),
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+            yes_price=yes_price,
+            yes_best_ask=_open_probability_or_none(yes_price_source["best_ask"]),
+            no_best_ask=_no_best_ask(
+                no_price=yes_price_source["no_price"],
+                yes_best_bid=yes_price_source["best_bid"],
+            ),
+            observed_at=observed_at,
+            resolves_at=cast(datetime | None, market_row["resolves_at"]),
+            venue=cast(Venue, market_row["venue"]),
+        )
+
+
+async def _resolve_flb_market_id(connection: Any, lookup_id: str) -> str | None:
+    query = """
+    WITH matches AS (
+        SELECT markets.condition_id AS market_id, 0 AS match_rank
+        FROM markets
+        WHERE markets.condition_id = $1
+
+        UNION ALL
+
+        SELECT tokens.condition_id AS market_id, 1 AS match_rank
+        FROM tokens
+        WHERE tokens.token_id = $1
+    )
+    SELECT market_id
+    FROM matches
+    ORDER BY match_rank ASC, market_id ASC
+    LIMIT 1
+    """
+    value = await connection.fetchval(query, lookup_id)
+    if not isinstance(value, str):
+        return None
+    return value
+
+
+async def _read_flb_market_row(connection: Any, market_id: str) -> Any | None:
+    query = """
+        SELECT
+            markets.condition_id AS market_id,
+            markets.question,
+            markets.venue,
+            markets.resolves_at,
+            markets.last_seen_at,
+            markets.yes_price,
+            markets.no_price,
+            markets.best_bid,
+            markets.best_ask,
+            markets.price_updated_at,
+            markets.closed,
+            markets.accepting_orders,
+            markets.status_updated_at,
+            MAX(CASE WHEN tokens.outcome = 'YES' THEN tokens.token_id END) AS yes_token_id,
+            MAX(CASE WHEN tokens.outcome = 'NO' THEN tokens.token_id END) AS no_token_id
+        FROM markets
+        LEFT JOIN tokens
+            ON tokens.condition_id = markets.condition_id
+        WHERE markets.condition_id = $1
+        GROUP BY
+            markets.condition_id,
+            markets.question,
+            markets.venue,
+            markets.resolves_at,
+            markets.last_seen_at,
+            markets.yes_price,
+            markets.no_price,
+            markets.best_bid,
+            markets.best_ask,
+            markets.price_updated_at,
+            markets.closed,
+            markets.accepting_orders,
+            markets.status_updated_at
+        """
+    return await connection.fetchrow(query, market_id)
+
+
+async def _read_flb_price_row(
+    connection: Any,
+    market_id: str,
+    *,
+    as_of: datetime,
+) -> Any | None:
+    query = """
+    SELECT
+        snapshot_at,
+        yes_price,
+        no_price,
+        best_bid,
+        best_ask
+    FROM market_price_snapshots
+    WHERE condition_id = $1
+      AND snapshot_at <= $2
+    ORDER BY snapshot_at DESC
+    LIMIT 1
+    """
+    return await connection.fetchrow(query, market_id, as_of)
+
+
+def _observed_at(row: Any) -> datetime | None:
+    observed_at = row["snapshot_at"] if "snapshot_at" in row else row["price_updated_at"]
+    if observed_at is None and "last_seen_at" in row:
+        observed_at = row["last_seen_at"]
+    if isinstance(observed_at, datetime):
+        return observed_at
+    return None
+
+
+def _future_market_status_change(row: Any, *, as_of: datetime) -> bool:
+    status_updated_at = row["status_updated_at"]
+    return isinstance(status_updated_at, datetime) and status_updated_at > as_of
+
+
+def _open_probability_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(cast(Any, value))
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0.0 or parsed >= 1.0:
+        return None
+    return parsed
+
+
+def _no_best_ask(
+    *,
+    no_price: object,
+    yes_best_bid: object,
+) -> float | None:
+    parsed_no_price = _open_probability_or_none(no_price)
+    if parsed_no_price is not None:
+        return parsed_no_price
+    parsed_yes_best_bid = _open_probability_or_none(yes_best_bid)
+    if parsed_yes_best_bid is None:
+        return None
+    return _open_probability_or_none(1.0 - parsed_yes_best_bid)
 
 
 def _append_bounded(items: list[T], item: T) -> None:
