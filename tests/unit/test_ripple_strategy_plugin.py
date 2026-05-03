@@ -30,6 +30,7 @@ from pms.strategies.ripple.controller import RippleController
 from pms.strategies.ripple.evaluator import RippleEvidenceEvaluator
 from pms.strategies.ripple.source import (
     LiveRippleSource,
+    RIPPLE_FACTOR_REQUIREMENTS,
     RippleMarketSnapshot,
     RippleObservationFixture,
     RippleObservationSource,
@@ -176,6 +177,33 @@ class _StaticMarketReader:
         )
 
 
+class _ZeroSizer:
+    def size(
+        self,
+        *,
+        prob: float,
+        market_price: float,
+        portfolio: Portfolio,
+    ) -> float:
+        del prob, market_price, portfolio
+        return 0.0
+
+
+class _FixedSizer:
+    def __init__(self, notional_usdc: float) -> None:
+        self.notional_usdc = notional_usdc
+
+    def size(
+        self,
+        *,
+        prob: float,
+        market_price: float,
+        portfolio: Portfolio,
+    ) -> float:
+        del prob, market_price, portfolio
+        return self.notional_usdc
+
+
 async def _candidate_from_fixture(
     fixture: RippleObservationFixture,
 ) -> StrategyCandidate:
@@ -297,6 +325,16 @@ async def test_live_ripple_source_reads_factor_snapshot_and_market_price() -> No
     )
 
 
+def test_live_ripple_requires_beta_binomial_count_factors() -> None:
+    required_flags = {
+        step.factor_id: step.required
+        for step in RIPPLE_FACTOR_REQUIREMENTS
+    }
+
+    assert required_flags["yes_count"] is True
+    assert required_flags["no_count"] is True
+
+
 def test_ripple_evaluator_emits_beta_binomial_posterior_edge_and_confidence() -> None:
     candidate = StrategyCandidate(
         candidate_id="candidate-ripple-live",
@@ -364,6 +402,27 @@ async def test_live_ripple_uses_fractional_kelly_sizing_instead_of_fixture_notio
 
 
 @pytest.mark.asyncio
+async def test_live_ripple_zero_kelly_size_is_clean_no_trade() -> None:
+    source = LiveRippleSource(
+        market_ids=("market-ripple-1",),
+        factor_reader=_RecordingFactorReader(),
+        market_reader=_StaticMarketReader(best_ask=0.60),
+        position_sizer=_ZeroSizer(),
+        portfolio=_portfolio(),
+    )
+    module = RippleStrategyModule(
+        source=source,
+        controller=RippleController(),
+        agent=RippleAgent(),
+        strategy_id="ripple",
+        strategy_version_id="ripple-v1",
+    )
+
+    assert await source.observe(_context()) == ()
+    assert await module.run(_context()) == ()
+
+
+@pytest.mark.asyncio
 async def test_live_ripple_rejects_zero_or_negative_edge_before_building_intent() -> None:
     source = LiveRippleSource(
         market_ids=("market-ripple-1",),
@@ -377,7 +436,7 @@ async def test_live_ripple_rejects_zero_or_negative_edge_before_building_intent(
             )
         ),
         market_reader=_StaticMarketReader(yes_price=0.55, best_ask=0.56),
-        position_sizer=KellySizer(risk=RiskSettings(max_position_per_market=100.0)),
+        position_sizer=_FixedSizer(2.0),
         portfolio=_portfolio(),
     )
     observations = await source.observe(_context())

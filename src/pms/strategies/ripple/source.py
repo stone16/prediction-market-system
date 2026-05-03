@@ -56,7 +56,7 @@ RIPPLE_FACTOR_REQUIREMENTS: tuple[FactorCompositionStep, ...] = (
         param="",
         weight=1.0,
         threshold=None,
-        required=False,
+        required=True,
         freshness_sla_s=3600.0,
     ),
     FactorCompositionStep(
@@ -65,7 +65,7 @@ RIPPLE_FACTOR_REQUIREMENTS: tuple[FactorCompositionStep, ...] = (
         param="",
         weight=1.0,
         threshold=None,
-        required=False,
+        required=True,
         freshness_sla_s=3600.0,
     ),
 )
@@ -270,19 +270,19 @@ class LiveRippleSource:
                 strategy_id=context.strategy_id,
                 strategy_version_id=context.strategy_version_id,
             )
-            observations.append(
-                _live_observation(
-                    context=context,
-                    market=market,
-                    snapshot=snapshot,
-                    position_sizer=self.position_sizer,
-                    portfolio=self.portfolio,
-                    prior_strength=self.prior_strength,
-                    min_expected_edge=self.min_expected_edge,
-                    max_slippage_bps=self.max_slippage_bps,
-                    time_in_force=self.time_in_force,
-                )
+            observation = _live_observation(
+                context=context,
+                market=market,
+                snapshot=snapshot,
+                position_sizer=self.position_sizer,
+                portfolio=self.portfolio,
+                prior_strength=self.prior_strength,
+                min_expected_edge=self.min_expected_edge,
+                max_slippage_bps=self.max_slippage_bps,
+                time_in_force=self.time_in_force,
             )
+            if observation is not None:
+                observations.append(observation)
         return tuple(observations)
 
 
@@ -309,7 +309,7 @@ def _live_observation(
     min_expected_edge: float,
     max_slippage_bps: int,
     time_in_force: TimeInForce,
-) -> StrategyObservation:
+) -> StrategyObservation | None:
     prior_probability = _bounded_probability(
         _factor_value(snapshot, "metaculus_prior", fallback=market.yes_price),
         "metaculus_prior",
@@ -344,6 +344,8 @@ def _live_observation(
         market_price=limit_price,
         portfolio=portfolio,
     )
+    if notional_usdc <= 0.0:
+        return None
     evidence_refs = _live_evidence_refs(market, snapshot)
     payload_metadata = {
         "source": LIVE_RIPPLE_SOURCE,
