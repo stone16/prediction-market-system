@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 
@@ -10,8 +11,10 @@ from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import HaltState, RiskManager, RiskTradeResult
 from pms.config import RiskSettings
 from pms.controller.pipeline import _default_portfolio
-from pms.core.enums import TimeInForce
+from pms.core.enums import OrderStatus, TimeInForce
 from pms.core.models import OrderState, Portfolio, TradeDecision
+from pms.storage.feedback_store import FeedbackStore
+from tests.support.fake_stores import InMemoryFeedbackStore
 
 
 NOW = datetime(2026, 5, 3, 8, 0, tzinfo=UTC)
@@ -201,11 +204,11 @@ async def test_actuator_executor_respects_auto_halt_before_order_risk() -> None:
     executor = ActuatorExecutor(
         adapter=adapter,
         risk=manager,
-        feedback=ActuatorFeedback(),
+        feedback=ActuatorFeedback(cast(FeedbackStore, InMemoryFeedbackStore())),
     )
 
     order = await executor.execute(_decision(), _portfolio())
 
     assert adapter.calls == 0
-    assert order.status == "rejected"
+    assert order.status == OrderStatus.INVALID.value
     assert order.raw_status == "credential_failure"
