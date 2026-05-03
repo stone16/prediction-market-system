@@ -62,8 +62,6 @@ class LLMSettings(BaseModel):
             raise ValueError("provider is required when LLM is enabled")
         if not self.api_key:
             raise ValueError("api_key is required when LLM is enabled")
-        if self.provider == "openai" and not self.base_url:
-            raise ValueError("base_url is required when provider is openai")
         return self
 
 

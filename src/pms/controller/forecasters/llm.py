@@ -169,11 +169,13 @@ class LLMForecaster:
         if not callable(client_factory):
             return None
         factory = cast(Callable[..., object], client_factory)
-        return factory(
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
-            timeout=self.config.timeout_s,
-        )
+        kwargs: dict[str, object] = {
+            "api_key": self.config.api_key,
+            "timeout": self.config.timeout_s,
+        }
+        if self.config.base_url:
+            kwargs["base_url"] = self.config.base_url
+        return factory(**kwargs)
 
     def _call(self, client: object, signal: MarketSignal) -> str:
         assert self.config is not None

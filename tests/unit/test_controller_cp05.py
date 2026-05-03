@@ -302,6 +302,47 @@ def test_llm_forecaster_predict_uses_openai_system_message() -> None:
     assert "# Market" in call["messages"][1]["content"]
 
 
+def test_llm_settings_allow_openai_default_and_custom_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_calls: list[dict[str, Any]] = []
+
+    def create_client(**kwargs: Any) -> FakeOpenAIClient:
+        created_calls.append(kwargs)
+        return FakeOpenAIClient()
+
+    monkeypatch.setattr(
+        "pms.controller.forecasters.llm.import_module",
+        lambda _: SimpleNamespace(OpenAI=create_client),
+    )
+    default_endpoint = LLMSettings(
+        enabled=True,
+        provider="openai",
+        api_key="test-key",
+        model="openai-test",
+    )
+    custom_endpoint = LLMSettings(
+        enabled=True,
+        provider="openai",
+        api_key="test-key",
+        base_url="https://llm-gateway.example/v1",
+        model="openai-test",
+    )
+
+    assert (
+        LLMForecaster(config=default_endpoint).predict(_signal(market_id="m-openai"))
+        is not None
+    )
+    assert (
+        LLMForecaster(config=custom_endpoint).predict(
+            _signal(market_id="m-openai-custom")
+        )
+        is not None
+    )
+    assert "base_url" not in created_calls[0]
+    assert created_calls[1]["base_url"] == "https://llm-gateway.example/v1"
+
+
 def test_llm_forecaster_returns_none_when_disabled_and_real_result_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
