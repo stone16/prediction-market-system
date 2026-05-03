@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from pms.core.enums import RunMode
@@ -45,9 +45,26 @@ class PolymarketSettings(BaseModel):
 
 class LLMSettings(BaseModel):
     enabled: bool = False
-    provider: str | None = None
+    provider: Literal["anthropic", "openai"] | None = None
     api_key: str | None = None
-    model: str = "claude-3-5-sonnet-latest"
+    base_url: str | None = None
+    model: str = "claude-sonnet-4-6"
+    timeout_s: float = 5.0
+    cache_ttl_s: float = 30.0
+    max_tokens: int = 256
+    max_daily_llm_cost_usdc: float | None = 5.0
+
+    @model_validator(mode="after")
+    def _validate_when_enabled(self) -> Self:
+        if not self.enabled:
+            return self
+        if self.provider is None:
+            raise ValueError("provider is required when LLM is enabled")
+        if not self.api_key:
+            raise ValueError("api_key is required when LLM is enabled")
+        if self.provider == "openai" and not self.base_url:
+            raise ValueError("base_url is required when provider is openai")
+        return self
 
 
 class ControllerSettings(BaseModel):

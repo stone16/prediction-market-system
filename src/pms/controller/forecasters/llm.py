@@ -1,21 +1,43 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from importlib import import_module
 from typing import Protocol, Self, cast
 
 from pms.config import LLMSettings
 from pms.core.models import MarketSignal
 
+logger = logging.getLogger(__name__)
 
-class _MessagesClient(Protocol):
-    def create(self, **kwargs: object) -> object: ...
+_SYSTEM_PROMPT = (
+    "You are a calibrated prediction-market forecaster. Estimate the true "
+    "resolution probability, not the current market price. Use the market, "
+    "orderbook, and external signals as evidence. Return valid JSON only with "
+    "prob_estimate, confidence, and rationale."
+)
+_ESTIMATED_CALL_COST_USDC = 0.002
 
 
-class _ClaudeClient(Protocol):
-    messages: _MessagesClient
+class _LLMClient(Protocol):
+    """Marker protocol; concrete SDK shapes are provider-specific."""
+
+
+class LLMTimeoutError(RuntimeError):
+    """Wraps SDK timeout errors. predict() downgrades these to None."""
+
+
+class LLMTransientError(RuntimeError):
+    """Wraps SDK transient errors such as rate limit, 5xx, and network errors."""
+
+
+class LLMParseError(RuntimeError):
+    """Raised when a provider response cannot satisfy the forecast contract."""
 
 
 class LLMForecastResult(tuple[float, float, str]):
@@ -37,6 +59,11 @@ class LLMForecastResult(tuple[float, float, str]):
 class LLMForecaster:
     config: LLMSettings | None = None
     client: object | None = None
+    _cache: dict[str, tuple[float, LLMForecastResult]] = field(default_factory=dict)
+    _cache_lock: threading.Lock = field(default_factory=threading.Lock)
+    _cost_lock: threading.Lock = field(default_factory=threading.Lock)
+    _cost_day: date | None = None
+    _daily_cost_usdc: float = 0.0
 
     def __post_init__(self) -> None:
         if self.config is None:
@@ -45,20 +72,54 @@ class LLMForecaster:
     def predict(self, signal: MarketSignal) -> LLMForecastResult | None:
         if self.config is None or not self.config.enabled:
             return None
-        return LLMForecastResult(
-            prob_estimate=signal.yes_price,
-            confidence=0.0,
-            rationale="pre-s5-neutral",
-            model_id="neutral",
-        )
+        cached = self._cache_get(signal.market_id)
+        if cached is not None:
+            return cached
+        estimated_cost = self._estimated_call_cost_usdc()
+        if not self._check_budget(estimated_cost):
+            logger.info(
+                "llm_forecaster_budget_exhausted",
+                extra={
+                    "market_id": signal.market_id,
+                    "provider": self.config.provider,
+                    "model": self.config.model,
+                    "estimated_cost_usdc": estimated_cost,
+                    "daily_cost_usdc": self._daily_cost_usdc,
+                    "max_daily_llm_cost_usdc": self.config.max_daily_llm_cost_usdc,
+                },
+            )
+            return None
+        client = self._client()
+        if client is None:
+            return None
+        try:
+            raw = self._call(client, signal)
+            result = self._parse(raw)
+        except (LLMTimeoutError, LLMTransientError, LLMParseError):
+            return None
+        self._record_cost(estimated_cost, signal)
+        self._cache_put(signal.market_id, result)
+        return result
 
     async def forecast(self, signal: MarketSignal) -> float:
-        result = self.predict(signal)
+        import asyncio
+
+        result = await asyncio.to_thread(self.predict, signal)
         return signal.yes_price if result is None else result[0]
 
-    def _client(self, api_key: str) -> _ClaudeClient | None:
+    def _client(self) -> object | None:
         if self.client is not None:
-            return cast(_ClaudeClient, self.client)
+            return self.client
+        if self.config is None or self.config.provider is None:
+            return None
+        if self.config.provider == "anthropic":
+            self.client = self._anthropic_client()
+        else:
+            self.client = self._openai_client()
+        return self.client
+
+    def _anthropic_client(self) -> object | None:
+        assert self.config is not None
         try:
             anthropic_module = import_module("anthropic")
         except ImportError:
@@ -66,10 +127,181 @@ class LLMForecaster:
         client_factory = getattr(anthropic_module, "Anthropic", None)
         if not callable(client_factory):
             return None
-        factory = cast(Callable[..., _ClaudeClient], client_factory)
-        created_client = factory(api_key=api_key)
-        self.client = created_client
-        return created_client
+        factory = cast(Callable[..., object], client_factory)
+        kwargs: dict[str, object] = {
+            "api_key": self.config.api_key,
+            "timeout": self.config.timeout_s,
+        }
+        if self.config.base_url:
+            kwargs["base_url"] = self.config.base_url
+        return factory(**kwargs)
+
+    def _openai_client(self) -> object | None:
+        assert self.config is not None
+        try:
+            openai_module = import_module("openai")
+        except ImportError:
+            return None
+        client_factory = getattr(openai_module, "OpenAI", None)
+        if not callable(client_factory):
+            return None
+        factory = cast(Callable[..., object], client_factory)
+        return factory(
+            api_key=self.config.api_key,
+            base_url=self.config.base_url,
+            timeout=self.config.timeout_s,
+        )
+
+    def _call(self, client: object, signal: MarketSignal) -> str:
+        assert self.config is not None
+        if self.config.provider == "anthropic":
+            return self._call_anthropic(client, signal)
+        if self.config.provider == "openai":
+            return self._call_openai(client, signal)
+        raise LLMTransientError(f"unknown provider: {self.config.provider}")
+
+    def _call_anthropic(self, client: object, signal: MarketSignal) -> str:
+        assert self.config is not None
+        try:
+            response = getattr(client, "messages").create(
+                model=self.config.model,
+                max_tokens=self.config.max_tokens,
+                system=_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": _prompt(signal)}],
+            )
+        except (LLMTimeoutError, LLMTransientError, LLMParseError):
+            raise
+        except Exception as exc:
+            anthropic_module = _safe_import("anthropic")
+            if anthropic_module is not None:
+                if isinstance(exc, getattr(anthropic_module, "APITimeoutError", ())):
+                    raise LLMTimeoutError(str(exc)) from exc
+                if isinstance(
+                    exc,
+                    (
+                        getattr(anthropic_module, "RateLimitError", ()),
+                        getattr(anthropic_module, "APIConnectionError", ()),
+                        getattr(anthropic_module, "InternalServerError", ()),
+                    ),
+                ):
+                    raise LLMTransientError(str(exc)) from exc
+            raise
+        return _response_text_anthropic(response)
+
+    def _call_openai(self, client: object, signal: MarketSignal) -> str:
+        assert self.config is not None
+        try:
+            response = getattr(client, "chat").completions.create(
+                model=self.config.model,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": _prompt(signal)},
+                ],
+                max_tokens=self.config.max_tokens,
+                response_format={"type": "json_object"},
+            )
+        except (LLMTimeoutError, LLMTransientError, LLMParseError):
+            raise
+        except Exception as exc:
+            openai_module = _safe_import("openai")
+            if openai_module is not None:
+                if isinstance(exc, getattr(openai_module, "APITimeoutError", ())):
+                    raise LLMTimeoutError(str(exc)) from exc
+                if isinstance(
+                    exc,
+                    (
+                        getattr(openai_module, "RateLimitError", ()),
+                        getattr(openai_module, "APIConnectionError", ()),
+                        getattr(openai_module, "InternalServerError", ()),
+                    ),
+                ):
+                    raise LLMTransientError(str(exc)) from exc
+            raise
+        return _response_text_openai(response)
+
+    def _parse(self, raw: str) -> LLMForecastResult:
+        try:
+            loaded = _load_json(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise LLMParseError(f"unparseable LLM response: {exc}") from exc
+        for key in ("prob_estimate", "confidence", "rationale"):
+            if key not in loaded:
+                raise LLMParseError(f"LLM response missing required key: {key}")
+        try:
+            probability = _clamp_probability(_as_float(loaded["prob_estimate"]))
+            confidence = _clamp(_as_float(loaded["confidence"]))
+        except (TypeError, ValueError) as exc:
+            raise LLMParseError(f"non-numeric LLM field: {exc}") from exc
+        assert self.config is not None
+        return LLMForecastResult(
+            prob_estimate=probability,
+            confidence=confidence,
+            rationale=str(loaded["rationale"]),
+            model_id=self.config.model,
+        )
+
+    def _cache_get(self, market_id: str) -> LLMForecastResult | None:
+        if self.config is None or self.config.cache_ttl_s <= 0:
+            return None
+        with self._cache_lock:
+            entry = self._cache.get(market_id)
+            if entry is None:
+                return None
+            ts, result = entry
+            if time.monotonic() - ts > self.config.cache_ttl_s:
+                del self._cache[market_id]
+                return None
+            return result
+
+    def _cache_put(self, market_id: str, result: LLMForecastResult) -> None:
+        if self.config is None or self.config.cache_ttl_s <= 0:
+            return
+        with self._cache_lock:
+            self._cache[market_id] = (time.monotonic(), result)
+            if len(self._cache) > 1000:
+                oldest = min(self._cache, key=lambda k: self._cache[k][0])
+                del self._cache[oldest]
+
+    def _estimated_call_cost_usdc(self) -> float:
+        return _ESTIMATED_CALL_COST_USDC
+
+    def _check_budget(self, estimated_cost_usdc: float) -> bool:
+        assert self.config is not None
+        with self._cost_lock:
+            today = _today_utc()
+            if self._cost_day != today:
+                self._cost_day = today
+                self._daily_cost_usdc = 0.0
+            max_daily = self.config.max_daily_llm_cost_usdc
+            if max_daily is None:
+                return True
+            return self._daily_cost_usdc + estimated_cost_usdc <= max_daily
+
+    def _record_cost(self, estimated_cost_usdc: float, signal: MarketSignal) -> None:
+        assert self.config is not None
+        with self._cost_lock:
+            if self._cost_day is None:
+                self._cost_day = _today_utc()
+            self._daily_cost_usdc += estimated_cost_usdc
+            daily_cost = self._daily_cost_usdc
+        logger.info(
+            "llm_forecaster_cost_recorded",
+            extra={
+                "market_id": signal.market_id,
+                "provider": self.config.provider,
+                "model": self.config.model,
+                "estimated_cost_usdc": estimated_cost_usdc,
+                "daily_cost_usdc": daily_cost,
+                "max_daily_llm_cost_usdc": self.config.max_daily_llm_cost_usdc,
+            },
+        )
+
+
+def _safe_import(name: str) -> object | None:
+    try:
+        return import_module(name)
+    except ImportError:
+        return None
 
 
 def _prompt(signal: MarketSignal) -> str:
@@ -79,14 +311,20 @@ def _prompt(signal: MarketSignal) -> str:
     }
     return "\n".join(
         [
-            f"market_title: {signal.title}",
+            "# Market",
+            f"title: {signal.title}",
             f"market_id: {signal.market_id}",
             f"venue: {signal.venue}",
             f"yes_price: {signal.yes_price}",
-            "orderbook_top_5: "
-            + json.dumps(orderbook, sort_keys=True, separators=(",", ":")),
-            "external_signal: "
-            + json.dumps(signal.external_signal, sort_keys=True, default=str),
+            "",
+            "# Orderbook",
+            json.dumps(orderbook, sort_keys=True, separators=(",", ":")),
+            "",
+            "# External Signals",
+            json.dumps(signal.external_signal, sort_keys=True, default=str),
+            "",
+            "# Output",
+            "Return JSON only with prob_estimate, confidence, and rationale.",
         ]
     )
 
@@ -97,8 +335,7 @@ def _top_five(levels: object) -> object:
     return []
 
 
-def _parse_response(response: object) -> dict[str, object]:
-    text = _response_text(response)
+def _load_json(text: str) -> dict[str, object]:
     try:
         loaded = json.loads(text)
     except json.JSONDecodeError:
@@ -108,14 +345,11 @@ def _parse_response(response: object) -> dict[str, object]:
             raise
         loaded = json.loads(text[start : end + 1])
     if not isinstance(loaded, dict):
-        raise ValueError("Expected Claude forecast response to be a JSON object")
-    for key in ("prob_estimate", "confidence", "rationale"):
-        if key not in loaded:
-            raise ValueError(f"Claude forecast response missing {key}")
+        raise ValueError("expected JSON object")
     return loaded
 
 
-def _response_text(response: object) -> str:
+def _response_text_anthropic(response: object) -> str:
     content = getattr(response, "content", "")
     if isinstance(content, str):
         return content
@@ -131,6 +365,15 @@ def _response_text(response: object) -> str:
     return str(content)
 
 
+def _response_text_openai(response: object) -> str:
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return ""
+    message = getattr(choices[0], "message", None)
+    content = getattr(message, "content", "") if message is not None else ""
+    return content if isinstance(content, str) else str(content)
+
+
 def _as_float(value: object) -> float:
     if isinstance(value, str | int | float):
         return float(value)
@@ -139,3 +382,11 @@ def _as_float(value: object) -> float:
 
 def _clamp(value: float) -> float:
     return min(max(value, 0.0), 1.0)
+
+
+def _clamp_probability(value: float) -> float:
+    return min(max(value, 0.01), 0.99)
+
+
+def _today_utc() -> date:
+    return datetime.now(tz=UTC).date()
