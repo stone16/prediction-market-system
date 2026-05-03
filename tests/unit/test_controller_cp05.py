@@ -330,12 +330,11 @@ def test_llm_forecaster_client_paths_cover_injection_dispatch_and_caching(
 def test_llm_prompt_trims_orderbook_and_serializes_external_signal() -> None:
     prompt = _prompt(_signal())
 
-    assert "**Market**: Will CP05 pass?" in prompt
-    assert "**Current YES price**: 0.4000" in prompt
+    assert "market_title: Will CP05 pass?" in prompt
+    assert "yes_price: 0.4" in prompt
     assert '"price":0.35' in prompt
     assert '"price":0.34' not in prompt
-    assert "- Yes count: 7" in prompt
-    assert "- No count: 3" in prompt
+    assert "Respond with a JSON object only" in prompt
 
 
 def test_llm_response_parsing_helpers_cover_json_text_and_errors() -> None:
