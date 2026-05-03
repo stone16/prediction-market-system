@@ -22,6 +22,19 @@ class FactorCatalogEntry:
 
 FACTOR_CATALOG_ROWS: tuple[FactorCatalogEntry, ...] = (
     FactorCatalogEntry(
+        factor_id="favorite_longshot_bias",
+        name="Favorite-Longshot Bias",
+        description=(
+            "Signed H1 contrarian bucket signal: negative means buy NO in "
+            "overpriced low-YES longshots, positive means buy YES in underpriced "
+            "high-YES favorites."
+        ),
+        input_schema_hash="c4288b992546eb39e3a5e71f660d2a381a45e07f5a267349855f010c59785f6b",
+        output_type="scalar",
+        direction="signed",
+        owner="system",
+    ),
+    FactorCatalogEntry(
         factor_id="orderbook_imbalance",
         name="Orderbook Imbalance",
         description="Normalized bid-versus-ask depth imbalance from the current orderbook signal.",
