@@ -14,7 +14,9 @@ and the first live order is approved by an operator gate.
 ## Status: Gate 2 CLOSED — Ready for Paper Soak
 
 All core PRs merged as of 2026-05-03. The system is code-complete for
-H1 (FLB contrarian) strategy and ready for live-data paper soaking.
+H1 (FLB contrarian) strategy and ready for live-data paper soaking. H2
+anchoring-lag / LLM-news replay remains research-only until the H1 historical
+data spine proves enough coverage and measurable edge.
 
 | Milestone | Status | PR | Description |
 |-----------|--------|-----|-------------|
@@ -77,7 +79,7 @@ emergency stop runbook. Install the optional live SDK with
 |-----------|-------------|------------|
 | **Beta-Binomial Forecaster** | Bayesian probability model using historical resolution data | `forecaster: beta_binomial` |
 | **LLM Forecaster** | Provider-switchable (Anthropic/OpenAI) market prediction with per-market 30s TTL cache | `forecaster: llm`, `llm.provider`, `llm.base_url` |
-| **FLB Signal** | Detects Favorite-Longshot Bias in Polymarket pricing | `strategies.h1.enabled` |
+| **FLB Signal** | Detects Favorite-Longshot Bias in Polymarket pricing | `pms.strategies.flb.FlbStrategyModule` |
 | **Kelly Sizer** | Position sizing based on edge magnitude and Kelly fraction | `sizing.kelly_fraction` |
 | **RiskManager** | 6 auto-halt triggers (drawdown, consecutive losses, slippage, rate limit, stale orders, credential failure) | `risk.max_drawdown_pct`, `risk.max_position_per_market` |
 
@@ -140,7 +142,7 @@ export PMS_POLYMARKET_SIGNATURE_TYPE="<your signature type>"
 # 3. Create first-order approval file
 #    /secure/pms/first-order.json — reviewed and approved by operator
 
-# 4. Start live mode
+# 4. Start live mode through the stub-gated operator path
 export PMS_MODE=live
 export PMS_LIVE_TRADING_ENABLED=true
 uv run pms-api --config config.live.yaml

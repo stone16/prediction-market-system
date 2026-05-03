@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pms.factors.base import FactorDefinition
 
+from .favorite_longshot_bias import FavoriteLongshotBias
 from .fair_value_spread import FairValueSpread
 from .metaculus_prior import MetaculusPrior
 from .no_count import NoCount
@@ -10,6 +11,7 @@ from .subset_pricing_violation import SubsetPricingViolation
 from .yes_count import YesCount
 
 REGISTERED: tuple[type[FactorDefinition], ...] = (
+    FavoriteLongshotBias,
     FairValueSpread,
     SubsetPricingViolation,
     MetaculusPrior,
@@ -20,6 +22,7 @@ REGISTERED: tuple[type[FactorDefinition], ...] = (
 
 __all__ = (
     "REGISTERED",
+    "FavoriteLongshotBias",
     "FairValueSpread",
     "MetaculusPrior",
     "NoCount",
