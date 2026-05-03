@@ -21,7 +21,13 @@ NOW = datetime(2026, 5, 3, 8, 0, tzinfo=UTC)
 
 
 def _portfolio(*, max_drawdown_pct: float | None = None) -> Portfolio:
-    return replace(_default_portfolio(), max_drawdown_pct=max_drawdown_pct)
+    return replace(
+        _default_portfolio(),
+        total_usdc=100.0,
+        free_usdc=100.0,
+        locked_usdc=0.0,
+        max_drawdown_pct=max_drawdown_pct,
+    )
 
 
 def _decision() -> TradeDecision:
@@ -78,6 +84,33 @@ class _RecordingAdapter:
         del decision, portfolio
         self.calls += 1
         return _filled_order()
+
+
+class _IocUnfilledAdapter:
+    async def execute(
+        self,
+        decision: TradeDecision,
+        portfolio: Portfolio | None = None,
+    ) -> OrderState:
+        del portfolio
+        return OrderState(
+            order_id="order-ioc-unfilled",
+            decision_id=decision.decision_id,
+            status=OrderStatus.INVALID.value,
+            market_id=decision.market_id,
+            token_id=decision.token_id,
+            venue=decision.venue,
+            requested_notional_usdc=decision.notional_usdc,
+            filled_notional_usdc=0.0,
+            remaining_notional_usdc=decision.notional_usdc,
+            fill_price=None,
+            submitted_at=NOW,
+            last_updated_at=NOW,
+            raw_status="ioc_unfilled",
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            filled_quantity=0.0,
+        )
 
 
 @pytest.mark.parametrize(
@@ -212,3 +245,19 @@ async def test_actuator_executor_respects_auto_halt_before_order_risk() -> None:
     assert adapter.calls == 0
     assert order.status == OrderStatus.INVALID.value
     assert order.raw_status == "credential_failure"
+
+
+@pytest.mark.asyncio
+async def test_actuator_executor_does_not_track_terminal_ioc_unfilled_as_open() -> None:
+    manager = RiskManager()
+    executor = ActuatorExecutor(
+        adapter=_IocUnfilledAdapter(),
+        risk=manager,
+        feedback=ActuatorFeedback(cast(FeedbackStore, InMemoryFeedbackStore())),
+    )
+
+    order = await executor.execute(_decision(), _portfolio())
+    halt = manager.check_auto_halt(_portfolio(), now=NOW + timedelta(minutes=31))
+
+    assert order.raw_status == "ioc_unfilled"
+    assert halt.halted is False

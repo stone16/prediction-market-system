@@ -206,8 +206,16 @@ def _normalize_order_status(status: str) -> str:
 
 
 def _record_order_lifecycle(risk: RiskManager, order_state: OrderState) -> None:
-    risk.record_order_placed(order_state.order_id, at=order_state.submitted_at)
-    if order_state.filled_notional_usdc > 0.0 or _normalize_order_status(
-        order_state.status
-    ) in {OrderStatus.MATCHED.value, OrderStatus.CANCELLED.value}:
-        risk.record_order_filled(order_state.order_id)
+    status = _normalize_order_status(order_state.status)
+    if (
+        status in {
+            OrderStatus.LIVE.value,
+            OrderStatus.UNMATCHED.value,
+            OrderStatus.PARTIAL.value,
+        }
+        and order_state.remaining_notional_usdc > 1e-9
+    ):
+        risk.record_order_placed(order_state.order_id, at=order_state.submitted_at)
+        return
+
+    risk.record_order_filled(order_state.order_id)
