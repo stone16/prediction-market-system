@@ -49,9 +49,10 @@ class LLMSettings(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str = "claude-sonnet-4-6"
-    timeout_s: float = 5.0
-    cache_ttl_s: float = 30.0
-    max_tokens: int = 256
+    timeout_s: float = Field(default=5.0, gt=0)
+    cache_ttl_s: float = Field(default=30.0, ge=0)
+    max_tokens: int = Field(default=256, gt=0)
+    max_daily_llm_cost_usdc: float | None = Field(default=5.0, gt=0)
 
     @model_validator(mode="after")
     def _validate_when_enabled(self) -> Self:
@@ -61,10 +62,6 @@ class LLMSettings(BaseModel):
             raise ValueError("provider is required when LLM is enabled")
         if not self.api_key:
             raise ValueError("api_key is required when LLM is enabled")
-        if self.provider == "openai" and not self.base_url:
-            raise ValueError(
-                "base_url is required when provider is openai"
-            )
         return self
 
 
@@ -162,6 +159,13 @@ class PMSSettings(BaseSettings):
 
         config_data: dict[str, Any] = loaded
         return cls(**config_data)
+
+
+def load_settings(config_path: str | Path | None = None) -> PMSSettings:
+    configured_path = config_path
+    if configured_path is None:
+        configured_path = os.environ.get("PMS_CONFIG_PATH") or "config.yaml"
+    return PMSSettings.load(configured_path)
 
 
 def validate_live_mode_ready(settings: PMSSettings) -> VenueCredentials:

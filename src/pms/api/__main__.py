@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 
 import uvicorn
 
-from pms.config import PMSSettings
+from pms.config import load_settings
 
 
 LOOPBACK_API_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -22,6 +23,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--log-level", default="info")
     parser.add_argument("--reload", action="store_true", help="Enable hot-reload for development.")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="YAML config path. Also available as PMS_CONFIG_PATH.",
+    )
     return parser
 
 
@@ -34,7 +40,9 @@ def _startup_gate_message(host: str) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
-    settings = PMSSettings()
+    if args.config is not None:
+        os.environ["PMS_CONFIG_PATH"] = args.config
+    settings = load_settings(args.config)
     host = settings.api_host
 
     if not settings.api_token and host not in LOOPBACK_API_HOSTS:

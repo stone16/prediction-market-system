@@ -54,6 +54,15 @@ class ActuatorExecutor:
             return final_state
 
         try:
+            halt_state = self.risk.check_auto_halt(portfolio)
+            if halt_state.halted:
+                final_state = _rejected_order_state(decision, halt_state.trigger_kind)
+                await self.feedback.generate(
+                    final_state,
+                    reason=halt_state.trigger_kind,
+                )
+                return final_state
+
             risk_decision = self.risk.check(decision, portfolio)
             if not risk_decision.approved:
                 final_state = _rejected_order_state(decision, risk_decision.reason)
@@ -69,6 +78,7 @@ class ActuatorExecutor:
 
             try:
                 final_state = await self.adapter.execute(decision, portfolio)
+                _record_order_lifecycle(self.risk, final_state)
                 return final_state
             except InsufficientLiquidityError:
                 final_state = _rejected_order_state(decision, "insufficient_liquidity")
@@ -193,3 +203,19 @@ def _normalize_order_status(status: str) -> str:
     if normalized == "canceled":
         return OrderStatus.CANCELLED.value
     return normalized
+
+
+def _record_order_lifecycle(risk: RiskManager, order_state: OrderState) -> None:
+    status = _normalize_order_status(order_state.status)
+    if (
+        status in {
+            OrderStatus.LIVE.value,
+            OrderStatus.UNMATCHED.value,
+            OrderStatus.PARTIAL.value,
+        }
+        and order_state.remaining_notional_usdc > 1e-9
+    ):
+        risk.record_order_placed(order_state.order_id, at=order_state.submitted_at)
+        return
+
+    risk.record_order_filled(order_state.order_id)

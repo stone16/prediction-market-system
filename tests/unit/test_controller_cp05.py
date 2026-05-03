@@ -1,22 +1,26 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, date, datetime
 from math import inf, nan
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Protocol
 
 import pytest
 
 from pms.config import ControllerSettings, LLMSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.forecasters.llm import (
+    LLMTransientError,
     LLMForecaster,
     _as_float,
     _clamp,
     _load_json,
     _prompt,
     _response_text_anthropic,
+    _response_text_openai,
 )
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
@@ -36,6 +40,12 @@ from pms.strategies.projections import (
     RiskParams,
     StrategyConfig,
 )
+
+
+class _MessagesDouble(Protocol):
+    calls: list[dict[str, Any]]
+
+    def create(self, **kwargs: Any) -> object: ...
 
 
 def _signal(
@@ -88,38 +98,88 @@ def _portfolio() -> Portfolio:
 
 
 class FakeMessages:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        prob_estimate: float = 0.8,
+        confidence: float = 0.6,
+        rationale: str = "orderbook and external context support yes",
+    ) -> None:
+        self._payload = {
+            "prob_estimate": prob_estimate,
+            "confidence": confidence,
+            "rationale": rationale,
+        }
         self.calls: list[dict[str, Any]] = []
 
     def create(self, **kwargs: Any) -> object:
         self.calls.append(kwargs)
+        return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(self._payload))])
+
+
+class FakeSequenceMessages:
+    def __init__(self, payloads: list[dict[str, Any]]) -> None:
+        self._payloads = list(payloads)
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        payload = self._payloads.pop(0)
+        return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(payload))])
+
+
+class BlockingMessages:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        self.entered.set()
+        assert self.release.wait(timeout=2.0)
         payload = {
             "prob_estimate": 0.8,
             "confidence": 0.6,
-            "rationale": "orderbook and external context support yes",
+            "rationale": "blocked race winner",
         }
         return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(payload))])
 
 
-class FakeClaudeClient:
-    def __init__(self) -> None:
-        self.messages = FakeMessages()
-
-
-class FakeOpenAIChatCompletions:
-    def __init__(self) -> None:
+class FailingMessages:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
         self.calls: list[dict[str, Any]] = []
 
     def create(self, **kwargs: Any) -> object:
         self.calls.append(kwargs)
-        payload = {
-            "prob_estimate": 0.72,
-            "confidence": 0.55,
-            "rationale": "openai-fake",
+        raise self._exc
+
+
+class FakeClaudeClient:
+    def __init__(self) -> None:
+        self.messages: _MessagesDouble = FakeMessages()
+
+
+class FakeOpenAIChatCompletions:
+    def __init__(
+        self,
+        *,
+        prob_estimate: float = 0.72,
+        confidence: float = 0.55,
+        rationale: str = "openai-fake",
+    ) -> None:
+        self._payload = {
+            "prob_estimate": prob_estimate,
+            "confidence": confidence,
+            "rationale": rationale,
         }
-        message = SimpleNamespace(content=json.dumps(payload))
-        choice = SimpleNamespace(message=message)
-        return SimpleNamespace(choices=[choice])
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        message = SimpleNamespace(content=json.dumps(self._payload))
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
 class FakeOpenAIChat:
@@ -184,7 +244,7 @@ class FixedSizer:
         return self._size
 
 
-def test_llm_forecaster_predict_uses_injected_client_and_caches() -> None:
+def test_llm_forecaster_predict_uses_anthropic_system_prompt_and_caches() -> None:
     client = FakeClaudeClient()
     forecaster = LLMForecaster(
         config=LLMSettings(
@@ -192,9 +252,7 @@ def test_llm_forecaster_predict_uses_injected_client_and_caches() -> None:
             provider="anthropic",
             api_key="test-key",
             model="claude-test",
-            timeout_s=2.0,
             cache_ttl_s=30.0,
-            max_tokens=128,
         ),
         client=client,
     )
@@ -202,14 +260,87 @@ def test_llm_forecaster_predict_uses_injected_client_and_caches() -> None:
     result = forecaster.predict(_signal())
 
     assert result is not None
-    assert result[0] == pytest.approx(0.8)
-    assert result[1] == pytest.approx(0.6)
+    assert result == pytest.approx(
+        (0.8, 0.6, "orderbook and external context support yes")
+    )
     assert result.model_id == "claude-test"
-    assert client.messages.calls and len(client.messages.calls) == 1
-
-    # second call hits cache
-    forecaster.predict(_signal())
     assert len(client.messages.calls) == 1
+    call = client.messages.calls[0]
+    assert call["system"].startswith("You are a calibrated prediction-market forecaster")
+    assert call["messages"][0]["role"] == "user"
+    assert "# Market" in call["messages"][0]["content"]
+
+    assert forecaster.predict(_signal()) is result
+    assert len(client.messages.calls) == 1
+
+
+def test_llm_forecaster_predict_uses_openai_system_message() -> None:
+    client = FakeOpenAIClient()
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="openai",
+            api_key="test-key",
+            base_url="https://llm-gateway.example/v1",
+            model="openai-test",
+        ),
+        client=client,
+    )
+
+    result = forecaster.predict(_signal())
+
+    assert result is not None
+    assert result == pytest.approx((0.72, 0.55, "openai-fake"))
+    assert result.model_id == "openai-test"
+    call = client.chat.completions.calls[0]
+    assert call["response_format"] == {"type": "json_object"}
+    assert call["messages"][0]["role"] == "system"
+    assert call["messages"][0]["content"].startswith(
+        "You are a calibrated prediction-market forecaster"
+    )
+    assert call["messages"][1]["role"] == "user"
+    assert "# Market" in call["messages"][1]["content"]
+
+
+def test_llm_settings_allow_openai_default_and_custom_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_calls: list[dict[str, Any]] = []
+
+    def create_client(**kwargs: Any) -> FakeOpenAIClient:
+        created_calls.append(kwargs)
+        return FakeOpenAIClient()
+
+    monkeypatch.setattr(
+        "pms.controller.forecasters.llm.import_module",
+        lambda _: SimpleNamespace(OpenAI=create_client),
+    )
+    default_endpoint = LLMSettings(
+        enabled=True,
+        provider="openai",
+        api_key="test-key",
+        model="openai-test",
+    )
+    custom_endpoint = LLMSettings(
+        enabled=True,
+        provider="openai",
+        api_key="test-key",
+        base_url="https://llm-gateway.example/v1",
+        model="openai-test",
+    )
+
+    assert (
+        LLMForecaster(config=default_endpoint).predict(_signal(market_id="m-openai"))
+        is not None
+    )
+    assert (
+        LLMForecaster(config=custom_endpoint).predict(
+            _signal(market_id="m-openai-custom")
+        )
+        is not None
+    )
+    assert "base_url" not in created_calls[0]
+    assert created_calls[1]["base_url"] == "https://llm-gateway.example/v1"
 
 
 def test_llm_forecaster_returns_none_when_disabled_and_real_result_when_enabled(
@@ -217,25 +348,21 @@ def test_llm_forecaster_returns_none_when_disabled_and_real_result_when_enabled(
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    disabled = LLMForecaster(
-        config=LLMSettings(enabled=False),
-        client=FakeClaudeClient(),
+    assert (
+        LLMForecaster(
+            config=LLMSettings(enabled=False),
+            client=FakeClaudeClient(),
+        ).predict(_signal())
+        is None
     )
-    assert disabled.predict(_signal()) is None
-
-    enabled = LLMForecaster(
-        config=LLMSettings(
-            enabled=True,
-            provider="anthropic",
-            api_key="test-key",
-            model="claude-test",
-            cache_ttl_s=30.0,
-        ),
+    result = LLMForecaster(
+        config=LLMSettings(enabled=True, provider="anthropic", api_key="test-key"),
         client=FakeClaudeClient(),
-    )
-    result = enabled.predict(_signal())
+    ).predict(_signal())
     assert result is not None
-    assert result[0] == pytest.approx(0.8)
+    assert result == pytest.approx(
+        (0.8, 0.6, "orderbook and external context support yes")
+    )
 
 
 @pytest.mark.asyncio
@@ -248,101 +375,327 @@ async def test_llm_forecaster_forecast_uses_neutral_probability_and_default_conf
     assert probability == pytest.approx(0.27)
 
 
-def test_llm_forecaster_client_paths_cover_injection_dispatch_and_caching(
+def test_llm_forecaster_client_paths_cover_injected_missing_and_cached_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 1. injected client short-circuits dispatch
     injected_client = FakeClaudeClient()
-    forecaster_a = LLMForecaster(
-        config=LLMSettings(
-            enabled=True,
-            provider="anthropic",
-            api_key="x",
-        ),
+    injected_result = LLMForecaster(
+        config=LLMSettings(enabled=True, provider="anthropic", api_key="ignored"),
         client=injected_client,
-    )
-    assert forecaster_a._client() is injected_client
+    )._client()
+    assert injected_result is not None
+    assert injected_result is injected_client
 
-    # 2. unknown / missing provider returns None
-    forecaster_b = LLMForecaster(config=LLMSettings(enabled=False))
-    assert forecaster_b._client() is None
-
-    # 3. anthropic provider, missing SDK -> None
     def raise_import_error(module_name: str) -> object:
         raise ImportError(module_name)
 
+    monkeypatch.setattr("pms.controller.forecasters.llm.import_module", raise_import_error)
+    assert (
+        LLMForecaster(
+            config=LLMSettings(enabled=True, provider="anthropic", api_key="missing")
+        )._client()
+        is None
+    )
+
     monkeypatch.setattr(
-        "pms.controller.forecasters.llm.import_module", raise_import_error
+        "pms.controller.forecasters.llm.import_module",
+        lambda _: SimpleNamespace(Anthropic="not-callable"),
     )
-    forecaster_c = LLMForecaster(
-        config=LLMSettings(
-            enabled=True, provider="anthropic", api_key="k"
-        )
+    assert (
+        LLMForecaster(
+            config=LLMSettings(enabled=True, provider="anthropic", api_key="bad")
+        )._client()
+        is None
     )
-    assert forecaster_c._client() is None
 
-    # 4. anthropic provider, factory returns object; cached on subsequent call
-    created_calls: list[dict[str, object]] = []
+    created_calls: list[str] = []
 
-    def create_anthropic(**kwargs: object) -> FakeClaudeClient:
-        created_calls.append(kwargs)
+    def create_client(**kwargs: Any) -> FakeClaudeClient:
+        created_calls.append(str(kwargs["api_key"]))
         return FakeClaudeClient()
 
     monkeypatch.setattr(
         "pms.controller.forecasters.llm.import_module",
-        lambda _: SimpleNamespace(Anthropic=create_anthropic),
+        lambda _: SimpleNamespace(Anthropic=create_client),
     )
-    forecaster_d = LLMForecaster(
-        config=LLMSettings(
-            enabled=True, provider="anthropic", api_key="key1"
-        )
+    forecaster = LLMForecaster(
+        config=LLMSettings(enabled=True, provider="anthropic", api_key="cache-key")
     )
-    first = forecaster_d._client()
-    assert first is not None
-    assert hasattr(first, "messages")
-    cached = forecaster_d._client()
-    assert cached is first
-    assert len(created_calls) == 1
-    assert created_calls[0]["api_key"] == "key1"
+    created_client = forecaster._client()
 
-    # 5. openai provider with base_url
-    def create_openai(**kwargs: object) -> FakeOpenAIClient:
-        created_calls.append({"openai": kwargs})
-        return FakeOpenAIClient()
+    assert created_client is not None
+    assert hasattr(created_client, "messages")
+    assert forecaster.client is not None
+    cached_client = forecaster._client()
+    assert cached_client is not None
+    assert cached_client is created_client
+    assert created_calls == ["cache-key"]
+
+
+def test_llm_forecaster_budget_exhaustion_and_midnight_utc_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClaudeClient()
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            model="claude-test",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
+        ),
+        client=client,
+    )
+    days = iter([date(2026, 5, 3), date(2026, 5, 3), date(2026, 5, 4)])
+    monkeypatch.setattr(
+        "pms.controller.forecasters.llm._today_utc",
+        lambda: next(days),
+    )
+
+    assert forecaster.predict(_signal(market_id="m-1")) is not None
+    assert forecaster.predict(_signal(market_id="m-2")) is None
+    assert forecaster.predict(_signal(market_id="m-3")) is not None
+    assert len(client.messages.calls) == 2
+
+
+def test_llm_forecaster_reserves_budget_atomically_for_concurrent_calls() -> None:
+    client = FakeClaudeClient()
+    messages = BlockingMessages()
+    client.messages = messages
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
+        ),
+        client=client,
+    )
+    start = threading.Barrier(3)
+
+    def predict_after_barrier(market_id: str) -> object:
+        start.wait(timeout=2.0)
+        return forecaster.predict(_signal(market_id=market_id))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(predict_after_barrier, "m-race-1"),
+            executor.submit(predict_after_barrier, "m-race-2"),
+        ]
+        start.wait(timeout=2.0)
+        assert messages.entered.wait(timeout=2.0)
+        messages.release.set()
+        results = [future.result(timeout=2.0) for future in futures]
+
+    assert len(messages.calls) == 1
+    assert sum(result is not None for result in results) == 1
+
+
+def test_llm_forecaster_shares_daily_budget_across_strategy_instances() -> None:
+    first_client = FakeClaudeClient()
+    second_client = FakeClaudeClient()
+    config = LLMSettings(
+        enabled=True,
+        provider="anthropic",
+        api_key="test-key",
+        cache_ttl_s=0.0,
+        max_daily_llm_cost_usdc=0.003,
+    )
+    first = LLMForecaster(config=config, client=first_client)
+    second = LLMForecaster(config=config, client=second_client)
+
+    assert first.predict(_signal(market_id="m-strategy-1")) is not None
+    assert second.predict(_signal(market_id="m-strategy-2")) is None
+    assert len(first_client.messages.calls) == 1
+    assert len(second_client.messages.calls) == 0
+
+
+def test_llm_forecaster_clamps_probability_away_from_impossible_extremes() -> None:
+    client = FakeClaudeClient()
+    client.messages = FakeMessages(prob_estimate=1.2, confidence=1.5)
+    high = LLMForecaster(
+        config=LLMSettings(enabled=True, provider="anthropic", api_key="test-key"),
+        client=client,
+    ).predict(_signal())
+
+    assert high is not None
+    assert high[0] == pytest.approx(0.99)
+    assert high[1] == pytest.approx(1.0)
+
+    low_client = FakeClaudeClient()
+    low_client.messages = FakeMessages(prob_estimate=-0.3, confidence=-0.2)
+    low = LLMForecaster(
+        config=LLMSettings(enabled=True, provider="anthropic", api_key="test-key"),
+        client=low_client,
+    ).predict(_signal())
+
+    assert low is not None
+    assert low[0] == pytest.approx(0.01)
+    assert low[1] == pytest.approx(0.0)
+
+
+def test_llm_forecaster_rejects_non_finite_numeric_fields() -> None:
+    client = FakeClaudeClient()
+    client.messages = FakeMessages(prob_estimate=float("nan"), confidence=0.5)
+    forecaster = LLMForecaster(
+        config=LLMSettings(enabled=True, provider="anthropic", api_key="test-key"),
+        client=client,
+    )
+
+    assert forecaster.predict(_signal()) is None
+    assert len(client.messages.calls) == 1
+
+
+def test_llm_forecaster_counts_malformed_provider_attempt_against_budget() -> None:
+    client = FakeClaudeClient()
+    client.messages = FakeSequenceMessages(
+        [
+            {
+                "prob_estimate": 0.8,
+                "confidence": 0.6,
+            },
+            {
+                "prob_estimate": 0.7,
+                "confidence": 0.5,
+                "rationale": "would be valid if called",
+            },
+        ]
+    )
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
+        ),
+        client=client,
+    )
+
+    assert forecaster.predict(_signal(market_id="m-bad")) is None
+    assert forecaster.predict(_signal(market_id="m-budget")) is None
+    assert len(client.messages.calls) == 1
+
+
+def test_llm_forecaster_refunds_transient_provider_failure_budget() -> None:
+    client = FakeClaudeClient()
+    client.messages = FailingMessages(LLMTransientError("provider unavailable"))
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
+        ),
+        client=client,
+    )
+
+    assert forecaster.predict(_signal(market_id="m-fail-1")) is None
+    assert forecaster.predict(_signal(market_id="m-fail-2")) is None
+    assert len(client.messages.calls) == 2
+
+
+def test_llm_forecaster_refunds_unhandled_provider_exception_budget() -> None:
+    client = FakeClaudeClient()
+    failing_messages = FailingMessages(RuntimeError("auth rejected"))
+    client.messages = failing_messages
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
+        ),
+        client=client,
+    )
+
+    with pytest.raises(RuntimeError, match="auth rejected"):
+        forecaster.predict(_signal(market_id="m-auth-fail"))
+
+    success_messages = FakeMessages()
+    client.messages = success_messages
+    assert forecaster.predict(_signal(market_id="m-after-auth-fail")) is not None
+    assert len(failing_messages.calls) == 1
+    assert len(success_messages.calls) == 1
+
+
+def test_llm_forecaster_refunds_client_initialization_exception_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory_calls: list[dict[str, Any]] = []
+
+    def create_client(**kwargs: Any) -> FakeClaudeClient:
+        factory_calls.append(kwargs)
+        if len(factory_calls) == 1:
+            raise RuntimeError("invalid client configuration")
+        return FakeClaudeClient()
 
     monkeypatch.setattr(
         "pms.controller.forecasters.llm.import_module",
-        lambda _: SimpleNamespace(OpenAI=create_openai),
+        lambda _: SimpleNamespace(Anthropic=create_client),
     )
-    forecaster_e = LLMForecaster(
+    forecaster = LLMForecaster(
         config=LLMSettings(
             enabled=True,
-            provider="openai",
-            api_key="key2",
-            base_url="https://gw.example/v1",
+            provider="anthropic",
+            api_key="test-key",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
         )
     )
-    openai_client = forecaster_e._client()
-    assert openai_client is not None
-    assert hasattr(openai_client, "chat")
+
+    with pytest.raises(RuntimeError, match="invalid client configuration"):
+        forecaster.predict(_signal(market_id="m-client-fail"))
+
+    assert forecaster.predict(_signal(market_id="m-after-client-fail")) is not None
+    assert len(factory_calls) == 2
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"timeout_s": 0.0},
+        {"cache_ttl_s": -1.0},
+        {"max_tokens": 0},
+        {"max_daily_llm_cost_usdc": 0.0},
+        {"max_daily_llm_cost_usdc": -0.01},
+    ],
+)
+def test_llm_settings_reject_invalid_numeric_controls(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        LLMSettings.model_validate(kwargs)
 
 
 def test_llm_prompt_trims_orderbook_and_serializes_external_signal() -> None:
     prompt = _prompt(_signal())
 
-    assert "market_title: Will CP05 pass?" in prompt
+    assert "# Market" in prompt
+    assert "title: Will CP05 pass?" in prompt
     assert "yes_price: 0.4" in prompt
     assert '"price":0.35' in prompt
     assert '"price":0.34' not in prompt
-    assert "Respond with a JSON object only" in prompt
+    assert '"fair_value": 0.65' in prompt
+    assert '"no_count": 3' in prompt
+    assert "Return JSON only" in prompt
 
 
 def test_llm_response_parsing_helpers_cover_json_text_and_errors() -> None:
     direct_json = '{"prob_estimate":0.6,"confidence":0.2,"rationale":"direct"}'
     embedded_json = 'prefix {"prob_estimate":0.7,"confidence":0.1,"rationale":"embedded"} suffix'
+    openai_response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=direct_json))]
+    )
 
     assert _response_text_anthropic(SimpleNamespace(content="plain-text")) == "plain-text"
-    assert _response_text_anthropic(SimpleNamespace(content={"content": "ignored"})) == "{'content': 'ignored'}"
+    assert (
+        _response_text_anthropic(SimpleNamespace(content={"content": "ignored"}))
+        == "{'content': 'ignored'}"
+    )
+    assert _response_text_openai(openai_response) == direct_json
     assert _load_json(direct_json)["prob_estimate"] == pytest.approx(0.6)
     assert _load_json(embedded_json)["rationale"] == "embedded"
     assert _as_float("0.5") == pytest.approx(0.5)
@@ -353,10 +706,18 @@ def test_llm_response_parsing_helpers_cover_json_text_and_errors() -> None:
     with pytest.raises(ValueError, match="Expected numeric value"):
         _as_float(object())
 
+    with pytest.raises(ValueError, match="expected JSON object"):
+        _load_json("[1, 2, 3]")
+
 
 @pytest.mark.asyncio
 async def test_controller_pipeline_suppresses_zero_size_decision_and_tracks_metric() -> None:
     llm_client = FakeClaudeClient()
+    llm_client.messages = FakeMessages(
+        prob_estimate=0.4,
+        confidence=0.0,
+        rationale="neutral mocked LLM branch",
+    )
     pipeline = ControllerPipeline(
         forecasters=[
             RulesForecaster(min_edge=0.01),
@@ -372,7 +733,7 @@ async def test_controller_pipeline_suppresses_zero_size_decision_and_tracks_metr
             ),
         ],
         calibrator=NetcalCalibrator(),
-        sizer=FixedSizer(0.5),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=1000.0)),
         router=Router(ControllerSettings(min_volume=100.0)),
     )
 
@@ -645,209 +1006,3 @@ def test_router_gate_rejects_non_finite_quote_metrics(
     router = Router(ControllerSettings(min_volume=100.0))
 
     assert router.gate(_signal(external_signal={metric: value})) is False
-
-
-def _enabled_anthropic_settings() -> LLMSettings:
-    return LLMSettings(
-        enabled=True,
-        provider="anthropic",
-        api_key="test-key",
-        model="claude-test",
-        timeout_s=2.0,
-        cache_ttl_s=30.0,
-        max_tokens=128,
-    )
-
-
-def _enabled_openai_settings() -> LLMSettings:
-    return LLMSettings(
-        enabled=True,
-        provider="openai",
-        api_key="test-key",
-        base_url="https://gateway.example/v1",
-        model="gpt-test",
-        timeout_s=2.0,
-        cache_ttl_s=30.0,
-        max_tokens=128,
-    )
-
-
-def test_predict_returns_none_when_disabled() -> None:
-    forecaster = LLMForecaster(
-        config=LLMSettings(enabled=False), client=FakeClaudeClient()
-    )
-    assert forecaster.predict(_signal()) is None
-
-
-def test_predict_anthropic_provider_calls_client_and_caches() -> None:
-    client = FakeClaudeClient()
-    forecaster = LLMForecaster(
-        config=_enabled_anthropic_settings(), client=client
-    )
-
-    first = forecaster.predict(_signal(market_id="mkt-A"))
-    assert first is not None
-    assert first[0] == pytest.approx(0.8)
-    assert first[1] == pytest.approx(0.6)
-    assert client.messages.calls and len(client.messages.calls) == 1
-
-    second = forecaster.predict(_signal(market_id="mkt-A"))
-    assert second is not None
-    assert second[0] == pytest.approx(0.8)
-    assert len(client.messages.calls) == 1  # cache hit, no extra call
-
-
-def test_predict_openai_provider_calls_client_and_caches() -> None:
-    client = FakeOpenAIClient()
-    forecaster = LLMForecaster(
-        config=_enabled_openai_settings(), client=client
-    )
-
-    result = forecaster.predict(_signal(market_id="mkt-O"))
-    assert result is not None
-    assert result[0] == pytest.approx(0.72)
-    assert result[1] == pytest.approx(0.55)
-    assert len(client.chat.completions.calls) == 1
-
-    # Cache hit
-    forecaster.predict(_signal(market_id="mkt-O"))
-    assert len(client.chat.completions.calls) == 1
-
-
-def test_predict_cache_hit_skips_client() -> None:
-    client = FakeClaudeClient()
-    forecaster = LLMForecaster(
-        config=_enabled_anthropic_settings(), client=client
-    )
-    forecaster.predict(_signal(market_id="mkt-X"))
-    forecaster.predict(_signal(market_id="mkt-X"))
-    forecaster.predict(_signal(market_id="mkt-X"))
-    assert len(client.messages.calls) == 1
-
-
-def test_predict_cache_expiry_recalls_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = FakeClaudeClient()
-    forecaster = LLMForecaster(
-        config=_enabled_anthropic_settings(), client=client
-    )
-    fake_now = [1000.0]
-    monkeypatch.setattr(
-        "pms.controller.forecasters.llm.time.monotonic",
-        lambda: fake_now[0],
-    )
-    forecaster.predict(_signal(market_id="mkt-T"))
-    assert len(client.messages.calls) == 1
-    fake_now[0] += 31.0  # past 30s TTL
-    forecaster.predict(_signal(market_id="mkt-T"))
-    assert len(client.messages.calls) == 2
-
-
-def test_predict_cache_size_cap_evicts_oldest(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = FakeClaudeClient()
-    forecaster = LLMForecaster(
-        config=_enabled_anthropic_settings(), client=client
-    )
-    fake_now = [1000.0]
-    monkeypatch.setattr(
-        "pms.controller.forecasters.llm.time.monotonic",
-        lambda: fake_now[0],
-    )
-    # Fill cache past its 1000-entry cap
-    for i in range(1005):
-        fake_now[0] += 0.001
-        forecaster.predict(_signal(market_id=f"mkt-{i}"))
-    assert len(forecaster._cache) <= 1000
-    # Earliest market_id must have been evicted
-    assert "mkt-0" not in forecaster._cache
-
-
-def test_predict_timeout_returns_none() -> None:
-    from pms.controller.forecasters.llm import LLMTimeoutError
-
-    class TimeoutClient:
-        class _Messages:
-            def create(self, **kwargs: Any) -> object:
-                raise LLMTimeoutError("simulated timeout")
-
-        def __init__(self) -> None:
-            self.messages = TimeoutClient._Messages()
-
-    forecaster = LLMForecaster(
-        config=_enabled_anthropic_settings(), client=TimeoutClient()
-    )
-    assert forecaster.predict(_signal(market_id="mkt-timeout")) is None
-    # Failure must not poison the cache
-    assert "mkt-timeout" not in forecaster._cache
-
-
-def test_predict_transient_error_returns_none() -> None:
-    from pms.controller.forecasters.llm import LLMTransientError
-
-    class TransientClient:
-        class _Messages:
-            def create(self, **kwargs: Any) -> object:
-                raise LLMTransientError("rate limited")
-
-        def __init__(self) -> None:
-            self.messages = TransientClient._Messages()
-
-    forecaster = LLMForecaster(
-        config=_enabled_anthropic_settings(), client=TransientClient()
-    )
-    assert forecaster.predict(_signal(market_id="mkt-rate")) is None
-    assert "mkt-rate" not in forecaster._cache
-
-
-def test_predict_malformed_response_returns_none() -> None:
-    class MalformedMessages:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, Any]] = []
-
-        def create(self, **kwargs: Any) -> object:
-            self.calls.append(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(text="not json")])
-
-    class MalformedClient:
-        def __init__(self) -> None:
-            self.messages = MalformedMessages()
-
-    forecaster = LLMForecaster(
-        config=_enabled_anthropic_settings(), client=MalformedClient()
-    )
-    assert forecaster.predict(_signal(market_id="mkt-bad")) is None
-    assert "mkt-bad" not in forecaster._cache
-
-
-@pytest.mark.asyncio
-async def test_forecast_returns_yes_price_on_predict_failure() -> None:
-    """forecast() falls back to signal.yes_price when predict returns None."""
-
-    class FailingMessages:
-        def create(self, **kwargs: Any) -> object:
-            raise RuntimeError("not a known LLM error")
-
-    class CrashingClient:
-        def __init__(self) -> None:
-            self.messages = FailingMessages()
-
-    forecaster = LLMForecaster(
-        config=_enabled_anthropic_settings(), client=CrashingClient()
-    )
-    # Unknown errors propagate — caller (pipeline gather) catches them.
-    with pytest.raises(RuntimeError):
-        await forecaster.forecast(_signal(yes_price=0.42))
-
-
-@pytest.mark.asyncio
-async def test_forecast_returns_predicted_value_on_success() -> None:
-    forecaster = LLMForecaster(
-        config=_enabled_anthropic_settings(), client=FakeClaudeClient()
-    )
-    probability = await forecaster.forecast(
-        _signal(market_id="mkt-OK", yes_price=0.31)
-    )
-    assert probability == pytest.approx(0.8)

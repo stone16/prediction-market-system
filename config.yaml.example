@@ -8,7 +8,9 @@
 #     from pms.config import PMSSettings
 #     settings = PMSSettings.load("config.yaml")
 #
-# Below are the supported top-level keys with their defaults.
+# Below are the supported top-level keys with their defaults. These defaults
+# document the schema; they are not the recommended first-live envelope. For
+# the 30-day paper soak before real money, start from `config.live-soak.yaml`.
 
 mode: backtest                 # backtest | paper | live
 live_trading_enabled: false    # must be true to switch into live mode
@@ -22,6 +24,7 @@ risk:
   max_open_positions: null
   min_order_usdc: 1.0
   slippage_threshold_bps: 50.0
+  max_quantity_shares: null
 
 sensor:
   poll_interval_s: 5.0
