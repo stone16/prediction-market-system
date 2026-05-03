@@ -229,6 +229,29 @@ def test_auto_halt_is_reversible_via_clear_halt() -> None:
     assert manager.check_auto_halt(_portfolio(), now=NOW).halted is False
 
 
+def test_clear_halt_resets_non_credential_halt_evidence() -> None:
+    manager = RiskManager()
+    for index in range(5):
+        manager.record_trade_result(
+            RiskTradeResult(
+                pnl=-1.0,
+                slippage_bps=10.0,
+                filled_at=NOW + timedelta(seconds=index),
+            )
+        )
+    manager.record_order_placed("stale-order", at=NOW)
+    for minutes in (0, 4, 9):
+        manager.record_api_error(429, at=NOW + timedelta(minutes=minutes))
+
+    assert manager.check_auto_halt(_portfolio(), now=NOW + timedelta(minutes=31)).halted
+    manager.clear_halt()
+
+    assert (
+        manager.check_auto_halt(_portfolio(), now=NOW + timedelta(minutes=31)).halted
+        is False
+    )
+
+
 @pytest.mark.asyncio
 async def test_actuator_executor_respects_auto_halt_before_order_risk() -> None:
     manager = RiskManager()

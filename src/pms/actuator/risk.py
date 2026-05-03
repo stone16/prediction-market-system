@@ -224,6 +224,9 @@ class RiskManager:
     def clear_halt(self) -> None:
         self._halt_state = None
         self._credential_failure = None
+        self._recent_trades.clear()
+        self._recent_rate_limits.clear()
+        self._open_order_submitted_at.clear()
 
     def _halt(
         self,
