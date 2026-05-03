@@ -19,11 +19,25 @@ For binary Polymarket contracts:
 - Factor: `favorite_longshot_bias`
   - negative value: low-YES longshot bucket, actionable side is buy NO
   - positive value: high-YES favorite bucket, actionable side is buy YES
+  - catalog direction stays `neutral` to satisfy the current factor schema; the
+    factor value itself carries the signed H1 semantics
 - Strategy plugin: `pms.strategies.flb`
   - source: `LiveFlbSource`
   - controller: `FlbController`
   - agent: `FlbAgent`
   - module: `FlbStrategyModule`
+
+## Edge Model
+
+The first slice uses `min_expected_edge` as a placeholder edge model:
+
+- probability estimate = observed limit price + `min_expected_edge`
+- default `min_expected_edge` = 2%
+
+This is intentionally conservative and deterministic for paper soak. Before
+live trading, replace the placeholder with data-driven decile edge estimates
+from the historical warehouse / Wilson CI pipeline so 1% longshots, 9%
+longshots, and 95% favorites are not treated as having identical edge.
 
 ## Out Of Scope
 
