@@ -17,6 +17,21 @@ stop runbook.
 Install the optional live SDK with `uv sync --extra live` before starting LIVE
 mode.
 
+## Orchestration & Agent Strategy Framework
+
+The system supports pluggable agent strategies with the LLM forecaster now integrated as a core component. The orchestration includes:
+- **LLM Forecaster**: Advanced market prediction using language models, integrated into the decision pipeline (PR #46)
+- **FLB Analysis**: Frontrunning Liquidity Bias measurement and exploitation, validated with contract-level analysis (PR #45)
+- **Runtime Selection**: Dynamic strategy selection based on market conditions and risk parameters
+- **Auto-halt Triggers**: 6 safety mechanisms including drawdown limits, consecutive loss stops, and slippage detection
+
+## Agent Strategy Boundary
+
+Agent strategy modules may propose, judge, and explain market actions, but they
+cannot submit orders, cannot override risk, and cannot override reconciliation.
+Their typed output path is `TradeIntent | BasketIntent` -> `ExecutionPlan` ->
+`RiskDecision` -> `OrderState` -> reconciliation -> evaluator.
+
 ## Agent strategy boundary
 
 Agent strategy modules may propose, judge, and explain market actions, but they
@@ -41,12 +56,14 @@ src/pms/               # Python package
   core/                # frozen dataclasses, enums, Protocol interfaces
   evaluation/          # metrics collector + eval spool + feedback engine
   market_selection/    # active-perception selector + subscription controller
+  research/            # backtesting, analysis, and experimental code
   sensor/              # HistoricalSensor + MarketDiscoverySensor + stream
   storage/             # JSONL stores + Postgres market-data persistence
   runner.py            # orchestrator wiring all four layers
   config.py            # PMSSettings (pydantic-settings)
 dashboard/             # Next.js console (port 3100)
 rust/                  # PyO3 workspace stub (reserved for perf paths)
+scripts/               # Utility scripts including strategy management
 tests/                 # pytest suite (unit + integration)
 ```
 
@@ -87,6 +104,14 @@ If `PMS_API_BASE_URL` is unset the dashboard silently falls back to the
 bundled mock store (`dashboard/lib/mock-store.ts`) — useful for pure frontend
 work, but every page will show fabricated data.
 
+## Research & Analysis Components
+
+The system includes sophisticated research and analysis tools:
+- **FLB (Frontrunning Liquidity Bias)**: Contract-level analysis revealing statistical edge opportunities in binary markets (YES/NO contracts)
+- **LLM Forecaster**: Advanced language model integration for market prediction and sentiment analysis
+- **Backtesting Framework**: Robust validation infrastructure with statistical confidence measures
+- **Live Data Feeds**: Real-time market data ingestion and processing pipelines
+
 ## Runner lifecycle via the API
 
 ```bash
@@ -106,6 +131,11 @@ uv run pytest -q                              # full default suite
 uv run mypy src/ tests/ --strict              # strict type check
 PMS_RUN_INTEGRATION=1 uv run pytest -m integration   # PostgreSQL + live-network tests
 ```
+
+Key orchestration scripts in `scripts/`:
+- `relax_default_strategy_required_factors.py` - Toggle required factors for strategy testing
+- `flb_data_feasibility.py` - Frontrunning Liquidity Bias analysis and validation
+- Various other utilities for strategy management and data analysis
 
 Baseline invariants enforced by CI:
 - pytest default suite stays green; integration checks are gated on
