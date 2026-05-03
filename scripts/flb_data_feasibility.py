@@ -10,6 +10,22 @@ Usage:
 Exit codes:
     0 — H1 viable (sample gate passed)
     1 — H1 not viable (insufficient data in target buckets)
+
+Limitations:
+    - **Entry price proxy:** Uses ``lastTradePrice`` from the Gamma API,
+      which is the last trade before resolution — NOT a timestamped entry
+      snapshot. This means the "implied probability" is measured at or very
+      near resolution time, not at a hypothetical entry point. For a real
+      strategy P&L backtest, we would need timestamped price snapshots at
+      a defined entry horizon (e.g., 24h before resolution).
+    - **Data source:** The Gamma API ``closed=true`` endpoint returns a
+      small window of recently resolved markets (typically <50). For
+      statistically robust FLB measurement (≥100 contracts per target
+      bucket), we need Dune Analytics on-chain data or a historical
+      warehouse with full Polymarket resolution history.
+    - **This script is a feasibility check**, not a strategy backtest.
+      It answers: "Does Polymarket data show measurable FLB?" — not
+      "Would FLB trading have been profitable after fees and slippage?"
 """
 
 from __future__ import annotations
@@ -464,6 +480,26 @@ def generate_report(
         lines.append(f"- **Max volume:** ${max(volumes):,.0f}")
         lines.append(f"- **Total volume:** ${sum(volumes):,.0f}")
         lines.append("")
+
+    # Limitations.
+    lines.append("## Limitations")
+    lines.append("")
+    lines.append(
+        "1. **Entry price proxy:** Uses `lastTradePrice` (last trade before "
+        "resolution), NOT a timestamped entry snapshot. For strategy P&L "
+        "backtesting, we need price snapshots at a defined entry horizon."
+    )
+    lines.append(
+        "2. **Data source:** Gamma API `closed=true` returns a small window "
+        "of recently resolved markets. For ≥100 contracts per target bucket, "
+        "Dune Analytics on-chain data or a historical warehouse is required."
+    )
+    lines.append(
+        "3. **Feasibility only:** This is a bias-detection script, not a "
+        "strategy backtest. It does not account for fees, slippage, or "
+        "execution timing."
+    )
+    lines.append("")
 
     return "\n".join(lines)
 
