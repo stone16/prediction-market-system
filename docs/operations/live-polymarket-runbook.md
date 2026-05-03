@@ -12,7 +12,9 @@ passphrases into chat, issues, PRs, logs, or config files.
    `max_drawdown_pct=20%`, `max_open_positions=5`,
    `max_quantity_shares=500`, and `slippage_threshold_bps=50`.
 3. Run PAPER mode against live market data with the soak config:
-   `PMS_MODE=paper uv run pms-api`.
+   `uv run pms-api --config config.live-soak.yaml`.
+   For process managers that cannot pass CLI args, set
+   `PMS_CONFIG_PATH=config.live-soak.yaml`.
 4. Confirm `/status`, `/trades`, `/positions`, and evaluator metrics update.
 5. Review order notional, slippage, rejected orders, and portfolio exposure.
 6. Keep `live_trading_enabled=false` until the 30-day soak and compliance

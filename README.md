@@ -70,6 +70,8 @@ uv run alembic downgrade base
 uv run pms-api                       # → http://127.0.0.1:8000
 # Optional: auto-start the runner at boot
 PMS_AUTO_START=1 uv run pms-api
+# First-live paper soak: load the tight risk envelope explicitly
+uv run pms-api --config config.live-soak.yaml
 
 # 5. In another shell, start the dashboard (port 3100)
 cd dashboard

@@ -60,7 +60,12 @@ from pms.api.routes.signals import SignalDepthNotFoundError, get_signal_depth
 from pms.api.routes.strategies import list_strategy_metrics as list_strategy_metrics_items
 from pms.api.routes.strategies import list_strategies as list_strategies_items
 from pms.api.routes.trades import list_trades as list_trades_items
-from pms.config import MissingPolymarketCredentialsError, PMSSettings, validate_live_mode_ready
+from pms.config import (
+    MissingPolymarketCredentialsError,
+    PMSSettings,
+    load_settings,
+    validate_live_mode_ready,
+)
 from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, LiveTradingDisabledError, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
@@ -104,8 +109,9 @@ def create_app(
     runner: Runner | None = None,
     *,
     auto_start: bool | None = None,
+    config_path: str | None = None,
 ) -> FastAPI:
-    active_runner = runner or Runner()
+    active_runner = runner or Runner(config=load_settings(config_path))
     if auto_start is None:
         auto_start = os.environ.get("PMS_AUTO_START", "").lower() in {"1", "true", "yes"}
 
