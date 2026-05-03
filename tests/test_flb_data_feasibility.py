@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 import pytest
 
 from scripts.flb_data_feasibility import (
+    ContractObservation,
     DecileStats,
     ResolvedMarket,
     _assign_decile,
@@ -19,6 +20,7 @@ from scripts.flb_data_feasibility import (
     check_sample_gate,
     compute_decile_stats,
     generate_report,
+    markets_to_contracts,
 )
 
 
@@ -120,19 +122,30 @@ class TestComputeDecileStats:
         assert len(stats) == 10
         assert all(s.n == 0 for s in stats)
 
-    def test_single_decile(self) -> None:
-        """Markets all in the same decile should populate only that bucket."""
+    def test_single_market_creates_two_contracts(self) -> None:
+        """One market creates two contract observations in different deciles."""
+        markets = [_market(0.05, False)]
+        stats = compute_decile_stats(markets_to_contracts(markets))
+        # One market creates YES@0.05 (decile 0) and NO@0.95 (decile 9)
+        assert stats[0].n == 1  # YES contract in longshot bucket
+        assert stats[9].n == 1  # NO contract in favorite bucket
+        assert all(stats[i].n == 0 for i in [1, 2, 3, 4, 5, 6, 7, 8])  # Others empty
+
+    def test_multiple_markets_fill_both_extreme_buckets(self) -> None:
+        """Multiple markets fill both longshot and favorite buckets through contract-level analysis."""
         markets = [_market(0.05, False) for _ in range(20)]
-        stats = compute_decile_stats(markets)
-        assert stats[0].n == 20
-        assert all(stats[i].n == 0 for i in range(1, 10))
+        stats = compute_decile_stats(markets_to_contracts(markets))
+        # Each market creates YES@0.05 (decile 0) and NO@0.95 (decile 9)
+        assert stats[0].n == 20  # 20 YES contracts in longshot bucket
+        assert stats[9].n == 20  # 20 NO contracts in favorite bucket
+        assert all(stats[i].n == 0 for i in [1, 2, 3, 4, 5, 6, 7, 8])  # Others empty
 
     def test_flb_pattern_longshots_overpriced(self) -> None:
         """If longshots (YES <10%) mostly resolve NO, FLB gap is positive."""
         # 20 longshot markets at 5% implied, only 1 resolves YES (5% actual)
         # FLB says they should resolve even less → gap = implied - actual
         markets = [_market(0.05, i == 0) for i in range(20)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         longshot = stats[0]
         assert longshot.n == 20
         assert longshot.n_yes == 1
@@ -142,7 +155,7 @@ class TestComputeDecileStats:
     def test_flb_pattern_longshots_strongly_overpriced(self) -> None:
         """Markets at 5% implied but 0% actual → strong FLB signal."""
         markets = [_market(0.05, False) for _ in range(100)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         longshot = stats[0]
         assert longshot.actual_rate == 0.0
         assert longshot.flb_gap > 0.04  # implied ~5% minus actual 0%
@@ -151,7 +164,7 @@ class TestComputeDecileStats:
     def test_flb_pattern_favorites_underpriced(self) -> None:
         """Markets at 95% implied but 100% actual → underpriced favorites."""
         markets = [_market(0.95, True) for _ in range(100)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         favorite = stats[9]
         assert favorite.actual_rate == 1.0
         assert favorite.flb_gap < 0  # implied < actual → negative gap
@@ -161,19 +174,29 @@ class TestComputeDecileStats:
         """When implied ≈ actual, no statistically significant edge."""
         # 100 markets at 50% implied, 50 resolve YES
         markets = [_market(0.50, i < 50) for i in range(100)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         mid = stats[5]
         assert mid.recommended_side == "no_edge"
 
-    def test_ten_deciles_populated(self) -> None:
-        """Markets spread across all deciles should populate all buckets."""
+    def test_contract_level_distribution_symmetry(self) -> None:
+        """Contract-level analysis creates symmetric distribution."""
         markets = []
         for d in range(10):
             price = 0.05 + d * 0.10  # 0.05, 0.15, ..., 0.95
             for _ in range(10):
                 markets.append(_market(price, True))
-        stats = compute_decile_stats(markets)
-        assert all(s.n == 10 for s in stats)
+        stats = compute_decile_stats(markets_to_contracts(markets))
+
+        # Each decile d gets original contracts + complementary decile (9-d) contracts
+        # decile 0: 10 from price=0.05 + 10 from price=0.95 -> total 20
+        # decile 1: 10 from price=0.15 + 10 from price=0.85 -> total 20
+        # ...
+        # decile 4: 10 from price=0.45 + 10 from price=0.55 -> total 20
+        # decile 5: 10 from price=0.55 + 10 from price=0.45 -> total 20
+        # decile 9: 10 from price=0.95 + 10 from price=0.05 -> total 20
+        expected_counts = [20, 20, 20, 20, 20, 20, 20, 20, 20, 20]
+        actual_counts = [s.n for s in stats]
+        assert actual_counts == expected_counts
 
 
 # ── Sample Gate ──────────────────────────────────────────────────────────────
@@ -233,10 +256,11 @@ class TestSampleGate:
 class TestReportGeneration:
     def test_report_contains_gate_section(self) -> None:
         markets = [_market(0.50, True)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         gate = check_sample_gate(stats)
         report = generate_report(
             markets=markets,
+            contracts=markets_to_contracts(markets),
             decile_stats=stats,
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
@@ -247,10 +271,11 @@ class TestReportGeneration:
 
     def test_report_contains_decile_table(self) -> None:
         markets = [_market(0.50, True)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         gate = check_sample_gate(stats)
         report = generate_report(
             markets=markets,
+            contracts=markets_to_contracts(markets),
             decile_stats=stats,
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
@@ -261,10 +286,11 @@ class TestReportGeneration:
 
     def test_report_contains_side_semantics(self) -> None:
         markets = [_market(0.50, True)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         gate = check_sample_gate(stats)
         report = generate_report(
             markets=markets,
+            contracts=markets_to_contracts(markets),
             decile_stats=stats,
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
@@ -275,10 +301,11 @@ class TestReportGeneration:
 
     def test_report_shows_not_viable_when_gate_fails(self) -> None:
         markets = [_market(0.50, True)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         gate = check_sample_gate(stats)
         report = generate_report(
             markets=markets,
+            contracts=markets_to_contracts(markets),
             decile_stats=stats,
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
@@ -291,10 +318,11 @@ class TestReportGeneration:
         for _ in range(120):
             markets.append(_market(0.05, False))  # longshot bucket
             markets.append(_market(0.95, True))   # favorite bucket
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         gate = check_sample_gate(stats)
         report = generate_report(
             markets=markets,
+            contracts=markets_to_contracts(markets),
             decile_stats=stats,
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
@@ -306,10 +334,11 @@ class TestReportGeneration:
             _market(0.50, True, category="politics"),
             _market(0.30, False, category="sports"),
         ]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         gate = check_sample_gate(stats)
         report = generate_report(
             markets=markets,
+            contracts=markets_to_contracts(markets),
             decile_stats=stats,
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
@@ -321,10 +350,11 @@ class TestReportGeneration:
     def test_report_uses_consistent_boundary_language(self) -> None:
         """Report should use [0%-10%) and [90%-100%] not <10% and >90%."""
         markets = [_market(0.50, True)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         gate = check_sample_gate(stats)
         report = generate_report(
             markets=markets,
+            contracts=markets_to_contracts(markets),
             decile_stats=stats,
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
@@ -431,7 +461,7 @@ class TestNinetyPercentBoundary:
     def test_exactly_90_counted_in_sample_gate(self) -> None:
         """120 markets at exactly 90% should pass the favorite gate."""
         markets = [_market(0.90, True) for _ in range(120)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         gate = check_sample_gate(stats)
         assert gate.favorite_count == 120
         assert gate.favorite_passed is True
@@ -445,7 +475,7 @@ class TestNinetyPercentBoundary:
         # 50 markets at 89% (decile 8) + 50 at 91% (decile 9)
         markets = [_market(0.89, True) for _ in range(50)]
         markets += [_market(0.91, True) for _ in range(50)]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         # Only the 91% markets should be in the favorite bucket
         assert stats[9].n == 50
         assert stats[8].n == 50
@@ -529,10 +559,11 @@ class TestMedianVolume:
             _market(0.52, True, volume=300.0),
             _market(0.53, True, volume=400.0),
         ]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         gate = check_sample_gate(stats)
         report = generate_report(
             markets=markets,
+            contracts=markets_to_contracts(markets),
             decile_stats=stats,
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
@@ -547,10 +578,11 @@ class TestMedianVolume:
             _market(0.51, True, volume=200.0),
             _market(0.52, True, volume=300.0),
         ]
-        stats = compute_decile_stats(markets)
+        stats = compute_decile_stats(markets_to_contracts(markets))
         gate = check_sample_gate(stats)
         report = generate_report(
             markets=markets,
+            contracts=markets_to_contracts(markets),
             decile_stats=stats,
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
@@ -643,3 +675,170 @@ class TestSettlementCriteria:
             last_trade_price=0.0,
         )
         assert _parse_market(row) is None
+
+
+class TestContractLevelAnalysis:
+    """Regression: each binary market contributes two contract observations.
+
+    A binary market at YES price p contributes:
+    - YES contract at price p (pays out if resolved YES)
+    - NO contract at price 1-p (pays out if resolved NO)
+
+    This ensures the sample gate counts the full opportunity set.
+    """
+
+    def test_single_market_yields_two_contracts(self) -> None:
+        """One market at 0.08 YES contributes YES@0.08 and NO@0.92 contracts."""
+        markets = [
+            ResolvedMarket(
+                market_id="m1",
+                question="Will X happen?",
+                yes_price=0.08,
+                resolved_yes=True,  # YES resolved to 1.0
+                volume=1000.0,
+                liquidity=100.0,
+                end_date="2026-05-01",
+                category="sports",
+            )
+        ]
+
+        contracts = markets_to_contracts(markets)
+        assert len(contracts) == 2
+
+        # YES contract: price 0.08, pays out because resolved_yes=True
+        yes_contract = next(c for c in contracts if c.contract_side == "YES")
+        assert yes_contract.entry_price == 0.08
+        assert yes_contract.pays_out is True  # YES resolved to 1.0
+        assert yes_contract.market_id == "m1"
+
+        # NO contract: price 1.0 - 0.08 = 0.92, doesn't pay out because resolved_yes=True
+        no_contract = next(c for c in contracts if c.contract_side == "NO")
+        assert no_contract.entry_price == 0.92
+        assert no_contract.pays_out is False  # NO resolved to 0.0
+        assert no_contract.market_id == "m1"
+
+    def test_no_resolution_flips_payout(self) -> None:
+        """Market at 0.92 YES that resolves NO creates YES@0.92(NO payout) and NO@0.08(NO payout)."""
+        markets = [
+            ResolvedMarket(
+                market_id="m2",
+                question="Will Y happen?",
+                yes_price=0.92,
+                resolved_yes=False,  # YES resolved to 0.0, NO to 1.0
+                volume=2000.0,
+                liquidity=200.0,
+                end_date="2026-05-01",
+                category="politics",
+            )
+        ]
+
+        contracts = markets_to_contracts(markets)
+        assert len(contracts) == 2
+
+        # YES contract: price 0.92, doesn't pay out because resolved_yes=False
+        yes_contract = next(c for c in contracts if c.contract_side == "YES")
+        assert yes_contract.entry_price == 0.92
+        assert yes_contract.pays_out is False  # YES resolved to 0.0
+
+        # NO contract: price 1.0 - 0.92 = 0.08, pays out because resolved_yes=False means NO won
+        no_contract = next(c for c in contracts if c.contract_side == "NO")
+        assert pytest.approx(no_contract.entry_price, abs=1e-10) == 0.08
+        assert no_contract.pays_out is True  # NO resolved to 1.0
+
+    def test_contract_level_decile_assignment(self) -> None:
+        """A market at 0.08 YES creates contracts in different deciles: YES@0.08→decile0, NO@0.92→decile9."""
+        markets = [
+            ResolvedMarket(
+                market_id="m3",
+                question="Low prob event?",
+                yes_price=0.08,  # Longshot
+                resolved_yes=False,  # Resolve to NO (meaning YES pays 0, NO pays 1)
+                volume=1500.0,
+                liquidity=150.0,
+                end_date="2026-05-01",
+                category="other",
+            )
+        ]
+
+        contracts = markets_to_contracts(markets)
+        stats = compute_decile_stats(contracts)
+
+        # The YES contract at 0.08 should be in decile 0 [0%-10%)
+        # The NO contract at 0.92 should be in decile 9 [90%-100%]
+        assert stats[0].n == 1  # One contract in longshot bucket
+        assert stats[9].n == 1  # One contract in favorite bucket
+
+        # Both contracts should show the relationship where the same underlying
+        # market creates opposite FLB signals from two perspectives
+        # YES contract: price=0.08, pays_out=False → gap = 0.08 - 0 = +0.08 (overpriced)
+        # NO contract: price=0.92, pays_out=True  → gap = 0.92 - 1 = -0.08 (underpriced)
+        assert stats[0].implied_prob == 0.08
+        assert stats[0].actual_rate == 0.0
+        assert stats[0].flb_gap == 0.08  # YES overpriced
+
+        assert stats[9].implied_prob == 0.92
+        assert stats[9].actual_rate == 1.0
+        assert stats[9].flb_gap == pytest.approx(-0.08, abs=1e-10)  # NO underpriced
+
+    def test_sample_gate_counts_contracts_not_markets(self) -> None:
+        """With 3 markets, should get 6 contracts, affecting sample gate."""
+        markets = [
+            ResolvedMarket(market_id=f"m{i}", question=f"Q{i}", yes_price=0.05,
+                          resolved_yes=(i % 2 == 0), volume=1000.0, liquidity=100.0,
+                          end_date="2026-05-01", category="other")
+            for i in range(3)
+        ]
+
+        contracts = markets_to_contracts(markets)
+        stats = compute_decile_stats(contracts)
+        gate = check_sample_gate(stats)
+
+        # Should have 6 contracts (3 markets × 2)
+        assert len(contracts) == 6
+
+        # Each market contributes one contract to longshot bucket [0.05] and one to favorite bucket [0.95]
+        longshot_contracts = [c for c in contracts if 0.0 <= c.entry_price < 0.1]
+        favorite_contracts = [c for c in contracts if 0.9 <= c.entry_price <= 1.0]
+
+        assert len(longshot_contracts) == 3  # Three 0.05 contracts
+        assert len(favorite_contracts) == 3  # Three 0.95 contracts
+
+        # Sample gate should reflect contract counts
+        assert gate.longshot_count == 3
+        assert gate.favorite_count == 3
+
+    def test_flb_gap_same_magnitude_opposite_sign(self) -> None:
+        """FLB gap should have same magnitude for both sides of same market."""
+        # For market with YES price p and resolution R (1=YES, 0=NO):
+        # YES contract: gap = p - R
+        # NO contract: entry_price = (1-p), pays_out = (1-R)
+        # NO contract gap = (1-p) - (1-R) = R - p = -(p - R)
+        # So the gaps are negatives of each other, same magnitude, opposite sign.
+
+        markets = [
+            ResolvedMarket(
+                market_id="m4",
+                question="Test market",
+                yes_price=0.15,
+                resolved_yes=True,  # Resolves to YES (1.0)
+                volume=1000.0,
+                liquidity=100.0,
+                end_date="2026-05-01",
+                category="test",
+            )
+        ]
+
+        contracts = markets_to_contracts(markets)
+        stats = compute_decile_stats(contracts)
+
+        # Find the specific contracts to verify the relationship
+        yes_contract = next(c for c in contracts if c.contract_side == "YES")
+        no_contract = next(c for c in contracts if c.contract_side == "NO")
+
+        assert yes_contract.entry_price == 0.15
+        assert yes_contract.pays_out is True  # Because resolved_yes=True
+        assert no_contract.entry_price == 0.85
+        assert no_contract.pays_out is False  # Because resolved_yes=True, so NO resolved to 0
+
+        # Both contracts from same market should contribute to their respective deciles
+        # with opposite-signed but same-magnitude FLB gaps

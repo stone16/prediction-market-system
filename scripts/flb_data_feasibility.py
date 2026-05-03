@@ -4,6 +4,10 @@ Fetches resolved Polymarket markets from the Gamma API, measures
 Favorite-Longshot Bias (FLB) by probability decile with Wilson score
 confidence intervals, and evaluates H1 strategy viability.
 
+Each binary market is decomposed into two contract-level observations
+(YES at price ``p``, NO at price ``1-p``) so that the sample gate
+reflects the full tradable contract set.
+
 Usage:
     uv run python scripts/flb_data_feasibility.py [--limit N] [--output PATH]
 
@@ -65,6 +69,28 @@ class ResolvedMarket:
     liquidity: float
     end_date: str
     category: str  # extracted from slug/group or "uncategorized"
+
+
+@dataclass(frozen=True, slots=True)
+class ContractObservation:
+    """A single tradable contract observation for FLB analysis.
+
+    Each binary market produces two contract observations:
+    - YES contract at price ``p`` (pays 1 if market resolves YES)
+    - NO contract at price ``1-p`` (pays 1 if market resolves NO)
+
+    Bucketing by contract price ensures the full opportunity set is counted
+    in the sample gate (a market with YES at 0.08 also contributes a NO
+    contract at 0.92, filling both extreme buckets).
+    """
+
+    contract_side: str  # "YES" or "NO"
+    entry_price: float  # contract price at entry
+    pays_out: bool  # True if this contract paid out at resolution
+    market_id: str
+    question: str
+    volume: float
+    category: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,25 +283,70 @@ def _extract_category(slug: str, question: str) -> str:
     return "other"
 
 
+# ── Contract-Level Conversion ────────────────────────────────────────────────
+
+
+def markets_to_contracts(markets: list[ResolvedMarket]) -> list[ContractObservation]:
+    """Convert resolved markets to contract-level observations.
+
+    Each binary market yields two observations:
+    - YES contract at ``yes_price`` — pays out if ``resolved_yes``
+    - NO contract at ``1 - yes_price`` — pays out if ``not resolved_yes``
+
+    This doubles the observation count and ensures the sample gate reflects
+    the full tradable contract set.  A market with YES at 0.08 (longshot)
+    also contributes a NO contract at 0.92 (favorite), filling both extreme
+    buckets.
+    """
+    contracts: list[ContractObservation] = []
+    for m in markets:
+        contracts.append(ContractObservation(
+            contract_side="YES",
+            entry_price=m.yes_price,
+            pays_out=m.resolved_yes,
+            market_id=m.market_id,
+            question=m.question,
+            volume=m.volume,
+            category=m.category,
+        ))
+        contracts.append(ContractObservation(
+            contract_side="NO",
+            entry_price=1.0 - m.yes_price,
+            pays_out=not m.resolved_yes,
+            market_id=m.market_id,
+            question=m.question,
+            volume=m.volume,
+            category=m.category,
+        ))
+    return contracts
+
+
 # ── FLB Analysis ─────────────────────────────────────────────────────────────
 
 
-def compute_decile_stats(markets: list[ResolvedMarket]) -> list[DecileStats]:
-    """Compute FLB statistics for each probability decile.
+def compute_decile_stats(
+    contracts: list[ContractObservation],
+) -> list[DecileStats]:
+    """Compute FLB statistics for each probability decile (contract-level).
 
-    Markets are bucketed by their ``yes_price`` into deciles [0-10%),
-    [10-20%), ..., [90-100%]. For each decile we compute the mean implied
-    probability, the actual YES resolution rate, the FLB gap, and a Wilson
-    score confidence interval.
+    Contract observations are bucketed by ``entry_price`` into deciles
+    [0%-10%), [10%-20%), ..., [90%-100%]. For each decile we compute the
+    mean implied probability, the actual payout rate, the FLB gap, and a
+    Wilson score confidence interval.
+
+    Each binary market contributes two observations (YES and NO contracts),
+    so the observation count is 2× the market count.
     """
-    # Sort markets by yes_price for decile assignment.
-    sorted_markets = sorted(markets, key=lambda m: m.yes_price)
+    # Sort contracts by entry_price for decile assignment.
+    sorted_contracts = sorted(contracts, key=lambda c: c.entry_price)
 
-    # Assign each market to a decile.
-    decile_buckets: dict[int, list[ResolvedMarket]] = {i: [] for i in range(10)}
-    for market in sorted_markets:
-        decile = _assign_decile(market.yes_price)
-        decile_buckets[decile].append(market)
+    # Assign each contract to a decile.
+    decile_buckets: dict[int, list[ContractObservation]] = {
+        i: [] for i in range(10)
+    }
+    for contract in sorted_contracts:
+        decile = _assign_decile(contract.entry_price)
+        decile_buckets[decile].append(contract)
 
     stats: list[DecileStats] = []
     for d in range(10):
@@ -297,8 +368,8 @@ def compute_decile_stats(markets: list[ResolvedMarket]) -> list[DecileStats]:
             ))
             continue
 
-        n_yes = sum(1 for m in bucket if m.resolved_yes)
-        implied_prob = sum(m.yes_price for m in bucket) / n
+        n_yes = sum(1 for c in bucket if c.pays_out)
+        implied_prob = sum(c.entry_price for c in bucket) / n
         actual_rate = n_yes / n
         flb_gap = implied_prob - actual_rate
 
@@ -406,6 +477,7 @@ def check_sample_gate(decile_stats: list[DecileStats]) -> SampleGateResult:
 def generate_report(
     *,
     markets: list[ResolvedMarket],
+    contracts: list[ContractObservation],
     decile_stats: list[DecileStats],
     gate: SampleGateResult,
     fetched_at: datetime,
@@ -416,14 +488,16 @@ def generate_report(
     lines.append("")
     lines.append(f"**Generated:** {fetched_at.isoformat()}")
     lines.append(f"**Total resolved markets analyzed:** {len(markets)}")
+    lines.append(f"**Total contract observations:** {len(contracts)} "
+                 "(2 per binary market: YES + NO)")
     lines.append("")
 
     # Gate result.
     gate_emoji = "✅" if gate.passed else "❌"
     lines.append(f"## Sample Gate: {gate_emoji}")
     lines.append("")
-    lines.append(f"| Bucket | Count | Required | Status |")
-    lines.append(f"|--------|-------|----------|--------|")
+    lines.append(f"| Bucket | Contract Count | Required | Status |")
+    lines.append(f"|--------|---------------|----------|--------|")
     ls = "✅" if gate.longshot_passed else "❌"
     fs = "✅" if gate.favorite_passed else "❌"
     lines.append(
@@ -442,14 +516,14 @@ def generate_report(
         lines.append("")
 
     # Decile table.
-    lines.append("## FLB by Probability Decile")
+    lines.append("## FLB by Probability Decile (Contract-Level)")
     lines.append("")
     lines.append(
-        "| Decile | Range | N | N_YES | Implied P | Actual Rate | "
+        "| Decile | Range | N | N_Payout | Implied P | Actual Rate | "
         "FLB Gap | 95% CI | Side |"
     )
     lines.append(
-        "|--------|-------|---|-------|-----------|-------------|"
+        "|--------|-------|---|----------|-----------|-------------|"
         "---------|--------|------|"
     )
 
@@ -470,6 +544,11 @@ def generate_report(
             f"{s.implied_prob:.1%} | {s.actual_rate:.1%} | "
             f"{gap_str} | {ci_str} | {side_display} |"
         )
+    lines.append("")
+    lines.append(
+        "*N = contract observations (2 per binary market).  "
+        "N_Payout = contracts that paid out at resolution.*"
+    )
     lines.append("")
 
     # Side semantics summary.
@@ -515,17 +594,24 @@ def generate_report(
     lines.append("## Limitations")
     lines.append("")
     lines.append(
-        "1. **Entry price proxy:** Uses `lastTradePrice` (last trade before "
+        "1. **Contract-level analysis:** Each binary market contributes two "
+        "contract observations (YES at `p`, NO at `1-p`). The sample gate "
+        "counts contracts, not markets. FLB gap is measured per contract "
+        "side, so the same market-level mispricing appears in both the "
+        "longshot and favorite buckets from opposite sides."
+    )
+    lines.append(
+        "2. **Entry price proxy:** Uses `lastTradePrice` (last trade before "
         "resolution), NOT a timestamped entry snapshot. For strategy P&L "
         "backtesting, we need price snapshots at a defined entry horizon."
     )
     lines.append(
-        "2. **Data source:** Gamma API `closed=true` returns a small window "
+        "3. **Data source:** Gamma API `closed=true` returns a small window "
         "of recently resolved markets. For ≥100 contracts per target bucket, "
         "Dune Analytics on-chain data or a historical warehouse is required."
     )
     lines.append(
-        "3. **Feasibility only:** This is a bias-detection script, not a "
+        "4. **Feasibility only:** This is a bias-detection script, not a "
         "strategy backtest. It does not account for fees, slippage, or "
         "execution timing."
     )
@@ -598,15 +684,21 @@ def main() -> int:
         print("ERROR: No resolved markets found. Check API connectivity.", file=sys.stderr)
         return 2
 
-    # Step 2: Compute FLB by decile.
-    decile_stats = compute_decile_stats(markets)
+    # Step 2: Convert to contract-level observations.
+    contracts = markets_to_contracts(markets)
+    print(f"Generated {len(contracts)} contract observations "
+          f"({len(markets)} markets × 2).", file=sys.stderr)
 
-    # Step 3: Check sample gate.
+    # Step 3: Compute FLB by decile (contract-level).
+    decile_stats = compute_decile_stats(contracts)
+
+    # Step 4: Check sample gate (contract-level counts).
     gate = check_sample_gate(decile_stats)
 
-    # Step 4: Generate report.
+    # Step 5: Generate report.
     report = generate_report(
         markets=markets,
+        contracts=contracts,
         decile_stats=decile_stats,
         gate=gate,
         fetched_at=fetched_at,
@@ -618,7 +710,7 @@ def main() -> int:
     else:
         print(report)
 
-    # Step 5: Save CSV if requested.
+    # Step 6: Save CSV if requested.
     if args.csv:
         save_decile_csv(decile_stats, args.csv)
         print(f"CSV written to {args.csv}", file=sys.stderr)
