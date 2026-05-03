@@ -161,6 +161,13 @@ class PMSSettings(BaseSettings):
         return cls(**config_data)
 
 
+def load_settings(config_path: str | Path | None = None) -> PMSSettings:
+    configured_path = config_path
+    if configured_path is None:
+        configured_path = os.environ.get("PMS_CONFIG_PATH") or "config.yaml"
+    return PMSSettings.load(configured_path)
+
+
 def validate_live_mode_ready(settings: PMSSettings) -> VenueCredentials:
     if not settings.live_trading_enabled:
         msg = "Live trading is disabled. Set live_trading_enabled=true in config."
