@@ -6,12 +6,13 @@ sample gate, report generation) without hitting the Gamma API.
 
 from __future__ import annotations
 
+import csv
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from scripts.flb_data_feasibility import (
-    ContractObservation,
     DecileStats,
     ResolvedMarket,
     _assign_decile,
@@ -20,6 +21,7 @@ from scripts.flb_data_feasibility import (
     check_sample_gate,
     compute_decile_stats,
     generate_report,
+    load_warehouse_markets,
     markets_to_contracts,
 )
 
@@ -46,6 +48,209 @@ def _market(
         end_date="2026-05-01",
         category=category,
     )
+
+
+WAREHOUSE_COLUMNS = [
+    "market_id",
+    "question",
+    "entry_yes_price",
+    "yes_payout",
+    "no_payout",
+    "volume",
+    "liquidity",
+    "entry_timestamp",
+    "resolved_at",
+    "category",
+]
+
+
+def _write_warehouse_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=WAREHOUSE_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _warehouse_row(
+    *,
+    market_id: str = "m-1",
+    entry_yes_price: str = "0.05",
+    yes_payout: str = "0",
+    no_payout: str = "1",
+    entry_timestamp: str = "2025-12-01T00:00:00Z",
+    resolved_at: str = "2026-01-01T00:00:00Z",
+) -> dict[str, str]:
+    return {
+        "market_id": market_id,
+        "question": f"Warehouse market {market_id}?",
+        "entry_yes_price": entry_yes_price,
+        "yes_payout": yes_payout,
+        "no_payout": no_payout,
+        "volume": "10000",
+        "liquidity": "500",
+        "entry_timestamp": entry_timestamp,
+        "resolved_at": resolved_at,
+        "category": "politics",
+    }
+
+
+# ── Warehouse CSV Loading ───────────────────────────────────────────────────
+
+
+class TestWarehouseCsvLoading:
+    def test_loads_explicit_settlement_vectors(self, tmp_path: Path) -> None:
+        """Warehouse source uses explicit final payout vectors, not price heuristics."""
+        path = tmp_path / "resolved_binary.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                market_id="yes-wins",
+                entry_yes_price="0.92",
+                yes_payout="1",
+                no_payout="0",
+            ),
+            _warehouse_row(
+                market_id="no-wins",
+                entry_yes_price="0.08",
+                yes_payout="0",
+                no_payout="1",
+            ),
+        ])
+
+        markets = load_warehouse_markets(path)
+
+        assert len(markets) == 2
+        assert markets[0].resolved_yes is True
+        assert markets[0].yes_price == pytest.approx(0.92)
+        assert markets[1].resolved_yes is False
+        assert len(markets_to_contracts(markets)) == 4
+
+    def test_rejects_near_settled_payout_vector(self, tmp_path: Path) -> None:
+        """0.995/0.005 is a price-like vector, not explicit settlement truth."""
+        path = tmp_path / "near_settled.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(yes_payout="0.995", no_payout="0.005")
+        ])
+
+        with pytest.raises(ValueError, match="exact final payout vector"):
+            load_warehouse_markets(path)
+
+    def test_rejects_ambiguous_fifty_fifty_payout_vector(self, tmp_path: Path) -> None:
+        """Ambiguous 50/50 resolutions are not safe labels for H1 FLB."""
+        path = tmp_path / "fifty_fifty.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(yes_payout="0.5", no_payout="0.5")
+        ])
+
+        with pytest.raises(ValueError, match="exact final payout vector"):
+            load_warehouse_markets(path)
+
+    def test_rejects_missing_required_column(self, tmp_path: Path) -> None:
+        path = tmp_path / "missing_column.csv"
+        with path.open("w", newline="", encoding="utf-8") as f:
+            fieldnames = [c for c in WAREHOUSE_COLUMNS if c != "liquidity"]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            row = _warehouse_row()
+            row.pop("liquidity")
+            writer.writerow(row)
+
+        with pytest.raises(ValueError, match="missing required columns: liquidity"):
+            load_warehouse_markets(path)
+
+    def test_rejects_duplicate_market_ids(self, tmp_path: Path) -> None:
+        """Duplicate markets would falsely inflate the contract sample gate."""
+        path = tmp_path / "duplicate_markets.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(market_id="duplicated-market"),
+            _warehouse_row(market_id="duplicated-market"),
+        ])
+
+        with pytest.raises(ValueError, match="duplicate market_id"):
+            load_warehouse_markets(path)
+
+    def test_rejects_entry_timestamp_after_resolution(self, tmp_path: Path) -> None:
+        """Post-resolution entry prices leak settlement truth into FLB samples."""
+        path = tmp_path / "post_resolution_entry.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                entry_timestamp="2026-01-02T00:00:00Z",
+                resolved_at="2026-01-01T00:00:00Z",
+            )
+        ])
+
+        with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
+            load_warehouse_markets(path)
+
+    def test_rejects_entry_timestamp_equal_to_resolution(self, tmp_path: Path) -> None:
+        """Same-time entry snapshots are also unsafe for historical replay."""
+        path = tmp_path / "same_time_entry.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                entry_timestamp="2026-01-01T00:00:00Z",
+                resolved_at="2026-01-01T00:00:00Z",
+            )
+        ])
+
+        with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
+            load_warehouse_markets(path)
+
+    def test_mixed_timezone_timestamps_are_normalized(self, tmp_path: Path) -> None:
+        """Naive and Z-suffixed ISO fields should compare as UTC instants."""
+        path = tmp_path / "mixed_timezone.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                entry_timestamp="2025-12-01T00:00:00",
+                resolved_at="2026-01-01T00:00:00Z",
+            )
+        ])
+
+        markets = load_warehouse_markets(path)
+
+        assert len(markets) == 1
+
+    def test_mixed_timezone_post_resolution_entry_is_validation_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Mixed timezone formats should not raise TypeError on unsafe rows."""
+        path = tmp_path / "mixed_timezone_bad_order.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                entry_timestamp="2026-01-02T00:00:00",
+                resolved_at="2026-01-01T00:00:00Z",
+            )
+        ])
+
+        with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
+            load_warehouse_markets(path)
+
+    def test_warehouse_contracts_can_pass_extreme_sample_gate(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "sample_gate.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(market_id=f"m-{i}", entry_yes_price="0.05")
+            for i in range(120)
+        ])
+
+        markets = load_warehouse_markets(path)
+        contracts = markets_to_contracts(markets)
+        stats = compute_decile_stats(contracts)
+        gate = check_sample_gate(stats)
+        report = generate_report(
+            markets=markets,
+            contracts=contracts,
+            decile_stats=stats,
+            gate=gate,
+            fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
+            source_label=f"warehouse CSV: {path}",
+        )
+
+        assert len(markets) == 120
+        assert gate.longshot_count == 120
+        assert gate.favorite_count == 120
+        assert gate.passed is True
+        assert "H1 DATA VIABLE" in report
+        assert "warehouse CSV:" in report
 
 
 # ── Decile Assignment ───────────────────────────────────────────────────────
@@ -829,8 +1034,6 @@ class TestContractLevelAnalysis:
         ]
 
         contracts = markets_to_contracts(markets)
-        stats = compute_decile_stats(contracts)
-
         # Find the specific contracts to verify the relationship
         yes_contract = next(c for c in contracts if c.contract_side == "YES")
         no_contract = next(c for c in contracts if c.contract_side == "NO")
