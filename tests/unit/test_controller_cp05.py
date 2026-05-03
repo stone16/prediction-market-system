@@ -184,39 +184,58 @@ class FixedSizer:
         return self._size
 
 
-@pytest.mark.xfail(reason="migrated in task 4 of llm-forecaster-real plan")
-def test_llm_forecaster_returns_neutral_tuple_without_calling_client() -> None:
+def test_llm_forecaster_predict_uses_injected_client_and_caches() -> None:
     client = FakeClaudeClient()
     forecaster = LLMForecaster(
-        config=LLMSettings(enabled=True, api_key="test-key", model="claude-test"),
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            model="claude-test",
+            timeout_s=2.0,
+            cache_ttl_s=30.0,
+            max_tokens=128,
+        ),
         client=client,
     )
 
     result = forecaster.predict(_signal())
 
     assert result is not None
-    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
-    assert result.model_id == "neutral"
-    assert client.messages.calls == []
+    assert result[0] == pytest.approx(0.8)
+    assert result[1] == pytest.approx(0.6)
+    assert result.model_id == "claude-test"
+    assert client.messages.calls and len(client.messages.calls) == 1
+
+    # second call hits cache
+    forecaster.predict(_signal())
+    assert len(client.messages.calls) == 1
 
 
-@pytest.mark.xfail(reason="migrated in task 4 of llm-forecaster-real plan")
-def test_llm_forecaster_returns_none_when_disabled_and_neutral_when_enabled(
+def test_llm_forecaster_returns_none_when_disabled_and_real_result_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    assert (
-        LLMForecaster(
-            config=LLMSettings(enabled=False),
-            client=FakeClaudeClient(),
-        ).predict(_signal())
-        is None
-    )
-    assert LLMForecaster(
-        config=LLMSettings(enabled=True),
+    disabled = LLMForecaster(
+        config=LLMSettings(enabled=False),
         client=FakeClaudeClient(),
-    ).predict(_signal()) == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
+    )
+    assert disabled.predict(_signal()) is None
+
+    enabled = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            model="claude-test",
+            cache_ttl_s=30.0,
+        ),
+        client=FakeClaudeClient(),
+    )
+    result = enabled.predict(_signal())
+    assert result is not None
+    assert result[0] == pytest.approx(0.8)
 
 
 @pytest.mark.asyncio
@@ -229,58 +248,94 @@ async def test_llm_forecaster_forecast_uses_neutral_probability_and_default_conf
     assert probability == pytest.approx(0.27)
 
 
-@pytest.mark.xfail(reason="migrated in task 4 of llm-forecaster-real plan")
-def test_llm_forecaster_client_paths_cover_injected_missing_and_cached_factory(
+def test_llm_forecaster_client_paths_cover_injection_dispatch_and_caching(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # 1. injected client short-circuits dispatch
     injected_client = FakeClaudeClient()
-    injected_result = LLMForecaster(client=injected_client)._client("ignored")  # type: ignore[call-arg]
-    assert injected_result is not None
-    assert cast(object, injected_result) is injected_client  # type: ignore[redundant-cast]
+    forecaster_a = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="x",
+        ),
+        client=injected_client,
+    )
+    assert forecaster_a._client() is injected_client
 
+    # 2. unknown / missing provider returns None
+    forecaster_b = LLMForecaster(config=LLMSettings(enabled=False))
+    assert forecaster_b._client() is None
+
+    # 3. anthropic provider, missing SDK -> None
     def raise_import_error(module_name: str) -> object:
         raise ImportError(module_name)
 
-    monkeypatch.setattr("pms.controller.forecasters.llm.import_module", raise_import_error)
-    assert LLMForecaster()._client("missing") is None  # type: ignore[call-arg]
-
     monkeypatch.setattr(
-        "pms.controller.forecasters.llm.import_module",
-        lambda _: SimpleNamespace(Anthropic="not-callable"),
+        "pms.controller.forecasters.llm.import_module", raise_import_error
     )
-    assert LLMForecaster()._client("bad-factory") is None  # type: ignore[call-arg]
+    forecaster_c = LLMForecaster(
+        config=LLMSettings(
+            enabled=True, provider="anthropic", api_key="k"
+        )
+    )
+    assert forecaster_c._client() is None
 
-    created_calls: list[str] = []
+    # 4. anthropic provider, factory returns object; cached on subsequent call
+    created_calls: list[dict[str, object]] = []
 
-    def create_client(*, api_key: str) -> FakeClaudeClient:
-        created_calls.append(api_key)
+    def create_anthropic(**kwargs: object) -> FakeClaudeClient:
+        created_calls.append(kwargs)
         return FakeClaudeClient()
 
     monkeypatch.setattr(
         "pms.controller.forecasters.llm.import_module",
-        lambda _: SimpleNamespace(Anthropic=create_client),
+        lambda _: SimpleNamespace(Anthropic=create_anthropic),
     )
-    forecaster = LLMForecaster()
-    created_client = forecaster._client("cache-key")  # type: ignore[call-arg]
+    forecaster_d = LLMForecaster(
+        config=LLMSettings(
+            enabled=True, provider="anthropic", api_key="key1"
+        )
+    )
+    first = forecaster_d._client()
+    assert first is not None
+    assert hasattr(first, "messages")
+    cached = forecaster_d._client()
+    assert cached is first
+    assert len(created_calls) == 1
+    assert created_calls[0]["api_key"] == "key1"
 
-    assert created_client is not None
-    assert hasattr(created_client, "messages")
-    assert forecaster.client is not None
-    cached_client = forecaster._client("ignored-after-cache")  # type: ignore[call-arg]
-    assert cached_client is not None
-    assert cast(object, cached_client) is cast(object, created_client)  # type: ignore[redundant-cast]
-    assert created_calls == ["cache-key"]
+    # 5. openai provider with base_url
+    def create_openai(**kwargs: object) -> FakeOpenAIClient:
+        created_calls.append({"openai": kwargs})
+        return FakeOpenAIClient()
+
+    monkeypatch.setattr(
+        "pms.controller.forecasters.llm.import_module",
+        lambda _: SimpleNamespace(OpenAI=create_openai),
+    )
+    forecaster_e = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="openai",
+            api_key="key2",
+            base_url="https://gw.example/v1",
+        )
+    )
+    openai_client = forecaster_e._client()
+    assert openai_client is not None
+    assert hasattr(openai_client, "chat")
 
 
 def test_llm_prompt_trims_orderbook_and_serializes_external_signal() -> None:
     prompt = _prompt(_signal())
 
-    assert "market_title: Will CP05 pass?" in prompt
-    assert "yes_price: 0.4" in prompt
+    assert "**Market**: Will CP05 pass?" in prompt
+    assert "**Current YES price**: 0.4000" in prompt
     assert '"price":0.35' in prompt
     assert '"price":0.34' not in prompt
-    assert '"fair_value": 0.65' in prompt
-    assert '"no_count": 3' in prompt
+    assert "- Yes count: 7" in prompt
+    assert "- No count: 3" in prompt
 
 
 def test_llm_response_parsing_helpers_cover_json_text_and_errors() -> None:
@@ -300,7 +355,6 @@ def test_llm_response_parsing_helpers_cover_json_text_and_errors() -> None:
         _as_float(object())
 
 
-@pytest.mark.xfail(reason="migrated in task 4 of llm-forecaster-real plan")
 @pytest.mark.asyncio
 async def test_controller_pipeline_suppresses_zero_size_decision_and_tracks_metric() -> None:
     llm_client = FakeClaudeClient()
@@ -309,12 +363,17 @@ async def test_controller_pipeline_suppresses_zero_size_decision_and_tracks_metr
             RulesForecaster(min_edge=0.01),
             StatisticalForecaster(),
             LLMForecaster(
-                config=LLMSettings(enabled=True, api_key="test-key", model="claude-test"),
+                config=LLMSettings(
+                    enabled=True,
+                    provider="anthropic",
+                    api_key="test-key",
+                    model="claude-test",
+                ),
                 client=llm_client,
             ),
         ],
         calibrator=NetcalCalibrator(),
-        sizer=KellySizer(risk=RiskSettings(max_position_per_market=1000.0)),
+        sizer=FixedSizer(0.5),
         router=Router(ControllerSettings(min_volume=100.0)),
     )
 
