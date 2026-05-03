@@ -5,7 +5,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import cast
 
 import asyncpg
 import httpx
@@ -169,6 +169,7 @@ def _settings() -> PMSSettings:
 
 
 def _signal() -> MarketSignal:
+    now = datetime.now(tz=UTC)
     return MarketSignal(
         market_id="cp07-user-subscription",
         token_id="cp07-user-token",
@@ -176,10 +177,10 @@ def _signal() -> MarketSignal:
         title="Will CP07 user subscriptions select?",
         yes_price=0.55,
         volume_24h=1_000.0,
-        resolves_at=datetime(2026, 5, 1, tzinfo=UTC),
+        resolves_at=now + timedelta(days=7),
         orderbook={"bids": [], "asks": []},
         external_signal={},
-        fetched_at=datetime(2026, 4, 24, 9, 0, tzinfo=UTC),
+        fetched_at=now,
         market_status="open",
     )
 
@@ -191,7 +192,8 @@ async def _seed_market_with_token(
     token_id: str,
 ) -> None:
     store = PostgresMarketDataStore(pg_pool)
-    now = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+    # Keep subscription-route fixtures selectable regardless of wall-clock date.
+    now = datetime.now(tz=UTC)
     await store.write_market(
         Market(
             condition_id=market_id,
