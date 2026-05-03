@@ -21,6 +21,41 @@ if not os.environ.get("PMS_RUN_INTEGRATION"):
     )
 
 
+@pytest.fixture(autouse=True)
+def reset_to_seed() -> None:
+    """Reset strategies.active_version_id to a pre-relaxed seed version so
+    each test starts from the same DB state. Skips the test if no seed
+    version with both required factors set to true exists in the DB."""
+    with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT strategy_version_id, config_json
+            FROM strategy_versions
+            WHERE strategy_id = 'default'
+            """
+        )
+        seed_id: str | None = None
+        for row in cur.fetchall():
+            version_id: str = row[0]
+            config: dict[str, Any] = row[1]
+            flags = _required_flags(config)
+            if flags.get("metaculus_prior") is True and flags.get(
+                "subset_pricing_violation"
+            ) is True:
+                seed_id = version_id
+                break
+        if seed_id is None:
+            pytest.skip(
+                "no pre-relaxed seed version present; "
+                "run alembic upgrade and seed the default strategy first"
+            )
+        cur.execute(
+            "UPDATE strategies SET active_version_id = %s WHERE strategy_id = 'default'",
+            (seed_id,),
+        )
+        conn.commit()
+
+
 def _dsn() -> str:
     return os.environ.get(
         "PMS_TEST_DATABASE_URL",
@@ -93,14 +128,19 @@ def test_relax_script_creates_new_version_and_flips_required_flags() -> None:
 
 
 def test_relax_script_is_idempotent_on_rerun() -> None:
-    # Assumes previous test ran first and the relaxation is in place.
+    """First call relaxes; second call should be a no-op printing 'already relaxed'."""
     proc1 = _run_script()
-    assert proc1.returncode == 0
+    assert proc1.returncode == 0, proc1.stderr
+    # proc1 either relaxed (fresh seed) OR was already relaxed (post-relax DB).
+    # In either case, proc2 must be the explicit no-op path.
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         first_id, _ = _active_config(cur)
 
     proc2 = _run_script()
-    assert proc2.returncode == 0
+    assert proc2.returncode == 0, proc2.stderr
+    assert "already relaxed" in proc2.stdout, (
+        f"second run should print 'already relaxed', got stdout: {proc2.stdout!r}"
+    )
     with psycopg.connect(_dsn()) as conn, conn.cursor() as cur:
         second_id, _ = _active_config(cur)
     assert first_id == second_id, "re-run must not create a new version"
