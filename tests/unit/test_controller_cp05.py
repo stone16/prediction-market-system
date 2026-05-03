@@ -557,6 +557,63 @@ def test_llm_forecaster_refunds_transient_provider_failure_budget() -> None:
     assert len(client.messages.calls) == 2
 
 
+def test_llm_forecaster_refunds_unhandled_provider_exception_budget() -> None:
+    client = FakeClaudeClient()
+    failing_messages = FailingMessages(RuntimeError("auth rejected"))
+    client.messages = failing_messages
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
+        ),
+        client=client,
+    )
+
+    with pytest.raises(RuntimeError, match="auth rejected"):
+        forecaster.predict(_signal(market_id="m-auth-fail"))
+
+    success_messages = FakeMessages()
+    client.messages = success_messages
+    assert forecaster.predict(_signal(market_id="m-after-auth-fail")) is not None
+    assert len(failing_messages.calls) == 1
+    assert len(success_messages.calls) == 1
+
+
+def test_llm_forecaster_refunds_client_initialization_exception_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory_calls: list[dict[str, Any]] = []
+
+    def create_client(**kwargs: Any) -> FakeClaudeClient:
+        factory_calls.append(kwargs)
+        if len(factory_calls) == 1:
+            raise RuntimeError("invalid client configuration")
+        return FakeClaudeClient()
+
+    monkeypatch.setattr(
+        "pms.controller.forecasters.llm.import_module",
+        lambda _: SimpleNamespace(Anthropic=create_client),
+    )
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="invalid client configuration"):
+        forecaster.predict(_signal(market_id="m-client-fail"))
+
+    assert forecaster.predict(_signal(market_id="m-after-client-fail")) is not None
+    assert len(factory_calls) == 2
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

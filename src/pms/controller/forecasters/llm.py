@@ -100,18 +100,26 @@ class LLMForecaster:
                 },
             )
             return None
-        client = self._client()
+        try:
+            client = self._client()
+        except Exception:
+            self._refund_budget(estimated_cost)
+            raise
         if client is None:
             self._refund_budget(estimated_cost)
             return None
         try:
             raw = self._call(client, signal)
-            self._record_cost(estimated_cost, signal)
-            result = self._parse(raw)
         except (LLMTimeoutError, LLMTransientError):
             self._refund_budget(estimated_cost)
             return None
-        except (LLMTimeoutError, LLMTransientError, LLMParseError):
+        except Exception:
+            self._refund_budget(estimated_cost)
+            raise
+        self._record_cost(estimated_cost, signal)
+        try:
+            result = self._parse(raw)
+        except LLMParseError:
             return None
         self._cache_put(signal.market_id, result)
         return result
