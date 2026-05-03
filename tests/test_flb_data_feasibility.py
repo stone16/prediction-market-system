@@ -14,6 +14,7 @@ from scripts.flb_data_feasibility import (
     DecileStats,
     ResolvedMarket,
     _assign_decile,
+    _parse_market,
     _wilson_interval,
     check_sample_gate,
     compute_decile_stats,
@@ -316,3 +317,135 @@ class TestReportGeneration:
         assert "Market Categories" in report
         assert "politics" in report
         assert "sports" in report
+
+    def test_report_uses_consistent_boundary_language(self) -> None:
+        """Report should use [0%-10%) and [90%-100%] not <10% and >90%."""
+        markets = [_market(0.50, True)]
+        stats = compute_decile_stats(markets)
+        gate = check_sample_gate(stats)
+        report = generate_report(
+            markets=markets,
+            decile_stats=stats,
+            gate=gate,
+            fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
+        )
+        assert "[0%-10%)" in report
+        assert "[90%-100%]" in report
+
+
+# ── P1 Regression: outcomePrices ordering ───────────────────────────────────
+
+
+class TestOutcomePricesOrdering:
+    """Regression: Gamma API can return outcomes in ['No', 'Yes'] order.
+
+    P1 bug fix: the parser must use the outcomes array to determine which
+    index in outcomePrices is YES, not assume index 0.
+    """
+
+    def _make_row(
+        self,
+        outcomes: list[str],
+        prices: list[str],
+        *,
+        resolved_idx: int = 0,
+    ) -> dict[str, object]:
+        """Build a Gamma API row with specified outcome ordering."""
+        # Set one price to 1.0 (resolved) and the other to 0.0.
+        resolved_prices = list(prices)
+        resolved_prices[resolved_idx] = "1.0"
+        resolved_prices[1 - resolved_idx] = "0.0"
+        return {
+            "id": "test-001",
+            "question": "Test market",
+            "outcomes": outcomes,
+            "outcomePrices": resolved_prices,
+            "lastTradePrice": 0.75,
+            "volumeNum": 10000.0,
+            "liquidityNum": 500.0,
+            "endDate": "2026-05-01",
+            "slug": "test-market",
+        }
+
+    def test_yes_no_order_resolves_yes(self) -> None:
+        """['Yes', 'No'] with YES=1.0 → resolved_yes=True."""
+        row = self._make_row(["Yes", "No"], ["0.0", "0.0"], resolved_idx=0)
+        market = _parse_market(row)
+        assert market is not None
+        assert market.resolved_yes is True
+
+    def test_no_yes_order_resolves_yes(self) -> None:
+        """['No', 'Yes'] with YES=1.0 (index 1) → resolved_yes=True.
+
+        This is the P1 regression: without the fix, the parser would see
+        prices[0]=0.0 and prices[1]=1.0 and incorrectly conclude resolved_no.
+        """
+        row = self._make_row(["No", "Yes"], ["0.0", "0.0"], resolved_idx=1)
+        market = _parse_market(row)
+        assert market is not None
+        assert market.resolved_yes is True
+
+    def test_yes_no_order_resolves_no(self) -> None:
+        """['Yes', 'No'] with NO=1.0 (index 1) → resolved_yes=False."""
+        row = self._make_row(["Yes", "No"], ["0.0", "0.0"], resolved_idx=1)
+        market = _parse_market(row)
+        assert market is not None
+        assert market.resolved_yes is False
+
+    def test_no_yes_order_resolves_no(self) -> None:
+        """['No', 'Yes'] with NO=1.0 (index 0) → resolved_yes=False."""
+        row = self._make_row(["No", "Yes"], ["0.0", "0.0"], resolved_idx=0)
+        market = _parse_market(row)
+        assert market is not None
+        assert market.resolved_yes is False
+
+    def test_flipped_order_does_not_flip_resolution(self) -> None:
+        """Both orderings with same resolution should agree on resolved_yes.
+
+        Builds two rows: one with ['Yes', 'No'] and one with ['No', 'Yes'],
+        both resolving YES. Both must produce resolved_yes=True.
+        """
+        row_std = self._make_row(["Yes", "No"], ["0.0", "0.0"], resolved_idx=0)
+        row_flip = self._make_row(["No", "Yes"], ["0.0", "0.0"], resolved_idx=1)
+        mkt_std = _parse_market(row_std)
+        mkt_flip = _parse_market(row_flip)
+        assert mkt_std is not None
+        assert mkt_flip is not None
+        assert mkt_std.resolved_yes == mkt_flip.resolved_yes is True
+
+
+# ── P2 Regression: 90% boundary in favorite bucket ─────────────────────────
+
+
+class TestNinetyPercentBoundary:
+    """P2: verify that exactly 90% markets land in decile 9 (favorite bucket).
+
+    The sample gate counts decile 9 as the favorite bucket. Markets at
+    exactly 90% should be counted, not excluded.
+    """
+
+    def test_exactly_90_in_favorite_decile(self) -> None:
+        """Markets at exactly 90% should be in decile 9."""
+        assert _assign_decile(0.90) == 9
+
+    def test_exactly_90_counted_in_sample_gate(self) -> None:
+        """120 markets at exactly 90% should pass the favorite gate."""
+        markets = [_market(0.90, True) for _ in range(120)]
+        stats = compute_decile_stats(markets)
+        gate = check_sample_gate(stats)
+        assert gate.favorite_count == 120
+        assert gate.favorite_passed is True
+
+    def test_just_below_90_not_in_favorite(self) -> None:
+        """Markets at 89.9% should be in decile 8, not the favorite bucket."""
+        assert _assign_decile(0.899) == 8
+
+    def test_boundary_does_not_overstate_favorite_sample(self) -> None:
+        """Only markets ≥90% should count; 89% markets should not inflate."""
+        # 50 markets at 89% (decile 8) + 50 at 91% (decile 9)
+        markets = [_market(0.89, True) for _ in range(50)]
+        markets += [_market(0.91, True) for _ in range(50)]
+        stats = compute_decile_stats(markets)
+        # Only the 91% markets should be in the favorite bucket
+        assert stats[9].n == 50
+        assert stats[8].n == 50
