@@ -142,7 +142,7 @@ export PMS_POLYMARKET_SIGNATURE_TYPE="<your signature type>"
 # 3. Create first-order approval file
 #    /secure/pms/first-order.json — reviewed and approved by operator
 
-# 4. Start live mode through the stub-gated operator path
+# 4. Start live mode (operator approval required)
 export PMS_MODE=live
 export PMS_LIVE_TRADING_ENABLED=true
 uv run pms-api --config config.live.yaml
