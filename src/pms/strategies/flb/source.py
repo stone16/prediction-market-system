@@ -68,9 +68,10 @@ class FlbMarketSnapshot:
 class LiveFlbSource:
     """Market-price source for H1 FLB signals.
 
-    This source implements only H1 bucket semantics from the research brief. H2
-    anchoring-lag/news replay remains out of scope until the H1 historical data
-    spine is proven viable.
+    This source implements only H1 bucket semantics from the research brief. The
+    edge estimate is a paper-soak placeholder until warehouse decile estimates
+    replace it. H2 anchoring-lag/news replay remains out of scope until the H1
+    historical data spine is proven viable.
     """
 
     market_ids: Sequence[str]
