@@ -556,3 +556,90 @@ class TestMedianVolume:
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
         )
         assert "$200" in report
+
+
+class TestSettlementCriteria:
+    """Regression: parser must reject closed-but-unsettled markets.
+
+    Gamma API has no explicit settlement flag.  The parser uses price-based
+    heuristics to distinguish oracle-settled markets (prices at 0.0/1.0)
+    from closed-but-unsettled markets (prices at e.g. 0.995/0.005).
+
+    Previous tolerance of 0.01 admitted near-resolution prices as ground
+    truth, corrupting the FLB label set.
+    """
+
+    @staticmethod
+    def _gamma_row(
+        outcomes: str = '["Yes", "No"]',
+        outcome_prices: str = '["1.0", "0.0"]',
+        last_trade_price: float = 0.05,
+        volume: float = 10_000.0,
+    ) -> dict:
+        """Build a minimal Gamma API row dict for _parse_market()."""
+        return {
+            "id": "test-123",
+            "question": "Test market?",
+            "outcomes": outcomes,
+            "outcomePrices": outcome_prices,
+            "lastTradePrice": last_trade_price,
+            "volumeNum": volume,
+            "liquidityNum": 500.0,
+            "endDate": "2026-05-01",
+            "slug": "test-market-sports",
+        }
+
+    def test_exact_payout_accepted(self) -> None:
+        """Exact 1.0/0.0 payout vector is accepted."""
+        row = self._gamma_row(outcome_prices='["1.0", "0.0"]')
+        result = _parse_market(row)
+        assert result is not None
+        assert result.resolved_yes is True
+
+    def test_exact_reverse_payout_accepted(self) -> None:
+        """Exact 0.0/1.0 payout vector (NO wins) is accepted."""
+        row = self._gamma_row(outcome_prices='["0.0", "1.0"]')
+        result = _parse_market(row)
+        assert result is not None
+        assert result.resolved_yes is False
+
+    def test_amm_residual_accepted(self) -> None:
+        """AMM residual prices (0.999999/0.000001) are accepted."""
+        row = self._gamma_row(
+            outcome_prices='["0.9999989889179475", "0.0000010110820525"]'
+        )
+        result = _parse_market(row)
+        assert result is not None
+
+    def test_near_resolution_rejected(self) -> None:
+        """0.995/0.005 near-resolution prices are rejected.
+
+        This is the key regression: closed-but-unsettled markets at
+        0.995/0.005 must NOT be treated as oracle-settled ground truth.
+        """
+        row = self._gamma_row(
+            outcome_prices='["0.995", "0.005"]'
+        )
+        assert _parse_market(row) is None
+
+    def test_99_1_percent_rejected(self) -> None:
+        """0.99/0.01 prices are rejected (above 0.001 tolerance)."""
+        row = self._gamma_row(
+            outcome_prices='["0.99", "0.01"]'
+        )
+        assert _parse_market(row) is None
+
+    def test_midrange_rejected(self) -> None:
+        """Mid-range prices (0.58/0.42) are rejected."""
+        row = self._gamma_row(
+            outcome_prices='["0.58", "0.42"]'
+        )
+        assert _parse_market(row) is None
+
+    def test_degenerate_zero_zero_rejected(self) -> None:
+        """Both prices at 0.0 (cleared data) are rejected."""
+        row = self._gamma_row(
+            outcome_prices='["0", "0"]',
+            last_trade_price=0.0,
+        )
+        assert _parse_market(row) is None

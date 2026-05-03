@@ -166,11 +166,28 @@ def _parse_market(row: dict[str, Any]) -> ResolvedMarket | None:
         yes_price = float(prices[yes_idx])
         no_price = float(prices[no_idx])
 
-        # A resolved market has one side at 1.0 and the other at 0.0.
-        # Use a tolerance for floating-point representation.
-        if abs(yes_price - 1.0) < 0.01:
+        # A settled binary market has one side at exactly 1.0 (the winner)
+        # and the other at 0.0 (the loser).  Polymarket's AMM leaves tiny
+        # residuals (e.g. 0.999999/0.000001), so we allow a tight tolerance.
+        #
+        # CRITICAL: the previous 0.01 tolerance admitted closed-but-unsettled
+        # markets (e.g. 0.995/0.005) whose prices reflect last-trade proximity
+        # to resolution, NOT oracle-settled payouts.  Such prices leak
+        # near-resolution information into the label set and bias FLB counts.
+        #
+        # LIMITATION: Gamma API has no explicit settlement/resolution flag.
+        # This price-based heuristic is the best available proxy.  Markets
+        # with prices in the 0.001–0.999 range (i.e. not clearly settled)
+        # are conservatively rejected.
+        _SETTLED_TOLERANCE = 0.001
+
+        # Reject degenerate markets where both prices are zero (cleared data).
+        if yes_price == 0.0 and no_price == 0.0:
+            return None
+
+        if abs(yes_price - 1.0) < _SETTLED_TOLERANCE:
             resolved_yes = True
-        elif abs(no_price - 1.0) < 0.01:
+        elif abs(no_price - 1.0) < _SETTLED_TOLERANCE:
             resolved_yes = False
         else:
             # Not clearly resolved — skip.
