@@ -452,6 +452,25 @@ def test_llm_forecaster_reserves_budget_atomically_for_concurrent_calls() -> Non
     assert sum(result is not None for result in results) == 1
 
 
+def test_llm_forecaster_shares_daily_budget_across_strategy_instances() -> None:
+    first_client = FakeClaudeClient()
+    second_client = FakeClaudeClient()
+    config = LLMSettings(
+        enabled=True,
+        provider="anthropic",
+        api_key="test-key",
+        cache_ttl_s=0.0,
+        max_daily_llm_cost_usdc=0.003,
+    )
+    first = LLMForecaster(config=config, client=first_client)
+    second = LLMForecaster(config=config, client=second_client)
+
+    assert first.predict(_signal(market_id="m-strategy-1")) is not None
+    assert second.predict(_signal(market_id="m-strategy-2")) is None
+    assert len(first_client.messages.calls) == 1
+    assert len(second_client.messages.calls) == 0
+
+
 def test_llm_forecaster_clamps_probability_away_from_impossible_extremes() -> None:
     client = FakeClaudeClient()
     client.messages = FakeMessages(prob_estimate=1.2, confidence=1.5)

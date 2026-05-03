@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from importlib import import_module
 from typing import Protocol, Self, cast
+from weakref import ReferenceType, ref
 
 from pms.config import LLMSettings
 from pms.core.models import MarketSignal
@@ -24,6 +25,17 @@ _SYSTEM_PROMPT = (
     "prob_estimate, confidence, and rationale."
 )
 _ESTIMATED_CALL_COST_USDC = Decimal("0.002")
+
+
+@dataclass
+class _BudgetTracker:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    cost_day: date | None = None
+    daily_cost_usdc: Decimal = Decimal("0")
+
+
+_BUDGET_TRACKERS: dict[int, tuple[ReferenceType[LLMSettings], _BudgetTracker]] = {}
+_BUDGET_TRACKERS_LOCK = threading.Lock()
 
 
 class _LLMClient(Protocol):
@@ -63,9 +75,6 @@ class LLMForecaster:
     client: object | None = None
     _cache: dict[str, tuple[float, LLMForecastResult]] = field(default_factory=dict)
     _cache_lock: threading.Lock = field(default_factory=threading.Lock)
-    _cost_lock: threading.Lock = field(default_factory=threading.Lock)
-    _cost_day: date | None = None
-    _daily_cost_usdc: Decimal = field(default_factory=lambda: Decimal("0"))
 
     def __post_init__(self) -> None:
         if self.config is None:
@@ -273,28 +282,30 @@ class LLMForecaster:
 
     def _reserve_budget(self, estimated_cost_usdc: Decimal) -> bool:
         assert self.config is not None
-        with self._cost_lock:
+        tracker = self._budget_tracker()
+        with tracker.lock:
             today = _today_utc()
-            if self._cost_day != today:
-                self._cost_day = today
-                self._daily_cost_usdc = Decimal("0")
+            if tracker.cost_day != today:
+                tracker.cost_day = today
+                tracker.daily_cost_usdc = Decimal("0")
             max_daily = self.config.max_daily_llm_cost_usdc
             max_daily_decimal = (
                 None if max_daily is None else Decimal(str(max_daily))
             )
             if (
                 max_daily_decimal is not None
-                and self._daily_cost_usdc + estimated_cost_usdc > max_daily_decimal
+                and tracker.daily_cost_usdc + estimated_cost_usdc > max_daily_decimal
             ):
                 return False
-            self._daily_cost_usdc += estimated_cost_usdc
+            tracker.daily_cost_usdc += estimated_cost_usdc
             return True
 
     def _refund_budget(self, estimated_cost_usdc: Decimal) -> None:
-        with self._cost_lock:
-            self._daily_cost_usdc = max(
+        tracker = self._budget_tracker()
+        with tracker.lock:
+            tracker.daily_cost_usdc = max(
                 Decimal("0"),
-                self._daily_cost_usdc - estimated_cost_usdc,
+                tracker.daily_cost_usdc - estimated_cost_usdc,
             )
 
     def _record_cost(self, estimated_cost_usdc: Decimal, signal: MarketSignal) -> None:
@@ -313,8 +324,21 @@ class LLMForecaster:
         )
 
     def _daily_cost_usdc_float(self) -> float:
-        with self._cost_lock:
-            return float(self._daily_cost_usdc)
+        tracker = self._budget_tracker()
+        with tracker.lock:
+            return float(tracker.daily_cost_usdc)
+
+    def _budget_tracker(self) -> _BudgetTracker:
+        assert self.config is not None
+        key = id(self.config)
+        with _BUDGET_TRACKERS_LOCK:
+            entry = _BUDGET_TRACKERS.get(key)
+            if entry is not None and entry[0]() is self.config:
+                return entry[1]
+            else:
+                tracker = _BudgetTracker()
+                _BUDGET_TRACKERS[key] = (ref(self.config), tracker)
+            return tracker
 
 
 def _safe_import(name: str) -> object | None:
