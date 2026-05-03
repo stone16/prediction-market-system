@@ -1844,6 +1844,8 @@ class _PostgresFlbMarketSnapshotReader:
         *,
         as_of: datetime,
     ) -> FlbMarketSnapshot | None:
+        # Paper-soak reader intentionally uses the latest persisted market row;
+        # historical as-of snapshots belong in the warehouse backtest path.
         del as_of
         query = """
         SELECT
