@@ -31,7 +31,7 @@ FACTOR_CATALOG_ROWS: tuple[FactorCatalogEntry, ...] = (
         ),
         input_schema_hash="c4288b992546eb39e3a5e71f660d2a381a45e07f5a267349855f010c59785f6b",
         output_type="scalar",
-        direction="signed",
+        direction="neutral",
         owner="system",
     ),
     FactorCatalogEntry(

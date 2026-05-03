@@ -31,11 +31,11 @@ def test_registered_includes_favorite_longshot_bias() -> None:
     assert FavoriteLongshotBias in REGISTERED
 
 
-def test_catalog_includes_signed_flb_factor() -> None:
+def test_catalog_includes_flb_factor_as_schema_compatible_neutral_direction() -> None:
     entry = next(row for row in FACTOR_CATALOG_ROWS if row.factor_id == "favorite_longshot_bias")
 
     assert entry.output_type == "scalar"
-    assert entry.direction == "signed"
+    assert entry.direction == "neutral"
 
 
 def test_flb_factor_marks_low_yes_longshot_as_buy_no_signal() -> None:
