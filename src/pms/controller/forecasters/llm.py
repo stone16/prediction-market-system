@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from importlib import import_module
 from typing import Protocol, Self, cast
 
@@ -22,7 +23,7 @@ _SYSTEM_PROMPT = (
     "orderbook, and external signals as evidence. Return valid JSON only with "
     "prob_estimate, confidence, and rationale."
 )
-_ESTIMATED_CALL_COST_USDC = 0.002
+_ESTIMATED_CALL_COST_USDC = Decimal("0.002")
 
 
 class _LLMClient(Protocol):
@@ -64,7 +65,7 @@ class LLMForecaster:
     _cache_lock: threading.Lock = field(default_factory=threading.Lock)
     _cost_lock: threading.Lock = field(default_factory=threading.Lock)
     _cost_day: date | None = None
-    _daily_cost_usdc: float = 0.0
+    _daily_cost_usdc: Decimal = field(default_factory=lambda: Decimal("0"))
 
     def __post_init__(self) -> None:
         if self.config is None:
@@ -77,26 +78,30 @@ class LLMForecaster:
         if cached is not None:
             return cached
         estimated_cost = self._estimated_call_cost_usdc()
-        if not self._check_budget(estimated_cost):
+        if not self._reserve_budget(estimated_cost):
             logger.info(
                 "llm_forecaster_budget_exhausted",
                 extra={
                     "market_id": signal.market_id,
                     "provider": self.config.provider,
                     "model": self.config.model,
-                    "estimated_cost_usdc": estimated_cost,
-                    "daily_cost_usdc": self._daily_cost_usdc,
+                    "estimated_cost_usdc": float(estimated_cost),
+                    "daily_cost_usdc": self._daily_cost_usdc_float(),
                     "max_daily_llm_cost_usdc": self.config.max_daily_llm_cost_usdc,
                 },
             )
             return None
         client = self._client()
         if client is None:
+            self._refund_budget(estimated_cost)
             return None
         try:
             raw = self._call(client, signal)
             self._record_cost(estimated_cost, signal)
             result = self._parse(raw)
+        except (LLMTimeoutError, LLMTransientError):
+            self._refund_budget(estimated_cost)
+            return None
         except (LLMTimeoutError, LLMTransientError, LLMParseError):
             return None
         self._cache_put(signal.market_id, result)
@@ -263,39 +268,53 @@ class LLMForecaster:
                 oldest = min(self._cache, key=lambda k: self._cache[k][0])
                 del self._cache[oldest]
 
-    def _estimated_call_cost_usdc(self) -> float:
+    def _estimated_call_cost_usdc(self) -> Decimal:
         return _ESTIMATED_CALL_COST_USDC
 
-    def _check_budget(self, estimated_cost_usdc: float) -> bool:
+    def _reserve_budget(self, estimated_cost_usdc: Decimal) -> bool:
         assert self.config is not None
         with self._cost_lock:
             today = _today_utc()
             if self._cost_day != today:
                 self._cost_day = today
-                self._daily_cost_usdc = 0.0
+                self._daily_cost_usdc = Decimal("0")
             max_daily = self.config.max_daily_llm_cost_usdc
-            if max_daily is None:
-                return True
-            return self._daily_cost_usdc + estimated_cost_usdc <= max_daily
-
-    def _record_cost(self, estimated_cost_usdc: float, signal: MarketSignal) -> None:
-        assert self.config is not None
-        with self._cost_lock:
-            if self._cost_day is None:
-                self._cost_day = _today_utc()
+            max_daily_decimal = (
+                None if max_daily is None else Decimal(str(max_daily))
+            )
+            if (
+                max_daily_decimal is not None
+                and self._daily_cost_usdc + estimated_cost_usdc > max_daily_decimal
+            ):
+                return False
             self._daily_cost_usdc += estimated_cost_usdc
-            daily_cost = self._daily_cost_usdc
+            return True
+
+    def _refund_budget(self, estimated_cost_usdc: Decimal) -> None:
+        with self._cost_lock:
+            self._daily_cost_usdc = max(
+                Decimal("0"),
+                self._daily_cost_usdc - estimated_cost_usdc,
+            )
+
+    def _record_cost(self, estimated_cost_usdc: Decimal, signal: MarketSignal) -> None:
+        assert self.config is not None
+        daily_cost = self._daily_cost_usdc_float()
         logger.info(
             "llm_forecaster_cost_recorded",
             extra={
                 "market_id": signal.market_id,
                 "provider": self.config.provider,
                 "model": self.config.model,
-                "estimated_cost_usdc": estimated_cost_usdc,
+                "estimated_cost_usdc": float(estimated_cost_usdc),
                 "daily_cost_usdc": daily_cost,
                 "max_daily_llm_cost_usdc": self.config.max_daily_llm_cost_usdc,
             },
         )
+
+    def _daily_cost_usdc_float(self) -> float:
+        with self._cost_lock:
+            return float(self._daily_cost_usdc)
 
 
 def _safe_import(name: str) -> object | None:

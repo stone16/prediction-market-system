@@ -49,10 +49,10 @@ class LLMSettings(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str = "claude-sonnet-4-6"
-    timeout_s: float = 5.0
-    cache_ttl_s: float = 30.0
-    max_tokens: int = 256
-    max_daily_llm_cost_usdc: float | None = 5.0
+    timeout_s: float = Field(default=5.0, gt=0)
+    cache_ttl_s: float = Field(default=30.0, ge=0)
+    max_tokens: int = Field(default=256, gt=0)
+    max_daily_llm_cost_usdc: float | None = Field(default=5.0, gt=0)
 
     @model_validator(mode="after")
     def _validate_when_enabled(self) -> Self:

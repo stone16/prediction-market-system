@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from math import inf, nan
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ import pytest
 from pms.config import ControllerSettings, LLMSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.forecasters.llm import (
+    LLMTransientError,
     LLMForecaster,
     _as_float,
     _clamp,
@@ -123,6 +126,34 @@ class FakeSequenceMessages:
         self.calls.append(kwargs)
         payload = self._payloads.pop(0)
         return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(payload))])
+
+
+class BlockingMessages:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        self.entered.set()
+        assert self.release.wait(timeout=2.0)
+        payload = {
+            "prob_estimate": 0.8,
+            "confidence": 0.6,
+            "rationale": "blocked race winner",
+        }
+        return SimpleNamespace(content=[SimpleNamespace(text=json.dumps(payload))])
+
+
+class FailingMessages:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        raise self._exc
 
 
 class FakeClaudeClient:
@@ -387,6 +418,40 @@ def test_llm_forecaster_budget_exhaustion_and_midnight_utc_reset(
     assert len(client.messages.calls) == 2
 
 
+def test_llm_forecaster_reserves_budget_atomically_for_concurrent_calls() -> None:
+    client = FakeClaudeClient()
+    messages = BlockingMessages()
+    client.messages = messages
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
+        ),
+        client=client,
+    )
+    start = threading.Barrier(3)
+
+    def predict_after_barrier(market_id: str) -> object:
+        start.wait(timeout=2.0)
+        return forecaster.predict(_signal(market_id=market_id))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(predict_after_barrier, "m-race-1"),
+            executor.submit(predict_after_barrier, "m-race-2"),
+        ]
+        start.wait(timeout=2.0)
+        assert messages.entered.wait(timeout=2.0)
+        messages.release.set()
+        results = [future.result(timeout=2.0) for future in futures]
+
+    assert len(messages.calls) == 1
+    assert sum(result is not None for result in results) == 1
+
+
 def test_llm_forecaster_clamps_probability_away_from_impossible_extremes() -> None:
     client = FakeClaudeClient()
     client.messages = FakeMessages(prob_estimate=1.2, confidence=1.5)
@@ -452,6 +517,40 @@ def test_llm_forecaster_counts_malformed_provider_attempt_against_budget() -> No
     assert forecaster.predict(_signal(market_id="m-bad")) is None
     assert forecaster.predict(_signal(market_id="m-budget")) is None
     assert len(client.messages.calls) == 1
+
+
+def test_llm_forecaster_refunds_transient_provider_failure_budget() -> None:
+    client = FakeClaudeClient()
+    client.messages = FailingMessages(LLMTransientError("provider unavailable"))
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=0.003,
+        ),
+        client=client,
+    )
+
+    assert forecaster.predict(_signal(market_id="m-fail-1")) is None
+    assert forecaster.predict(_signal(market_id="m-fail-2")) is None
+    assert len(client.messages.calls) == 2
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"timeout_s": 0.0},
+        {"cache_ttl_s": -1.0},
+        {"max_tokens": 0},
+        {"max_daily_llm_cost_usdc": 0.0},
+        {"max_daily_llm_cost_usdc": -0.01},
+    ],
+)
+def test_llm_settings_reject_invalid_numeric_controls(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        LLMSettings.model_validate(kwargs)
 
 
 def test_llm_prompt_trims_orderbook_and_serializes_external_signal() -> None:
