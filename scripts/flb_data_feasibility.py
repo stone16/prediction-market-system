@@ -318,8 +318,16 @@ def load_warehouse_markets(path: Path) -> list[ResolvedMarket]:
             raise ValueError(f"warehouse CSV missing required columns: {missing_display}")
 
         markets: list[ResolvedMarket] = []
+        market_ids: set[str] = set()
         for row_number, row in enumerate(reader, start=2):
-            markets.append(_parse_warehouse_row(row, row_number=row_number))
+            market = _parse_warehouse_row(row, row_number=row_number)
+            if market.market_id in market_ids:
+                raise ValueError(
+                    f"warehouse row {row_number}: duplicate market_id "
+                    f"{market.market_id!r}; expected one row per resolved binary market"
+                )
+            market_ids.add(market.market_id)
+            markets.append(market)
 
     return markets
 
@@ -340,8 +348,20 @@ def _parse_warehouse_row(
 
     entry_timestamp = _required_text(row, "entry_timestamp", row_number=row_number)
     resolved_at = _required_text(row, "resolved_at", row_number=row_number)
-    _validate_iso_datetime(entry_timestamp, column="entry_timestamp", row_number=row_number)
-    _validate_iso_datetime(resolved_at, column="resolved_at", row_number=row_number)
+    entry_dt = _parse_iso_datetime(
+        entry_timestamp,
+        column="entry_timestamp",
+        row_number=row_number,
+    )
+    resolved_dt = _parse_iso_datetime(
+        resolved_at,
+        column="resolved_at",
+        row_number=row_number,
+    )
+    if entry_dt >= resolved_dt:
+        raise ValueError(
+            f"warehouse row {row_number}: entry_timestamp must be before resolved_at"
+        )
 
     return ResolvedMarket(
         market_id=_required_text(row, "market_id", row_number=row_number),
@@ -407,9 +427,9 @@ def _required_float(
     return value
 
 
-def _validate_iso_datetime(value: str, *, column: str, row_number: int) -> None:
+def _parse_iso_datetime(value: str, *, column: str, row_number: int) -> datetime:
     try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(
             f"warehouse row {row_number}: {column} must be ISO-8601"

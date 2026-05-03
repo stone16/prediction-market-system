@@ -22,7 +22,11 @@ sample gate:
 ## Warehouse CSV Contract
 
 Export a CSV from Dune, a data warehouse, or a checked-in research fixture with
-one row per resolved binary market and these required columns:
+one row per resolved binary market. `market_id` must be unique; trade-level or
+token-level exports must be aggregated to one entry snapshot per market before
+running the gate.
+
+The CSV requires these columns:
 
 | Column | Meaning |
 | --- | --- |
@@ -40,6 +44,10 @@ one row per resolved binary market and these required columns:
 Settlement correctness is strict: only `(yes_payout,no_payout)=(1,0)` or
 `(0,1)` is accepted. Price-like or ambiguous vectors such as `0.995,0.005` and
 `0.5,0.5` are rejected because they are not explicit binary settlement labels.
+
+Timing correctness is also strict: `entry_timestamp` must be before
+`resolved_at`. Same-time or post-resolution entry snapshots are rejected because
+they can leak settlement truth into the FLB sample.
 
 ## Reproducible Run
 

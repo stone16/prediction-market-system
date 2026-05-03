@@ -77,6 +77,8 @@ def _warehouse_row(
     entry_yes_price: str = "0.05",
     yes_payout: str = "0",
     no_payout: str = "1",
+    entry_timestamp: str = "2025-12-01T00:00:00Z",
+    resolved_at: str = "2026-01-01T00:00:00Z",
 ) -> dict[str, str]:
     return {
         "market_id": market_id,
@@ -86,8 +88,8 @@ def _warehouse_row(
         "no_payout": no_payout,
         "volume": "10000",
         "liquidity": "500",
-        "entry_timestamp": "2025-12-01T00:00:00Z",
-        "resolved_at": "2026-01-01T00:00:00Z",
+        "entry_timestamp": entry_timestamp,
+        "resolved_at": resolved_at,
         "category": "politics",
     }
 
@@ -153,6 +155,43 @@ class TestWarehouseCsvLoading:
             writer.writerow(row)
 
         with pytest.raises(ValueError, match="missing required columns: liquidity"):
+            load_warehouse_markets(path)
+
+    def test_rejects_duplicate_market_ids(self, tmp_path: Path) -> None:
+        """Duplicate markets would falsely inflate the contract sample gate."""
+        path = tmp_path / "duplicate_markets.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(market_id="duplicated-market"),
+            _warehouse_row(market_id="duplicated-market"),
+        ])
+
+        with pytest.raises(ValueError, match="duplicate market_id"):
+            load_warehouse_markets(path)
+
+    def test_rejects_entry_timestamp_after_resolution(self, tmp_path: Path) -> None:
+        """Post-resolution entry prices leak settlement truth into FLB samples."""
+        path = tmp_path / "post_resolution_entry.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                entry_timestamp="2026-01-02T00:00:00Z",
+                resolved_at="2026-01-01T00:00:00Z",
+            )
+        ])
+
+        with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
+            load_warehouse_markets(path)
+
+    def test_rejects_entry_timestamp_equal_to_resolution(self, tmp_path: Path) -> None:
+        """Same-time entry snapshots are also unsafe for historical replay."""
+        path = tmp_path / "same_time_entry.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                entry_timestamp="2026-01-01T00:00:00Z",
+                resolved_at="2026-01-01T00:00:00Z",
+            )
+        ])
+
+        with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
             load_warehouse_markets(path)
 
     def test_warehouse_contracts_can_pass_extreme_sample_gate(
