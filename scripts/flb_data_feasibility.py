@@ -429,11 +429,14 @@ def _required_float(
 
 def _parse_iso_datetime(value: str, *, column: str, row_number: int) -> datetime:
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(
             f"warehouse row {row_number}: {column} must be ISO-8601"
         ) from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 # ── Contract-Level Conversion ────────────────────────────────────────────────

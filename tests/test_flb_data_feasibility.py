@@ -194,6 +194,35 @@ class TestWarehouseCsvLoading:
         with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
             load_warehouse_markets(path)
 
+    def test_mixed_timezone_timestamps_are_normalized(self, tmp_path: Path) -> None:
+        """Naive and Z-suffixed ISO fields should compare as UTC instants."""
+        path = tmp_path / "mixed_timezone.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                entry_timestamp="2025-12-01T00:00:00",
+                resolved_at="2026-01-01T00:00:00Z",
+            )
+        ])
+
+        markets = load_warehouse_markets(path)
+
+        assert len(markets) == 1
+
+    def test_mixed_timezone_post_resolution_entry_is_validation_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Mixed timezone formats should not raise TypeError on unsafe rows."""
+        path = tmp_path / "mixed_timezone_bad_order.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                entry_timestamp="2026-01-02T00:00:00",
+                resolved_at="2026-01-01T00:00:00Z",
+            )
+        ])
+
+        with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
+            load_warehouse_markets(path)
+
     def test_warehouse_contracts_can_pass_extreme_sample_gate(
         self, tmp_path: Path
     ) -> None:
