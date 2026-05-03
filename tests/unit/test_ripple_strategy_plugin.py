@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -31,6 +31,7 @@ from pms.strategies.ripple.source import (
     RippleObservationSource,
 )
 from pms.strategies.ripple.strategy import RippleStrategyModule
+from pms.strategies.projections import FactorCompositionStep
 
 
 NOW = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
@@ -67,22 +68,38 @@ def _fixture(**overrides: object) -> RippleObservationFixture:
 
 
 class _FakeFactorSnapshot:
-    values = {
+    values: Mapping[tuple[str, str], float] = {
         ("metaculus_prior", ""): 0.67,
         ("orderbook_imbalance", ""): 0.21,
         ("fair_value_spread", ""): 0.08,
     }
     missing_factors: tuple[tuple[str, str], ...] = ()
     stale_factors: tuple[tuple[str, str], ...] = ()
-    snapshot_hash = "factor-hash-1"
+    snapshot_hash: str | None = "factor-hash-1"
 
 
 class _RecordingFactorReader:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    async def snapshot(self, **kwargs: object) -> _FakeFactorSnapshot:
-        self.calls.append(kwargs)
+    async def snapshot(
+        self,
+        *,
+        market_id: str,
+        as_of: datetime,
+        required: Sequence[FactorCompositionStep],
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> _FakeFactorSnapshot:
+        self.calls.append(
+            {
+                "market_id": market_id,
+                "as_of": as_of,
+                "required": required,
+                "strategy_id": strategy_id,
+                "strategy_version_id": strategy_version_id,
+            }
+        )
         return _FakeFactorSnapshot()
 
 
