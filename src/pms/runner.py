@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -35,8 +35,8 @@ from pms.controller.diagnostics import ControllerDiagnostic
 from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
 from pms.controller.outcome_tokens import MarketDataOutcomeTokenResolver
-from pms.controller.pipeline import ControllerPipeline
-from pms.core.enums import OrderStatus, RunMode
+from pms.controller.sizers.kelly import KellySizer
+from pms.core.enums import OrderStatus, RunMode, TimeInForce
 from pms.core.interfaces import (
     DiscoveryPollCompleteSensor,
     IController,
@@ -54,6 +54,7 @@ from pms.core.models import (
     Position,
     ReconciliationReport as ReconciliationReport,
     TradeDecision,
+    Venue,
     VenueAccountSnapshot as VenueAccountSnapshot,
     VenueCredentials,
 )
@@ -91,6 +92,13 @@ from pms.storage.order_store import OrderStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
 from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
+from pms.strategies.flb import FlbAgent, FlbController, FlbStrategyModule
+from pms.strategies.flb.source import (
+    FlbMarketSnapshot,
+    FlbMarketSnapshotReader,
+    LiveFlbSource,
+)
+from pms.strategies.intents import StrategyContext
 from pms.strategies.projections import (
     ActiveStrategy,
     EvalSpec,
@@ -100,6 +108,7 @@ from pms.strategies.projections import (
     RiskParams,
     StrategyConfig,
 )
+from pms.strategies.runtime_bridge import StrategyRunResult
 from pms.strategies.versioning import compute_strategy_version_id
 
 
@@ -579,6 +588,71 @@ class Runner:
     async def wait_for_signals(self, count: int) -> None:
         while len(self.state.signals) < count:
             await asyncio.sleep(0.1)
+
+    def build_flb_strategy_module(
+        self,
+        *,
+        strategy_id: str,
+        strategy_version_id: str,
+        market_ids: Sequence[str],
+        market_reader: FlbMarketSnapshotReader | None = None,
+    ) -> FlbStrategyModule:
+        if not market_ids:
+            msg = "market_ids must not be empty"
+            raise ValueError(msg)
+        reader = market_reader
+        if reader is None:
+            if self._pg_pool is None:
+                msg = (
+                    "Runner PostgreSQL pool is required to build the production "
+                    "FLB market reader"
+                )
+                raise RuntimeError(msg)
+            reader = _PostgresFlbMarketSnapshotReader(
+                PostgresMarketDataStore(self._pg_pool)
+            )
+
+        return FlbStrategyModule(
+            source=LiveFlbSource(
+                market_ids=tuple(market_ids),
+                market_reader=reader,
+                position_sizer=KellySizer(self.config.risk),
+                portfolio=self.portfolio,
+                max_slippage_bps=self.config.controller.max_slippage_bps,
+                time_in_force=TimeInForce(
+                    self.config.controller.time_in_force.upper()
+                ),
+            ),
+            controller=FlbController(),
+            agent=FlbAgent(),
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+        )
+
+    async def run_flb_strategy_once(
+        self,
+        *,
+        strategy_id: str,
+        strategy_version_id: str,
+        market_ids: Sequence[str],
+        as_of: datetime | None = None,
+        market_reader: FlbMarketSnapshotReader | None = None,
+    ) -> Sequence[StrategyRunResult]:
+        module = self.build_flb_strategy_module(
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+            market_ids=market_ids,
+            market_reader=market_reader,
+        )
+        return tuple(
+            await module.run_with_artifacts(
+                StrategyContext(
+                    strategy_id=strategy_id,
+                    strategy_version_id=strategy_version_id,
+                    as_of=as_of or datetime.now(tz=UTC),
+                )
+            )
+        )
 
     def _build_sensors(self) -> tuple[ISensor, ...]:
         if self.sensors is not None:
@@ -1758,6 +1832,122 @@ class Runner:
                 asset_ids=None,
             )
         ]
+
+
+@dataclass(frozen=True)
+class _PostgresFlbMarketSnapshotReader:
+    store: PostgresMarketDataStore
+
+    async def latest(
+        self,
+        market_id: str,
+        *,
+        as_of: datetime,
+    ) -> FlbMarketSnapshot | None:
+        del as_of
+        query = """
+        SELECT
+            markets.condition_id AS market_id,
+            markets.question,
+            markets.venue,
+            markets.resolves_at,
+            markets.last_seen_at,
+            markets.yes_price,
+            markets.no_price,
+            markets.best_bid,
+            markets.best_ask,
+            markets.price_updated_at,
+            markets.closed,
+            markets.accepting_orders,
+            MAX(CASE WHEN tokens.outcome = 'YES' THEN tokens.token_id END) AS yes_token_id,
+            MAX(CASE WHEN tokens.outcome = 'NO' THEN tokens.token_id END) AS no_token_id
+        FROM markets
+        LEFT JOIN tokens
+            ON tokens.condition_id = markets.condition_id
+        WHERE markets.condition_id = $1
+           OR EXISTS (
+                SELECT 1
+                FROM tokens AS lookup_tokens
+                WHERE lookup_tokens.token_id = $1
+                  AND lookup_tokens.condition_id = markets.condition_id
+           )
+        GROUP BY
+            markets.condition_id,
+            markets.question,
+            markets.venue,
+            markets.resolves_at,
+            markets.last_seen_at,
+            markets.yes_price,
+            markets.no_price,
+            markets.best_bid,
+            markets.best_ask,
+            markets.price_updated_at,
+            markets.closed,
+            markets.accepting_orders
+        LIMIT 1
+        """
+        async with self.store.pool.acquire() as connection:
+            row = await connection.fetchrow(query, market_id)
+        if row is None:
+            return None
+        if row["closed"] is True or row["accepting_orders"] is False:
+            return None
+
+        yes_price = _open_probability_or_none(row["yes_price"])
+        yes_token_id = row["yes_token_id"]
+        no_token_id = row["no_token_id"]
+        if (
+            yes_price is None
+            or not isinstance(yes_token_id, str)
+            or not isinstance(no_token_id, str)
+        ):
+            return None
+
+        observed_at = row["price_updated_at"] or row["last_seen_at"]
+        if not isinstance(observed_at, datetime):
+            return None
+
+        return FlbMarketSnapshot(
+            market_id=cast(str, row["market_id"]),
+            title=cast(str, row["question"]),
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+            yes_price=yes_price,
+            yes_best_ask=_open_probability_or_none(row["best_ask"]),
+            no_best_ask=_no_best_ask(
+                no_price=row["no_price"],
+                yes_best_bid=row["best_bid"],
+            ),
+            observed_at=observed_at,
+            resolves_at=cast(datetime | None, row["resolves_at"]),
+            venue=cast(Venue, row["venue"]),
+        )
+
+
+def _open_probability_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(cast(Any, value))
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0.0 or parsed >= 1.0:
+        return None
+    return parsed
+
+
+def _no_best_ask(
+    *,
+    no_price: object,
+    yes_best_bid: object,
+) -> float | None:
+    parsed_no_price = _open_probability_or_none(no_price)
+    if parsed_no_price is not None:
+        return parsed_no_price
+    parsed_yes_best_bid = _open_probability_or_none(yes_best_bid)
+    if parsed_yes_best_bid is None:
+        return None
+    return _open_probability_or_none(1.0 - parsed_yes_best_bid)
 
 
 def _append_bounded(items: list[T], item: T) -> None:
