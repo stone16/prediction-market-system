@@ -10,6 +10,8 @@ reflects the full tradable contract set.
 
 Usage:
     uv run python scripts/flb_data_feasibility.py [--limit N] [--output PATH]
+    uv run python scripts/flb_data_feasibility.py \
+        --source warehouse-csv --input exports/polymarket_resolved_binary.csv
 
 Exit codes:
     0 — H1 viable (sample gate passed)
@@ -52,6 +54,18 @@ SAMPLE_GATE_MIN = 100  # minimum resolved contracts per target bucket
 DECILE_BOUNDARIES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 TARGET_BUCKETS = [0, 9]  # decile 0 = [0%, 10%), decile 9 = [90%, 100%]
 WILSON_Z = 1.96  # 95% confidence
+WAREHOUSE_REQUIRED_COLUMNS = frozenset({
+    "market_id",
+    "question",
+    "entry_yes_price",
+    "yes_payout",
+    "no_payout",
+    "volume",
+    "liquidity",
+    "entry_timestamp",
+    "resolved_at",
+    "category",
+})
 
 
 # ── Data Structures ─────────────────────────────────────────────────────────
@@ -283,6 +297,125 @@ def _extract_category(slug: str, question: str) -> str:
     return "other"
 
 
+# ── Historical Warehouse Loading ─────────────────────────────────────────────
+
+
+def load_warehouse_markets(path: Path) -> list[ResolvedMarket]:
+    """Load resolved binary markets from an explicit warehouse/Dune CSV export.
+
+    The warehouse path is intentionally stricter than the Gamma fallback:
+    settlement must come from an explicit final payout vector
+    (``yes_payout,no_payout`` equal to ``1,0`` or ``0,1``).  Near-settled
+    prices such as ``0.995,0.005`` are rejected because they are trade prices,
+    not oracle settlement labels.
+    """
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = set(reader.fieldnames or [])
+        missing = WAREHOUSE_REQUIRED_COLUMNS - fieldnames
+        if missing:
+            missing_display = ", ".join(sorted(missing))
+            raise ValueError(f"warehouse CSV missing required columns: {missing_display}")
+
+        markets: list[ResolvedMarket] = []
+        for row_number, row in enumerate(reader, start=2):
+            markets.append(_parse_warehouse_row(row, row_number=row_number))
+
+    return markets
+
+
+def _parse_warehouse_row(
+    row: dict[str, str | None],
+    *,
+    row_number: int,
+) -> ResolvedMarket:
+    """Parse one strict warehouse CSV row into a resolved binary market."""
+    entry_yes_price = _required_float(row, "entry_yes_price", row_number=row_number)
+    if entry_yes_price <= 0.0 or entry_yes_price >= 1.0:
+        raise ValueError(
+            f"warehouse row {row_number}: entry_yes_price must be between 0 and 1"
+        )
+
+    resolved_yes = _resolved_yes_from_exact_payout(row, row_number=row_number)
+
+    entry_timestamp = _required_text(row, "entry_timestamp", row_number=row_number)
+    resolved_at = _required_text(row, "resolved_at", row_number=row_number)
+    _validate_iso_datetime(entry_timestamp, column="entry_timestamp", row_number=row_number)
+    _validate_iso_datetime(resolved_at, column="resolved_at", row_number=row_number)
+
+    return ResolvedMarket(
+        market_id=_required_text(row, "market_id", row_number=row_number),
+        question=_required_text(row, "question", row_number=row_number),
+        yes_price=entry_yes_price,
+        resolved_yes=resolved_yes,
+        volume=_required_float(row, "volume", row_number=row_number),
+        liquidity=_required_float(row, "liquidity", row_number=row_number),
+        end_date=resolved_at,
+        category=_required_text(row, "category", row_number=row_number),
+    )
+
+
+def _resolved_yes_from_exact_payout(
+    row: dict[str, str | None],
+    *,
+    row_number: int,
+) -> bool:
+    """Return resolution from an exact final payout vector."""
+    yes_payout = _required_float(row, "yes_payout", row_number=row_number)
+    no_payout = _required_float(row, "no_payout", row_number=row_number)
+
+    if yes_payout == 1.0 and no_payout == 0.0:
+        return True
+    if yes_payout == 0.0 and no_payout == 1.0:
+        return False
+
+    raise ValueError(
+        f"warehouse row {row_number}: expected exact final payout vector "
+        "(yes_payout,no_payout) of (1,0) or (0,1)"
+    )
+
+
+def _required_text(
+    row: dict[str, str | None],
+    column: str,
+    *,
+    row_number: int,
+) -> str:
+    value = row.get(column)
+    if value is None or value.strip() == "":
+        raise ValueError(f"warehouse row {row_number}: missing {column}")
+    return value.strip()
+
+
+def _required_float(
+    row: dict[str, str | None],
+    column: str,
+    *,
+    row_number: int,
+) -> float:
+    raw_value = _required_text(row, column, row_number=row_number)
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"warehouse row {row_number}: {column} must be a finite number"
+        ) from exc
+    if not math.isfinite(value):
+        raise ValueError(
+            f"warehouse row {row_number}: {column} must be a finite number"
+        )
+    return value
+
+
+def _validate_iso_datetime(value: str, *, column: str, row_number: int) -> None:
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            f"warehouse row {row_number}: {column} must be ISO-8601"
+        ) from exc
+
+
 # ── Contract-Level Conversion ────────────────────────────────────────────────
 
 
@@ -481,12 +614,14 @@ def generate_report(
     decile_stats: list[DecileStats],
     gate: SampleGateResult,
     fetched_at: datetime,
+    source_label: str = "Gamma API closed markets",
 ) -> str:
     """Generate a Markdown report of the FLB feasibility analysis."""
     lines: list[str] = []
     lines.append("# H1 FLB Data Feasibility Report")
     lines.append("")
     lines.append(f"**Generated:** {fetched_at.isoformat()}")
+    lines.append(f"**Data source:** {source_label}")
     lines.append(f"**Total resolved markets analyzed:** {len(markets)}")
     lines.append(f"**Total contract observations:** {len(contracts)} "
                  "(2 per binary market: YES + NO)")
@@ -496,8 +631,8 @@ def generate_report(
     gate_emoji = "✅" if gate.passed else "❌"
     lines.append(f"## Sample Gate: {gate_emoji}")
     lines.append("")
-    lines.append(f"| Bucket | Contract Count | Required | Status |")
-    lines.append(f"|--------|---------------|----------|--------|")
+    lines.append("| Bucket | Contract Count | Required | Status |")
+    lines.append("|--------|---------------|----------|--------|")
     ls = "✅" if gate.longshot_passed else "❌"
     fs = "✅" if gate.favorite_passed else "❌"
     lines.append(
@@ -508,10 +643,18 @@ def generate_report(
     )
     lines.append("")
 
-    if not gate.passed:
+    if gate.passed:
+        lines.append(
+            "**H1 DATA VIABLE.** Extreme buckets meet the sample gate. "
+            "Proceed to the next backtest slice with fees, slippage, and "
+            "timestamped entry rules."
+        )
+        lines.append("")
+    else:
         lines.append(
             "**H1 NOT VIABLE YET.** Insufficient resolved contracts in target "
-            "buckets. Collect more data before proceeding with FLB strategy."
+            "buckets. Next data-source gap: collect a broader Dune or "
+            "warehouse export before proceeding with FLB strategy."
         )
         lines.append("")
 
@@ -606,9 +749,9 @@ def generate_report(
         "backtesting, we need price snapshots at a defined entry horizon."
     )
     lines.append(
-        "3. **Data source:** Gamma API `closed=true` returns a small window "
-        "of recently resolved markets. For ≥100 contracts per target bucket, "
-        "Dune Analytics on-chain data or a historical warehouse is required."
+        "3. **Data source coverage:** Gamma API `closed=true` is only a "
+        "small-window fallback. Robust H1 viability requires a Dune Analytics "
+        "or historical warehouse export with explicit final payout vectors."
     )
     lines.append(
         "4. **Feasibility only:** This is a bias-detection script, not a "
@@ -647,6 +790,18 @@ def save_decile_csv(
 def main() -> int:
     parser = argparse.ArgumentParser(description="H1 FLB Data Feasibility Analysis")
     parser.add_argument(
+        "--source",
+        choices=["gamma", "warehouse-csv"],
+        default="gamma",
+        help="Historical data source (default: gamma)",
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=None,
+        help="Input CSV path when --source=warehouse-csv",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=500,
@@ -674,14 +829,26 @@ def main() -> int:
 
     fetched_at = datetime.now(tz=UTC)
 
-    # Step 1: Fetch resolved markets.
-    print(f"Fetching resolved Polymarket markets (limit={args.limit}, max_pages={args.max_pages})...",
-          file=sys.stderr)
-    markets = fetch_resolved_markets(limit=args.limit, max_pages=args.max_pages)
-    print(f"Fetched {len(markets)} resolved binary markets.", file=sys.stderr)
+    # Step 1: Fetch/load resolved markets.
+    if args.source == "gamma":
+        source_label = "Gamma API closed markets"
+        print(
+            "Fetching resolved Polymarket markets "
+            f"(limit={args.limit}, max_pages={args.max_pages})...",
+            file=sys.stderr,
+        )
+        markets = fetch_resolved_markets(limit=args.limit, max_pages=args.max_pages)
+        print(f"Fetched {len(markets)} resolved binary markets.", file=sys.stderr)
+    else:
+        if args.input is None:
+            parser.error("--input is required when --source=warehouse-csv")
+        source_label = f"warehouse CSV: {args.input}"
+        print(f"Loading resolved binary markets from {args.input}...", file=sys.stderr)
+        markets = load_warehouse_markets(args.input)
+        print(f"Loaded {len(markets)} resolved binary markets.", file=sys.stderr)
 
     if not markets:
-        print("ERROR: No resolved markets found. Check API connectivity.", file=sys.stderr)
+        print("ERROR: No resolved markets found.", file=sys.stderr)
         return 2
 
     # Step 2: Convert to contract-level observations.
@@ -702,6 +869,7 @@ def main() -> int:
         decile_stats=decile_stats,
         gate=gate,
         fetched_at=fetched_at,
+        source_label=source_label,
     )
 
     if args.output:
