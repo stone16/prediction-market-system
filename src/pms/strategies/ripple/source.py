@@ -9,9 +9,16 @@ from typing import Any
 from typing import Protocol
 
 from pms.core.enums import TimeInForce
-from pms.core.models import BookSide, Outcome, Venue
+from pms.core.models import BookSide, Outcome, Portfolio, Venue
 from pms.strategies.intents import StrategyContext, StrategyObservation
 from pms.strategies.projections import FactorCompositionStep
+from pms.strategies.ripple.evaluator import (
+    DEFAULT_MIN_EXPECTED_EDGE,
+    DEFAULT_PRIOR_STRENGTH,
+    beta_binomial_posterior_probability,
+    entry_edge_threshold,
+    posterior_confidence,
+)
 
 
 LIVE_RIPPLE_SOURCE = "live_factor_service"
@@ -40,6 +47,24 @@ RIPPLE_FACTOR_REQUIREMENTS: tuple[FactorCompositionStep, ...] = (
         param="",
         weight=1.0,
         threshold=0.0,
+        required=True,
+        freshness_sla_s=3600.0,
+    ),
+    FactorCompositionStep(
+        factor_id="yes_count",
+        role="posterior_success",
+        param="",
+        weight=1.0,
+        threshold=None,
+        required=True,
+        freshness_sla_s=3600.0,
+    ),
+    FactorCompositionStep(
+        factor_id="no_count",
+        role="posterior_failure",
+        param="",
+        weight=1.0,
+        threshold=None,
         required=True,
         freshness_sla_s=3600.0,
     ),
@@ -77,6 +102,16 @@ class RippleMarketSnapshotReader(Protocol):
     ) -> RippleMarketSnapshot | None: ...
 
 
+class RipplePositionSizer(Protocol):
+    def size(
+        self,
+        *,
+        prob: float,
+        market_price: float,
+        portfolio: Portfolio,
+    ) -> float: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RippleMarketSnapshot:
     market_id: str
@@ -86,6 +121,7 @@ class RippleMarketSnapshot:
     observed_at: datetime
     best_bid: float | None = None
     best_ask: float | None = None
+    resolves_at: datetime | None = None
     venue: Venue = "polymarket"
 
     def __post_init__(self) -> None:
@@ -195,7 +231,10 @@ class LiveRippleSource:
     market_ids: Sequence[str]
     factor_reader: RippleFactorSnapshotReader
     market_reader: RippleMarketSnapshotReader
-    notional_usdc: float = 25.0
+    position_sizer: RipplePositionSizer
+    portfolio: Portfolio
+    prior_strength: float = DEFAULT_PRIOR_STRENGTH
+    min_expected_edge: float = DEFAULT_MIN_EXPECTED_EDGE
     max_slippage_bps: int = 50
     time_in_force: TimeInForce = TimeInForce.GTC
 
@@ -205,8 +244,11 @@ class LiveRippleSource:
             raise ValueError(msg)
         for market_id in self.market_ids:
             _require_non_empty(market_id, "market_id")
-        if self.notional_usdc <= 0.0:
-            msg = "notional_usdc must be > 0.0"
+        if self.prior_strength <= 0.0:
+            msg = "prior_strength must be > 0.0"
+            raise ValueError(msg)
+        if self.min_expected_edge <= 0.0:
+            msg = "min_expected_edge must be > 0.0"
             raise ValueError(msg)
         if self.max_slippage_bps < 0:
             msg = "max_slippage_bps must be >= 0"
@@ -228,16 +270,19 @@ class LiveRippleSource:
                 strategy_id=context.strategy_id,
                 strategy_version_id=context.strategy_version_id,
             )
-            observations.append(
-                _live_observation(
-                    context=context,
-                    market=market,
-                    snapshot=snapshot,
-                    notional_usdc=self.notional_usdc,
-                    max_slippage_bps=self.max_slippage_bps,
-                    time_in_force=self.time_in_force,
-                )
+            observation = _live_observation(
+                context=context,
+                market=market,
+                snapshot=snapshot,
+                position_sizer=self.position_sizer,
+                portfolio=self.portfolio,
+                prior_strength=self.prior_strength,
+                min_expected_edge=self.min_expected_edge,
+                max_slippage_bps=self.max_slippage_bps,
+                time_in_force=self.time_in_force,
             )
+            if observation is not None:
+                observations.append(observation)
         return tuple(observations)
 
 
@@ -258,24 +303,49 @@ def _live_observation(
     context: StrategyContext,
     market: RippleMarketSnapshot,
     snapshot: RippleFactorSnapshot,
-    notional_usdc: float,
+    position_sizer: RipplePositionSizer,
+    portfolio: Portfolio,
+    prior_strength: float,
+    min_expected_edge: float,
     max_slippage_bps: int,
     time_in_force: TimeInForce,
-) -> StrategyObservation:
-    probability_estimate = _bounded_probability(
+) -> StrategyObservation | None:
+    prior_probability = _bounded_probability(
         _factor_value(snapshot, "metaculus_prior", fallback=market.yes_price),
-        "probability_estimate",
+        "metaculus_prior",
     )
-    expected_edge = _factor_value(
-        snapshot,
-        "fair_value_spread",
-        fallback=probability_estimate - market.yes_price,
+    yes_count = _non_negative_count(snapshot, "yes_count")
+    no_count = _non_negative_count(snapshot, "no_count")
+    probability_estimate = beta_binomial_posterior_probability(
+        prior_probability=prior_probability,
+        prior_strength=prior_strength,
+        yes_count=yes_count,
+        no_count=no_count,
     )
     orderbook_imbalance = _factor_value(snapshot, "orderbook_imbalance", fallback=0.0)
     limit_price = _bounded_probability(
         market.best_ask if market.best_ask is not None else market.yes_price,
         "limit_price",
     )
+    expected_edge = probability_estimate - limit_price
+    dynamic_entry_threshold = entry_edge_threshold(
+        as_of=context.as_of,
+        resolves_at=market.resolves_at,
+        min_expected_edge=min_expected_edge,
+    )
+    confidence = _live_confidence(
+        snapshot,
+        prior_strength=prior_strength,
+        yes_count=yes_count,
+        no_count=no_count,
+    )
+    notional_usdc = position_sizer.size(
+        prob=probability_estimate,
+        market_price=limit_price,
+        portfolio=portfolio,
+    )
+    if notional_usdc <= 0.0:
+        return None
     evidence_refs = _live_evidence_refs(market, snapshot)
     payload_metadata = {
         "source": LIVE_RIPPLE_SOURCE,
@@ -287,7 +357,14 @@ def _live_observation(
         "best_bid": market.best_bid,
         "best_ask": market.best_ask,
         "observed_at": market.observed_at.isoformat(),
+        "resolves_at": market.resolves_at.isoformat() if market.resolves_at else None,
         "orderbook_imbalance": orderbook_imbalance,
+        "metaculus_prior": prior_probability,
+        "prior_strength": prior_strength,
+        "yes_count": yes_count,
+        "no_count": no_count,
+        "posterior_probability": probability_estimate,
+        "entry_edge_threshold": dynamic_entry_threshold,
     }
     payload = {
         "market_id": market.market_id,
@@ -298,7 +375,7 @@ def _live_observation(
         ),
         "probability_estimate": probability_estimate,
         "expected_edge": expected_edge,
-        "confidence": _live_confidence(snapshot),
+        "confidence": confidence,
         "token_id": market.token_id,
         "venue": market.venue,
         "side": "BUY",
@@ -337,6 +414,14 @@ def _factor_value(
     return float(value)
 
 
+def _non_negative_count(snapshot: RippleFactorSnapshot, factor_id: str) -> float:
+    value = _factor_value(snapshot, factor_id, fallback=0.0)
+    if value < 0.0:
+        msg = f"{factor_id} must be >= 0.0"
+        raise ValueError(msg)
+    return value
+
+
 def _bounded_probability(value: float, field_name: str) -> float:
     if value <= 0.0:
         return 0.0001
@@ -348,10 +433,19 @@ def _bounded_probability(value: float, field_name: str) -> float:
     return float(value)
 
 
-def _live_confidence(snapshot: RippleFactorSnapshot) -> float:
-    if snapshot.missing_factors or snapshot.stale_factors:
-        return 0.55
-    return 0.75
+def _live_confidence(
+    snapshot: RippleFactorSnapshot,
+    *,
+    prior_strength: float,
+    yes_count: float,
+    no_count: float,
+) -> float:
+    return posterior_confidence(
+        prior_strength=prior_strength,
+        yes_count=yes_count,
+        no_count=no_count,
+        degraded=bool(snapshot.missing_factors or snapshot.stale_factors),
+    )
 
 
 def _live_evidence_refs(

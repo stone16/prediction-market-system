@@ -26,6 +26,33 @@ class RippleController:
 
 def _candidate_from_observation(observation: StrategyObservation) -> StrategyCandidate:
     payload = observation.payload
+    payload_metadata = _mapping(payload.get("metadata", {}))
+    metadata: dict[str, Any] = {
+        "observation_id": observation.observation_id,
+        "source": observation.source,
+        "confidence": _required_float(payload, "confidence"),
+        "token_id": _required_str(payload, "token_id"),
+        "venue": _required_str(payload, "venue"),
+        "side": _required_str(payload, "side"),
+        "outcome": _required_str(payload, "outcome"),
+        "limit_price": _required_float(payload, "limit_price"),
+        "notional_usdc": _required_float(payload, "notional_usdc"),
+        "expected_price": _required_float(payload, "expected_price"),
+        "max_slippage_bps": _required_int(payload, "max_slippage_bps"),
+        "time_in_force": _required_str(payload, "time_in_force"),
+        "contradiction_refs": _string_tuple(payload.get("contradiction_refs", ())),
+        "fixture_metadata": payload_metadata,
+    }
+    for field_name in (
+        "entry_edge_threshold",
+        "metaculus_prior",
+        "no_count",
+        "posterior_probability",
+        "prior_strength",
+        "yes_count",
+    ):
+        if field_name in payload_metadata:
+            metadata[field_name] = payload_metadata[field_name]
     return StrategyCandidate(
         candidate_id=f"candidate-{observation.observation_id}",
         strategy_id=observation.strategy_id,
@@ -37,22 +64,7 @@ def _candidate_from_observation(observation: StrategyObservation) -> StrategyCan
         expected_edge=_required_float(payload, "expected_edge"),
         evidence_refs=observation.evidence_refs,
         created_at=observation.observed_at,
-        metadata={
-            "observation_id": observation.observation_id,
-            "source": observation.source,
-            "confidence": _required_float(payload, "confidence"),
-            "token_id": _required_str(payload, "token_id"),
-            "venue": _required_str(payload, "venue"),
-            "side": _required_str(payload, "side"),
-            "outcome": _required_str(payload, "outcome"),
-            "limit_price": _required_float(payload, "limit_price"),
-            "notional_usdc": _required_float(payload, "notional_usdc"),
-            "expected_price": _required_float(payload, "expected_price"),
-            "max_slippage_bps": _required_int(payload, "max_slippage_bps"),
-            "time_in_force": _required_str(payload, "time_in_force"),
-            "contradiction_refs": _string_tuple(payload.get("contradiction_refs", ())),
-            "fixture_metadata": _mapping(payload.get("metadata", {})),
-        },
+        metadata=metadata,
     )
 
 
