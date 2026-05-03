@@ -86,23 +86,25 @@ but does not perform it.
 
 ```
 ControllerPipeline (existing)
-  └─ LLMForecaster (rewritten)
-       ├─ LLMSettings (extended schema)
-       ├─ _client() — provider-dispatch, lazy SDK import
-       │    ├─ provider="anthropic" → AsyncAnthropic
-       │    └─ provider="openai"    → AsyncOpenAI
-       ├─ _predict_async() — async hot path
-       │    ├─ cache hit → return cached
-       │    ├─ cache miss → _call() → _parse() → cache put
-       │    └─ on TimeoutError | LLMTransientError | LLMParseError → return None
-       ├─ predict() — sync escape-hatch (returns None when enabled, for back-compat)
-       └─ forecast() — async public surface, calls _predict_async()
+  └─ asyncio.to_thread(forecaster.predict, signal)   ← pipeline.py:385
+       └─ LLMForecaster (rewritten)
+            ├─ LLMSettings (extended schema)
+            ├─ predict() — sync, the real hot path
+            │    ├─ cache hit → return cached
+            │    ├─ cache miss → _call() → _parse() → cache put
+            │    └─ on LLMTimeoutError | LLMTransientError | LLMParseError
+            │       → return None  (F1 strict)
+            ├─ _client() — provider-dispatch, lazy SDK import
+            │    ├─ provider="anthropic" → anthropic.Anthropic (sync)
+            │    └─ provider="openai"    → openai.OpenAI       (sync)
+            └─ forecast() — async wrapper, awaits asyncio.to_thread(self.predict)
 ```
 
 Cache lives on the forecaster instance. One forecaster per
 `ControllerPipeline`, one pipeline per strategy
 (`controller/factory.py:102`). Cache lifetime matches strategy
-lifetime — desired.
+lifetime — desired. Cache is `threading.Lock`-protected because
+`predict()` is invoked from threadpool workers.
 
 ## 6. Detailed design
 
@@ -155,93 +157,129 @@ guidance. Existing tests that pin `claude-test` still work.
 ### 6.2 `LLMForecaster` (in
 `src/pms/controller/forecasters/llm.py`)
 
+**Sync `predict()` does the real work.** `ControllerPipeline._predict_forecaster`
+(`src/pms/controller/pipeline.py:385`) calls `predict()` via
+`asyncio.to_thread`, keeping the event loop unblocked while the
+forecaster makes blocking HTTP calls inside the threadpool.
+Async clients would not fit this pattern — sync clients
+(`anthropic.Anthropic`, `openai.OpenAI`) match it directly.
+
 Public surface preserved:
 
-- `predict(signal) -> LLMForecastResult | None` — sync. When
-  `enabled=False`: `None`. When `enabled=True`: also `None` (sync
-  callers cannot drive the async path without an event loop).
-  Existing tests that mock `predict()` still work because mocks
-  bypass this body entirely.
-- `forecast(signal) -> float` — async. Runs the real path via
-  `_predict_async()`.
+- `predict(signal) -> LLMForecastResult | None` — **sync, makes
+  the real LLM call** (over a sync HTTP client, inside
+  the threadpool). When `enabled=False`: returns `None`.
+- `forecast(signal) -> float` — async. Wraps `predict()` via
+  `asyncio.to_thread(self.predict, signal)` so async callers
+  still work; preserves the existing public surface.
 
-New / changed internals:
+`predict()` body:
 
-- `_predict_async(signal)` — the real path:
+```python
+def predict(self, signal: MarketSignal) -> LLMForecastResult | None:
+    if self.config is None or not self.config.enabled:
+        return None
+    cached = self._cache_get(signal.market_id)
+    if cached is not None:
+        return cached
+    client = self._client()
+    if client is None:
+        return None  # F1 strict — no client wired = no decision
+    try:
+        raw = self._call(client, signal)             # sync, blocking
+        result = self._parse(raw, signal)
+    except (LLMTimeoutError, LLMTransientError, LLMParseError):
+        return None  # F1 strict
+    self._cache_put(signal.market_id, result)
+    return result
+```
 
-  ```python
-  if not self.config or not self.config.enabled:
-      return None
-  cached = await self._cache_get(signal.market_id)
-  if cached is not None:
-      return cached
-  client = self._client()
-  if client is None:
-      return None  # F1 strict — no client wired = no decision
-  try:
-      raw = await asyncio.wait_for(
-          self._call(client, signal),
-          timeout=self.config.timeout_s,
-      )
-      result = self._parse(raw, signal)
-  except (TimeoutError, LLMTransientError, LLMParseError):
-      return None  # F1 strict
-  await self._cache_put(signal.market_id, result)
-  return result
-  ```
+`forecast()` body (preserved async surface):
 
-- `_client()` — provider dispatch with lazy SDK import:
+```python
+async def forecast(self, signal: MarketSignal) -> float:
+    result = await asyncio.to_thread(self.predict, signal)
+    return signal.yes_price if result is None else result[0]
+```
 
-  ```python
-  if self.client is not None:
-      return cast(_LLMClient, self.client)
-  if self.config.provider == "anthropic":
-      from anthropic import AsyncAnthropic  # type: ignore[import-not-found]
-      kwargs = {"api_key": self.config.api_key}
-      if self.config.base_url:
-          kwargs["base_url"] = self.config.base_url
-      self.client = AsyncAnthropic(**kwargs)
-  elif self.config.provider == "openai":
-      from openai import AsyncOpenAI  # type: ignore[import-not-found]
-      self.client = AsyncOpenAI(
-          api_key=self.config.api_key,
-          base_url=self.config.base_url,
-      )
-  else:
-      return None
-  return cast(_LLMClient, self.client)
-  ```
+`_client()` — provider dispatch with lazy SDK import, **sync clients**:
 
-- `_call(client, signal)` — split into `_call_anthropic` and
-  `_call_openai`, each taking the typed client and returning a
-  raw string body. Anthropic uses `await client.messages.create(
-  model=..., max_tokens=..., messages=[{"role":"user",
-  "content": prompt}])`. OpenAI uses
-  `await client.chat.completions.create(model=...,
+```python
+def _client(self) -> _LLMClient | None:
+    if self.client is not None:
+        return cast(_LLMClient, self.client)
+    if self.config is None or not self.config.provider:
+        return None
+    if self.config.provider == "anthropic":
+        try:
+            from anthropic import Anthropic  # type: ignore[import-not-found]
+        except ImportError:
+            return None
+        kwargs: dict[str, object] = {"api_key": self.config.api_key}
+        if self.config.base_url:
+            kwargs["base_url"] = self.config.base_url
+        kwargs["timeout"] = self.config.timeout_s
+        self.client = Anthropic(**kwargs)
+    elif self.config.provider == "openai":
+        try:
+            from openai import OpenAI  # type: ignore[import-not-found]
+        except ImportError:
+            return None
+        self.client = OpenAI(
+            api_key=self.config.api_key,
+            base_url=self.config.base_url,
+            timeout=self.config.timeout_s,
+        )
+    else:
+        return None
+    return cast(_LLMClient, self.client)
+```
+
+The SDK `timeout` parameter is passed through (both Anthropic
+and OpenAI SDKs honour it on each request). On timeout, the SDK
+raises a `*TimeoutError` which `_call_*` wraps in
+`LLMTimeoutError` for the caller.
+
+`_call(client, signal)` — split into two helpers, both sync:
+
+- `_call_anthropic(client, signal) -> str`:
+  `client.messages.create(model=..., max_tokens=...,
+  messages=[{"role":"user","content": prompt}])` →
+  return text block content.
+- `_call_openai(client, signal) -> str`:
+  `client.chat.completions.create(model=...,
   messages=[{"role":"user","content":prompt}],
-  max_tokens=..., response_format={"type":"json_object"})`.
+  max_tokens=..., response_format={"type":"json_object"})`
+  → return `response.choices[0].message.content`.
 
-- `_parse(raw, signal)` — preserved from the existing
-  `_parse_response`; converts the raw text into
-  `LLMForecastResult(prob_estimate, confidence, rationale,
-  model_id)`. Returns the `LLMForecastResult` value class
-  (existing tuple subclass).
+Each helper catches the SDK's own timeout / transient errors and
+re-raises as `LLMTimeoutError` / `LLMTransientError`. Each
+returns a raw string body fed into `_parse()`.
 
-- `_prompt(signal)` — preserved from existing `_prompt`. Sends:
-  market_title, market_id, venue, yes_price, top-5 orderbook,
-  external_signal. Asks for JSON-only response with keys
-  `prob_estimate`, `confidence`, `rationale`. Adds an explicit
-  instruction line:
-  `"Respond with a JSON object only. No prose. Keys:
-  prob_estimate (0..1 float), confidence (0..1 float),
-  rationale (one short sentence)."`
+`_parse(raw, signal) -> LLMForecastResult` — preserved from the
+existing `_parse_response`; raises `LLMParseError` (replacing
+existing `ValueError` raise) when JSON parse fails or required
+keys missing.
 
-- New exceptions, both subclasses of `RuntimeError` so callers
-  catching broad `Exception` still work:
-  - `LLMTransientError` — wraps SDK transient errors (rate limit,
-    network, 5xx).
-  - `LLMParseError` — raised when JSON parse fails or required
-    keys missing.
+`_prompt(signal) -> str` — preserved from existing `_prompt`.
+Sends: market_title, market_id, venue, yes_price, top-5 orderbook,
+external_signal. Adds an explicit instruction line:
+
+```
+"Respond with a JSON object only. No prose. Keys:
+prob_estimate (0..1 float), confidence (0..1 float),
+rationale (one short sentence)."
+```
+
+New exceptions, all subclasses of `RuntimeError`:
+
+- `LLMTimeoutError` — wraps SDK timeout. (Distinct from
+  `asyncio.TimeoutError`; we no longer use `asyncio.wait_for` —
+  the SDK enforces timeout at the request layer.)
+- `LLMTransientError` — wraps SDK transient errors (rate limit,
+  network, 5xx).
+- `LLMParseError` — raised when JSON parse fails or required
+  keys missing.
 
 Per-instance state added:
 
@@ -249,18 +287,24 @@ Per-instance state added:
 _cache: dict[str, tuple[float, LLMForecastResult]] = field(
     default_factory=dict
 )
-_cache_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+_cache_lock: threading.Lock = field(default_factory=threading.Lock)
 ```
+
+`threading.Lock` (not `asyncio.Lock`) because `predict()` is
+called from threadpool workers; multiple worker threads may hit
+the cache concurrently. `threading.Lock` is the correct primitive.
 
 Cache helpers as designed in §6.3.
 
 ### 6.3 Cache (T1 — per-market TTL)
 
+Cache is sync (called from threadpool workers via `predict()`):
+
 ```python
-async def _cache_get(self, market_id: str) -> LLMForecastResult | None:
+def _cache_get(self, market_id: str) -> LLMForecastResult | None:
     if not self.config or self.config.cache_ttl_s <= 0:
         return None
-    async with self._cache_lock:
+    with self._cache_lock:
         entry = self._cache.get(market_id)
         if entry is None:
             return None
@@ -270,10 +314,10 @@ async def _cache_get(self, market_id: str) -> LLMForecastResult | None:
             return None
         return result
 
-async def _cache_put(self, market_id: str, result: LLMForecastResult) -> None:
+def _cache_put(self, market_id: str, result: LLMForecastResult) -> None:
     if not self.config or self.config.cache_ttl_s <= 0:
         return
-    async with self._cache_lock:
+    with self._cache_lock:
         self._cache[market_id] = (time.monotonic(), result)
         if len(self._cache) > 1000:
             oldest = min(self._cache, key=lambda k: self._cache[k][0])
@@ -297,7 +341,7 @@ Decisions:
 
 ### 6.4 Failure handling (F1 — strict)
 
-A failed LLM call returns `None` from `_predict_async()`. The
+A failed LLM call returns `None` from `predict()`. The
 controller's `required: true` gate then prevents decision
 emission for that signal. This is the conservative default for
 LIVE money: a sick model blocks trades rather than letting a
@@ -305,13 +349,16 @@ silent fallback chase the market price.
 
 Failure cases caught:
 
-- `asyncio.TimeoutError` — request exceeded `timeout_s`.
-- `LLMTransientError` — wraps SDK transient errors. Caught at
-  `_call_*` boundary; raised inside `_predict_async`'s try block.
+- `LLMTimeoutError` — wraps SDK timeout (Anthropic SDK
+  `APITimeoutError`, OpenAI SDK `APITimeoutError`).
+- `LLMTransientError` — wraps SDK transient errors (rate limit,
+  network, 5xx). Caught at `_call_*` boundary, re-raised for
+  `predict()` to handle.
 - `LLMParseError` — JSON parse / schema validation failure.
 - Any other `Exception` from the SDK is NOT caught. Crashes
   surface in logs. This forces operators to fix bugs rather than
-  silently downgrade to neutral.
+  silently downgrade to neutral. (Notably: auth errors propagate
+  — they signal a config bug, not a runtime hiccup.)
 
 ### 6.5 Strategy config relaxation
 
@@ -366,11 +413,11 @@ In `tests/unit/test_controller_cp05.py`:
 
 | Test | Old → New |
 |---|---|
-| `test_llm_forecaster_returns_neutral_tuple_without_calling_client` | New: assert `predict()` returns `None` when enabled (sync escape-hatch behaviour under option `a`). Rename to `test_llm_forecaster_predict_sync_returns_none_when_enabled`. |
-| `test_llm_forecaster_returns_none_when_disabled_and_neutral_when_enabled` | New: assert `None` for both disabled and enabled (sync). |
+| `test_llm_forecaster_returns_neutral_tuple_without_calling_client` | New: assert `predict()` returns the parsed `LLMForecastResult` from the **injected** client (no network), with cache populated. Rename to `test_llm_forecaster_predict_uses_injected_client_and_caches`. |
+| `test_llm_forecaster_returns_none_when_disabled_and_neutral_when_enabled` | New: assert `None` when disabled; assert real-result tuple when enabled with injected client. |
 | `test_llm_forecaster_forecast_uses_neutral_probability_and_default_config` | Preserved — default config has `enabled=False`, so `forecast()` returns `signal.yes_price`. |
-| `test_llm_forecaster_client_paths_cover_injected_missing_and_cached_factory` | Rewrite to test new provider dispatch. Cover: client injection short-circuit, missing SDK import → `None`, cached client return. |
-| `test_controller_cp01.py:104` mock of `predict` returning `(0.65, 0.9, "test-llm")` | If `ControllerPipeline` calls `predict()`, the mock works as-is. **If it calls `forecast()`, update the mock target to `forecast` returning a coroutine.** Verified during impl. |
+| `test_llm_forecaster_client_paths_cover_injected_missing_and_cached_factory` | Rewrite to test new provider dispatch. Cover: injected client short-circuit, missing SDK import → `None`, cached client return, unknown provider → `None`. |
+| `test_controller_cp01.py:104` mock of `predict` returning `(0.65, 0.9, "test-llm")` | **No change required.** Pipeline still calls `predict()` (sync); mock works as-is. |
 
 #### 6.6.2 New tests (16 new)
 
@@ -385,30 +432,30 @@ across area-specific test files):
 4. `test_llm_settings_anthropic_optional_base_url`
 5. `test_llm_settings_disabled_skips_validation`
 
-`LLMForecaster._predict_async` lives in
-`tests/unit/test_controller_cp05.py` (joining the existing LLM
-forecaster tests; no new file unless §6.6.1 migrations push the
-file past project conventions, in which case a sibling
-`test_llm_forecaster_async.py` is acceptable):
+`LLMForecaster.predict` (sync) and `forecast` (async wrapper)
+live in `tests/unit/test_controller_cp05.py`:
 
-6. `test_predict_async_returns_none_when_disabled`
-7. `test_predict_async_anthropic_provider_calls_client_and_caches`
-8. `test_predict_async_openai_provider_calls_client_and_caches`
-9. `test_predict_async_cache_hit_skips_client`
-10. `test_predict_async_cache_expiry_recalls_client`
-11. `test_predict_async_cache_size_cap_evicts_oldest`
-12. `test_predict_async_timeout_returns_none`
-13. `test_predict_async_transient_error_returns_none`
-14. `test_predict_async_malformed_response_returns_none`
+6. `test_predict_returns_none_when_disabled`
+7. `test_predict_anthropic_provider_calls_client_and_caches`
+8. `test_predict_openai_provider_calls_client_and_caches`
+9. `test_predict_cache_hit_skips_client`
+10. `test_predict_cache_expiry_recalls_client`
+11. `test_predict_cache_size_cap_evicts_oldest`
+12. `test_predict_timeout_returns_none`
+13. `test_predict_transient_error_returns_none`
+14. `test_predict_malformed_response_returns_none`
 
 `forecast()` integration:
 
 15. `test_forecast_returns_yes_price_on_predict_failure`
 16. `test_forecast_returns_predicted_value_on_success`
 
-Mocking strategy: inject a fake async client via the existing
-`client` field on `LLMForecaster`. No real HTTP calls. Pattern
-matches existing
+Mocking strategy: inject a fake **sync** client via the existing
+`client` field on `LLMForecaster`. The fake exposes the same
+shape as `anthropic.Anthropic` or `openai.OpenAI` — for example,
+`fake.messages.create(...)` returns a stub response with
+`.content[0].text = '{"prob_estimate":0.65,...}'`. No real
+HTTP calls. Pattern matches existing
 `test_llm_forecaster_client_paths_cover_injected_missing_and_cached_factory`.
 
 #### 6.6.3 Strategy relaxation test
@@ -451,14 +498,14 @@ updated `uv.lock`.
 
 | Mode | Behaviour |
 |---|---|
-| LLM API down or network failure | Timeout fires (5s default). `None` returned. Decision blocked for that signal. Other signals continue (cache hit-through). |
+| LLM API down or network failure | SDK timeout fires (5s default). Wrapped in `LLMTimeoutError`. `None` returned. Decision blocked for that signal. Other signals continue (cache hit-through). |
 | Rate limit (429) | SDK raises a transient error. Wrapped in `LLMTransientError`. `None` returned. |
 | Malformed JSON | `LLMParseError`. `None` returned. |
-| Wrong base_url (404) | Behaves like an unparseable response or a 4xx. Caught → `None`. |
-| API key revoked mid-run | First call after revocation raises auth error. Currently NOT caught (lets it propagate). Operators see the failure clearly in logs. **Open question — see §11.** |
+| Wrong base_url (404 or DNS) | Caught at `_call_*` boundary → `LLMTransientError` → `None`. |
+| API key revoked mid-run | Auth error from SDK is NOT caught — propagates out of `predict()`. Pipeline's `_predict_forecaster` catches via `return_exceptions=True` in the gather, logs as `forecaster failed`. Operator sees the failure clearly. |
 | Cache eviction during burst | Bounded loss; cache fills back during normal operation. |
-| `enabled=False` in config | `_predict_async` short-circuits at the first check. Zero LLM calls. |
-| Multiple concurrent calls for same market_id, cold cache | All proceed independently. Up to N redundant calls during the very first second of a market's first cache fill. Acceptable. |
+| `enabled=False` in config | `predict()` short-circuits at the first check. Zero LLM calls. |
+| Multiple concurrent calls for same market_id, cold cache | Each call runs in its own threadpool worker. Cache lock serializes the read/write but not the LLM call itself. Up to N redundant calls during the very first second of a market's first cache fill. Acceptable. |
 | Process restart | Cache is in-memory and resets. First N seconds of post-restart calls all miss. Acceptable — soak warm-up. |
 | `client` field manually injected (existing test pattern) | Provider dispatch is skipped. Test client used directly. Preserved. |
 
@@ -488,7 +535,7 @@ Commits, atomic and ordered:
 |---|---|---|
 | 1 | `chore:` | Add `openai` to llm extra in `pyproject.toml`, regenerate `uv.lock`. |
 | 2 | `feat:` | `LLMSettings` schema additions + validation + new tests. |
-| 3 | `feat:` | `LLMForecaster` async path + provider dispatch + cache + new exception types + new tests. |
+| 3 | `feat:` | `LLMForecaster` real `predict()` impl + provider dispatch + sync cache + new exception types + new tests. |
 | 4 | `test:` | Migrate the 5 existing LLM forecaster tests to new assertions. Update `test_controller_cp01.py` mock target if needed (verified during impl). |
 | 5 | `feat:` | `scripts/relax_default_strategy_required_factors.py` + integration test. |
 | 6 | `docs:` | This spec doc + any cross-reference updates. (May land first as a separate commit on the branch.) |
@@ -501,16 +548,19 @@ description references this spec.
 These are NOT design decisions for the user. Resolved by the
 implementing agent during impl by reading the relevant code:
 
-1. Does `ControllerPipeline` call `predict()` (sync) or
-   `forecast()` (async)? Determines whether the test_controller
-   _cp01 mock target needs updating. **Path forward:** read
-   `src/pms/controller/pipeline.py`. If `predict()`: no pipeline
-   change. If `forecast()`: trivial mock swap, one line.
+1. ~~Does `ControllerPipeline` call `predict()` (sync) or
+   `forecast()` (async)?~~ **Resolved during plan-writing:**
+   pipeline calls `predict()` via `asyncio.to_thread`
+   (`src/pms/controller/pipeline.py:385`). The forecaster uses
+   sync clients (`anthropic.Anthropic`, `openai.OpenAI`) and
+   `predict()` does the real work. No pipeline change. No
+   Protocol change. `test_controller_cp01.py:104` mock works
+   unchanged.
 2. Where is the `strategy_version_id` hashing scheme implemented?
-   Likely `src/pms/strategies/aggregate.py` or
-   `src/pms/storage/seed.py`. **Path forward:** grep for the
-   string `sha256` and `strategy_version_id` in those modules.
-   The relaxation script imports and reuses the helper.
+   **Resolved during plan-writing:**
+   `src/pms/strategies/versioning.py:158` —
+   `sha256(canonical_json.encode("utf-8")).hexdigest()`. The
+   relaxation script imports and reuses this helper.
 3. Should auth errors be caught and downgraded to `None`, or
    surface as crashes? **Path forward:** look at how Anthropic
    SDK 0.92.0 raises auth errors (likely
@@ -523,8 +573,9 @@ implementing agent during impl by reading the relevant code:
 
 | Option | Why rejected |
 |---|---|
-| Sync clients wrapped in `asyncio.to_thread` | Thread overhead; async-native is what the rest of the runner uses (`asyncpg`, `httpx.AsyncClient`). |
-| Pure-SQL strategy relaxation via `jsonb_set` | Matching the existing hashing scheme in pure SQL is hard; Python helper is cleaner. |
+| Async-native clients (`AsyncAnthropic`, `AsyncOpenAI`) | Pipeline calls `predict()` via `asyncio.to_thread` (`pipeline.py:385`). Async clients can't be awaited inside `to_thread`. Switching the pipeline path requires either a Protocol-wide async refactor (3 forecasters + pipeline + tests) or special-casing the LLM forecaster (hacky). Sync clients fit the existing pattern with no cascade. |
+| Async-native + Protocol-wide refactor of `IForecaster.predict` | Cleanest async story but cascades through Rules + Statistical forecasters and every test that mocks `predict()`. Big diff for a marginal-at-this-scale benefit (50 sig/sec, 30s cache → tiny concurrent LLM count). |
+| Pure-SQL strategy relaxation via `jsonb_set` | Matching the existing hashing scheme (`src/pms/strategies/versioning.py:158`) in pure SQL is hard; Python helper is cleaner. |
 | Alembic migration for strategy relaxation | Migrations are for schema changes, not application data. |
 | Delete `metaculus_prior` and `subset_pricing_violation` from `factor_composition` entirely | Bigger config delta; preserves design intent if Metaculus is wired up later. |
 | Materiality-threshold cache (T3) | More logic for marginal benefit at this scale. T1 (TTL) is sufficient. |
