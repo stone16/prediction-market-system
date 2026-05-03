@@ -12,13 +12,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "relax_default_strategy_required_factors.py"
 
-pytestmark = pytest.mark.integration
-
-if not os.environ.get("PMS_RUN_INTEGRATION"):
-    pytest.skip(
-        "set PMS_RUN_INTEGRATION=1 to run integration tests",
-        allow_module_level=True,
-    )
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not os.environ.get("PMS_RUN_INTEGRATION"),
+        reason="set PMS_RUN_INTEGRATION=1 to run integration tests",
+    ),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +81,7 @@ def _active_config(cur: psycopg.Cursor[Any]) -> tuple[str, dict[str, Any]]:
 def _required_flags(config: dict[str, Any]) -> dict[str, bool]:
     factors = config["config"]["factor_composition"]
     return {
-        f["factor_id"]: f["required"]
+        f["factor_id"]: f.get("required", True)
         for f in factors
         if f["factor_id"] in {
             "metaculus_prior", "subset_pricing_violation"

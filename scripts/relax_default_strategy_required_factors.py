@@ -40,7 +40,7 @@ def _relax(config: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     for factor in factors:
         if (
             factor.get("factor_id") in TARGET_FACTORS
-            and factor.get("required") is True
+            and factor.get("required", True)
         ):
             factor["required"] = False
             flipped.append(factor["factor_id"])
