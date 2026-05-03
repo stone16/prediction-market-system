@@ -575,7 +575,7 @@ class TestSettlementCriteria:
         outcome_prices: str = '["1.0", "0.0"]',
         last_trade_price: float = 0.05,
         volume: float = 10_000.0,
-    ) -> dict:
+    ) -> dict[str, object]:
         """Build a minimal Gamma API row dict for _parse_market()."""
         return {
             "id": "test-123",
