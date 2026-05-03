@@ -1844,10 +1844,82 @@ class _PostgresFlbMarketSnapshotReader:
         *,
         as_of: datetime,
     ) -> FlbMarketSnapshot | None:
-        # Paper-soak reader intentionally uses the latest persisted market row;
-        # historical as-of snapshots belong in the warehouse backtest path.
-        del as_of
-        query = """
+        async with self.store.pool.acquire() as connection:
+            resolved_market_id = await _resolve_flb_market_id(connection, market_id)
+            if resolved_market_id is None:
+                return None
+            market_row = await _read_flb_market_row(connection, resolved_market_id)
+            if market_row is None:
+                return None
+            price_row = await _read_flb_price_row(
+                connection,
+                resolved_market_id,
+                as_of=as_of,
+            )
+
+        if _future_market_status_change(market_row, as_of=as_of):
+            return None
+        if market_row["closed"] is True or market_row["accepting_orders"] is False:
+            return None
+
+        yes_price_source = price_row if price_row is not None else market_row
+        observed_at = _observed_at(yes_price_source)
+        if observed_at is None or observed_at > as_of:
+            return None
+
+        yes_price = _open_probability_or_none(yes_price_source["yes_price"])
+        yes_token_id = market_row["yes_token_id"]
+        no_token_id = market_row["no_token_id"]
+        if (
+            yes_price is None
+            or not isinstance(yes_token_id, str)
+            or not isinstance(no_token_id, str)
+        ):
+            return None
+
+        return FlbMarketSnapshot(
+            market_id=cast(str, market_row["market_id"]),
+            title=cast(str, market_row["question"]),
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+            yes_price=yes_price,
+            yes_best_ask=_open_probability_or_none(yes_price_source["best_ask"]),
+            no_best_ask=_no_best_ask(
+                no_price=yes_price_source["no_price"],
+                yes_best_bid=yes_price_source["best_bid"],
+            ),
+            observed_at=observed_at,
+            resolves_at=cast(datetime | None, market_row["resolves_at"]),
+            venue=cast(Venue, market_row["venue"]),
+        )
+
+
+async def _resolve_flb_market_id(connection: Any, lookup_id: str) -> str | None:
+    query = """
+    WITH matches AS (
+        SELECT markets.condition_id AS market_id, 0 AS match_rank
+        FROM markets
+        WHERE markets.condition_id = $1
+
+        UNION ALL
+
+        SELECT tokens.condition_id AS market_id, 1 AS match_rank
+        FROM tokens
+        WHERE tokens.token_id = $1
+    )
+    SELECT market_id
+    FROM matches
+    ORDER BY match_rank ASC, market_id ASC
+    LIMIT 1
+    """
+    value = await connection.fetchval(query, lookup_id)
+    if not isinstance(value, str):
+        return None
+    return value
+
+
+async def _read_flb_market_row(connection: Any, market_id: str) -> Any | None:
+    query = """
         SELECT
             markets.condition_id AS market_id,
             markets.question,
@@ -1861,18 +1933,13 @@ class _PostgresFlbMarketSnapshotReader:
             markets.price_updated_at,
             markets.closed,
             markets.accepting_orders,
+            markets.status_updated_at,
             MAX(CASE WHEN tokens.outcome = 'YES' THEN tokens.token_id END) AS yes_token_id,
             MAX(CASE WHEN tokens.outcome = 'NO' THEN tokens.token_id END) AS no_token_id
         FROM markets
         LEFT JOIN tokens
             ON tokens.condition_id = markets.condition_id
         WHERE markets.condition_id = $1
-           OR EXISTS (
-                SELECT 1
-                FROM tokens AS lookup_tokens
-                WHERE lookup_tokens.token_id = $1
-                  AND lookup_tokens.condition_id = markets.condition_id
-           )
         GROUP BY
             markets.condition_id,
             markets.question,
@@ -1885,45 +1952,46 @@ class _PostgresFlbMarketSnapshotReader:
             markets.best_ask,
             markets.price_updated_at,
             markets.closed,
-            markets.accepting_orders
-        LIMIT 1
+            markets.accepting_orders,
+            markets.status_updated_at
         """
-        async with self.store.pool.acquire() as connection:
-            row = await connection.fetchrow(query, market_id)
-        if row is None:
-            return None
-        if row["closed"] is True or row["accepting_orders"] is False:
-            return None
+    return await connection.fetchrow(query, market_id)
 
-        yes_price = _open_probability_or_none(row["yes_price"])
-        yes_token_id = row["yes_token_id"]
-        no_token_id = row["no_token_id"]
-        if (
-            yes_price is None
-            or not isinstance(yes_token_id, str)
-            or not isinstance(no_token_id, str)
-        ):
-            return None
 
-        observed_at = row["price_updated_at"] or row["last_seen_at"]
-        if not isinstance(observed_at, datetime):
-            return None
+async def _read_flb_price_row(
+    connection: Any,
+    market_id: str,
+    *,
+    as_of: datetime,
+) -> Any | None:
+    query = """
+    SELECT
+        snapshot_at,
+        yes_price,
+        no_price,
+        best_bid,
+        best_ask
+    FROM market_price_snapshots
+    WHERE condition_id = $1
+      AND snapshot_at <= $2
+    ORDER BY snapshot_at DESC
+    LIMIT 1
+    """
+    return await connection.fetchrow(query, market_id, as_of)
 
-        return FlbMarketSnapshot(
-            market_id=cast(str, row["market_id"]),
-            title=cast(str, row["question"]),
-            yes_token_id=yes_token_id,
-            no_token_id=no_token_id,
-            yes_price=yes_price,
-            yes_best_ask=_open_probability_or_none(row["best_ask"]),
-            no_best_ask=_no_best_ask(
-                no_price=row["no_price"],
-                yes_best_bid=row["best_bid"],
-            ),
-            observed_at=observed_at,
-            resolves_at=cast(datetime | None, row["resolves_at"]),
-            venue=cast(Venue, row["venue"]),
-        )
+
+def _observed_at(row: Any) -> datetime | None:
+    observed_at = row["snapshot_at"] if "snapshot_at" in row else row["price_updated_at"]
+    if observed_at is None and "last_seen_at" in row:
+        observed_at = row["last_seen_at"]
+    if isinstance(observed_at, datetime):
+        return observed_at
+    return None
+
+
+def _future_market_status_change(row: Any, *, as_of: datetime) -> bool:
+    status_updated_at = row["status_updated_at"]
+    return isinstance(status_updated_at, datetime) and status_updated_at > as_of
 
 
 def _open_probability_or_none(value: object) -> float | None:
