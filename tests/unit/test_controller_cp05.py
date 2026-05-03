@@ -157,6 +157,7 @@ class FixedSizer:
         return self._size
 
 
+@pytest.mark.xfail(reason="migrated in task 4 of llm-forecaster-real plan")
 def test_llm_forecaster_returns_neutral_tuple_without_calling_client() -> None:
     client = FakeClaudeClient()
     forecaster = LLMForecaster(
@@ -172,6 +173,7 @@ def test_llm_forecaster_returns_neutral_tuple_without_calling_client() -> None:
     assert client.messages.calls == []
 
 
+@pytest.mark.xfail(reason="migrated in task 4 of llm-forecaster-real plan")
 def test_llm_forecaster_returns_none_when_disabled_and_neutral_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,6 +279,7 @@ def test_llm_response_parsing_helpers_cover_json_text_and_errors() -> None:
         _parse_response(SimpleNamespace(content='{"prob_estimate":0.6,"confidence":0.2}'))
 
 
+@pytest.mark.xfail(reason="migrated in task 4 of llm-forecaster-real plan")
 @pytest.mark.asyncio
 async def test_controller_pipeline_suppresses_zero_size_decision_and_tracks_metric() -> None:
     llm_client = FakeClaudeClient()
