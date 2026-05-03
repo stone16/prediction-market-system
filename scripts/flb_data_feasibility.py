@@ -45,7 +45,7 @@ import httpx
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 SAMPLE_GATE_MIN = 100  # minimum resolved contracts per target bucket
 DECILE_BOUNDARIES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-TARGET_BUCKETS = [0, 9]  # decile 0 = <10%, decile 9 = >90%
+TARGET_BUCKETS = [0, 9]  # decile 0 = [0%, 10%), decile 9 = [90%, 100%]
 WILSON_Z = 1.96  # 95% confidence
 
 
@@ -142,6 +142,9 @@ def _parse_market(row: dict[str, Any]) -> ResolvedMarket | None:
             return None
 
         # Parse outcome prices to determine resolution and last price.
+        # CRITICAL: outcomePrices ordering follows the outcomes array.
+        # ["Yes", "No"] → prices[0]=YES, prices[1]=NO
+        # ["No", "Yes"] → prices[0]=NO,  prices[1]=YES
         prices_raw = row.get("outcomePrices")
         if isinstance(prices_raw, str):
             prices = json.loads(prices_raw)
@@ -150,8 +153,10 @@ def _parse_market(row: dict[str, Any]) -> ResolvedMarket | None:
         if not isinstance(prices, list) or len(prices) < 2:
             return None
 
-        yes_price = float(prices[0])
-        no_price = float(prices[1])
+        yes_idx = outcomes.index("Yes")
+        no_idx = 1 - yes_idx  # binary market: the other index
+        yes_price = float(prices[yes_idx])
+        no_price = float(prices[no_idx])
 
         # A resolved market has one side at 1.0 and the other at 0.0.
         # Use a tolerance for floating-point representation.
@@ -342,8 +347,8 @@ def _wilson_interval(successes: int, trials: int) -> tuple[float, float]:
 class SampleGateResult:
     """Result of the H1 sample gate check."""
 
-    longshot_count: int  # markets in decile 0 (<10%)
-    favorite_count: int  # markets in decile 9 (>90%)
+    longshot_count: int  # markets in decile 0 [0%, 10%)
+    favorite_count: int  # markets in decile 9 [90%, 100%]
     longshot_passed: bool
     favorite_passed: bool
     passed: bool  # both buckets meet minimum
@@ -352,8 +357,8 @@ class SampleGateResult:
 def check_sample_gate(decile_stats: list[DecileStats]) -> SampleGateResult:
     """Check whether enough data exists in the target FLB buckets.
 
-    The sample gate requires ≥100 resolved contracts in both the <10%
-    (longshot) and >90% (favorite) buckets.
+    The sample gate requires ≥100 resolved contracts in both the [0%, 10%)
+    (longshot) and [90%, 100%] (favorite) buckets.
     """
     longshot_count = decile_stats[0].n
     favorite_count = decile_stats[9].n
@@ -397,10 +402,10 @@ def generate_report(
     ls = "✅" if gate.longshot_passed else "❌"
     fs = "✅" if gate.favorite_passed else "❌"
     lines.append(
-        f"| Longshot (<10%) | {gate.longshot_count} | ≥{SAMPLE_GATE_MIN} | {ls} |"
+        f"| Longshot [0%-10%) | {gate.longshot_count} | ≥{SAMPLE_GATE_MIN} | {ls} |"
     )
     lines.append(
-        f"| Favorite (>90%) | {gate.favorite_count} | ≥{SAMPLE_GATE_MIN} | {fs} |"
+        f"| Favorite [90%-100%] | {gate.favorite_count} | ≥{SAMPLE_GATE_MIN} | {fs} |"
     )
     lines.append("")
 

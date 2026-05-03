@@ -1,14 +1,14 @@
 # H1 FLB Data Feasibility Report
 
-**Generated:** 2026-05-03T09:11:24.324443+00:00
+**Generated:** 2026-05-03T09:22:35.478539+00:00
 **Total resolved markets analyzed:** 13
 
 ## Sample Gate: ❌
 
 | Bucket | Count | Required | Status |
 |--------|-------|----------|--------|
-| Longshot (<10%) | 12 | ≥100 | ❌ |
-| Favorite (>90%) | 1 | ≥100 | ❌ |
+| Longshot [0%-10%) | 12 | ≥100 | ❌ |
+| Favorite [90%-100%] | 1 | ≥100 | ❌ |
 
 **H1 NOT VIABLE YET.** Insufficient resolved contracts in target buckets. Collect more data before proceeding with FLB strategy.
 
@@ -48,3 +48,9 @@
 - **Median volume:** $30,917
 - **Max volume:** $601,109
 - **Total volume:** $1,369,972
+
+## Limitations
+
+1. **Entry price proxy:** Uses `lastTradePrice` (last trade before resolution), NOT a timestamped entry snapshot. For strategy P&L backtesting, we need price snapshots at a defined entry horizon.
+2. **Data source:** Gamma API `closed=true` returns a small window of recently resolved markets. For ≥100 contracts per target bucket, Dune Analytics on-chain data or a historical warehouse is required.
+3. **Feasibility only:** This is a bias-detection script, not a strategy backtest. It does not account for fees, slippage, or execution timing.
