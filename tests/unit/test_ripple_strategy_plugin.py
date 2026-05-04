@@ -577,6 +577,7 @@ def test_ripple_import_linter_contract_is_declared() -> None:
     assert contract["source_modules"] == [
         "pms.strategies.ripple",
         "pms.strategies.flb",
+        "pms.strategies.anchoring",
     ]
     assert contract["forbidden_modules"] == [
         "pms.actuator",
