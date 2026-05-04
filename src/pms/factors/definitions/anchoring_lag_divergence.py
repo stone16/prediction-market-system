@@ -52,6 +52,8 @@ class AnchoringLagDivergence(FactorDefinition):
         if (
             "llm_posterior" not in signal.external_signal
             or "news_timestamp" not in signal.external_signal
+            or signal.external_signal["llm_posterior"] is None
+            or signal.external_signal["news_timestamp"] is None
         ):
             return None
         llm_posterior = _require_open_probability(
@@ -88,8 +90,7 @@ def _linear_decay(
 ) -> float:
     elapsed_hours = (now - news_timestamp).total_seconds() / 3600.0
     if elapsed_hours < 0.0:
-        msg = "news_timestamp must not be in the future"
-        raise ValueError(msg)
+        return 0.0
     return max(0.0, 1.0 - elapsed_hours / decay_window_hours)
 
 

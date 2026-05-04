@@ -99,6 +99,23 @@ def test_anchoring_lag_factor_returns_none_when_llm_news_inputs_are_absent() -> 
     assert AnchoringLagDivergence().compute(signal, EMPTY_OUTER_RING) is None
 
 
+def test_anchoring_lag_factor_returns_none_for_null_llm_news_inputs() -> None:
+    signal = _signal()
+    signal.external_signal["llm_posterior"] = None
+    assert AnchoringLagDivergence().compute(signal, EMPTY_OUTER_RING) is None
+
+    signal = _signal()
+    signal.external_signal["news_timestamp"] = None
+    assert AnchoringLagDivergence().compute(signal, EMPTY_OUTER_RING) is None
+
+
+def test_anchoring_lag_factor_returns_none_for_future_news_timestamp() -> None:
+    assert AnchoringLagDivergence().compute(
+        _signal(news_timestamp=NOW + timedelta(seconds=1)),
+        EMPTY_OUTER_RING,
+    ) is None
+
+
 def test_anchoring_lag_factor_rejects_invalid_probability_inputs() -> None:
     with pytest.raises(ValueError, match="llm_posterior"):
         AnchoringLagDivergence().compute(
