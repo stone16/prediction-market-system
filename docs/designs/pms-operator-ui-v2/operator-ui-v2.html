@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PMS User-Friendly Flow Mockups</title>
+  <style>
+    :root {
+      --paper: #f5f8f2;
+      --ink: #171916;
+      --muted: #5f675b;
+      --line: #cbd8c4;
+      --panel: #ffffff;
+      --green: #1f8a70;
+      --green-weak: rgba(31,138,112,.13);
+      --coral: #d84f3f;
+      --coral-weak: rgba(216,79,63,.13);
+      --amber: #d6a72d;
+      --amber-weak: rgba(214,167,45,.20);
+      --cyan: #2d8aa6;
+      --cyan-weak: rgba(45,138,166,.14);
+      --error: #b23a2a;
+      --error-weak: rgba(178,58,42,.13);
+      --navy: #101827;
+      --shadow: 0 20px 55px rgba(23,25,22,.13);
+      --radius-sm: 4px;
+      --radius-md: 8px;
+      --radius-lg: 16px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #dce5d9;
+      color: var(--ink);
+      font-family: Avenir, "Gill Sans", "Trebuchet MS", "PingFang SC", sans-serif;
+      letter-spacing: 0;
+    }
+    .board {
+      width: 1600px;
+      height: 1000px;
+      overflow: hidden;
+      position: relative;
+      padding: 42px 56px;
+      background:
+        linear-gradient(90deg, rgba(31,138,112,.07) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(216,79,63,.055) 1px, transparent 1px),
+        var(--paper);
+      background-size: 36px 36px;
+    }
+    .top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 32px;
+      margin-bottom: 24px;
+    }
+    .eyebrow {
+      color: var(--coral);
+      font-weight: 850;
+      font-size: 13px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    h1, h2, h3 { font-family: Georgia, "Times New Roman", "Songti SC", serif; margin: 0; letter-spacing: 0; }
+    h1 { font-size: 52px; line-height: .98; max-width: 920px; }
+    h2 { font-size: 30px; line-height: 1.12; }
+    h3 { font-size: 22px; line-height: 1.18; }
+    p { margin: 10px 0 0; color: var(--muted); font-size: 16px; line-height: 1.48; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      height: 34px;
+      padding: 0 13px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,.78);
+      font-size: 13px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+    .shell {
+      height: 740px;
+      display: grid;
+      grid-template-rows: 76px 1fr;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255,255,255,.84);
+      box-shadow: var(--shadow);
+    }
+    .appbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 28px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.88);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; font-family: Georgia, serif; font-weight: 800; font-size: 23px; }
+    .mark { width: 38px; height: 38px; border-radius: 8px; background: var(--green); border: 2px solid var(--ink); color: white; display: grid; place-items: center; font-weight: 900; font-family: Avenir, sans-serif; }
+    .tabs, .statusbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .tab, .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 30px;
+      padding: 0 11px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+    .tab { border: 1px solid var(--line); background: rgba(255,255,255,.75); color: var(--muted); }
+    .tab.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+    .green { background: var(--green-weak); color: var(--green); }
+    .cyan { background: var(--cyan-weak); color: var(--cyan); }
+    .amber { background: var(--amber-weak); color: #8a6500; }
+    .coral { background: var(--coral-weak); color: var(--coral); }
+    .error { background: var(--error-weak); color: var(--error); }
+    .body { padding: 24px 28px; display: grid; gap: 16px; }
+    .overview-grid { grid-template-columns: .95fr .72fr .72fr; grid-template-rows: auto 1fr; }
+    .card { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel); padding: 22px; }
+    .soft { background: linear-gradient(180deg, #fff, #fbfdf9); }
+    .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+    .metric { border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; background: #fff; min-height: 104px; }
+    .metric small { display: block; color: var(--muted); font-size: 12px; font-weight: 850; margin-bottom: 8px; }
+    .metric strong { display: block; font-family: "SF Mono", Menlo, monospace; font-size: 30px; line-height: 1; }
+    .metric span { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .lane { display: grid; gap: 12px; margin-top: 16px; }
+    .item { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 13px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+    .item:last-child { border-bottom: 0; }
+    .icon { width: 34px; height: 34px; border-radius: 8px; background: #edf3eb; display: grid; place-items: center; color: var(--muted); font-weight: 900; }
+    .item b { display: block; font-size: 15px; margin-bottom: 3px; }
+    .item span { color: var(--muted); font-size: 13px; }
+    .btn { display: inline-flex; height: 42px; align-items: center; justify-content: center; padding: 0 16px; border-radius: var(--radius-md); background: var(--ink); color: white; font-size: 13px; font-weight: 850; white-space: nowrap; }
+    .btn.secondary { background: white; color: var(--ink); border: 1px solid var(--line); }
+    .stack { display: grid; gap: 18px; }
+    .strategy-grid { grid-template-columns: 360px 1fr; }
+    .strategy-list { display: grid; gap: 10px; margin-top: 14px; }
+    .strategy-row { border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; padding: 16px; display: grid; gap: 9px; }
+    .strategy-row.active { background: #f3fbf7; border-color: rgba(31,138,112,.42); }
+    .row-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .row-top b { font-size: 15px; }
+    .mini-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .mini { padding: 10px; border-radius: var(--radius-sm); background: #f8faf6; }
+    .mini small { display: block; color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+    .mini strong { font-family: "SF Mono", Menlo, monospace; font-size: 18px; }
+    .bar { height: 10px; border-radius: 999px; background: #edf2e9; overflow: hidden; margin-top: 8px; }
+    .bar i { display: block; height: 100%; width: var(--w); background: var(--green); border-radius: 999px; }
+    .action-grid { grid-template-columns: 1fr 1fr 1fr; }
+    .decision { min-height: 270px; display: grid; align-content: space-between; }
+    .decision h3 { font-size: 24px; }
+    .evidence { display: grid; gap: 10px; margin-top: 14px; }
+    .evidence div { display: flex; justify-content: space-between; gap: 14px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 13px; color: var(--muted); }
+    .evidence b { color: var(--ink); }
+    .timeline { display: grid; gap: 0; margin-top: 14px; }
+    .timeline .item { grid-template-columns: 88px 34px 1fr auto; }
+    .time { color: var(--muted); font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+    .footer-note { position: absolute; right: 28px; bottom: 18px; font-size: 12px; color: rgba(23,25,22,.45); font-weight: 800; }
+    body.single-board { background: transparent; }
+    body.single-board .board { display: none; }
+    body.single-board .board.active-board { display: block; }
+  </style>
+</head>
+<body>
+  <section class="board" id="operator-home">
+    <div class="top">
+      <div>
+        <div class="eyebrow">PMS Control Room · Operator Home</div>
+        <h1>用户第一眼要知道：我赚亏多少，系统正在做什么</h1>
+        <p>当前 dashboard 把 Markets / Ideas / Trades / Positions 分散到多个页面。新的首页应该把 P&L、风险额度、系统动作和待确认决策合成一个操作台。</p>
+      </div>
+      <span class="pill">Primary question: Do I need to act now?</span>
+    </div>
+    <div class="shell">
+      <div class="appbar">
+        <div class="brand"><div class="mark">P</div><span>PMS Control Room</span></div>
+        <div class="statusbar"><span class="badge green">Paper soak healthy</span><span class="badge amber">Live gated</span><span class="badge coral">$100 bankroll draft</span></div>
+      </div>
+      <div class="body overview-grid">
+        <div class="card soft">
+          <p class="eyebrow">Portfolio P&L</p>
+          <h2>Today: +$3.80 paper P&L · max loss budget still safe</h2>
+          <div class="metric-grid">
+            <div class="metric"><small>Realized P&L</small><strong>+$1.20</strong><span>2 resolved markets</span></div>
+            <div class="metric"><small>Unrealized P&L</small><strong>+$2.60</strong><span>4 open positions</span></div>
+            <div class="metric"><small>Exposure</small><strong>$18</strong><span>$5 / market cap</span></div>
+            <div class="metric"><small>Daily loss room</small><strong>$20</strong><span>no stop triggered</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <p class="eyebrow">Live readiness</p>
+          <h2>BLOCKED — credentials and one soak gate missing</h2>
+          <div class="lane">
+            <div class="item"><div class="icon">✓</div><div><b>Paper runner healthy</b><span>11h+ soak, API responding</span></div><span class="badge green">Pass</span></div>
+            <div class="item"><div class="icon">!</div><div><b>Polymarket credentials missing</b><span>cannot place live orders yet</span></div><span class="badge error">Block</span></div>
+            <div class="item"><div class="icon">?</div><div><b>Compliance numbers pending</b><span>$100 bankroll / $5 market / $20 daily max loss</span></div><span class="badge amber">Owner</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <p class="eyebrow">Bankroll management</p>
+          <h2>$18 exposed from $100 paper bankroll</h2>
+          <div class="lane">
+            <div class="item"><div class="icon">$</div><div><b>Available room</b><span>$82 remaining after open exposure</span></div><span class="badge green">Safe</span></div>
+            <div class="item"><div class="icon">M</div><div><b>Per-market cap</b><span>current highest exposure $4 / $5</span></div><span class="badge amber">Near cap</span></div>
+            <div class="item"><div class="icon">D</div><div><b>Daily max loss</b><span>$0 used from $20 stop budget</span></div><span class="badge green">OK</span></div>
+          </div>
+        </div>
+        <div class="card" style="grid-column: span 3;">
+          <div class="row-top"><div><p class="eyebrow">System action timeline</p><h2>What the system did since the last sweep</h2></div><span class="badge green">audit trail complete</span></div>
+          <div class="timeline">
+            <div class="item"><span class="time">22:31</span><div class="icon">S</div><div><b>Scanned 128 markets</b><span>Filtered by liquidity, spread, and freshness. 7 candidates passed.</span></div><span class="badge cyan">Sensor</span></div>
+            <div class="item"><span class="time">22:34</span><div class="icon">F</div><div><b>H1 FLB created 3 opportunities</b><span>YES + NO contracts both counted; binary-market patch active.</span></div><span class="badge green">Strategy</span></div>
+            <div class="item"><span class="time">22:40</span><div class="icon">R</div><div><b>Risk gate rejected 1 oversized trade</b><span>Would exceed $5 per-market cap. No order submitted.</span></div><span class="badge amber">Risk</span></div>
+            <div class="item"><span class="time">22:45</span><div class="icon">A</div><div><b>Paper actuator placed 2 orders</b><span>Both logged with decision_id, strategy_id, expected edge, and fill reason.</span></div><span class="badge green">Action</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="footer-note">Image 1 · Operator home / P&L + actions</div>
+  </section>
+
+  <section class="board" id="strategy-performance">
+    <div class="top">
+      <div>
+        <div class="eyebrow">Strategy Level Performance</div>
+        <h1>策略页不要只是表格，要回答“该信谁、停谁、为什么”</h1>
+        <p>当前策略页已有 Brier、P&L、fill rate、slippage、drawdown，但用户需要排序、解释和行动建议，而不只是 raw metrics。</p>
+      </div>
+      <span class="pill">Primary question: Which strategy deserves capital?</span>
+    </div>
+    <div class="shell">
+      <div class="appbar">
+        <div class="brand"><div class="mark">P</div><span>Strategy Performance</span></div>
+        <div class="tabs"><span class="tab active">Live/Paper</span><span class="tab">Backtest</span><span class="tab">Risk</span><span class="tab">Versions</span></div>
+      </div>
+      <div class="body strategy-grid">
+        <aside class="card">
+          <p class="eyebrow">Strategy lineup</p>
+          <h2>Ranked by trust score</h2>
+          <div class="strategy-list">
+            <div class="strategy-row active"><div class="row-top"><b>H1 FLB contrarian</b><span class="badge green">Promote</span></div><div class="mini-metrics"><div class="mini"><small>P&L</small><strong>+$7.40</strong></div><div class="mini"><small>Brier</small><strong>0.184</strong></div><div class="mini"><small>DD</small><strong>-$2.10</strong></div></div><div class="bar"><i style="--w:78%"></i></div></div>
+            <div class="strategy-row"><div class="row-top"><b>H2 anchoring lag</b><span class="badge amber">Research</span></div><div class="mini-metrics"><div class="mini"><small>P&L</small><strong>n/a</strong></div><div class="mini"><small>Brier</small><strong>n/a</strong></div><div class="mini"><small>DD</small><strong>n/a</strong></div></div><div class="bar"><i style="--w:28%"></i></div></div>
+            <div class="strategy-row"><div class="row-top"><b>LLM forecaster</b><span class="badge coral">Throttle</span></div><div class="mini-metrics"><div class="mini"><small>P&L</small><strong>-$1.80</strong></div><div class="mini"><small>Brier</small><strong>0.261</strong></div><div class="mini"><small>DD</small><strong>-$4.60</strong></div></div><div class="bar"><i style="--w:42%"></i></div></div>
+          </div>
+        </aside>
+        <main class="stack">
+          <div class="card soft">
+            <div class="row-top"><div><p class="eyebrow">Selected strategy</p><h2>H1 FLB contrarian is profitable, but only in low-spread markets</h2></div><span class="badge green">Capital allowed</span></div>
+            <div class="metric-grid">
+              <div class="metric"><small>P&L contribution</small><strong>+$7.40</strong><span>62% of total paper P&L</span></div>
+              <div class="metric"><small>Calibration</small><strong>0.184</strong><span>Brier lower is better</span></div>
+              <div class="metric"><small>Fill quality</small><strong>91%</strong><span>fills inside limit policy</span></div>
+              <div class="metric"><small>Drawdown</small><strong>-$2.10</strong><span>below risk limit</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <p class="eyebrow">Why this score</p>
+            <div class="timeline">
+              <div class="item"><span class="time">Signal</span><div class="icon">F</div><div><b>Forecasted Log-Odds Bias works in the current sample</b><span>Top decile opportunities produced +$7.40 paper P&L.</span></div><span class="badge green">Positive</span></div>
+              <div class="item"><span class="time">Risk</span><div class="icon">R</div><div><b>Risk filter prevented one bad oversized trade</b><span>Without risk gate, drawdown would be 2.2x higher.</span></div><span class="badge amber">Guarded</span></div>
+              <div class="item"><span class="time">Live gate</span><div class="icon">L</div><div><b>Promotion checklist still blocks live capital</b><span>Need 24h paper soak, Brier &lt; 0.22, min 30 records, drawdown below threshold, credentials present.</span></div><span class="btn">Open checklist</span></div>
+              <div class="item"><span class="time">Auto-halt</span><div class="icon">H</div><div><b>Suggested action: keep paper allocation, do not go live yet</b><span>If drawdown exceeds limit, strategy row moves to HALTED with resume / retire actions.</span></div><span class="badge amber">Guard</span></div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+    <div class="footer-note">Image 2 · Strategy scorecard / strategy-level performance</div>
+  </section>
+
+  <section class="board" id="decision-flow">
+    <div class="top">
+      <div>
+        <div class="eyebrow">Action Review Flow</div>
+        <h1>每个系统动作都要能被用户追问：为什么做、风险多少、结果如何</h1>
+        <p>交易系统的 UI 不是“漂亮地展示数据”，而是帮助用户批准、否决、暂停、复盘。每张 action card 都要连接 strategy、risk、P&L 和 ledger。</p>
+      </div>
+      <span class="pill">Primary question: Should I approve this action?</span>
+    </div>
+    <div class="shell">
+      <div class="appbar">
+        <div class="brand"><div class="mark">P</div><span>Action Review</span></div>
+        <div class="statusbar"><span class="badge amber">7 pending</span><span class="badge green">5 batch-safe</span><span class="badge cyan">paper mode</span></div>
+      </div>
+      <div class="body action-grid">
+        <article class="card decision soft">
+          <div>
+            <p class="eyebrow">Pending action</p>
+            <h3>Place $4 YES on “Will ETH ETF inflows exceed forecast?”</h3>
+            <p>H1 FLB sees +8.4% expected edge. Risk gate allows this size under the $5 market cap. Five similar low-risk actions can be batch approved.</p>
+            <div class="evidence">
+              <div><span>Strategy</span><b>H1 FLB v06</b></div>
+              <div><span>Expected edge</span><b>+8.4%</b></div>
+              <div><span>Max loss impact</span><b>$4.00</b></div>
+              <div><span>Current exposure</span><b>$1 / $5 cap</b></div>
+            </div>
+          </div>
+          <div class="tabs"><span class="btn">Approve this trade</span><span class="btn secondary">Batch approve 5 safe</span><span class="btn secondary">Reject</span></div>
+        </article>
+        <article class="card decision">
+          <div>
+            <p class="eyebrow">System explanation</p>
+            <h3>Why the system wants this</h3>
+            <p>The market price moved faster than historical resolution odds. Similar H1 samples had positive expected value after spread.</p>
+            <div class="timeline">
+              <div class="item"><span class="time">1</span><div class="icon">M</div><div><b>Market passed liquidity filter</b><span>spread 42 bps, liquidity $28k</span></div><span class="badge green">OK</span></div>
+              <div class="item"><span class="time">2</span><div class="icon">S</div><div><b>Strategy produced signal</b><span>FLB top-decile bucket</span></div><span class="badge green">OK</span></div>
+              <div class="item"><span class="time">3</span><div class="icon">R</div><div><b>Risk policy checked size</b><span>within market and daily loss limits</span></div><span class="badge green">OK</span></div>
+            </div>
+          </div>
+        </article>
+        <article class="card decision">
+          <div>
+            <p class="eyebrow">After action result</p>
+            <h3>If approved, it appears in the action ledger</h3>
+            <p>The user should later see whether this action improved P&L, hurt calibration, or violated expected slippage.</p>
+            <div class="evidence">
+              <div><span>Order status</span><b>submitted → filled</b></div>
+              <div><span>Fill price</span><b>0.42</b></div>
+              <div><span>Slippage</span><b>12 bps</b></div>
+              <div><span>P&L attribution</span><b>H1 FLB v06</b></div>
+            </div>
+          </div>
+          <div class="tabs"><span class="btn secondary">Open trace</span><span class="btn secondary">View ledger</span></div>
+        </article>
+      </div>
+    </div>
+    <div class="footer-note">Image 3 · Action review / action ledger mental model</div>
+  </section>
+  <script>
+    const board = new URLSearchParams(window.location.search).get("board");
+    if (board) {
+      document.body.classList.add("single-board");
+      const target = document.getElementById(board);
+      if (target) target.classList.add("active-board");
+    }
+  </script>
+</body>
+</html>
