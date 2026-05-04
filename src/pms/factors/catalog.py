@@ -22,6 +22,19 @@ class FactorCatalogEntry:
 
 FACTOR_CATALOG_ROWS: tuple[FactorCatalogEntry, ...] = (
     FactorCatalogEntry(
+        factor_id="anchoring_lag_divergence",
+        name="Anchoring Lag Divergence",
+        description=(
+            "Signed H2 divergence between LLM posterior and market YES price "
+            "after news. Positive means buy YES; negative means buy NO. "
+            "Includes 24h linear decay."
+        ),
+        input_schema_hash="51c833482880179372982cec8f88eb9a7c094ece9e52be91bce487a1c70e9050",
+        output_type="scalar",
+        direction="neutral",
+        owner="system",
+    ),
+    FactorCatalogEntry(
         factor_id="favorite_longshot_bias",
         name="Favorite-Longshot Bias",
         description=(

@@ -92,6 +92,13 @@ from pms.storage.order_store import OrderStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
 from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
+from pms.strategies.anchoring import (
+    AnchoringAgent,
+    AnchoringController,
+    AnchoringLagStrategyModule,
+    LiveAnchoringSource,
+)
+from pms.strategies.anchoring.source import AnchoringMarketSnapshotReader
 from pms.strategies.flb import FlbAgent, FlbController, FlbStrategyModule
 from pms.strategies.flb.source import (
     FlbMarketSnapshot,
@@ -639,6 +646,66 @@ class Runner:
         market_reader: FlbMarketSnapshotReader | None = None,
     ) -> Sequence[StrategyRunResult]:
         module = self.build_flb_strategy_module(
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+            market_ids=market_ids,
+            market_reader=market_reader,
+        )
+        return tuple(
+            await module.run_with_artifacts(
+                StrategyContext(
+                    strategy_id=strategy_id,
+                    strategy_version_id=strategy_version_id,
+                    as_of=as_of or datetime.now(tz=UTC),
+                )
+            )
+        )
+
+    def build_anchoring_strategy_module(
+        self,
+        *,
+        strategy_id: str,
+        strategy_version_id: str,
+        market_ids: Sequence[str],
+        market_reader: AnchoringMarketSnapshotReader | None = None,
+    ) -> AnchoringLagStrategyModule:
+        if not market_ids:
+            msg = "market_ids must not be empty"
+            raise ValueError(msg)
+        if market_reader is None:
+            msg = (
+                "explicit H2 anchoring market reader is required until the "
+                "LLM/news observation source is wired"
+            )
+            raise RuntimeError(msg)
+
+        return AnchoringLagStrategyModule(
+            source=LiveAnchoringSource(
+                market_ids=tuple(market_ids),
+                market_reader=market_reader,
+                position_sizer=KellySizer(self.config.risk),
+                portfolio=self.portfolio,
+                max_slippage_bps=self.config.controller.max_slippage_bps,
+                time_in_force=TimeInForce(
+                    self.config.controller.time_in_force.upper()
+                ),
+            ),
+            controller=AnchoringController(),
+            agent=AnchoringAgent(),
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+        )
+
+    async def run_anchoring_strategy_once(
+        self,
+        *,
+        strategy_id: str,
+        strategy_version_id: str,
+        market_ids: Sequence[str],
+        as_of: datetime | None = None,
+        market_reader: AnchoringMarketSnapshotReader | None = None,
+    ) -> Sequence[StrategyRunResult]:
+        module = self.build_anchoring_strategy_module(
             strategy_id=strategy_id,
             strategy_version_id=strategy_version_id,
             market_ids=market_ids,

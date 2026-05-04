@@ -138,7 +138,7 @@ as_packages = false
 [[tool.importlinter.contracts]]
 name = "Strategy plugins: no actuator, controller, or venue adapter imports"
 type = "forbidden"
-source_modules = ["pms.strategies.ripple", "pms.strategies.flb"]
+source_modules = ["pms.strategies.ripple", "pms.strategies.flb", "pms.strategies.anchoring"]
 forbidden_modules = [
     "pms.actuator",
     "pms.actuator.adapters",

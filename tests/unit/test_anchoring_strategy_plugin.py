@@ -9,32 +9,26 @@ import tomllib
 import pytest
 
 from pms.core.models import Portfolio
-from pms.strategies.base import (
-    StrategyAgent,
-    StrategyController,
-    StrategyModule,
-    StrategyObservationSource,
+from pms.strategies.anchoring import (
+    ANCHORING_RESEARCH_REF,
+    AnchoringAgent,
+    AnchoringController,
+    AnchoringLagStrategyModule,
+    AnchoringMarketSnapshot,
+    LiveAnchoringSource,
 )
-from pms.strategies.flb.agent import FlbAgent
-from pms.strategies.flb.controller import FlbController
-from pms.strategies.flb.source import (
-    FLB_RESEARCH_REF,
-    FlbPositionSizer,
-    LiveFlbSource,
-    FlbMarketSnapshot,
-)
-from pms.strategies.flb.strategy import FlbStrategyModule
+from pms.strategies.base import StrategyAgent, StrategyController, StrategyModule, StrategyObservationSource
 from pms.strategies.intents import StrategyContext, TradeIntent
 
 
-NOW = datetime(2026, 5, 3, 12, 0, tzinfo=UTC)
+NOW = datetime(2026, 5, 4, 1, 0, tzinfo=UTC)
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def _context() -> StrategyContext:
     return StrategyContext(
-        strategy_id="h1_flb",
-        strategy_version_id="h1-flb-v1",
+        strategy_id="h2_anchoring_lag",
+        strategy_version_id="h2-anchoring-lag-v1",
         as_of=NOW,
     )
 
@@ -77,8 +71,8 @@ class _ZeroSizer:
         return 0.0
 
 
-class _StaticMarketReader:
-    def __init__(self, market: FlbMarketSnapshot | None) -> None:
+class _StaticAnchoringReader:
+    def __init__(self, market: AnchoringMarketSnapshot | None) -> None:
         self.market = market
         self.calls: list[tuple[str, datetime]] = []
 
@@ -87,47 +81,51 @@ class _StaticMarketReader:
         market_id: str,
         *,
         as_of: datetime,
-    ) -> FlbMarketSnapshot | None:
+    ) -> AnchoringMarketSnapshot | None:
         self.calls.append((market_id, as_of))
         return self.market
 
 
-def _market(**overrides: object) -> FlbMarketSnapshot:
+def _market(**overrides: object) -> AnchoringMarketSnapshot:
     data: dict[str, object] = {
-        "market_id": "market-flb-1",
-        "title": "Will the H1 FLB strategy choose the contrarian side?",
+        "market_id": "market-h2-1",
+        "title": "Will H2 anchoring lag detect delayed repricing?",
         "yes_token_id": "token-yes",
         "no_token_id": "token-no",
-        "yes_price": 0.05,
+        "yes_price": 0.50,
+        "llm_posterior": 0.80,
+        "llm_confidence": 0.70,
+        "news_timestamp": NOW,
         "observed_at": NOW,
-        "yes_best_ask": 0.05,
-        "no_best_ask": 0.96,
+        "yes_best_ask": 0.51,
+        "no_best_ask": 0.50,
         "resolves_at": NOW + timedelta(days=7),
+        "news_ref": "news:headline-1",
     }
     data.update(overrides)
-    return FlbMarketSnapshot(**cast(Any, data))
+    return AnchoringMarketSnapshot(**cast(Any, data))
 
 
 def _module(
-    market: FlbMarketSnapshot | None,
+    market: AnchoringMarketSnapshot | None,
     *,
-    sizer: FlbPositionSizer | None = None,
-) -> FlbStrategyModule:
-    return FlbStrategyModule(
-        source=LiveFlbSource(
-            market_ids=("market-flb-1",),
-            market_reader=_StaticMarketReader(market),
+    sizer: Any | None = None,
+) -> AnchoringLagStrategyModule:
+    return AnchoringLagStrategyModule(
+        source=LiveAnchoringSource(
+            market_ids=("market-h2-1",),
+            market_reader=_StaticAnchoringReader(market),
             position_sizer=sizer or _FixedSizer(),
             portfolio=_portfolio(),
         ),
-        controller=FlbController(),
-        agent=FlbAgent(),
-        strategy_id="h1_flb",
-        strategy_version_id="h1-flb-v1",
+        controller=AnchoringController(),
+        agent=AnchoringAgent(),
+        strategy_id="h2_anchoring_lag",
+        strategy_version_id="h2-anchoring-lag-v1",
     )
 
 
-def test_flb_components_satisfy_strategy_protocols() -> None:
+def test_anchoring_components_satisfy_strategy_protocols() -> None:
     module = _module(_market())
 
     source: StrategyObservationSource = module.source
@@ -138,35 +136,13 @@ def test_flb_components_satisfy_strategy_protocols() -> None:
     assert source is module.source
     assert controller is module.controller
     assert agent is module.agent
-    assert strategy_module.strategy_id == "h1_flb"
+    assert strategy_module.strategy_id == "h2_anchoring_lag"
 
 
 @pytest.mark.asyncio
-async def test_flb_longshot_signal_buys_no_contract() -> None:
+async def test_anchoring_positive_divergence_buys_yes_contract() -> None:
     sizer = _FixedSizer(5.0)
-    module = _module(_market(yes_price=0.05, no_best_ask=0.96), sizer=sizer)
-
-    intents = await module.run(_context())
-
-    assert len(intents) == 1
-    intent = intents[0]
-    assert isinstance(intent, TradeIntent)
-    assert intent.outcome == "NO"
-    assert intent.side == "BUY"
-    assert intent.token_id == "token-no"
-    assert intent.limit_price == pytest.approx(0.96)
-    assert intent.expected_price == pytest.approx(0.98)
-    assert intent.expected_edge == pytest.approx(0.02)
-    assert intent.notional_usdc == pytest.approx(5.0)
-    assert len(sizer.calls) == 1
-    assert sizer.calls[0][0] == pytest.approx(0.98)
-    assert sizer.calls[0][1] == pytest.approx(0.96)
-    assert FLB_RESEARCH_REF in intent.evidence_refs
-
-
-@pytest.mark.asyncio
-async def test_flb_favorite_signal_buys_yes_contract() -> None:
-    module = _module(_market(yes_price=0.95, yes_best_ask=0.94))
+    module = _module(_market(yes_price=0.50, llm_posterior=0.80, yes_best_ask=0.51), sizer=sizer)
 
     intents = await module.run(_context())
 
@@ -176,37 +152,58 @@ async def test_flb_favorite_signal_buys_yes_contract() -> None:
     assert intent.outcome == "YES"
     assert intent.side == "BUY"
     assert intent.token_id == "token-yes"
-    assert intent.limit_price == pytest.approx(0.94)
-    assert intent.expected_price == pytest.approx(0.96)
+    assert intent.limit_price == pytest.approx(0.51)
+    assert intent.expected_price == pytest.approx(0.80)
+    assert intent.expected_edge == pytest.approx(0.29)
+    assert intent.notional_usdc == pytest.approx(5.0)
+    assert len(sizer.calls) == 1
+    assert sizer.calls[0][0] == pytest.approx(0.80)
+    assert sizer.calls[0][1] == pytest.approx(0.51)
+    assert ANCHORING_RESEARCH_REF in intent.evidence_refs
 
 
 @pytest.mark.asyncio
-async def test_flb_source_ignores_middle_decile_markets() -> None:
-    module = _module(_market(yes_price=0.50, yes_best_ask=0.50, no_best_ask=0.50))
+async def test_anchoring_negative_divergence_buys_no_contract() -> None:
+    module = _module(
+        _market(
+            yes_price=0.75,
+            llm_posterior=0.45,
+            no_best_ask=0.26,
+        )
+    )
 
-    assert await module.run(_context()) == ()
+    intents = await module.run(_context())
+
+    assert len(intents) == 1
+    intent = intents[0]
+    assert isinstance(intent, TradeIntent)
+    assert intent.outcome == "NO"
+    assert intent.side == "BUY"
+    assert intent.token_id == "token-no"
+    assert intent.limit_price == pytest.approx(0.26)
+    assert intent.expected_price == pytest.approx(0.55)
+    assert intent.expected_edge == pytest.approx(0.29)
 
 
 @pytest.mark.asyncio
-async def test_flb_source_suppresses_zero_sized_trades() -> None:
+async def test_anchoring_source_rejects_stale_or_low_confidence_signals() -> None:
+    assert await _module(_market(news_timestamp=NOW - timedelta(hours=24))).run(_context()) == ()
+    assert await _module(_market(llm_confidence=0.50)).run(_context()) == ()
+
+
+@pytest.mark.asyncio
+async def test_anchoring_source_suppresses_zero_sized_trades() -> None:
     module = _module(_market(), sizer=_ZeroSizer())
 
     assert await module.run(_context()) == ()
 
 
 @pytest.mark.asyncio
-async def test_flb_source_skips_resolved_markets() -> None:
-    module = _module(_market(resolves_at=NOW - timedelta(minutes=1)))
-
-    assert await module.run(_context()) == ()
-
-
-@pytest.mark.asyncio
-async def test_flb_module_rejects_context_strategy_mismatch() -> None:
+async def test_anchoring_module_rejects_context_strategy_mismatch() -> None:
     module = _module(_market())
     context = StrategyContext(
         strategy_id="other",
-        strategy_version_id="h1-flb-v1",
+        strategy_version_id="h2-anchoring-lag-v1",
         as_of=NOW,
     )
 
@@ -214,11 +211,9 @@ async def test_flb_module_rejects_context_strategy_mismatch() -> None:
         await module.run(context)
 
 
-def test_strategy_import_linter_contract_includes_flb_plugin() -> None:
+def test_strategy_import_linter_contract_includes_anchoring_plugin() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    contracts: Sequence[dict[str, object]] = pyproject["tool"]["importlinter"][
-        "contracts"
-    ]
+    contracts: Sequence[dict[str, object]] = pyproject["tool"]["importlinter"]["contracts"]
     contract = next(
         candidate
         for candidate in contracts
