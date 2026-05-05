@@ -5,10 +5,11 @@ import logging
 from datetime import UTC, datetime
 from hashlib import sha256
 import json
+from math import isfinite
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar
 
 from pms.config import PMSSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
@@ -243,7 +244,7 @@ class ControllerPipeline:
                 logger.warning("composition resolution failed: %s", exc)
                 return None
         yes_probability = prob_estimate
-        yes_reference_price = signal.yes_price
+        yes_reference_price = _yes_reference_price(signal, self.strategy)
         yes_edge = yes_probability - yes_reference_price
         active_portfolio = portfolio or _default_portfolio()
         sizer = _required(self.sizer, "sizer")
@@ -468,6 +469,61 @@ def _runtime_factor_id(forecaster_name: str | None) -> str | None:
     if forecaster_name in {"rules", "llm"}:
         return forecaster_name
     return None
+
+
+def _yes_reference_price(
+    signal: MarketSignal,
+    strategy: ActiveStrategy | None,
+) -> float:
+    if _strategy_metadata(strategy).get("price_reference") != "best_ask":
+        return signal.yes_price
+    best_ask = _best_ask(signal)
+    return signal.yes_price if best_ask is None else best_ask
+
+
+def _strategy_metadata(strategy: ActiveStrategy | None) -> dict[str, str]:
+    if strategy is None:
+        return {}
+    return dict(strategy.config.metadata)
+
+
+def _best_ask(signal: MarketSignal) -> float | None:
+    raw_external_ask = signal.external_signal.get("best_ask")
+    external_ask = _open_probability_or_none(raw_external_ask)
+    if external_ask is not None:
+        return external_ask
+
+    raw_asks = signal.orderbook.get("asks")
+    if not isinstance(raw_asks, list):
+        return None
+    asks: list[float] = []
+    for raw_level in raw_asks:
+        if not isinstance(raw_level, dict):
+            continue
+        price = _open_probability_or_none(raw_level.get("price"))
+        size = _positive_float_or_none(raw_level.get("size"))
+        if price is not None and size is not None:
+            asks.append(price)
+    if not asks:
+        return None
+    return min(asks)
+
+
+def _open_probability_or_none(value: Any) -> float | None:
+    parsed = _positive_float_or_none(value)
+    if parsed is None or parsed >= 1.0:
+        return None
+    return parsed
+
+
+def _positive_float_or_none(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(parsed) or parsed <= 0.0:
+        return None
+    return parsed
 
 
 def _intent_key(
