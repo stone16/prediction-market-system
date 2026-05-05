@@ -217,6 +217,65 @@ def test_apply_composition_supports_generic_threshold_edge_steps() -> None:
     assert result == pytest.approx(0.07)
 
 
+def test_apply_composition_treats_orderbook_imbalance_as_directional_edge() -> None:
+    result = apply_composition(
+        (
+            _step(
+                "orderbook_imbalance",
+                role="threshold_edge",
+                weight=1.0,
+                threshold=0.10,
+            ),
+        ),
+        {
+            ("orderbook_imbalance", ""): 0.12,
+            ("yes_price", ""): 0.50,
+        },
+    )
+
+    assert result == pytest.approx(0.62)
+
+
+def test_apply_composition_skips_orderbook_imbalance_below_threshold() -> None:
+    result = apply_composition(
+        (
+            _step(
+                "orderbook_imbalance",
+                role="threshold_edge",
+                weight=1.0,
+                threshold=0.10,
+            ),
+        ),
+        {
+            ("orderbook_imbalance", ""): 0.05,
+            ("yes_price", ""): 0.50,
+        },
+    )
+
+    assert result == pytest.approx(0.50)
+
+
+def test_apply_composition_does_not_use_gated_orderbook_weighted_fallback() -> None:
+    result = apply_composition(
+        (
+            _step(
+                "orderbook_imbalance",
+                role="threshold_edge",
+                weight=1.0,
+                threshold=0.10,
+            ),
+            _step("orderbook_imbalance", role="weighted", weight=1.0),
+            _step("rules", role="blend_weighted", weight=0.5),
+        ),
+        {
+            ("orderbook_imbalance", ""): 0.05,
+            ("yes_price", ""): 0.50,
+        },
+    )
+
+    assert result == pytest.approx(0.50)
+
+
 def test_apply_composition_raises_when_required_rule_inputs_are_missing() -> None:
     with pytest.raises(KeyError, match="missing required factor input 'yes_price':''"):
         apply_composition(

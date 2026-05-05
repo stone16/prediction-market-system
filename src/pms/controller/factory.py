@@ -10,8 +10,10 @@ from pms.controller.factor_snapshot import (
     NullFactorSnapshotReader,
 )
 from pms.controller.forecasters.llm import LLMForecaster
+from pms.controller.forecasters.paper_canary import PaperCanaryForecaster
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
+from pms.core.enums import RunMode
 from pms.controller.outcome_tokens import (
     NullOutcomeTokenResolver,
     OutcomeTokenResolver,
@@ -43,6 +45,7 @@ class ControllerPipelineFactory:
         }
 
     def build(self, strategy: ActiveStrategy) -> ControllerPipeline:
+        _assert_strategy_mode_allowed(strategy, mode=self.settings.mode)
         return ControllerPipeline(
             strategy=strategy,
             strategy_id=strategy.strategy_id,
@@ -70,6 +73,7 @@ class ControllerPipelineFactory:
                 name=name,
                 raw_params=raw_params,
                 llm_settings=self.settings.llm,
+                mode=self.settings.mode,
             )
             for name, raw_params in strategy.forecaster.forecasters
         )
@@ -80,6 +84,7 @@ def _build_forecaster(
     name: str,
     raw_params: tuple[tuple[str, str], ...],
     llm_settings: LLMSettings,
+    mode: RunMode,
 ) -> IForecaster:
     params = dict(raw_params)
     if name == "rules":
@@ -100,6 +105,18 @@ def _build_forecaster(
             )
             raise ValueError(msg)
         return LLMForecaster(config=llm_settings)
+    if name == "paper_canary":
+        if mode != RunMode.PAPER:
+            msg = "paper_canary forecaster is PAPER-only"
+            raise ValueError(msg)
+        return PaperCanaryForecaster(
+            edge_bps=float(params.get("edge_bps", "1000")),
+            max_probability=float(params.get("max_probability", "0.97")),
+            min_price=float(params.get("min_price", "0.05")),
+            max_price=float(params.get("max_price", "0.90")),
+            sample_modulus=int(params.get("sample_modulus", "25")),
+            sample_remainder=int(params.get("sample_remainder", "0")),
+        )
     msg = f"Unsupported forecaster {name!r}"
     raise ValueError(msg)
 
@@ -117,3 +134,13 @@ def _risk_settings(
         min_order_usdc=strategy.risk.min_order_size_usdc,
         slippage_threshold_bps=fallback.slippage_threshold_bps,
     )
+
+
+def _assert_strategy_mode_allowed(strategy: ActiveStrategy, *, mode: RunMode) -> None:
+    if mode != RunMode.LIVE:
+        return
+    metadata = dict(strategy.config.metadata)
+    if metadata.get("live_allowed") != "false":
+        return
+    msg = f"{strategy.strategy_id} is PAPER-only"
+    raise ValueError(msg)

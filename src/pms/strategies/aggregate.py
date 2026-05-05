@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TypeVar
 
 from .projections import (
+    ActiveStrategy,
     EvalSpec,
     ForecasterSpec,
     MarketSelectionSpec,
@@ -87,6 +88,17 @@ class Strategy:
             self._eval_spec,
             self._forecaster,
             self._market_selection,
+        )
+
+    def to_active(self, *, strategy_version_id: str) -> ActiveStrategy:
+        return ActiveStrategy(
+            strategy_id=self.config.strategy_id,
+            strategy_version_id=strategy_version_id,
+            config=self.config,
+            risk=self.risk,
+            eval_spec=self.eval_spec,
+            forecaster=self.forecaster,
+            market_selection=self.market_selection,
         )
 
     def __eq__(self, other: object) -> bool:
