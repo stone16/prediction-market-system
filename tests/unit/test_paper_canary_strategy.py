@@ -9,13 +9,15 @@ from pms.config import PMSSettings
 from pms.controller.factory import ControllerPipelineFactory
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, Portfolio
+from pms.strategies.aggregate import Strategy
 from pms.strategies.paper_canary import PAPER_CANARY_STRATEGY_ID, build_paper_canary_strategy
+from pms.strategies.projections import ForecasterSpec
 
 
 def _signal(*, yes_price: float = 0.50, best_ask: float = 0.52) -> MarketSignal:
     return MarketSignal(
         market_id="canary-market-8",
-        token_id="canary-token-8",
+        token_id="canary-token-8",  # noqa: S106 - market token fixture, not a secret.
         venue="polymarket",
         title="Can the canary prove paper execution?",
         yes_price=yes_price,
@@ -40,10 +42,33 @@ def _portfolio() -> Portfolio:
     )
 
 
+def _unsampled_canary_strategy() -> Strategy:
+    strategy = build_paper_canary_strategy()
+    return Strategy(
+        config=strategy.config,
+        risk=strategy.risk,
+        eval_spec=strategy.eval_spec,
+        forecaster=ForecasterSpec(
+            forecasters=(
+                (
+                    "paper_canary",
+                    tuple(
+                        ("sample_modulus", "1")
+                        if key == "sample_modulus"
+                        else (key, value)
+                        for key, value in strategy.forecaster.forecasters[0][1]
+                    ),
+                ),
+            )
+        ),
+        market_selection=strategy.market_selection,
+    )
+
+
 @pytest.mark.asyncio
 async def test_paper_canary_uses_executable_best_ask_for_decision_price() -> None:
     settings = PMSSettings(mode=RunMode.PAPER)
-    strategy = build_paper_canary_strategy()
+    strategy = _unsampled_canary_strategy()
     pipeline = ControllerPipelineFactory(settings=settings).build(
         strategy.to_active(strategy_version_id="paper-canary-test-v1")
     )
@@ -63,7 +88,7 @@ async def test_paper_canary_uses_executable_best_ask_for_decision_price() -> Non
 async def test_paper_canary_decision_matches_paper_orderbook() -> None:
     settings = PMSSettings(mode=RunMode.PAPER)
     signal = _signal()
-    strategy = build_paper_canary_strategy()
+    strategy = _unsampled_canary_strategy()
     pipeline = ControllerPipelineFactory(settings=settings).build(
         strategy.to_active(strategy_version_id="paper-canary-test-v1")
     )

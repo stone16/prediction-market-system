@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from hashlib import sha256
-from math import isfinite
-from typing import Any
 
+from pms.controller._price_utils import best_ask
 from pms.core.models import MarketSignal
 
 ForecastResult = tuple[float, float, str]
@@ -45,18 +45,21 @@ class PaperCanaryForecaster:
             remainder=self.sample_remainder,
         ):
             return None
-        executable_price = _best_ask(signal)
+        executable_price = best_ask(signal)
         if executable_price is None:
             return None
         if executable_price < self.min_price or executable_price > self.max_price:
             return None
-        edge = self.edge_bps / 10_000.0
-        probability = min(executable_price + edge, self.max_probability)
-        if probability <= executable_price:
+        edge = Decimal(str(self.edge_bps)) / Decimal("10000")
+        executable_price_dec = Decimal(str(executable_price))
+        max_probability_dec = Decimal(str(self.max_probability))
+        probability_dec = min(executable_price_dec + edge, max_probability_dec)
+        if probability_dec <= executable_price_dec:
             return None
+        probability = float(probability_dec)
         return (
             probability,
-            min(edge, 1.0),
+            float(min(edge, Decimal("1"))),
             (
                 "paper_canary_v1_e2e_probe:"
                 f"best_ask={executable_price:.4f},edge_bps={self.edge_bps:.1f},"
@@ -69,28 +72,6 @@ class PaperCanaryForecaster:
         return signal.yes_price if result is None else result[0]
 
 
-def _best_ask(signal: MarketSignal) -> float | None:
-    raw_external_ask = signal.external_signal.get("best_ask")
-    external_ask = _open_probability_or_none(raw_external_ask)
-    if external_ask is not None:
-        return external_ask
-
-    raw_asks = signal.orderbook.get("asks")
-    if not isinstance(raw_asks, list):
-        return None
-    asks: list[float] = []
-    for raw_level in raw_asks:
-        if not isinstance(raw_level, dict):
-            continue
-        price = _open_probability_or_none(raw_level.get("price"))
-        size = _positive_float_or_none(raw_level.get("size"))
-        if price is not None and size is not None:
-            asks.append(price)
-    if not asks:
-        return None
-    return min(asks)
-
-
 def _matches_sample(
     signal: MarketSignal,
     *,
@@ -100,22 +81,3 @@ def _matches_sample(
     key = f"{signal.market_id}:{signal.token_id or ''}"
     bucket = int(sha256(key.encode("utf-8")).hexdigest(), 16) % modulus
     return bucket == remainder
-
-
-def _open_probability_or_none(value: Any) -> float | None:
-    parsed = _positive_float_or_none(value)
-    if parsed is None:
-        return None
-    if parsed >= 1.0:
-        return None
-    return parsed
-
-
-def _positive_float_or_none(value: Any) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not isfinite(parsed) or parsed <= 0.0:
-        return None
-    return parsed
