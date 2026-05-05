@@ -34,7 +34,7 @@ def apply_composition(
     composition: Sequence[FactorCompositionStep],
     factor_values: Mapping[tuple[str, str], float],
 ) -> float:
-    weighted_steps = tuple(step for step in composition if step.role == "weighted")
+    weighted_steps = _eligible_weighted_steps(composition, factor_values)
     non_weighted_steps = tuple(step for step in composition if step.role != "weighted")
     if weighted_steps and not non_weighted_steps:
         return _apply_weighted(weighted_steps, factor_values)
@@ -65,6 +65,28 @@ def apply_composition(
 
     msg = "composition could not resolve a probability"
     raise KeyError(msg)
+
+
+def _eligible_weighted_steps(
+    composition: Sequence[FactorCompositionStep],
+    factor_values: Mapping[tuple[str, str], float],
+) -> tuple[FactorCompositionStep, ...]:
+    threshold_gates = {
+        (step.factor_id, step.param): 0.0 if step.threshold is None else step.threshold
+        for step in composition
+        if step.role == "threshold_edge"
+    }
+    eligible_steps: list[FactorCompositionStep] = []
+    for step in composition:
+        if step.role != "weighted":
+            continue
+        threshold = threshold_gates.get((step.factor_id, step.param))
+        if threshold is not None:
+            value = factor_values.get((step.factor_id, step.param))
+            if value is None or abs(value) < threshold:
+                continue
+        eligible_steps.append(step)
+    return tuple(eligible_steps)
 
 
 def evaluate_branch_probabilities(
@@ -159,6 +181,11 @@ def _apply_threshold_precedence(
             if edge < threshold:
                 continue
             return _required_factor_value(factor_values, "subset_price", "") - edge
+        if step.factor_id == "orderbook_imbalance":
+            if abs(edge) < threshold:
+                continue
+            yes_price = _required_factor_value(factor_values, "yes_price", "")
+            return _bounded_probability(yes_price + edge)
         if abs(edge) < threshold:
             continue
         return edge
@@ -237,3 +264,7 @@ def _required_factor_value(
         msg = f"missing required factor input {factor_id!r}:{param!r}"
         raise KeyError(msg)
     return value
+
+
+def _bounded_probability(value: float) -> float:
+    return max(1e-6, min(1.0 - 1e-6, value))

@@ -20,6 +20,12 @@ def test_live_soak_config_loads_tight_first_live_risk_caps() -> None:
     assert settings.risk.slippage_threshold_bps == 50.0
 
 
+def test_live_soak_config_relaxes_paper_factor_gate_for_phase_a() -> None:
+    settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
+
+    assert settings.controller.strict_factor_gates is False
+
+
 def test_live_soak_config_keeps_credentials_env_only() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
