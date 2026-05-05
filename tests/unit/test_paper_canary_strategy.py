@@ -139,7 +139,7 @@ def test_paper_canary_forecaster_is_rejected_outside_paper_mode() -> None:
     settings = PMSSettings(mode=RunMode.LIVE)
     strategy = build_paper_canary_strategy()
 
-    with pytest.raises(ValueError, match="paper_canary forecaster is PAPER-only"):
+    with pytest.raises(ValueError, match="paper_canary_v1 is PAPER-only"):
         ControllerPipelineFactory(settings=settings).build(
             strategy.to_active(strategy_version_id="paper-canary-test-v1")
         )

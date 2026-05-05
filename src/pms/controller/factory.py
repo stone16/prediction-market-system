@@ -45,6 +45,7 @@ class ControllerPipelineFactory:
         }
 
     def build(self, strategy: ActiveStrategy) -> ControllerPipeline:
+        _assert_strategy_mode_allowed(strategy, mode=self.settings.mode)
         return ControllerPipeline(
             strategy=strategy,
             strategy_id=strategy.strategy_id,
@@ -133,3 +134,13 @@ def _risk_settings(
         min_order_usdc=strategy.risk.min_order_size_usdc,
         slippage_threshold_bps=fallback.slippage_threshold_bps,
     )
+
+
+def _assert_strategy_mode_allowed(strategy: ActiveStrategy, *, mode: RunMode) -> None:
+    if mode != RunMode.LIVE:
+        return
+    metadata = dict(strategy.config.metadata)
+    if metadata.get("live_allowed") != "false":
+        return
+    msg = f"{strategy.strategy_id} is PAPER-only"
+    raise ValueError(msg)

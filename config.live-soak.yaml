@@ -25,7 +25,7 @@ controller:
   max_book_age_ms: 1000.0
   allowed_book_clock_skew_ms: 250.0
   max_spread_bps: 100.0
-  strict_factor_gates: true
+  strict_factor_gates: false
   quote_source: postgres_snapshot
   direct_quote_min_notional_usdc: 100.0
   dual_quote_max_price_delta_bps: 25.0
