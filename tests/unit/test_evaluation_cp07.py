@@ -13,7 +13,6 @@ from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
 from pms.evaluation.metrics import (
     MetricsCollector,
-    MetricsSnapshot,
     StrategyMetricsSnapshot,
 )
 from pms.evaluation.spool import EvalSpool

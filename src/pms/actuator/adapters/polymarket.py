@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Final, Literal, Protocol, cast
+from typing import Callable, Final, Literal, Protocol, cast
 from uuid import uuid4
 
 from pms.config import PMSSettings, validate_live_mode_ready

@@ -10,7 +10,6 @@ from typing import Any, cast
 import pytest
 
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
-from pms.controller.pipeline import ControllerPipeline
 from pms.core.enums import MarketStatus, RunMode
 from pms.core.models import MarketSignal
 from pms.runner import Runner

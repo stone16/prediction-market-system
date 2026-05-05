@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from pms.actuator.risk import InsufficientLiquidityError
 from pms.core.enums import OrderStatus, Side, Venue
-from pms.core.exceptions import KalshiStubError
+from pms.core.exceptions import KalshiStubError  # noqa: F401
 from pms.core.models import OrderState, Portfolio, TradeDecision
 from pms.core.venue_support import kalshi_stub_error
 

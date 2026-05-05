@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from pms.core.enums import Venue
-from pms.core.exceptions import KalshiStubError
+from pms.core.exceptions import KalshiStubError  # noqa: F401
 from pms.core.models import MarketSignal, Venue as VenueValue
 from pms.core.venue_support import kalshi_stub_error, normalize_venue
 

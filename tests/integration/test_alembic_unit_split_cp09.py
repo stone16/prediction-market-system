@@ -90,7 +90,7 @@ def _run_pg_dump(database_url: str) -> str:
         shutil.which(f"pg_dump-{major_version}"),
         f"/opt/homebrew/opt/postgresql@{major_version}/bin/pg_dump",
         f"/usr/local/opt/postgresql@{major_version}/bin/pg_dump",
-        f"/opt/homebrew/opt/libpq/bin/pg_dump",
+        "/opt/homebrew/opt/libpq/bin/pg_dump",
     ]
     pg_dump_binary = next(
         (path for path in candidate_paths if path and Path(path).exists()),

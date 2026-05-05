@@ -296,6 +296,7 @@ async def test_market_data_sensor_bounds_websocket_close_timeout(
 
     assert signal.market_id == "m-close-timeout"
     assert captured_kwargs["close_timeout"] == 1.0
+    assert captured_kwargs["proxy"] is None
 
 
 @pytest.mark.asyncio
