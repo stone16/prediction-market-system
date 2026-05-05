@@ -398,12 +398,18 @@ class MarketDataSensor:
             await websocket.send(json.dumps(_subscription_payload(self._asset_ids)))
 
     def _connect(self) -> Any:
-        try:
-            return connect(self.ws_url, close_timeout=self._CLOSE_TIMEOUT_S)
-        except TypeError as exc:
-            if "close_timeout" not in str(exc):
-                raise
-            return connect(self.ws_url)
+        connect_kwargs: tuple[dict[str, Any], ...] = (
+            {"close_timeout": self._CLOSE_TIMEOUT_S, "proxy": None},
+            {"close_timeout": self._CLOSE_TIMEOUT_S},
+            {},
+        )
+        for kwargs in connect_kwargs:
+            try:
+                return connect(self.ws_url, **kwargs)
+            except TypeError as exc:
+                if not _is_unsupported_connect_kwarg_error(exc):
+                    raise
+        return connect(self.ws_url)
 
     async def _send_subscription_update(
         self,
@@ -517,6 +523,15 @@ def _subscription_payload(asset_ids: list[str]) -> dict[str, Any]:
         "initial_dump": True,
         "level": 2,
     }
+
+
+def _is_unsupported_connect_kwarg_error(exc: TypeError) -> bool:
+    message = str(exc)
+    return (
+        "unexpected keyword argument" in message
+        or "got an unexpected keyword" in message
+        or "takes no keyword arguments" in message
+    )
 
 
 def _subscription_update_payload(

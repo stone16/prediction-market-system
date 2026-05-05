@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 import json
 import os
-from typing import Any, cast
+from typing import cast
 from uuid import UUID
 
 import asyncpg

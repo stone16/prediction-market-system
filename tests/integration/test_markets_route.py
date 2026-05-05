@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import cast
 
 import asyncpg
 import httpx

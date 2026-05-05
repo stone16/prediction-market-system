@@ -5,7 +5,7 @@ import logging
 from typing import Protocol
 
 from pms.core.enums import Venue
-from pms.core.exceptions import KalshiStubError
+from pms.core.exceptions import KalshiStubError  # noqa: F401
 from pms.core.interfaces import MarketDataStore, StrategySelectionRegistry
 from pms.core.models import Market, Token
 from pms.core.venue_support import kalshi_stub_error, normalize_venue

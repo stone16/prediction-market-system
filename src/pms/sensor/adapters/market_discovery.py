@@ -13,7 +13,7 @@ import asyncpg
 import httpx
 
 from pms.core.enums import Venue
-from pms.core.exceptions import KalshiStubError
+from pms.core.exceptions import KalshiStubError  # noqa: F401
 from pms.core.models import Market, MarketSignal, Outcome, Token
 from pms.core.models import Venue as VenueValue
 from pms.core.venue_support import kalshi_stub_error, normalize_venue

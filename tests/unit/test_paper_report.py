@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 from pms.config import RiskSettings
-from scripts.paper_report import PaperReportMetrics, render_report
+from scripts.paper_report import PaperReportMetrics, metrics_from_api_payloads, render_report
 
 
 def test_paper_report_renders_empty_day_without_crashing() -> None:
@@ -50,3 +50,58 @@ def test_paper_report_contains_all_gate_three_metrics() -> None:
     assert "| Hit rate (all trades) | 50.0% | > 45% |" in report
     assert "| Average edge (bps) | 35.0 | > 5 |" in report
     assert "| Sharpe ratio (cumulative) | 0.70 | > 0 |" in report
+
+
+def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T09:03:03.240858+00:00",
+            "controller": {
+                "decisions_total": 17,
+                "diagnostics_total": 3,
+            },
+            "actuator": {
+                "fills_total": 4,
+            },
+            "evaluator": {
+                "brier_overall": 0.18,
+            },
+        },
+        trades={
+            "trades": [
+                {"fill_notional_usdc": 2.5},
+                {"fill_notional_usdc": 1.5},
+            ],
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 3.0, "unrealized_pnl": 1.25},
+                {"locked_usdc": 2.0, "unrealized_pnl": -0.25},
+            ],
+        },
+    )
+
+    assert metrics.day_of_soak == 2
+    assert metrics.decisions_made == 17
+    assert metrics.decisions_rejected == 3
+    assert metrics.fills == 4
+    assert metrics.open_positions == 2
+    assert metrics.total_exposure == 5.0
+    assert metrics.cumulative_pnl == 1.0
+    assert metrics.brier_score_7d == 0.18
+
+
+def test_metrics_from_api_payloads_records_missing_status_as_risk_event() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={},
+        trades={},
+        positions={},
+    )
+
+    assert metrics.day_of_soak == 0
+    assert metrics.risk_events == (
+        ("report generation", "runner_started_at missing", "check /status"),
+    )

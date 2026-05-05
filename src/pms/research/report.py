@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
-from typing import Any, cast
+from typing import cast
 from uuid import uuid4
 
 import asyncpg

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from typing import Any, cast
