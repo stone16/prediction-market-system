@@ -441,4 +441,10 @@ def _string_list(value: object) -> list[str]:
 def _optional_int(value: object) -> int | None:
     if value is None:
         return None
-    return int(cast(int | float | str, value))
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric = float(cast(int | float | str, value))
+    except (TypeError, ValueError):
+        return None
+    return int(round(numeric))

@@ -8,6 +8,7 @@ import asyncpg
 import pytest
 
 from pms.config import ControllerSettings, PMSSettings
+from pms.controller.outcome_tokens import OutcomeTokens
 from pms.controller.pipeline import ControllerPipeline
 from pms.core.enums import OrderStatus, Side, TimeInForce
 from pms.core.interfaces import IForecaster
@@ -27,6 +28,17 @@ class ConstantForecaster:
     async def forecast(self, signal: MarketSignal) -> float:
         del signal
         return self.probability
+
+
+class StaticOutcomeTokenResolver:
+    async def resolve(
+        self,
+        *,
+        market_id: str,
+        signal_token_id: str | None,
+    ) -> OutcomeTokens:
+        del market_id
+        return OutcomeTokens(yes_token_id=signal_token_id, no_token_id="token-meta-no")
 
 
 class _RecordingConnection:
@@ -186,6 +198,22 @@ async def test_controller_computes_spread_bps_from_orderbook_when_missing() -> N
     assert decision.spread_bps_at_decision == 500
 
 
+@pytest.mark.asyncio
+async def test_controller_captures_buy_no_spread_for_traded_token() -> None:
+    pipeline = ControllerPipeline(
+        forecasters=(cast(IForecaster, ConstantForecaster(0.3)),),
+        outcome_token_resolver=StaticOutcomeTokenResolver(),
+        settings=PMSSettings(),
+    )
+
+    decision = await pipeline.decide(_signal(), portfolio=_portfolio())
+
+    assert decision is not None
+    assert decision.outcome == "NO"
+    assert decision.token_id == "token-meta-no"
+    assert decision.spread_bps_at_decision == 333
+
+
 def test_scorer_copies_decision_edge_and_spread_to_eval_record() -> None:
     record = Scorer().score(_fill(), _decision(spread_bps_at_decision=321))
 
@@ -206,7 +234,11 @@ async def test_decision_store_round_trips_spread_bps_in_payload() -> None:
         expires_at=created_at + timedelta(minutes=15),
     )
 
-    payload_args = connection.execute_calls[2][1]
+    payload_args = next(
+        args
+        for query, args, _ in connection.execute_calls
+        if "INSERT INTO decision_payloads" in query
+    )
     payload = json.loads(cast(str, payload_args[1]))
     assert payload["spread_bps_at_decision"] == 456
 
@@ -253,3 +285,72 @@ async def test_decision_store_round_trips_spread_bps_in_payload() -> None:
     rows = await store.read_decisions(limit=1)
 
     assert rows[0].decision.spread_bps_at_decision == 789
+
+
+@pytest.mark.asyncio
+async def test_decision_store_tolerates_float_string_and_malformed_spread_payload() -> None:
+    connection = _RecordingConnection()
+    store = DecisionStore(cast(asyncpg.Pool, _Pool(connection)))
+    created_at = datetime(2026, 5, 6, tzinfo=UTC)
+
+    base_payload = {
+        "decision_id": "decision-meta-capture",
+        "market_id": "market-meta-capture",
+        "token_id": "token-meta-yes",
+        "venue": "polymarket",
+        "side": "BUY",
+        "notional_usdc": 25.0,
+        "order_type": "limit",
+        "max_slippage_bps": 50,
+        "stop_conditions": ["unit"],
+        "prob_estimate": 0.7,
+        "expected_edge": 0.3,
+        "time_in_force": "GTC",
+        "opportunity_id": "opportunity-meta-capture",
+        "strategy_id": "default",
+        "strategy_version_id": "default-v1",
+        "limit_price": 0.4,
+        "action": "BUY",
+        "outcome": "YES",
+        "model_id": "unit",
+        "intent_key": None,
+    }
+    connection.fetch_rows = [
+        {
+            "decision_id": "decision-meta-capture",
+            "opportunity_id": "opportunity-meta-capture",
+            "strategy_id": "default",
+            "strategy_version_id": "default-v1",
+            "status": "pending",
+            "factor_snapshot_hash": "snapshot",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "expires_at": created_at + timedelta(minutes=15),
+            "payload": json.dumps({**base_payload, "spread_bps_at_decision": "120.0"}),
+            "opportunity_row_id": None,
+        },
+        {
+            "decision_id": "decision-meta-capture-bad",
+            "opportunity_id": "opportunity-meta-capture",
+            "strategy_id": "default",
+            "strategy_version_id": "default-v1",
+            "status": "pending",
+            "factor_snapshot_hash": "snapshot",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "expires_at": created_at + timedelta(minutes=15),
+            "payload": json.dumps(
+                {
+                    **base_payload,
+                    "decision_id": "decision-meta-capture-bad",
+                    "spread_bps_at_decision": "bad-data",
+                }
+            ),
+            "opportunity_row_id": None,
+        },
+    ]
+
+    rows = await store.read_decisions(limit=2)
+
+    assert rows[0].decision.spread_bps_at_decision == 120
+    assert rows[1].decision.spread_bps_at_decision is None

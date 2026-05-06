@@ -17,10 +17,11 @@ from pms.storage.strategy_registry import PostgresStrategyRegistry
 class _RecordingConnection:
     execute_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
     fetchrow_rows: list[dict[str, object] | None] = field(default_factory=list)
+    execute_status: str = "UPDATE 1"
 
     async def execute(self, query: str, *args: object) -> str:
         self.execute_calls.append((query, args))
-        return "OK"
+        return self.execute_status
 
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         del query, args
@@ -67,6 +68,19 @@ async def test_strategy_registry_set_version_metadata_targets_one_version_row() 
         "validation_regime": "low_vol_bull",
         "regime_source": "price_changes",
     }
+
+
+@pytest.mark.asyncio
+async def test_strategy_registry_set_version_metadata_raises_when_no_row_matches() -> None:
+    connection = _RecordingConnection(execute_status="UPDATE 0")
+    registry = PostgresStrategyRegistry(cast(asyncpg.Pool, _Pool(connection)))
+
+    with pytest.raises(LookupError, match="No strategy_versions row matched"):
+        await registry.set_version_metadata(
+            "meta-strategy",
+            "missing-v1",
+            {"validation_regime": "low_vol_bull"},
+        )
 
 
 @pytest.mark.asyncio

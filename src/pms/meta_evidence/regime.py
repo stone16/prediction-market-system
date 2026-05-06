@@ -18,7 +18,7 @@ def classify_regime(
     if len(resolved_records) >= min_resolved_samples:
         pnl_values = [record.pnl for record in resolved_records]
         volatility = _sample_stddev(pnl_values)
-        drift = pnl_values[-1] - pnl_values[0] if len(pnl_values) >= 2 else 0.0
+        drift = sum(pnl_values)
         return RegimeClassification(
             validation_regime=_classify(
                 volatility=volatility,
@@ -40,7 +40,7 @@ def classify_regime(
             if prices[index - 1] > 0.0
         ]
         volatility = _sample_stddev(returns)
-        drift = prices[-1] - prices[0]
+        drift = sum(returns)
         return RegimeClassification(
             validation_regime=_classify(
                 volatility=volatility,

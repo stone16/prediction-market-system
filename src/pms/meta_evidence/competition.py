@@ -20,10 +20,15 @@ def compute_competition_snapshot(
         if (snapshot_date.toordinal() - record.recorded_at.date().toordinal()) < 30
         and record.recorded_at.date() <= snapshot_date
     ]
-    edge_values = [record.edge_at_decision for record in window_records]
+    edge_window_records = [
+        record
+        for record in window_records
+        if _has_captured_edge(record)
+    ]
+    edge_values = [record.edge_at_decision for record in edge_window_records]
     spread_values = [
         float(record.spread_bps_at_decision)
-        for record in window_records
+        for record in edge_window_records
         if record.spread_bps_at_decision is not None
     ]
     collected_days = _days_collected(records, snapshot_date=snapshot_date)
@@ -32,7 +37,8 @@ def compute_competition_snapshot(
         [
             (record.recorded_at.date(), record.edge_at_decision)
             for record in records
-            if (snapshot_date.toordinal() - record.recorded_at.date().toordinal()) < 90
+            if _has_captured_edge(record)
+            and (snapshot_date.toordinal() - record.recorded_at.date().toordinal()) < 90
             and record.recorded_at.date() <= snapshot_date
         ]
     ) if collected_days >= 90 else None
@@ -63,7 +69,7 @@ def compute_competition_snapshot(
         mean_spread_bps_30d=_mean(spread_values),
         edge_trend_slope_90d=edge_slope_90d,
         spread_trend_slope_90d=spread_slope_90d,
-        sample_count_30d=len(window_records),
+        sample_count_30d=len(edge_window_records),
         trend_status=trend_status,
         days_collected=collected_days,
         short_term_slope_30d=None,
@@ -93,6 +99,13 @@ def _mean(values: list[float]) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def _has_captured_edge(record: EvalRecord) -> bool:
+    # The 0015 migration backfills legacy eval rows with 0.0 because the column
+    # is NOT NULL. Controller decisions only emit positive edge decisions, so a
+    # zero value is the legacy/missing sentinel for this metric.
+    return record.edge_at_decision != 0.0
 
 
 def _days_collected(records: list[EvalRecord], *, snapshot_date: date) -> int:

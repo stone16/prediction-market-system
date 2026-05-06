@@ -45,11 +45,14 @@ def compute_decay_status(
     if existing_peak is None or existing_peak.peak_sharpe_7d <= 0.0:
         status: DecayStatusValue = "insufficient_peak_data"
         ratio = None
+    elif sharpe_7d is None:
+        status = "insufficient_resolved_outcomes"
+        ratio = None
     else:
-        ratio = None if sharpe_7d is None else sharpe_7d / existing_peak.peak_sharpe_7d
-        if sharpe_7d is not None and sharpe_7d < 0.0:
+        ratio = sharpe_7d / existing_peak.peak_sharpe_7d
+        if sharpe_7d < 0.0:
             status = "negative"
-        elif ratio is not None and ratio < 0.5:
+        elif ratio < 0.5:
             status = "degraded"
         else:
             status = "healthy"

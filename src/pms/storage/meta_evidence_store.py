@@ -62,7 +62,7 @@ class MetaEvidenceStore:
             )
         if row is None:
             return None
-        return _performance_peak_from_row(row)
+        return performance_peak_from_row(row)
 
     async def upsert_competition_snapshot(
         self,
@@ -154,10 +154,10 @@ class MetaEvidenceStore:
             )
         if row is None:
             return None
-        return _competition_snapshot_from_row(row)
+        return competition_snapshot_from_row(row)
 
 
-def _performance_peak_from_row(row: asyncpg.Record) -> PerformancePeak:
+def performance_peak_from_row(row: asyncpg.Record) -> PerformancePeak:
     return PerformancePeak(
         strategy_id=cast(str, row["strategy_id"]),
         strategy_version_id=cast(str, row["strategy_version_id"]),
@@ -168,7 +168,7 @@ def _performance_peak_from_row(row: asyncpg.Record) -> PerformancePeak:
     )
 
 
-def _competition_snapshot_from_row(row: asyncpg.Record) -> CompetitionSnapshot:
+def competition_snapshot_from_row(row: asyncpg.Record) -> CompetitionSnapshot:
     return CompetitionSnapshot(
         snapshot_id=cast(str, row["snapshot_id"]),
         strategy_id=cast(str, row["strategy_id"]),

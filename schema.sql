@@ -763,6 +763,9 @@ CREATE INDEX IF NOT EXISTS idx_feedback_strategy_identity
 CREATE INDEX IF NOT EXISTS idx_eval_records_strategy_identity
     ON eval_records(strategy_id, strategy_version_id);
 
+CREATE INDEX IF NOT EXISTS idx_eval_records_strategy_identity_recorded_at
+    ON eval_records(strategy_id, strategy_version_id, recorded_at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_orders_strategy_identity
     ON orders(strategy_id, strategy_version_id);
 

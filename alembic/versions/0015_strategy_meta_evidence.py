@@ -29,6 +29,12 @@ def upgrade() -> None:
     )
     connection.exec_driver_sql(
         """
+        CREATE INDEX IF NOT EXISTS idx_eval_records_strategy_identity_recorded_at
+            ON eval_records(strategy_id, strategy_version_id, recorded_at DESC)
+        """
+    )
+    connection.exec_driver_sql(
+        """
         CREATE TABLE IF NOT EXISTS strategy_performance_peaks (
             strategy_id TEXT NOT NULL,
             strategy_version_id TEXT NOT NULL,
@@ -68,6 +74,9 @@ def downgrade() -> None:
     connection: Connection = op.get_bind()
     connection.exec_driver_sql("DROP TABLE IF EXISTS alpha_competition_snapshots")
     connection.exec_driver_sql("DROP TABLE IF EXISTS strategy_performance_peaks")
+    connection.exec_driver_sql(
+        "DROP INDEX IF EXISTS idx_eval_records_strategy_identity_recorded_at"
+    )
     connection.exec_driver_sql(
         """
         ALTER TABLE eval_records

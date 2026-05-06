@@ -161,12 +161,19 @@ class PostgresStrategyRegistry:
         WHERE strategy_id = $1 AND strategy_version_id = $2
         """
         async with self._pool.acquire() as connection:
-            await connection.execute(
+            status = await connection.execute(
                 query,
                 strategy_id,
                 strategy_version_id,
                 metadata_json,
             )
+        updated = _command_tag_row_count(status)
+        if updated != 1:
+            msg = (
+                "No strategy_versions row matched "
+                f"strategy_id={strategy_id!r}, strategy_version_id={strategy_version_id!r}"
+            )
+            raise LookupError(msg)
 
     async def get_by_id(self, strategy_id: str) -> Strategy | None:
         query = """
@@ -571,6 +578,13 @@ def _json_string(value: object, field_name: str) -> str:
         msg = f"{field_name} must decode to a string"
         raise TypeError(msg)
     return value
+
+
+def _command_tag_row_count(status: str) -> int | None:
+    try:
+        return int(status.rsplit(" ", 1)[-1])
+    except (IndexError, ValueError):
+        return None
 
 
 def _json_required_field(

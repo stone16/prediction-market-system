@@ -46,7 +46,8 @@ class _Connection:
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
         assert "FROM eval_records" in query
-        del args
+        assert "recorded_at >= $3" in query
+        assert len(args) == 3
         return [
             {
                 "market_id": "market-meta",

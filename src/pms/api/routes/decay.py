@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime, timedelta
 import json
 from typing import Any, cast
 
@@ -8,7 +8,14 @@ import asyncpg
 
 from pms.core.models import EvalRecord
 from pms.meta_evidence.decay import compute_decay_status
-from pms.meta_evidence.models import CompetitionSnapshot, PerformancePeak, TrendStatus
+from pms.meta_evidence.models import CompetitionSnapshot
+from pms.storage.meta_evidence_store import (
+    competition_snapshot_from_row,
+    performance_peak_from_row,
+)
+
+
+DECAY_RECORD_LOOKBACK_DAYS = 40
 
 
 async def get_strategy_decay_status(
@@ -18,6 +25,8 @@ async def get_strategy_decay_status(
     strategy_version_id: str | None = None,
     min_resolved_samples: int = 10,
 ) -> dict[str, Any]:
+    now = datetime.now(tz=UTC)
+    cutoff_ts = now - timedelta(days=DECAY_RECORD_LOOKBACK_DAYS)
     async with pg_pool.acquire() as connection:
         active_version_id = strategy_version_id
         if active_version_id is None:
@@ -96,24 +105,27 @@ async def get_strategy_decay_status(
                 edge_at_decision,
                 spread_bps_at_decision
             FROM eval_records
-            WHERE strategy_id = $1 AND strategy_version_id = $2
+            WHERE strategy_id = $1
+              AND strategy_version_id = $2
+              AND recorded_at >= $3
             ORDER BY recorded_at ASC, decision_id ASC
             """,
             strategy_id,
             active_version_id,
+            cutoff_ts,
         )
 
     records = [_eval_record_from_row(row) for row in rows]
-    peak = None if peak_row is None else _performance_peak_from_row(peak_row)
+    peak = None if peak_row is None else performance_peak_from_row(peak_row)
     status = compute_decay_status(
         records,
         strategy_id=strategy_id,
         strategy_version_id=active_version_id,
-        now=datetime.now(tz=UTC),
+        now=now,
         min_resolved_samples=min_resolved_samples,
         existing_peak=peak,
     )
-    snapshot = None if snapshot_row is None else _competition_snapshot_from_row(snapshot_row)
+    snapshot = None if snapshot_row is None else competition_snapshot_from_row(snapshot_row)
     return {
         "strategy_id": status.strategy_id,
         "strategy_version_id": status.strategy_version_id,
@@ -162,37 +174,6 @@ def _citations(value: object) -> list[str]:
         if isinstance(loaded, list):
             return [str(item) for item in loaded]
     return []
-
-
-def _performance_peak_from_row(row: asyncpg.Record) -> PerformancePeak:
-    return PerformancePeak(
-        strategy_id=cast(str, row["strategy_id"]),
-        strategy_version_id=cast(str, row["strategy_version_id"]),
-        peak_sharpe_7d=float(cast(float, row["peak_sharpe_7d"])),
-        peak_sharpe_30d=float(cast(float, row["peak_sharpe_30d"])),
-        peak_hit_rate=float(cast(float, row["peak_hit_rate"])),
-        recorded_at=cast(datetime, row["recorded_at"]),
-    )
-
-
-def _competition_snapshot_from_row(row: asyncpg.Record) -> CompetitionSnapshot:
-    return CompetitionSnapshot(
-        snapshot_id=cast(str, row["snapshot_id"]),
-        strategy_id=cast(str, row["strategy_id"]),
-        strategy_version_id=cast(str, row["strategy_version_id"]),
-        snapshot_date=cast(date, row["snapshot_date"]),
-        mean_edge_30d=cast(float | None, row["mean_edge_30d"]),
-        mean_spread_bps_30d=cast(float | None, row["mean_spread_bps_30d"]),
-        edge_trend_slope_90d=cast(float | None, row["edge_trend_slope_90d"]),
-        spread_trend_slope_90d=cast(float | None, row["spread_trend_slope_90d"]),
-        sample_count_30d=cast(int, row["sample_count_30d"]),
-        trend_status=cast(TrendStatus, row["trend_status"]),
-        days_collected=cast(int, row["days_collected"]),
-        short_term_slope_30d=cast(float | None, row["short_term_slope_30d"]),
-        short_term_slope_60d=cast(float | None, row["short_term_slope_60d"]),
-        interpretation=cast(str, row["interpretation"]),
-        created_at=cast(datetime, row["created_at"]),
-    )
 
 
 def _competition_payload(snapshot: CompetitionSnapshot) -> dict[str, Any]:

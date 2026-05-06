@@ -251,6 +251,7 @@ class ControllerPipeline:
         now = datetime.now(tz=UTC)
         opportunity_side: Literal["yes", "no"] = "yes"
         decision_token_id = signal.token_id
+        decision_yes_token_id: str | None = signal.token_id
         decision_outcome: Literal["YES", "NO"] = "YES"
         decision_probability = yes_probability
         decision_price = yes_reference_price
@@ -284,6 +285,7 @@ class ControllerPipeline:
                     extra={"controller_diagnostic": self.last_diagnostic},
                 )
                 return None
+            decision_yes_token_id = outcome_tokens.yes_token_id
             decision_token_id = outcome_tokens.no_token_id
             decision_outcome = "NO"
             opportunity_side = "no"
@@ -365,7 +367,12 @@ class ControllerPipeline:
             outcome=decision_outcome,
             model_id=_decision_model_id(model_ids),
             intent_key=intent_key,
-            spread_bps_at_decision=spread_bps_at_decision(signal),
+            spread_bps_at_decision=spread_bps_at_decision(
+                signal,
+                token_id=decision_token_id,
+                outcome=decision_outcome,
+                yes_token_id=decision_yes_token_id,
+            ),
         )
 
     async def decide(

@@ -43,6 +43,7 @@ def test_schema_sql_declares_strategy_meta_evidence_surfaces() -> None:
     assert "CREATE TABLE IF NOT EXISTS strategy_performance_peaks" in schema_sql
     assert "CREATE TABLE IF NOT EXISTS alpha_competition_snapshots" in schema_sql
     assert "UNIQUE (strategy_id, strategy_version_id, snapshot_date)" in schema_sql
+    assert "idx_eval_records_strategy_identity_recorded_at" in schema_sql
 
 
 def test_family_f_evalrecord_schema_fixture_declares_persisted_columns() -> None:
@@ -88,6 +89,7 @@ def test_strategy_meta_evidence_migration_creates_columns_and_tables(
     assert "ALTER TABLE eval_records" in statements
     assert "ADD COLUMN IF NOT EXISTS edge_at_decision DOUBLE PRECISION NOT NULL DEFAULT 0.0" in statements
     assert "ADD COLUMN IF NOT EXISTS spread_bps_at_decision INTEGER" in statements
+    assert "idx_eval_records_strategy_identity_recorded_at" in statements
     assert "CREATE TABLE IF NOT EXISTS strategy_performance_peaks" in statements
     assert "CREATE TABLE IF NOT EXISTS alpha_competition_snapshots" in statements
 
@@ -104,6 +106,7 @@ def test_strategy_meta_evidence_migration_downgrade_drops_surfaces(
     statements = "\n".join(fake_connection.statements)
     assert "DROP TABLE IF EXISTS alpha_competition_snapshots" in statements
     assert "DROP TABLE IF EXISTS strategy_performance_peaks" in statements
+    assert "DROP INDEX IF EXISTS idx_eval_records_strategy_identity_recorded_at" in statements
     assert "DROP COLUMN IF EXISTS spread_bps_at_decision" in statements
     assert "DROP COLUMN IF EXISTS edge_at_decision" in statements
     assert "DROP COLUMN IF EXISTS metadata_json" in statements
