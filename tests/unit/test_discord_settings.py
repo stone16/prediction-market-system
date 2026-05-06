@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 from pms.config import DiscordSettings, PMSSettings
 

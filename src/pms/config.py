@@ -87,7 +87,6 @@ class DiscordSettings(BaseModel):
                     {
                         "type": "value_error",
                         "loc": ("webhook_url",),
-                        "msg": "webhook_url is required",
                         "input": None,
                         "ctx": {"error": ValueError("webhook_url is required")},
                     }
