@@ -71,6 +71,31 @@ async def test_alert_subscriber_converts_halt_event_to_discord_message() -> None
 
 
 @pytest.mark.asyncio
+async def test_alert_subscriber_replays_buffered_halt_events() -> None:
+    bus = RuntimeEventBus()
+    client = RecordingDiscordClient()
+    stop = asyncio.Event()
+    await bus.publish(
+        "pms.halt.drawdown_circuit_breaker",
+        "Auto-halt drawdown_circuit_breaker: buffered halt",
+        created_at=datetime(2026, 5, 6, 8, 0, tzinfo=UTC),
+    )
+
+    task = asyncio.create_task(run_alerting_subscription(bus, client, stop_event=stop))
+    try:
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while not client.messages:
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError("subscriber did not replay buffered halt")
+            await asyncio.sleep(0.01)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert "buffered halt" in client.messages[0]
+
+
+@pytest.mark.asyncio
 async def test_alert_subscriber_survives_single_delivery_failure() -> None:
     bus = RuntimeEventBus()
     client = FailsFirstDiscordClient()

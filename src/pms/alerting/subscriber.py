@@ -27,7 +27,7 @@ async def run_alerting_subscription(
     *,
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    replay, queue = await event_bus.subscribe()
+    replay, queue = await event_bus.subscribe(last_event_id=0)
     stop = stop_event or asyncio.Event()
     try:
         for event in replay:
