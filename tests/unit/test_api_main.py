@@ -59,6 +59,28 @@ def test_main_refuses_non_loopback_bind_without_api_token(
     assert "PMS_API_HOST" in captured.err
 
 
+def test_main_auto_start_requires_discord_webhook(
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    def fake_run(app: str, **kwargs: Any) -> None:
+        calls["app"] = app
+        calls.update(kwargs)
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+    monkeypatch.setenv("PMS_AUTO_START", "1")
+    monkeypatch.delenv("PMS_DISCORD__WEBHOOK_URL", raising=False)
+
+    exit_code = api_main.main([])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert calls == {}
+    assert "PMS_DISCORD__WEBHOOK_URL" in captured.err
+
+
 def test_main_uses_settings_host_even_when_host_flag_is_passed(
     monkeypatch: Any,
 ) -> None:
