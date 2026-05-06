@@ -11,9 +11,15 @@ from pms.core.enums import OrderStatus
 
 
 class _Connection:
+    def __init__(self, *, version_exists: bool = True) -> None:
+        self.version_exists = version_exists
+
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         if "SELECT active_version_id" in query:
             return {"active_version_id": "meta-v1"}
+        if "FROM strategy_versions" in query:
+            assert args == ("meta-strategy", "meta-v1")
+            return {"exists": 1} if self.version_exists else None
         if "FROM strategy_performance_peaks" in query:
             return {
                 "strategy_id": "meta-strategy",
@@ -77,16 +83,22 @@ class _Connection:
 
 
 class _Acquire:
+    def __init__(self, connection: _Connection | None = None) -> None:
+        self.connection = connection or _Connection()
+
     async def __aenter__(self) -> _Connection:
-        return _Connection()
+        return self.connection
 
     async def __aexit__(self, *_: object) -> None:
         return None
 
 
 class _Pool:
+    def __init__(self, connection: _Connection | None = None) -> None:
+        self.connection = connection or _Connection()
+
     def acquire(self) -> _Acquire:
-        return _Acquire()
+        return _Acquire(self.connection)
 
 
 @pytest.mark.asyncio
@@ -111,3 +123,15 @@ async def test_decay_status_route_payload_includes_decay_and_competition_metrics
         "sample_count_30d": 12,
         "last_snapshot_date": "2026-05-06",
     }
+
+
+@pytest.mark.asyncio
+async def test_decay_status_route_rejects_unknown_explicit_strategy_version() -> None:
+    pool = _Pool(_Connection(version_exists=False))
+
+    with pytest.raises(LookupError, match="strategy version not found"):
+        await get_strategy_decay_status(
+            cast(asyncpg.Pool, pool),
+            strategy_id="meta-strategy",
+            strategy_version_id="meta-v1",
+        )

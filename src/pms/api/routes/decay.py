@@ -43,6 +43,22 @@ async def get_strategy_decay_status(
                 raise LookupError(msg)
             active_version_id = cast(str, row["active_version_id"])
 
+        version_row = await connection.fetchrow(
+            """
+            SELECT 1
+            FROM strategy_versions
+            WHERE strategy_id = $1 AND strategy_version_id = $2
+            """,
+            strategy_id,
+            active_version_id,
+        )
+        if version_row is None:
+            msg = (
+                "strategy version not found for "
+                f"strategy_id={strategy_id!r}, strategy_version_id={active_version_id!r}"
+            )
+            raise LookupError(msg)
+
         peak_row = await connection.fetchrow(
             """
             SELECT
