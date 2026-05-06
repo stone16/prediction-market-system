@@ -20,6 +20,7 @@ Inject secrets through Fly, never through config files or chat:
 
 ```bash
 fly secrets set \
+  PMS_API_TOKEN='...' \
   PMS_DISCORD__WEBHOOK_URL='https://discord.com/api/webhooks/...' \
   PMS_POLYMARKET__PRIVATE_KEY='...' \
   PMS_POLYMARKET__API_KEY='...' \

@@ -86,11 +86,12 @@ async def run_eod_report_once(
         if not report_path.exists():
             raise FileNotFoundError(str(report_path))
         content = report_path.read_text(encoding="utf-8")
-        for index, chunk in enumerate(_paginate(content), start=1):
-            total = len(_paginate(content))
+        chunks = _paginate_report(content, report_date)
+        total = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
+            header = _report_header(report_date, index=index, total=total)
             await client.send(
-                f"PMS Daily Report - {report_date} 22:00 CST ({index}/{total})\n\n"
-                f"{chunk}"
+                f"{header}\n\n{chunk}"
             )
     except Exception as exc:
         message = (
@@ -118,10 +119,27 @@ async def _run_paper_report(report_date: str) -> None:
         raise RuntimeError(f"paper-report.py exited {return_code}")
 
 
-def _paginate(content: str) -> list[str]:
-    if len(content) <= DISCORD_MESSAGE_LIMIT:
+def _report_header(report_date: str, *, index: int, total: int) -> str:
+    return f"PMS Daily Report - {report_date} 22:00 CST ({index}/{total})"
+
+
+def _paginate_report(content: str, report_date: str) -> list[str]:
+    total = 1
+    while True:
+        max_header = _report_header(report_date, index=total, total=total)
+        limit = DISCORD_MESSAGE_LIMIT - len(max_header) - 2
+        if limit <= 0:
+            raise ValueError("Discord report header exceeds message limit")
+        chunks = _paginate(content, limit=limit)
+        if len(chunks) == total:
+            return chunks
+        total = len(chunks)
+
+
+def _paginate(content: str, *, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
+    if len(content) <= limit:
         return [content]
     return [
-        content[index : index + DISCORD_MESSAGE_LIMIT]
-        for index in range(0, len(content), DISCORD_MESSAGE_LIMIT)
+        content[index : index + limit]
+        for index in range(0, len(content), limit)
     ]

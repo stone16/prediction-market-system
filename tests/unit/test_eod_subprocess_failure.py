@@ -127,3 +127,26 @@ async def test_paper_report_subprocess_uses_no_dev(
     )
 
     assert captured[:3] == ["uv", "run", "--no-dev"]
+
+
+@pytest.mark.asyncio
+async def test_eod_report_pages_reserve_space_for_discord_header(tmp_path: Path) -> None:
+    report_date = "2026-05-06"
+    (tmp_path / f"{report_date}.md").write_text("x" * 4500, encoding="utf-8")
+    client = RecordingClient()
+
+    async def successful_runner(candidate_date: str) -> None:
+        assert candidate_date == report_date
+
+    await run_eod_report_once(
+        client,
+        now=datetime(2026, 5, 6, 22, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        report_root=tmp_path,
+        run_report=successful_runner,
+    )
+
+    assert len(client.messages) > 1
+    assert all(len(message) <= 2000 for message in client.messages)
+    assert client.messages[0].startswith(
+        "PMS Daily Report - 2026-05-06 22:00 CST (1/"
+    )
