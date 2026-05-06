@@ -27,6 +27,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("strategy_version_id", "text"),
         ("strategy_id", "text"),
         ("config_json", "jsonb"),
+        ("metadata_json", "jsonb"),
         ("created_at", "timestamp with time zone"),
     ],
     "strategy_factors": [

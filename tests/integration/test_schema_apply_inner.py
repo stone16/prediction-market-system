@@ -43,6 +43,8 @@ STRATEGY_INDEXES = [
 ]
 INNER_RING_NOT_NULL_TABLES = [
     *STRATEGY_TABLES,
+    "alpha_competition_snapshots",
+    "strategy_performance_peaks",
     "strategy_runs",
     "backtest_live_comparisons",
 ]
