@@ -30,6 +30,7 @@ async def test_alert_subscriber_converts_halt_event_to_discord_message() -> None
     client = RecordingDiscordClient()
     stop = asyncio.Event()
     task = asyncio.create_task(run_alerting_subscription(bus, client, stop_event=stop))
+    await asyncio.sleep(0)
 
     try:
         await bus.publish(

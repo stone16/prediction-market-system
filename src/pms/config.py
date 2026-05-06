@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from pms.core.enums import RunMode
@@ -63,6 +63,37 @@ class LLMSettings(BaseModel):
         if not self.api_key:
             raise ValueError("api_key is required when LLM is enabled")
         return self
+
+
+class DiscordSettings(BaseModel):
+    webhook_url: SecretStr | None = None
+
+    @field_validator("webhook_url", mode="before")
+    @classmethod
+    def _validate_webhook_url(cls, value: object) -> object:
+        if value in {None, ""}:
+            return None
+        if not isinstance(value, str):
+            return value
+        if not value.startswith(("https://", "http://")):
+            raise ValueError("webhook_url must be an HTTP(S) URL")
+        return value
+
+    def require_webhook_url(self) -> SecretStr:
+        if self.webhook_url is None:
+            raise ValidationError.from_exception_data(
+                "DiscordSettings",
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("webhook_url",),
+                        "msg": "webhook_url is required",
+                        "input": None,
+                        "ctx": {"error": ValueError("webhook_url is required")},
+                    }
+                ],
+            )
+        return self.webhook_url
 
 
 class ControllerSettings(BaseModel):
@@ -135,6 +166,7 @@ class PMSSettings(BaseSettings):
     live_emergency_audit_path: str = ".data/live-emergency-audit.jsonl"
     polymarket: PolymarketSettings = Field(default_factory=PolymarketSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    discord: DiscordSettings = Field(default_factory=DiscordSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     sensor: SensorSettings = Field(default_factory=SensorSettings)
     controller: ControllerSettings = Field(default_factory=ControllerSettings)

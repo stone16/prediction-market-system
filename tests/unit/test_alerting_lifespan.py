@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from pydantic import SecretStr
 
 from pms.api.app import create_app
 from pms.config import DiscordSettings, PMSSettings
@@ -14,7 +15,9 @@ async def test_alerting_lifespan_spawns_and_cancels_subscription_task() -> None:
     runner = Runner(
         config=PMSSettings(
             auto_migrate_default_v2=False,
-            discord=DiscordSettings(webhook_url="https://discord.example/webhooks/a/b"),
+            discord=DiscordSettings(
+                webhook_url=SecretStr("https://discord.example/webhooks/a/b")
+            ),
         )
     )
     app = create_app(runner, auto_start=False)

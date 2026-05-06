@@ -9,11 +9,13 @@ from uuid import uuid4
 from pms.actuator.adapters.polymarket import PolymarketSubmissionUnknownError
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
+from pms.alerting.events import HaltEvent as AlertHaltEvent
 from pms.core.enums import OrderStatus, Venue
 from pms.core.exceptions import KalshiStubError
 from pms.core.interfaces import DedupStore
 from pms.core.models import OrderState, Portfolio, TradeDecision
 from pms.core.venue_support import kalshi_stub_error
+from pms.event_stream import RuntimeEventBus
 from pms.storage.dedup_store import InMemoryDedupStore
 
 
@@ -35,6 +37,8 @@ class ActuatorExecutor:
     risk: RiskManager
     feedback: ActuatorFeedback
     dedup_store: DedupStore = field(default_factory=InMemoryDedupStore)
+    event_bus: RuntimeEventBus | None = None
+    _missing_event_bus_warned: bool = field(default=False, init=False)
 
     async def execute(
         self,
@@ -56,6 +60,7 @@ class ActuatorExecutor:
         try:
             halt_state = self.risk.check_auto_halt(portfolio)
             if halt_state.halted:
+                await self._publish_halt_event(decision, halt_state)
                 final_state = _rejected_order_state(decision, halt_state.trigger_kind)
                 await self.feedback.generate(
                     final_state,
@@ -139,6 +144,34 @@ class ActuatorExecutor:
                 "Failed to release dedup state for decision_id=%s",
                 decision_id,
             )
+
+    async def _publish_halt_event(
+        self,
+        decision: TradeDecision,
+        halt_state: object,
+    ) -> None:
+        if self.event_bus is None:
+            if not self._missing_event_bus_warned:
+                logger.warning("Auto-halt detected but no RuntimeEventBus is attached")
+                self._missing_event_bus_warned = True
+            return
+        trigger_kind = getattr(halt_state, "trigger_kind")
+        reason = getattr(halt_state, "reason")
+        triggered_at = getattr(halt_state, "triggered_at")
+        halt_event = AlertHaltEvent(
+            reason=reason,
+            trigger_kind=trigger_kind,
+            triggered_at=triggered_at,
+            market_id=decision.market_id,
+            decision_id=decision.decision_id,
+        )
+        await self.event_bus.publish(
+            halt_event.event_type,
+            halt_event.summary,
+            created_at=halt_event.triggered_at,
+            market_id=decision.market_id,
+            decision_id=decision.decision_id,
+        )
 
 
 def _rejected_order_state(decision: TradeDecision, reason: str) -> OrderState:

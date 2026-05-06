@@ -906,6 +906,7 @@ class Runner:
             risk=RiskManager(self.config.risk),
             feedback=ActuatorFeedback(self.feedback_store),
             dedup_store=self._build_dedup_store(),
+            event_bus=self.event_bus,
         )
 
     def _build_dedup_store(self) -> PgDedupStore | InMemoryDedupStore:

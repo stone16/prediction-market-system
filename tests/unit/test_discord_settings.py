@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from pms.config import DiscordSettings, PMSSettings
 
@@ -32,4 +32,4 @@ def test_discord_settings_missing_webhook_fails_when_required() -> None:
 
 def test_discord_settings_rejects_non_url() -> None:
     with pytest.raises(ValidationError):
-        DiscordSettings(webhook_url="not-a-url")
+        DiscordSettings.model_validate({"webhook_url": "not-a-url"})

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import cast
 
 import httpx
@@ -32,7 +33,7 @@ pytestmark = [
 ]
 
 
-async def test_alerting_chain_real_auto_halt_to_discord(tmp_path) -> None:
+async def test_alerting_chain_real_auto_halt_to_discord(tmp_path: Path) -> None:
     posts: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -49,6 +50,7 @@ async def test_alerting_chain_real_auto_halt_to_discord(tmp_path) -> None:
     )
     stop = asyncio.Event()
     subscriber_task = asyncio.create_task(run_alerting_subscription(bus, client, stop_event=stop))
+    await asyncio.sleep(0)
     manager = RiskManager(RiskSettings(max_drawdown_pct=20.0))
     executor = ActuatorExecutor(
         adapter=RecordingAdapter(),

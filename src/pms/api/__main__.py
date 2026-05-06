@@ -38,6 +38,13 @@ def _startup_gate_message(host: str) -> str:
     )
 
 
+def _auto_start_fail_closed_message() -> str:
+    return (
+        "Refusing PMS_AUTO_START=1 without PMS_DISCORD__WEBHOOK_URL. "
+        "Set the Discord webhook secret before supervising pms-api."
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     if args.config is not None:
@@ -47,6 +54,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not settings.api_token and host not in LOOPBACK_API_HOSTS:
         print(_startup_gate_message(host), file=sys.stderr)
+        return 1
+    auto_start = os.environ.get("PMS_AUTO_START", "").lower() in {"1", "true", "yes"}
+    if auto_start and settings.discord.webhook_url is None:
+        print(_auto_start_fail_closed_message(), file=sys.stderr)
         return 1
 
     uvicorn.run(

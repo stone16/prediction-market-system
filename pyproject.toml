@@ -121,6 +121,18 @@ source_modules = ["pms.market_selection"]
 forbidden_modules = ["pms.strategies.aggregate"]
 
 [[tool.importlinter.contracts]]
+name = "Alerting stays out of strategy and IO adapter rings"
+type = "forbidden"
+source_modules = ["pms.alerting"]
+forbidden_modules = [
+    "pms.strategies",
+    "pms.controller",
+    "pms.market_selection",
+    "pms.actuator.adapters",
+    "pms.sensor.adapters",
+]
+
+[[tool.importlinter.contracts]]
 name = "Kalshi stub helper stays at runtime boundaries"
 type = "protected"
 protected_modules = ["pms.core.venue_support"]

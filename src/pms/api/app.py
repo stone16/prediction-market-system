@@ -5,7 +5,7 @@ import logging
 import os
 from collections import defaultdict
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from pms.api.auth import require_api_token
+from pms.api.health import health_payload, readiness_payload
 from pms.api.routes.decisions import (
     AcceptDecisionRequest,
     DecisionMarketChangedError,
@@ -66,6 +67,9 @@ from pms.config import (
     load_settings,
     validate_live_mode_ready,
 )
+from pms.alerting.discord import DiscordWebhookClient
+from pms.alerting.scheduler import EODScheduler
+from pms.alerting.subscriber import run_alerting_subscription
 from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, LiveTradingDisabledError, MarketSignal, TradeDecision
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
@@ -122,6 +126,12 @@ def create_app(
         startup_complete = False
         app_inst.state.autostart_attempted = False
         app_inst.state.autostart_error = None
+        app_inst.state.shutting_down = False
+        app_inst.state.alerting_task = None
+        app_inst.state.alerting_stop_event = None
+        app_inst.state.discord_client = None
+        app_inst.state.eod_scheduler_task = None
+        app_inst.state.eod_stop_event = None
         try:
             await _ensure_runner_pool(active_runner)
             runner_pool_initialized = active_runner.pg_pool is not None and not pool_was_bound
@@ -161,9 +171,12 @@ def create_app(
                     )
             if active_runner.pg_pool is not None:
                 await scan_orphaned_backtest_runs(active_runner.pg_pool)
+            _start_alerting_if_configured(app_inst, active_runner)
             startup_complete = True
             yield
         finally:
+            app_inst.state.shutting_down = True
+            await _stop_alerting_if_started(app_inst)
             # Always stop a running runner on shutdown — covers both auto_start
             # and runners launched by callers via POST /run/start, so sensor
             # resources (for example venue HTTP clients) close cleanly.
@@ -205,6 +218,22 @@ def create_app(
                 "brier_overall": metrics_snapshot.brier_overall,
             },
         }
+
+    @app.get("/health")
+    async def health(request: Request) -> JSONResponse:
+        code, payload = health_payload(
+            shutting_down=bool(getattr(request.app.state, "shutting_down", False))
+        )
+        return JSONResponse(status_code=code, content=payload)
+
+    @app.get("/readiness")
+    async def readiness(request: Request) -> JSONResponse:
+        code, payload = readiness_payload(
+            active_runner,
+            halt_subscriber_task=getattr(request.app.state, "alerting_task", None),
+            forced_running=bool(getattr(request.app.state, "runner_started_for_test", False)),
+        )
+        return JSONResponse(status_code=code, content=payload)
 
     @app.get("/signals")
     async def signals(limit: int = 50) -> list[dict[str, Any]]:
@@ -862,6 +891,53 @@ def _last_signal_at(signals: Sequence[MarketSignal]) -> str | None:
     if not signals:
         return None
     return signals[-1].fetched_at.isoformat()
+
+
+def _start_alerting_if_configured(app_inst: FastAPI, runner: Runner) -> None:
+    webhook = runner.config.discord.webhook_url
+    if webhook is None:
+        return
+    client = DiscordWebhookClient(webhook)
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        run_alerting_subscription(runner.event_bus, client, stop_event=stop_event)
+    )
+    app_inst.state.discord_client = client
+    app_inst.state.alerting_stop_event = stop_event
+    app_inst.state.alerting_task = task
+    eod_stop_event = asyncio.Event()
+    eod_task = asyncio.create_task(EODScheduler(client).run(eod_stop_event))
+    app_inst.state.eod_stop_event = eod_stop_event
+    app_inst.state.eod_scheduler_task = eod_task
+
+
+async def _stop_alerting_if_started(app_inst: FastAPI) -> None:
+    eod_stop_event = getattr(app_inst.state, "eod_stop_event", None)
+    if isinstance(eod_stop_event, asyncio.Event):
+        eod_stop_event.set()
+    eod_task = getattr(app_inst.state, "eod_scheduler_task", None)
+    if isinstance(eod_task, asyncio.Task):
+        try:
+            await asyncio.wait_for(eod_task, timeout=2.0)
+        except TimeoutError:
+            eod_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await eod_task
+    stop_event = getattr(app_inst.state, "alerting_stop_event", None)
+    if isinstance(stop_event, asyncio.Event):
+        stop_event.set()
+    task = getattr(app_inst.state, "alerting_task", None)
+    if isinstance(task, asyncio.Task):
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except TimeoutError:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+    client = getattr(app_inst.state, "discord_client", None)
+    close = getattr(client, "aclose", None)
+    if callable(close):
+        await close()
 
 
 def _forecaster(decision: TradeDecision) -> str:
