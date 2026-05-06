@@ -15,6 +15,8 @@ RUN apt-get update \
 ENV PATH="/root/.local/bin:${PATH}"
 
 COPY pyproject.toml uv.lock README.md ./
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
 COPY src ./src
 COPY scripts ./scripts
 COPY config.live-soak.yaml ./config.live-soak.yaml

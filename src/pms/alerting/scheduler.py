@@ -107,6 +107,7 @@ async def _run_paper_report(report_date: str) -> None:
     process = await asyncio.create_subprocess_exec(
         "uv",
         "run",
+        "--no-dev",
         "python",
         "scripts/paper-report.py",
         "--date",

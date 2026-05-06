@@ -35,6 +35,10 @@ async def emit_shutdown_alert(
         _write_shutdown_fallback(alert_dir, reason=reason, error="timeout")
         logger.error("Shutdown alert timed out; wrote dropped shutdown fallback")
         return False
+    except Exception as exc:
+        _write_shutdown_fallback(alert_dir, reason=reason, error=str(exc))
+        logger.exception("Shutdown alert failed; wrote dropped shutdown fallback")
+        return False
 
 
 async def flush_alerts(client: object) -> None:

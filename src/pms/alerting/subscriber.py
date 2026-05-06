@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from typing import Protocol
 
 from pms.alerting.events import alert_from_halt, halt_event_from_runtime
 from pms.event_stream import RuntimeEvent, RuntimeEventBus
+
+
+logger = logging.getLogger(__name__)
 
 
 class AlertSender(Protocol):
@@ -27,7 +31,13 @@ async def run_alerting_subscription(
     stop = stop_event or asyncio.Event()
     try:
         for event in replay:
-            await _deliver_if_halt(event, client)
+            try:
+                await _deliver_if_halt(event, client)
+            except Exception:
+                logger.exception(
+                    "alert subscriber replay delivery failed; continuing",
+                    extra={"runtime_event_id": event.event_id},
+                )
         while not stop.is_set():
             get_task = asyncio.create_task(queue.get())
             stop_task = asyncio.create_task(stop.wait())
@@ -42,7 +52,13 @@ async def run_alerting_subscription(
             if stop_task in done:
                 return
             event = get_task.result()
-            await _deliver_if_halt(event, client)
+            try:
+                await _deliver_if_halt(event, client)
+            except Exception:
+                logger.exception(
+                    "alert subscriber live delivery failed; continuing",
+                    extra={"runtime_event_id": event.event_id},
+                )
     finally:
         await event_bus.unsubscribe(queue)
 

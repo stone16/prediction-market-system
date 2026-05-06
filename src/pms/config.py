@@ -71,13 +71,12 @@ class DiscordSettings(BaseModel):
     @field_validator("webhook_url", mode="before")
     @classmethod
     def _validate_webhook_url(cls, value: object) -> object:
-        if value in {None, ""}:
+        normalized = normalize_webhook_url(value)
+        if normalized is None:
             return None
-        if not isinstance(value, str):
-            return value
-        if not value.startswith(("https://", "http://")):
-            raise ValueError("webhook_url must be an HTTP(S) URL")
-        return value
+        if not normalized.startswith("https://"):
+            raise ValueError("webhook_url must be an HTTPS URL")
+        return normalized
 
     def require_webhook_url(self) -> SecretStr:
         if self.webhook_url is None:
@@ -93,6 +92,19 @@ class DiscordSettings(BaseModel):
                 ],
             )
         return self.webhook_url
+
+
+def normalize_webhook_url(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, SecretStr):
+        raw_value = value.get_secret_value()
+    elif isinstance(value, str):
+        raw_value = value
+    else:
+        return str(value)
+    stripped = raw_value.strip()
+    return stripped or None
 
 
 class ControllerSettings(BaseModel):

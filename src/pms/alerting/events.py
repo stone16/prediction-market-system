@@ -44,7 +44,7 @@ def halt_event_from_runtime(event: RuntimeEvent) -> HaltEvent | None:
     if not event.event_type.startswith(HALT_EVENT_PREFIX):
         return None
     trigger_kind = event.event_type.removeprefix(HALT_EVENT_PREFIX)
-    reason = event.summary.rsplit(": ", maxsplit=1)[-1]
+    reason = event.summary.split(": ", maxsplit=1)[-1]
     return HaltEvent(
         reason=reason,
         trigger_kind=_coerce_trigger_kind(trigger_kind),

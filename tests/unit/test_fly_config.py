@@ -16,3 +16,5 @@ def test_docker_cmd_uses_pms_api_host_env_not_deprecated_host_flag() -> None:
 
     assert "--host" not in dockerfile
     assert "pms-api" in dockerfile
+    assert "COPY alembic.ini ./alembic.ini" in dockerfile
+    assert "COPY alembic ./alembic" in dockerfile

@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 import uvicorn
 
-from pms.config import load_settings
+from pms.config import load_settings, normalize_webhook_url
 
 
 LOOPBACK_API_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -56,7 +56,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(_startup_gate_message(host), file=sys.stderr)
         return 1
     auto_start = os.environ.get("PMS_AUTO_START", "").lower() in {"1", "true", "yes"}
-    if auto_start and settings.discord.webhook_url is None:
+    if auto_start and normalize_webhook_url(settings.discord.webhook_url) is None:
         print(_auto_start_fail_closed_message(), file=sys.stderr)
         return 1
 

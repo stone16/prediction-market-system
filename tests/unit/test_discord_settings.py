@@ -33,3 +33,16 @@ def test_discord_settings_missing_webhook_fails_when_required() -> None:
 def test_discord_settings_rejects_non_url() -> None:
     with pytest.raises(ValidationError):
         DiscordSettings.model_validate({"webhook_url": "not-a-url"})
+
+
+def test_discord_settings_rejects_plaintext_http_webhook() -> None:
+    with pytest.raises(ValidationError, match="HTTPS"):
+        DiscordSettings.model_validate(
+            {"webhook_url": "http://discord.example/webhooks/abc/secret-token"}
+        )
+
+
+def test_discord_settings_trims_blank_webhook_to_missing() -> None:
+    settings = DiscordSettings.model_validate({"webhook_url": "   "})
+
+    assert settings.webhook_url is None

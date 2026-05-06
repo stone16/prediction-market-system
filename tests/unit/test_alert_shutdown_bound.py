@@ -22,6 +22,17 @@ class HangingClient:
         return True
 
 
+class FailingClient:
+    async def send(
+        self,
+        content: str,
+        *,
+        embed: dict[str, object] | None = None,
+    ) -> bool:
+        del content, embed
+        raise RuntimeError("discord unavailable")
+
+
 @pytest.mark.asyncio
 async def test_alert_shutdown_bound(tmp_path: Path) -> None:
     started = time.monotonic()
@@ -39,3 +50,20 @@ async def test_alert_shutdown_bound(tmp_path: Path) -> None:
     assert len(dropped) == 1
     payload = json.loads(dropped[0].read_text())
     assert payload["reason"] == "SIGTERM"
+
+
+@pytest.mark.asyncio
+async def test_alert_shutdown_exception_writes_fallback(tmp_path: Path) -> None:
+    delivered = await emit_shutdown_alert(
+        FailingClient(),
+        reason="exception",
+        alert_dir=tmp_path,
+        timeout_s=0.5,
+    )
+
+    assert delivered is False
+    dropped = list(tmp_path.glob("dropped-shutdown-*.json"))
+    assert len(dropped) == 1
+    payload = json.loads(dropped[0].read_text())
+    assert payload["reason"] == "exception"
+    assert "discord unavailable" in payload["error"]

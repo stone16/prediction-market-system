@@ -25,8 +25,8 @@ async def test_health_liveness_is_independent_from_runner_readiness() -> None:
     assert health.json()["status"] == "ok"
     assert readiness.status_code == 503
     assert readiness.json()["status"] == "not_ready"
-    assert readiness.json()["checks"]["halt_subscriber"] == "not_started"
-    assert readiness.json()["checks"]["eod_scheduler"] == "not_started"
+    assert readiness.json()["checks"]["halt_subscriber"] == "disabled"
+    assert readiness.json()["checks"]["eod_scheduler"] == "disabled"
 
 
 @pytest.mark.asyncio
@@ -35,7 +35,7 @@ async def test_readiness_reports_ready_when_runner_and_alerting_are_running() ->
     app = create_app(runner, auto_start=False)
     app.state.alerting_task = asyncio.create_task(asyncio.sleep(60))
     app.state.eod_scheduler_task = asyncio.create_task(asyncio.sleep(60))
-    app.state.runner_started_for_test = True
+    app.state.runner_readiness_forced = True
 
     try:
         transport = httpx.ASGITransport(app=app)
@@ -55,12 +55,29 @@ async def test_readiness_reports_ready_when_runner_and_alerting_are_running() ->
 
 
 @pytest.mark.asyncio
+async def test_readiness_allows_disabled_alerting_when_runner_is_ready() -> None:
+    runner = Runner(config=PMSSettings(auto_migrate_default_v2=False))
+    app = create_app(runner, auto_start=False)
+    app.state.runner_readiness_forced = True
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/readiness")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "ready"
+    assert payload["checks"]["halt_subscriber"] == "disabled"
+    assert payload["checks"]["eod_scheduler"] == "disabled"
+
+
+@pytest.mark.asyncio
 async def test_readiness_reports_not_ready_when_eod_scheduler_stopped() -> None:
     runner = Runner(config=PMSSettings(auto_migrate_default_v2=False))
     app = create_app(runner, auto_start=False)
     app.state.alerting_task = asyncio.create_task(asyncio.sleep(60))
     app.state.eod_scheduler_task = asyncio.create_task(asyncio.sleep(0))
-    app.state.runner_started_for_test = True
+    app.state.runner_readiness_forced = True
 
     try:
         await app.state.eod_scheduler_task
@@ -75,3 +92,20 @@ async def test_readiness_reports_not_ready_when_eod_scheduler_stopped() -> None:
     assert response.status_code == 503
     assert payload["status"] == "not_ready"
     assert payload["checks"]["eod_scheduler"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_health_stays_live_while_readiness_fails_during_shutdown() -> None:
+    runner = Runner(config=PMSSettings(auto_migrate_default_v2=False))
+    app = create_app(runner, auto_start=False)
+    app.state.shutting_down = True
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        health = await client.get("/health")
+        readiness = await client.get("/readiness")
+
+    assert health.status_code == 200
+    assert health.json()["status"] == "shutting_down"
+    assert readiness.status_code == 503
+    assert readiness.json()["status"] == "shutting_down"

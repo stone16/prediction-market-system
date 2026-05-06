@@ -65,6 +65,7 @@ from pms.config import (
     MissingPolymarketCredentialsError,
     PMSSettings,
     load_settings,
+    normalize_webhook_url,
     validate_live_mode_ready,
 )
 from pms.alerting.discord import DiscordWebhookClient
@@ -232,7 +233,8 @@ def create_app(
             active_runner,
             halt_subscriber_task=getattr(request.app.state, "alerting_task", None),
             eod_scheduler_task=getattr(request.app.state, "eod_scheduler_task", None),
-            forced_running=bool(getattr(request.app.state, "runner_started_for_test", False)),
+            shutting_down=bool(getattr(request.app.state, "shutting_down", False)),
+            forced_running=bool(getattr(request.app.state, "runner_readiness_forced", False)),
         )
         return JSONResponse(status_code=code, content=payload)
 
@@ -895,7 +897,7 @@ def _last_signal_at(signals: Sequence[MarketSignal]) -> str | None:
 
 
 def _start_alerting_if_configured(app_inst: FastAPI, runner: Runner) -> None:
-    webhook = runner.config.discord.webhook_url
+    webhook = normalize_webhook_url(runner.config.discord.webhook_url)
     if webhook is None:
         return
     client = DiscordWebhookClient(webhook)
@@ -913,6 +915,7 @@ def _start_alerting_if_configured(app_inst: FastAPI, runner: Runner) -> None:
 
 
 async def _stop_alerting_if_started(app_inst: FastAPI) -> None:
+    first_exc: BaseException | None = None
     eod_stop_event = getattr(app_inst.state, "eod_stop_event", None)
     if isinstance(eod_stop_event, asyncio.Event):
         eod_stop_event.set()
@@ -924,6 +927,9 @@ async def _stop_alerting_if_started(app_inst: FastAPI) -> None:
             eod_task.cancel()
             with suppress(asyncio.CancelledError):
                 await eod_task
+        except Exception as exc:
+            logger.exception("EOD scheduler shutdown failed")
+            first_exc = first_exc or exc
     stop_event = getattr(app_inst.state, "alerting_stop_event", None)
     if isinstance(stop_event, asyncio.Event):
         stop_event.set()
@@ -935,10 +941,19 @@ async def _stop_alerting_if_started(app_inst: FastAPI) -> None:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        except Exception as exc:
+            logger.exception("Alert subscriber shutdown failed")
+            first_exc = first_exc or exc
     client = getattr(app_inst.state, "discord_client", None)
     close = getattr(client, "aclose", None)
     if callable(close):
-        await close()
+        try:
+            await close()
+        except Exception as exc:
+            logger.exception("Discord client close failed")
+            first_exc = first_exc or exc
+    if first_exc is not None:
+        raise first_exc
 
 
 def _forecaster(decision: TradeDecision) -> str:

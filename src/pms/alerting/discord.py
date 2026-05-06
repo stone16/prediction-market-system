@@ -136,13 +136,16 @@ def _write_fallback(alert_dir: Path, payload: dict[str, Any], *, prefix: str) ->
 
 
 def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    sanitized: dict[str, Any] = {}
-    for key, value in payload.items():
+    def sanitize(value: Any) -> Any:
         if isinstance(value, str):
-            sanitized[key] = _redact_url_like(value)
-        else:
-            sanitized[key] = value
-    return sanitized
+            return _redact_url_like(value)
+        if isinstance(value, dict):
+            return {key: sanitize(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [sanitize(item) for item in value]
+        return value
+
+    return {key: sanitize(value) for key, value in payload.items()}
 
 
 def _redact_url_like(value: str) -> str:
@@ -156,9 +159,12 @@ def _retry_after(response: httpx.Response) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        parsed = float(value.strip())
     except ValueError:
         return None
+    if parsed < 0:
+        return None
+    return parsed
 
 
 def redact_webhook_url(url: str) -> str:

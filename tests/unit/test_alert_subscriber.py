@@ -24,6 +24,23 @@ class RecordingDiscordClient:
         return True
 
 
+class FailsFirstDiscordClient(RecordingDiscordClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    async def send(
+        self,
+        content: str,
+        *,
+        embed: dict[str, object] | None = None,
+    ) -> bool:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise RuntimeError("one bad event")
+        return await super().send(content, embed=embed)
+
+
 @pytest.mark.asyncio
 async def test_alert_subscriber_converts_halt_event_to_discord_message() -> None:
     bus = RuntimeEventBus()
@@ -51,3 +68,35 @@ async def test_alert_subscriber_converts_halt_event_to_discord_message() -> None
 
     assert "drawdown_circuit_breaker" in client.messages[0]
     assert "decision-alert" in client.messages[0]
+
+
+@pytest.mark.asyncio
+async def test_alert_subscriber_survives_single_delivery_failure() -> None:
+    bus = RuntimeEventBus()
+    client = FailsFirstDiscordClient()
+    stop = asyncio.Event()
+    task = asyncio.create_task(run_alerting_subscription(bus, client, stop_event=stop))
+    await asyncio.sleep(0)
+
+    try:
+        await bus.publish(
+            "pms.halt.drawdown_circuit_breaker",
+            "Auto-halt drawdown_circuit_breaker: first failure",
+            created_at=datetime(2026, 5, 6, 8, 0, tzinfo=UTC),
+        )
+        await bus.publish(
+            "pms.halt.drawdown_circuit_breaker",
+            "Auto-halt drawdown_circuit_breaker: second success",
+            created_at=datetime(2026, 5, 6, 8, 1, tzinfo=UTC),
+        )
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while not client.messages:
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError("subscriber did not recover after failure")
+            await asyncio.sleep(0.01)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert client.attempts == 2
+    assert "second success" in client.messages[0]
