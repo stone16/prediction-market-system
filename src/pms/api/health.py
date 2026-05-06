@@ -16,12 +16,14 @@ def readiness_payload(
     runner: Runner,
     *,
     halt_subscriber_task: asyncio.Task[None] | None,
+    eod_scheduler_task: asyncio.Task[None] | None,
     forced_running: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     checks = {
         "sensors": _sensor_readiness(runner, forced_running=forced_running),
         "event_loop": _event_loop_readiness(runner, forced_running=forced_running),
         "halt_subscriber": _task_readiness(halt_subscriber_task),
+        "eod_scheduler": _task_readiness(eod_scheduler_task),
     }
     status = "ready" if all(value == "ready" for value in checks.values()) else "not_ready"
     code = 200 if status == "ready" else 503

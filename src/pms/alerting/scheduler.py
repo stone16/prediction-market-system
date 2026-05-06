@@ -25,6 +25,7 @@ class EODClient(Protocol):
 
 RunReport = Callable[[str], Awaitable[None]]
 Clock = Callable[[], datetime]
+NextTrigger = Callable[[ZoneInfo, datetime], datetime]
 
 
 def next_trigger(tz: ZoneInfo, now: datetime) -> datetime:
@@ -42,24 +43,32 @@ class EODScheduler:
         *,
         clock: Clock | None = None,
         report_root: str | Path = "docs/paper-reports",
+        run_report: RunReport | None = None,
+        next_trigger_fn: NextTrigger = next_trigger,
     ) -> None:
         self._client = client
         self._clock = clock or (lambda: datetime.now(tz=SHANGHAI_TZ))
         self._report_root = Path(report_root)
+        self._run_report = run_report
+        self._next_trigger = next_trigger_fn
 
     async def run(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
             now = self._clock()
-            trigger = next_trigger(SHANGHAI_TZ, now)
+            trigger = self._next_trigger(SHANGHAI_TZ, now)
             delay = max((trigger - now.astimezone(SHANGHAI_TZ)).total_seconds(), 0.0)
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=delay)
             except TimeoutError:
-                await run_eod_report_once(
-                    self._client,
-                    now=self._clock(),
-                    report_root=self._report_root,
-                )
+                try:
+                    await run_eod_report_once(
+                        self._client,
+                        now=self._clock(),
+                        report_root=self._report_root,
+                        run_report=self._run_report,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("EOD scheduler iteration failed; continuing")
 
 
 async def run_eod_report_once(

@@ -23,4 +23,4 @@ RUN uv sync --frozen --no-dev
 
 EXPOSE 8000
 
-CMD ["uv", "run", "--no-dev", "pms-api", "--config", "/app/config.live-soak.yaml", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "--no-dev", "pms-api", "--config", "/app/config.live-soak.yaml", "--port", "8000"]

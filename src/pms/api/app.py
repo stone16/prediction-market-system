@@ -231,6 +231,7 @@ def create_app(
         code, payload = readiness_payload(
             active_runner,
             halt_subscriber_task=getattr(request.app.state, "alerting_task", None),
+            eod_scheduler_task=getattr(request.app.state, "eod_scheduler_task", None),
             forced_running=bool(getattr(request.app.state, "runner_started_for_test", False)),
         )
         return JSONResponse(status_code=code, content=payload)
