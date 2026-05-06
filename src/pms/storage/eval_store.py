@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
-from typing import cast
+from typing import SupportsFloat, cast
 
 import asyncpg
 
@@ -73,9 +73,12 @@ async def insert_eval_record_row(
             slippage_bps,
             filled,
             strategy_id,
-            strategy_version_id
+            strategy_version_id,
+            edge_at_decision,
+            spread_bps_at_decision
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15
+            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15,
+            $16, $17
         )
         """,
         record.decision_id,
@@ -93,6 +96,8 @@ async def insert_eval_record_row(
         record.filled,
         record.strategy_id,
         record.strategy_version_id,
+        record.edge_at_decision,
+        record.spread_bps_at_decision,
     )
 
 
@@ -112,7 +117,9 @@ SELECT
     model_id,
     pnl,
     slippage_bps,
-    filled
+    filled,
+    edge_at_decision,
+    spread_bps_at_decision
 FROM eval_records
 ORDER BY recorded_at ASC, decision_id ASC
 """
@@ -134,7 +141,9 @@ SELECT
     model_id,
     pnl,
     slippage_bps,
-    filled
+    filled,
+    edge_at_decision,
+    spread_bps_at_decision
 FROM eval_records
 WHERE strategy_id = $1 AND strategy_version_id = $2
 ORDER BY recorded_at ASC, decision_id ASC
@@ -168,4 +177,19 @@ def _eval_record_from_row(row: asyncpg.Record) -> EvalRecord:
         pnl=cast(float, row["pnl"]),
         slippage_bps=cast(float, row["slippage_bps"]),
         filled=cast(bool, row["filled"]),
+        edge_at_decision=float(
+            cast(SupportsFloat, _row_value(row, "edge_at_decision", 0.0))
+        ),
+        spread_bps_at_decision=cast(
+            int | None,
+            _row_value(row, "spread_bps_at_decision", None),
+        ),
     )
+
+
+def _row_value(row: asyncpg.Record, key: str, default: object) -> object:
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return default
+    return default if value is None and default is not None else value

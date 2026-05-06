@@ -143,6 +143,31 @@ class PostgresStrategyRegistry:
             created_at=_ensure_utc(created_at),
         )
 
+    async def set_version_metadata(
+        self,
+        strategy_id: str,
+        strategy_version_id: str,
+        metadata: dict[str, object],
+    ) -> None:
+        metadata_json = json.dumps(
+            metadata,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        query = """
+        UPDATE strategy_versions
+        SET metadata_json = metadata_json || $3::jsonb
+        WHERE strategy_id = $1 AND strategy_version_id = $2
+        """
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                query,
+                strategy_id,
+                strategy_version_id,
+                metadata_json,
+            )
+
     async def get_by_id(self, strategy_id: str) -> Strategy | None:
         query = """
         SELECT versions.config_json

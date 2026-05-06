@@ -342,6 +342,7 @@ def _decision_payload(decision: TradeDecision) -> dict[str, object]:
         "outcome": decision.outcome,
         "model_id": decision.model_id,
         "intent_key": decision.intent_key,
+        "spread_bps_at_decision": decision.spread_bps_at_decision,
     }
 
 
@@ -388,6 +389,7 @@ def _decision_from_payload(payload: Mapping[str, Any]) -> TradeDecision:
         outcome=cast(Literal["YES", "NO"], payload.get("outcome", "YES")),
         model_id=cast(str | None, payload.get("model_id")),
         intent_key=cast(str | None, payload.get("intent_key")),
+        spread_bps_at_decision=_optional_int(payload.get("spread_bps_at_decision")),
     )
 
 
@@ -434,3 +436,9 @@ def _string_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return []
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(cast(int | float | str, value))

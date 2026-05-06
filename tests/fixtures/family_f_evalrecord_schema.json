@@ -1,0 +1,61 @@
+{
+  "schema_version": "family_f_evalrecord_schema_v1",
+  "table": "eval_records",
+  "source": "Family F pms-strategy-meta-evidence-v1 CP01a",
+  "tables": [
+    {
+      "table": "eval_records",
+      "columns": [
+        {"column_name": "decision_id", "data_type": "text", "is_nullable": "NO"},
+        {"column_name": "market_id", "data_type": "text", "is_nullable": "NO"},
+        {"column_name": "prob_estimate", "data_type": "double precision", "is_nullable": "NO"},
+        {"column_name": "resolved_outcome", "data_type": "double precision", "is_nullable": "NO"},
+        {"column_name": "brier_score", "data_type": "double precision", "is_nullable": "NO"},
+        {"column_name": "fill_status", "data_type": "text", "is_nullable": "NO"},
+        {"column_name": "recorded_at", "data_type": "timestamp with time zone", "is_nullable": "NO"},
+        {"column_name": "citations", "data_type": "jsonb", "is_nullable": "NO", "column_default": "'[]'::jsonb"},
+        {"column_name": "category", "data_type": "text", "is_nullable": "YES"},
+        {"column_name": "model_id", "data_type": "text", "is_nullable": "YES"},
+        {"column_name": "pnl", "data_type": "double precision", "is_nullable": "NO", "column_default": "0.0"},
+        {"column_name": "slippage_bps", "data_type": "double precision", "is_nullable": "NO", "column_default": "0.0"},
+        {"column_name": "filled", "data_type": "boolean", "is_nullable": "NO", "column_default": "true"},
+        {"column_name": "strategy_id", "data_type": "text", "is_nullable": "NO"},
+        {"column_name": "strategy_version_id", "data_type": "text", "is_nullable": "NO"},
+        {"column_name": "edge_at_decision", "data_type": "double precision", "is_nullable": "NO", "column_default": "0.0"},
+        {"column_name": "spread_bps_at_decision", "data_type": "integer", "is_nullable": "YES"}
+      ]
+    },
+    {
+      "table": "strategy_versions",
+      "columns": [
+        {"column_name": "strategy_version_id", "data_type": "text", "is_nullable": "NO"},
+        {"column_name": "strategy_id", "data_type": "text", "is_nullable": "NO"},
+        {"column_name": "config_json", "data_type": "jsonb", "is_nullable": "NO"},
+        {"column_name": "metadata_json", "data_type": "jsonb", "is_nullable": "NO", "column_default": "'{}'::jsonb"},
+        {"column_name": "created_at", "data_type": "timestamp with time zone", "is_nullable": "NO"}
+      ],
+      "namespace_contracts": {
+        "promotion": "Family A writes scorecard artifacts under metadata_json.promotion"
+      }
+    }
+  ],
+  "columns": [
+    {"column_name": "decision_id", "data_type": "text", "is_nullable": "NO"},
+    {"column_name": "market_id", "data_type": "text", "is_nullable": "NO"},
+    {"column_name": "prob_estimate", "data_type": "double precision", "is_nullable": "NO"},
+    {"column_name": "resolved_outcome", "data_type": "double precision", "is_nullable": "NO"},
+    {"column_name": "brier_score", "data_type": "double precision", "is_nullable": "NO"},
+    {"column_name": "fill_status", "data_type": "text", "is_nullable": "NO"},
+    {"column_name": "recorded_at", "data_type": "timestamp with time zone", "is_nullable": "NO"},
+    {"column_name": "citations", "data_type": "jsonb", "is_nullable": "NO", "column_default": "'[]'::jsonb"},
+    {"column_name": "category", "data_type": "text", "is_nullable": "YES"},
+    {"column_name": "model_id", "data_type": "text", "is_nullable": "YES"},
+    {"column_name": "pnl", "data_type": "double precision", "is_nullable": "NO", "column_default": "0.0"},
+    {"column_name": "slippage_bps", "data_type": "double precision", "is_nullable": "NO", "column_default": "0.0"},
+    {"column_name": "filled", "data_type": "boolean", "is_nullable": "NO", "column_default": "true"},
+    {"column_name": "strategy_id", "data_type": "text", "is_nullable": "NO"},
+    {"column_name": "strategy_version_id", "data_type": "text", "is_nullable": "NO"},
+    {"column_name": "edge_at_decision", "data_type": "double precision", "is_nullable": "NO", "column_default": "0.0"},
+    {"column_name": "spread_bps_at_decision", "data_type": "integer", "is_nullable": "YES"}
+  ]
+}

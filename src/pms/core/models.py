@@ -85,6 +85,7 @@ class TradeDecision:
     outcome: Outcome = "YES"
     model_id: str | None = None
     intent_key: str | None = None
+    spread_bps_at_decision: int | None = None
 
     def __post_init__(self) -> None:
         if self.action is not None and self.side != self.action:
@@ -297,6 +298,8 @@ class EvalRecord:
     pnl: float = 0.0
     slippage_bps: float = 0.0
     filled: bool = True
+    edge_at_decision: float = 0.0
+    spread_bps_at_decision: int | None = None
 
 
 @dataclass(frozen=True)

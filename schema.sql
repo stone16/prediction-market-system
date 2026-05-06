@@ -171,9 +171,13 @@ CREATE TABLE IF NOT EXISTS strategy_versions (
     strategy_version_id TEXT PRIMARY KEY,
     strategy_id TEXT NOT NULL REFERENCES strategies(strategy_id) ON DELETE CASCADE,
     config_json JSONB NOT NULL,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (strategy_id, strategy_version_id)
 );
+
+ALTER TABLE strategy_versions
+    ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 DO $$
 BEGIN
@@ -254,7 +258,42 @@ CREATE TABLE IF NOT EXISTS eval_records (
     slippage_bps DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     filled BOOLEAN NOT NULL DEFAULT TRUE,
     strategy_id TEXT NOT NULL,
-    strategy_version_id TEXT NOT NULL
+    strategy_version_id TEXT NOT NULL,
+    edge_at_decision DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    spread_bps_at_decision INTEGER
+);
+
+ALTER TABLE eval_records
+    ADD COLUMN IF NOT EXISTS edge_at_decision DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    ADD COLUMN IF NOT EXISTS spread_bps_at_decision INTEGER;
+
+CREATE TABLE IF NOT EXISTS strategy_performance_peaks (
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL,
+    peak_sharpe_7d DOUBLE PRECISION NOT NULL,
+    peak_sharpe_30d DOUBLE PRECISION NOT NULL,
+    peak_hit_rate DOUBLE PRECISION NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (strategy_id, strategy_version_id)
+);
+
+CREATE TABLE IF NOT EXISTS alpha_competition_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL,
+    snapshot_date DATE NOT NULL,
+    mean_edge_30d DOUBLE PRECISION,
+    mean_spread_bps_30d DOUBLE PRECISION,
+    edge_trend_slope_90d DOUBLE PRECISION,
+    spread_trend_slope_90d DOUBLE PRECISION,
+    sample_count_30d INTEGER NOT NULL,
+    trend_status TEXT NOT NULL CHECK (trend_status IN ('warming_up', 'active')),
+    days_collected INTEGER NOT NULL,
+    short_term_slope_30d DOUBLE PRECISION,
+    short_term_slope_60d DOUBLE PRECISION,
+    interpretation TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (strategy_id, strategy_version_id, snapshot_date)
 );
 
 CREATE TABLE IF NOT EXISTS decisions (

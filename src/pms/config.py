@@ -133,6 +133,10 @@ class PMSSettings(BaseSettings):
     api_token: str | None = None
     live_account_reconciliation_required: bool = True
     live_emergency_audit_path: str = ".data/live-emergency-audit.jsonl"
+    regime_volatility_threshold: float = Field(default=0.15, ge=0.0)
+    regime_drift_threshold: float = Field(default=0.02, ge=0.0)
+    regime_min_resolved_samples: int = Field(default=5, ge=0)
+    decay_min_resolved_samples: int = Field(default=10, ge=0)
     polymarket: PolymarketSettings = Field(default_factory=PolymarketSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)

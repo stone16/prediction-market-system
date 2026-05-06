@@ -40,6 +40,8 @@ class Scorer:
             pnl=_pnl(fill, decision),
             slippage_bps=_slippage_bps(fill, decision),
             filled=fill.status == OrderStatus.MATCHED.value,
+            edge_at_decision=decision.expected_edge,
+            spread_bps_at_decision=decision.spread_bps_at_decision,
         )
 
 

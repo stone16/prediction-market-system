@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Literal, TypeVar
 
 from pms.config import PMSSettings
-from pms.controller._price_utils import best_ask
+from pms.controller._price_utils import best_ask, spread_bps_at_decision
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.diagnostics import ControllerDiagnostic
 from pms.controller.factor_snapshot import (
@@ -365,6 +365,7 @@ class ControllerPipeline:
             outcome=decision_outcome,
             model_id=_decision_model_id(model_ids),
             intent_key=intent_key,
+            spread_bps_at_decision=spread_bps_at_decision(signal),
         )
 
     async def decide(
