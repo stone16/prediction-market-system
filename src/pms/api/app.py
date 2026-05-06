@@ -28,6 +28,7 @@ from pms.api.routes.decisions import (
     get_decision as get_decision_item,
     list_decisions as list_decisions_items,
 )
+from pms.api.routes.decay import get_strategy_decay_status as get_strategy_decay_status_item
 from pms.api.routes.events import encode_sse_event
 from pms.api.research_routes import (
     compute_backtest_live_comparison,
@@ -506,6 +507,23 @@ def create_app(
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_strategy_metrics_items(active_runner.pg_pool)
+
+    @app.get("/strategies/{strategy_id}/decay-status")
+    async def strategy_decay_status(
+        strategy_id: str,
+        strategy_version_id: str | None = None,
+    ) -> dict[str, Any]:
+        if active_runner.pg_pool is None:
+            raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
+        try:
+            return await get_strategy_decay_status_item(
+                active_runner.pg_pool,
+                strategy_id=strategy_id,
+                strategy_version_id=strategy_version_id,
+                min_resolved_samples=active_runner.config.decay_min_resolved_samples,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/share/{strategy_id}")
     async def share_strategy(strategy_id: str) -> dict[str, Any]:
