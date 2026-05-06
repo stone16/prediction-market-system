@@ -10,6 +10,7 @@ import pytest
 from pms.config import ControllerSettings, PMSSettings
 from pms.controller.pipeline import ControllerPipeline
 from pms.core.enums import OrderStatus, Side, TimeInForce
+from pms.core.interfaces import IForecaster
 from pms.core.models import FillRecord, MarketSignal, Portfolio, TradeDecision
 from pms.evaluation.adapters.scoring import Scorer
 from pms.storage.decision_store import DecisionStore
@@ -22,6 +23,10 @@ class ConstantForecaster:
     def predict(self, signal: MarketSignal) -> tuple[float, float, str]:
         del signal
         return (self.probability, 0.8, "constant")
+
+    async def forecast(self, signal: MarketSignal) -> float:
+        del signal
+        return self.probability
 
 
 class _RecordingConnection:
@@ -155,7 +160,7 @@ def _fill() -> FillRecord:
 @pytest.mark.asyncio
 async def test_controller_captures_spread_bps_from_explicit_signal_field() -> None:
     pipeline = ControllerPipeline(
-        forecasters=(ConstantForecaster(0.7),),
+        forecasters=(cast(IForecaster, ConstantForecaster(0.7)),),
         settings=PMSSettings(controller=ControllerSettings(max_spread_bps=200.0)),
     )
 
@@ -171,7 +176,7 @@ async def test_controller_captures_spread_bps_from_explicit_signal_field() -> No
 @pytest.mark.asyncio
 async def test_controller_computes_spread_bps_from_orderbook_when_missing() -> None:
     pipeline = ControllerPipeline(
-        forecasters=(ConstantForecaster(0.7),),
+        forecasters=(cast(IForecaster, ConstantForecaster(0.7)),),
         settings=PMSSettings(),
     )
 
