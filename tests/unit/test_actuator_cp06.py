@@ -2895,6 +2895,69 @@ async def test_polymarket_actuator_audit_includes_approver_id_from_sidecar(
 
 
 @pytest.mark.asyncio
+async def test_polymarket_actuator_emits_consume_failed_when_consume_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """STO-10 review-loop f1: when `consume()` raises after a successful
+    submit, the audit log must NOT claim the approval was cleanly
+    consumed — the artifact may still be on disk and could replay on
+    restart. Emit a distinct `approval_consume_failed` event instead so
+    forensic walkers can separate "successfully consumed" from "consumed
+    but cleanup failed", and log at ERROR rather than WARN.
+
+    The fast path (`_approval_state.approved=True`) MUST stay set after
+    submit succeeds — flipping it back would cause the *next* in-process
+    decision to re-prompt the gate and double-submit on the same
+    approval file. The cleanup-failure handling is forensic, not
+    transactional."""
+
+    @dataclass
+    class _ConsumeRaisesGate:
+        consume_error: Exception
+        previews: list[LiveOrderPreview] = field(default_factory=list)
+
+        async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+            self.previews.append(preview)
+            return True
+
+        async def consume(self, preview: LiveOrderPreview) -> None:
+            del preview
+            raise self.consume_error
+
+    writer = RecordingFirstOrderAuditWriter()
+    gate = _ConsumeRaisesGate(consume_error=OSError("disk full"))
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="pms.actuator.adapters.polymarket"):
+        state = await actuator.execute(_decision(), _portfolio())
+
+    # Submit succeeded; the in-process fast path must stay open so the
+    # next decision doesn't re-trigger the gate.
+    assert state.status == OrderStatus.MATCHED.value
+    assert actuator._first_order_approved() is True
+
+    # Audit log records the failure honestly, not a clean consume.
+    events = [event for event, _, _ in writer.events]
+    assert events == ["approval_matched", "approval_consume_failed"]
+    assert "approval_consumed" not in events
+
+    # ERROR-level log fires on consume failure (not the previous WARN).
+    assert any(
+        record.levelname == "ERROR" and "consume" in record.message.lower()
+        for record in caplog.records
+    ), (
+        "expected ERROR log on consume failure, got: "
+        f"{[(r.levelname, r.message) for r in caplog.records]}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_polymarket_actuator_audit_approver_id_is_none_when_sidecar_absent(
     tmp_path: Path,
 ) -> None:

@@ -10,6 +10,7 @@ the gate; centralising the write in one tested helper prevents that.
 
 from __future__ import annotations
 
+import importlib
 import json
 import stat
 from datetime import UTC, datetime
@@ -228,6 +229,96 @@ def test_write_approval_force_overwrites(tmp_path: Path) -> None:
 
     payload = json.loads(approval_path.read_text(encoding="utf-8"))
     assert payload["approved"] is True
+
+
+def test_write_approval_writes_sidecar_before_approval_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """STO-10 review-loop f2: the actuator's gate matches on the
+    approval JSON; if the JSON appears before the sidecar, a running
+    actuator can match and submit while `read_approver_id` returns
+    None — the audit log would record a real authorization with
+    `approver_id: null`. Writing the sidecar first closes that race."""
+    write_order: list[str] = []
+    real_write = importlib.import_module("scripts.approve_first_order")._write_secret_file
+
+    def _tracking_write(target_path: Path, content: str) -> None:
+        write_order.append(target_path.name)
+        real_write(target_path, content)
+
+    monkeypatch.setattr(
+        "scripts.approve_first_order._write_secret_file", _tracking_write
+    )
+
+    preview = ApprovalPreview(
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side="BUY",
+        outcome="YES",
+        max_notional_usdc=10.0,
+        limit_price=0.4,
+        max_slippage_bps=50,
+    )
+    approval_path = tmp_path / "first-order.json"
+
+    write_approval(
+        preview,
+        path=approval_path,
+        approver_id="op-a",
+        ts=datetime.now(tz=UTC),
+    )
+
+    assert write_order == [
+        "first-order.json.meta.json",
+        "first-order.json",
+    ], (
+        "sidecar must be written before the approval JSON so the gate "
+        f"never sees the approval before the operator identity is on disk; "
+        f"actual order: {write_order}"
+    )
+
+
+def test_write_approval_does_not_publish_approval_when_sidecar_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If sidecar writing raises, the approval JSON must NOT exist on
+    disk afterwards — otherwise an actuator could match a half-armed
+    authorization with no operator identity recorded."""
+    real_write = importlib.import_module("scripts.approve_first_order")._write_secret_file
+
+    def _failing_sidecar_write(target_path: Path, content: str) -> None:
+        if target_path.name.endswith(".meta.json"):
+            raise OSError("simulated sidecar write failure")
+        real_write(target_path, content)
+
+    monkeypatch.setattr(
+        "scripts.approve_first_order._write_secret_file", _failing_sidecar_write
+    )
+
+    preview = ApprovalPreview(
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side="BUY",
+        outcome="YES",
+        max_notional_usdc=10.0,
+        limit_price=0.4,
+        max_slippage_bps=50,
+    )
+    approval_path = tmp_path / "first-order.json"
+
+    with pytest.raises(OSError, match="simulated sidecar write failure"):
+        write_approval(
+            preview,
+            path=approval_path,
+            approver_id="op-a",
+            ts=datetime.now(tz=UTC),
+        )
+
+    assert not approval_path.exists(), (
+        "approval JSON must not exist when sidecar write failed first"
+    )
 
 
 def test_main_end_to_end(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

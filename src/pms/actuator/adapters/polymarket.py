@@ -729,16 +729,37 @@ class PolymarketActuator:
             # First venue submission succeeded: lock in first-order
             # completion and consume the operator-side approval artefact
             # so it cannot be replayed by a future restart.
+            #
+            # `_approval_state.approved=True` MUST stay set even if
+            # consume() fails — flipping it back would cause the next
+            # in-process decision to re-prompt the gate and double-submit
+            # against the still-present approval file. The cleanup-
+            # failure handling below is forensic, not transactional.
             self._approval_state.approved = True
             try:
                 await self.operator_gate.consume(preview)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("first-order gate consume failed: %s", exc)
-            await self._emit_audit(
-                event="approval_consumed",
-                preview=preview,
-                approver_id=approver_id,
-            )
+                # Record the truth: cleanup failed, the artefact may
+                # still be on disk, a future restart could replay it.
+                # ERROR-level so an external alerter can page the
+                # operator for manual cleanup.
+                logger.error(
+                    "first-order gate consume failed: %s. Approval "
+                    "artefact may remain on disk and could replay on "
+                    "restart; manual cleanup required.",
+                    exc,
+                )
+                await self._emit_audit(
+                    event="approval_consume_failed",
+                    preview=preview,
+                    approver_id=approver_id,
+                )
+            else:
+                await self._emit_audit(
+                    event="approval_consumed",
+                    preview=preview,
+                    approver_id=approver_id,
+                )
 
         return order_state
 

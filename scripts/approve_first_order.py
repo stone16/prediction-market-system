@@ -143,11 +143,19 @@ def write_approval(
         "ts": ts.isoformat(),
     }
 
-    _write_secret_file(path, json.dumps(payload, sort_keys=True))
+    # Write order matters: the gate matches on the approval JSON, then
+    # `read_approver_id` reads the sidecar. If the approval JSON
+    # appeared first, a running actuator could match between the two
+    # writes and emit `approval_matched` with `approver_id: null`.
+    # Writing the sidecar first guarantees identity is on disk before
+    # the approval is observable to the gate. If the sidecar write
+    # raises, the approval JSON is never written — the gate stays
+    # denied and the operator's tool exits non-zero.
     _write_secret_file(
         sidecar_path,
         json.dumps(sidecar_payload, sort_keys=True),
     )
+    _write_secret_file(path, json.dumps(payload, sort_keys=True))
 
     return path, sidecar_path
 
