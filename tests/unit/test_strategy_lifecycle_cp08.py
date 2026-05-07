@@ -227,6 +227,7 @@ class FakeControllerFactory:
 def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.LIVE,
+        secret_source="fly",
         live_trading_enabled=True,
         auto_migrate_default_v2=False,
         database=DatabaseSettings(

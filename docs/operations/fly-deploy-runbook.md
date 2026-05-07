@@ -16,18 +16,31 @@ same change.
 
 ## Secrets
 
-Inject secrets through Fly, never through config files or chat:
+Inject Fly deployment secrets through Fly, never through config files, shell
+exports, `.env` files, chat, issues, or PRs.
+
+For non-sensitive values such as `PMS_API_TOKEN`, `fly secrets set` is fine:
 
 ```bash
 fly secrets set \
   PMS_API_TOKEN='...' \
-  PMS_DISCORD__WEBHOOK_URL='https://discord.com/api/webhooks/...' \
-  PMS_POLYMARKET__PRIVATE_KEY='...' \
-  PMS_POLYMARKET__API_KEY='...' \
-  PMS_POLYMARKET__API_SECRET='...' \
-  PMS_POLYMARKET__API_PASSPHRASE='...' \
-  PMS_POLYMARKET__SIGNATURE_TYPE='...' \
-  PMS_POLYMARKET__FUNDER_ADDRESS='...'
+  PMS_DISCORD__WEBHOOK_URL='https://discord.com/api/webhooks/...'
+```
+
+Local LIVE currently uses the temporary local secret-file path documented in
+`docs/operations/live-polymarket-runbook.md`. If LIVE later moves to Fly, set
+the non-secret `PMS_SECRET_SOURCE=fly` marker in the Fly app environment and
+use stdin so Polymarket values do not land in shell history. Run this command,
+paste the `NAME=VALUE` lines, then press Ctrl-D:
+
+```text
+fly secrets import
+PMS_POLYMARKET__PRIVATE_KEY=<paste private key>
+PMS_POLYMARKET__API_KEY=<paste API key>
+PMS_POLYMARKET__API_SECRET=<paste API secret>
+PMS_POLYMARKET__API_PASSPHRASE=<paste API passphrase>
+PMS_POLYMARKET__SIGNATURE_TYPE=1
+PMS_POLYMARKET__FUNDER_ADDRESS=<paste wallet address>
 ```
 
 ## Deploy

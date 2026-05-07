@@ -37,8 +37,10 @@ def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_ga
     )
 
     assert '"outcome": "NO"' in runbook_text
-    assert "PMS_LIVE_ACCOUNT_RECONCILIATION_REQUIRED=true" in runbook_text
-    assert "PMS_CONTROLLER__TIME_IN_FORCE=IOC" in runbook_text
+    assert "live_account_reconciliation_required: true" in runbook_text
+    assert "time_in_force: IOC" in runbook_text
+    assert "secret_source: local_file" in runbook_text
+    assert "chmod 600" in runbook_text
 
 
 def test_live_and_kalshi_mentions_are_stubbed_not_capability_claims() -> None:

@@ -1,5 +1,6 @@
 # Tight PAPER soak configuration for the first real-data risk-readiness run.
-# Keep all credentials in environment variables or a secret manager.
+# Keep PAPER soak credentials out of config; LIVE Polymarket credentials must
+# come from a chmod 600 local secret file with secret_source=local_file.
 
 mode: paper
 live_trading_enabled: false

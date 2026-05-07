@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import stat
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -15,6 +16,9 @@ from pms.core.models import LiveTradingDisabledError, VenueCredentials
 
 class MissingPolymarketCredentialsError(LiveTradingDisabledError):
     """Raised when LIVE mode lacks required Polymarket credentials."""
+
+
+SecretSource = Literal["fly", "local_file"]
 
 
 class PolymarketSettings(BaseModel):
@@ -166,6 +170,8 @@ class PMSSettings(BaseSettings):
     )
 
     mode: RunMode = RunMode.BACKTEST
+    secret_source: SecretSource | None = None
+    local_secret_file: str | None = None
     live_trading_enabled: bool = False
     agent_strategy_runtime_enabled: bool = False
     auto_migrate_default_v2: bool = True
@@ -190,21 +196,19 @@ class PMSSettings(BaseSettings):
 
     @classmethod
     def load(cls, config_path: str | Path | None = "config.yaml") -> Self:
-        if config_path is None:
-            return cls()
+        config_data: dict[str, Any] = {}
 
-        path = Path(config_path)
-        if not path.exists():
-            return cls()
+        if config_path is not None:
+            path = Path(config_path)
+            if path.exists():
+                loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+                if loaded is not None:
+                    if not isinstance(loaded, dict):
+                        msg = f"Expected mapping in config file {path}"
+                        raise ValueError(msg)
+                    config_data = loaded
 
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if loaded is None:
-            return cls()
-        if not isinstance(loaded, dict):
-            msg = f"Expected mapping in config file {path}"
-            raise ValueError(msg)
-
-        config_data: dict[str, Any] = loaded
+        config_data = _merge_local_secret_file(config_data)
         return cls(**config_data)
 
 
@@ -226,6 +230,23 @@ def validate_live_mode_ready(settings: PMSSettings) -> VenueCredentials:
         fields = ", ".join(missing)
         msg = f"Missing Polymarket credential fields: {fields}"
         raise MissingPolymarketCredentialsError(msg)
+    if settings.mode == RunMode.LIVE and settings.secret_source not in {"fly", "local_file"}:
+        msg = (
+            "LIVE mode requires Polymarket credentials to come from an approved "
+            "secret source. Set PMS_SECRET_SOURCE=local_file for temporary "
+            "local live trading, or PMS_SECRET_SOURCE=fly for Fly deployment."
+        )
+        raise LiveTradingDisabledError(msg)
+    if settings.mode == RunMode.LIVE and settings.secret_source == "local_file":
+        if settings.local_secret_file is None or settings.local_secret_file.strip() == "":
+            msg = "LIVE local_file secret source requires PMS_LOCAL_SECRET_FILE."
+            raise LiveTradingDisabledError(msg)
+        try:
+            _require_private_local_secret_file(
+                Path(settings.local_secret_file).expanduser()
+            )
+        except ValueError as exc:
+            raise LiveTradingDisabledError(str(exc)) from exc
     if settings.controller.time_in_force.upper() == "GTC":
         msg = (
             "LIVE GTC disabled until an open-order ledger reserves "
@@ -256,3 +277,89 @@ def _missing_polymarket_fields(credentials: VenueCredentials) -> list[str]:
     if credentials.signature_type is None:
         missing.append("signature_type")
     return missing
+
+
+def _merge_local_secret_file(config_data: dict[str, Any]) -> dict[str, Any]:
+    secret_source = _configured_string(
+        config_data,
+        field_name="secret_source",
+        env_name="PMS_SECRET_SOURCE",
+    )
+    if secret_source != "local_file":
+        return config_data
+
+    raw_path = _configured_string(
+        config_data,
+        field_name="local_secret_file",
+        env_name="PMS_LOCAL_SECRET_FILE",
+    )
+    if raw_path is None or raw_path.strip() == "":
+        return config_data
+
+    secret_path = Path(raw_path).expanduser()
+    local_secrets = _load_local_polymarket_secret_file(secret_path)
+    merged = dict(config_data)
+    existing_polymarket = merged.get("polymarket") or {}
+    if not isinstance(existing_polymarket, dict):
+        msg = "Expected polymarket config mapping before applying local secret file"
+        raise ValueError(msg)
+
+    merged["secret_source"] = "local_file"
+    merged["local_secret_file"] = str(secret_path)
+    merged["polymarket"] = {**existing_polymarket, **local_secrets}
+    return merged
+
+
+def _configured_string(
+    config_data: dict[str, Any],
+    *,
+    field_name: str,
+    env_name: str,
+) -> str | None:
+    raw_value = config_data.get(field_name)
+    if isinstance(raw_value, str):
+        return raw_value
+    env_value = os.environ.get(env_name)
+    if env_value is None:
+        return None
+    return env_value
+
+
+def _load_local_polymarket_secret_file(path: Path) -> dict[str, object]:
+    _require_private_local_secret_file(path)
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        msg = f"Expected mapping in local secret file {path}"
+        raise ValueError(msg)
+
+    raw_polymarket = loaded.get("polymarket")
+    if not isinstance(raw_polymarket, dict):
+        msg = f"Expected polymarket mapping in local secret file {path}"
+        raise ValueError(msg)
+
+    allowed_fields = {
+        "private_key",
+        "api_key",
+        "api_secret",
+        "api_passphrase",
+        "signature_type",
+        "funder_address",
+    }
+    return {
+        field_name: value
+        for field_name, value in raw_polymarket.items()
+        if field_name in allowed_fields
+    }
+
+
+def _require_private_local_secret_file(path: Path) -> None:
+    if not path.exists():
+        msg = f"Local secret file does not exist: {path}"
+        raise ValueError(msg)
+    if not path.is_file():
+        msg = f"Local secret path is not a file: {path}"
+        raise ValueError(msg)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        msg = f"Local secret file {path} is too permissive; run `chmod 600 {path}`."
+        raise ValueError(msg)

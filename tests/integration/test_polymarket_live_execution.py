@@ -151,6 +151,7 @@ async def test_live_polymarket_order_uses_runner_order_and_fill_persistence_path
 def _live_settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.LIVE,
+        secret_source="fly",
         live_trading_enabled=True,
         auto_migrate_default_v2=False,
         controller=ControllerSettings(time_in_force="IOC"),

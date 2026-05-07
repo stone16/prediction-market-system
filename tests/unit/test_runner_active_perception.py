@@ -179,6 +179,7 @@ class MatchingVenueReconciler:
 def _settings(mode: RunMode) -> PMSSettings:
     return PMSSettings(
         mode=mode,
+        secret_source="fly" if mode == RunMode.LIVE else None,
         live_trading_enabled=mode == RunMode.LIVE,
         auto_migrate_default_v2=False,
         database=DatabaseSettings(
@@ -633,6 +634,7 @@ async def test_reselection_caps_subscription_asset_ids(
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.LIVE,
+            secret_source="fly",
             live_trading_enabled=True,
             auto_migrate_default_v2=False,
             database=DatabaseSettings(
@@ -738,6 +740,7 @@ async def test_refresh_subscription_caps_asset_ids() -> None:
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.LIVE,
+            secret_source="fly",
             live_trading_enabled=True,
             auto_migrate_default_v2=False,
             database=DatabaseSettings(

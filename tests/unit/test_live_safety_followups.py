@@ -176,6 +176,7 @@ def _portfolio() -> Portfolio:
 def _live_settings(**overrides: object) -> PMSSettings:
     values: dict[str, Any] = {
         "mode": RunMode.LIVE,
+        "secret_source": "fly",
         "live_trading_enabled": True,
         "auto_migrate_default_v2": False,
         "controller": ControllerSettings(time_in_force="IOC", min_volume=0.0),
