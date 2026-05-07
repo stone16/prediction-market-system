@@ -148,6 +148,128 @@ Keep the first-order notional at the minimum production risk cap. The approval
 file is not a credential, but it should still live outside the repo so stale
 approvals are not committed or reused accidentally.
 
+## Operator Workflow (STO-10)
+
+The first-order gate is fail-closed by code (see
+`src/pms/actuator/adapters/polymarket.py:584-660`), but the gate only does its
+job when the human side is named, reachable, and accountable. This section
+defines that human side.
+
+### Named operators
+
+- **Primary operator**: `TODO_DECISION` — fill in the named human responsible
+  for first-order approvals. Until this is filled in, the gate must remain
+  denied for every first-order signal.
+- **Backup operator**: `TODO_DECISION` — fill in the named human who covers
+  when the primary is unavailable.
+- **Reachability rule**: at least one named operator must be reachable for
+  every first-order event during normal market hours. First-order signals
+  outside named operator hours **stall the strategy by design** — there is no
+  on-call escalation path for first-order events until the user explicitly
+  funds one.
+
+Whoever is on Slack at the time is **not** the operator. An anonymous gate is
+no gate.
+
+### Approval-file location
+
+- **Canonical environment variable**:
+  `PMS_POLYMARKET__FIRST_LIVE_ORDER_APPROVAL_PATH`
+  (consumed at `src/pms/runner.py:2098-2104` →
+  `_first_live_order_gate`). An empty value resolves to
+  `DenyFirstLiveOrderGate` and **locks** the gate; do not set the env var to
+  empty as a "disable" — the gate is already disabled if the env var is
+  unset.
+- **Path**: `TODO_DECISION` — choose one of:
+  - encrypted directory on the runner host (e.g. `/secure/pms/first-order.json`
+    on a LUKS-backed mount or tmpfs);
+  - Fly secret mount if the runner is deployed on Fly (see `fly.toml`);
+  - operator's local machine over an SSH-tunnel-mounted dir.
+- **Permissions**: write the file with `umask 077`. The runner process UID
+  must be the only reader. The file must never be committed to the repo.
+- **Sidecar metadata**: alongside the approval JSON, the operator's tool
+  writes a `<approval-path>.meta.json` containing `{ "approver_id": "<id>",
+  "ts": "<ISO 8601>" }`. The audit writer reads this on the next event and
+  records the approver. Format remains stable across runs.
+
+### "First" order semantics
+
+"First" means **first since the actuator was instantiated** (see the in-
+memory state at `src/pms/actuator/adapters/polymarket.py:571-576`). A process
+restart resets the gate to denied — the next decision will re-prompt the
+operator. **This re-prompt on restart is intentional**, not a bug: any
+disruption that warrants a restart also warrants re-validating the operating
+environment before the next live submit.
+
+Concretely, an approval is consumed exactly once per actuator lifetime:
+
+1. Operator drops the approval JSON at the configured path.
+2. Adapter matches the next decision against the file and submits.
+3. Adapter calls `consume()`, which unlinks the file
+   (`polymarket.py:324-330`).
+4. `_approval_state.approved = True` flips the fast path open
+   (`polymarket.py:599-604`); subsequent orders skip the slow path.
+5. On any process restart, step 1 must repeat with a freshly-filed
+   approval.
+
+### Audit trail
+
+Every gate consultation appends one record to the JSONL at
+`live_emergency_audit_path` (default `.data/live-emergency-audit.jsonl`,
+configurable via `PMS_LIVE_EMERGENCY_AUDIT_PATH`).
+
+Three event types, written by `JsonlFirstOrderAuditWriter`
+(`src/pms/storage/first_order_audit.py`):
+
+| `event`              | When                                                  |
+|----------------------|-------------------------------------------------------|
+| `approval_matched`   | Gate returned True; submit is about to proceed.       |
+| `approval_denied`    | Gate returned False; `OperatorApprovalRequiredError`. |
+| `approval_consumed`  | Submit succeeded and `consume()` ran (file unlinked). |
+
+A record carries: `ts`, `event`, `approver_id` (from sidecar, may be `null`),
+`venue`, `market_id`, `token_id`, `side`, `outcome`, `max_notional_usdc`,
+`limit_price`, `max_slippage_bps`, `market_slug`, `question`. The audit
+writer is non-blocking — a write failure logs WARN and the order proceeds,
+mirroring `runner.py:1307-1308`.
+
+> **TODO_DECISION (audit sink)**: This runbook reuses `live_emergency_audit_path` as
+> the single consolidated authorization log. Filter records by the `event`
+> field (first-order) vs the `phase` field (emergency-halt) when reading.
+> Switch to a dedicated `first_order_audit_path` if you prefer separate
+> sinks; this is recorded as a deferred decision in STO-10.
+
+### Alerting and SLA
+
+- **Alert channel**: `TODO_DECISION` — choose one of: Slack webhook fed by a
+  log shipper that watches for `OperatorApprovalRequiredError`; PagerDuty;
+  email digest; or no alerting (operator polls runner status). Until this is
+  set, the operator must actively check `/status` before any first-order
+  signal is expected.
+- **Max acceptable elapsed time** from `OperatorApprovalRequiredError` to
+  `approval_consumed`: `TODO_DECISION` minutes. Exceeding this in cp-03
+  rehearsal is a signal to streamline the procedure before live.
+
+### End-to-end procedure (operator playbook)
+
+When `OperatorApprovalRequiredError` is observed (in logs or via alert):
+
+1. Pull the preview details from the error message (venue, market, token,
+   side, outcome, max_notional_usdc, limit_price, max_slippage_bps).
+2. Validate the preview against current strategy intent and risk caps.
+3. If approved, run the operator tool to write both the approval JSON
+   (matching every field) and the `<path>.meta.json` sidecar with your
+   `approver_id`.
+4. Wait for the next decision; the gate consults the file, matches, submits.
+5. Confirm `approval_consumed` lands in the audit JSONL.
+6. The fast path is now open for the rest of the actuator's lifetime; if
+   the runner restarts, repeat from step 1 on the next decision.
+
+If at any step you decide **not** to approve, do nothing. The next decision
+will trigger another `OperatorApprovalRequiredError`; the audit log will
+record `approval_denied`. The strategy stalls — that is the gate working as
+intended.
+
 ## Rollback
 
 1. Stop the runner: `curl -X POST http://127.0.0.1:8000/run/stop`.
