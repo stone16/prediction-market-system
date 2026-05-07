@@ -4,7 +4,7 @@ The script's job is to take an `OperatorApprovalRequiredError` message
 (or explicit fields) and write the approval JSON + sidecar metadata file
 correctly so the gate matches on the next decision. Mismatches between
 what the operator types and what `_approval_payload_matches` expects
-(`src/pms/actuator/adapters/polymarket.py:976-998`) would silently fail
+(`src/pms/actuator/adapters/polymarket.py:1122-1144`) would silently fail
 the gate; centralising the write in one tested helper prevents that.
 """
 

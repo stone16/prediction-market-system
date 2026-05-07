@@ -2727,7 +2727,7 @@ async def test_polymarket_actuator_audit_writer_failure_does_not_break_submit(
 ) -> None:
     """STO-10 cp-02: an audit-writer failure must NOT block the submit
     or leave the gate in an inconsistent state. Audit failure logs WARN
-    and the order proceeds. Mirrors precedent at runner.py:1307-1308 where
+    and the order proceeds. Mirrors precedent at runner.py:1319-1320 where
     LiveEmergencyAuditWriter failures degrade gracefully rather than
     interrupting the trading hot path."""
     writer = RecordingFirstOrderAuditWriter(raise_on_event="approval_matched")

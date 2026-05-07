@@ -156,7 +156,7 @@ This is the human work that must happen before flipping
 file), or **[confirm]** (verify each launch).
 
 The first-order gate is fail-closed by code
-(`src/pms/actuator/adapters/polymarket.py:584-660`), but it only does its
+(`src/pms/actuator/adapters/polymarket.py:645-764`), but it only does its
 job when the human side is named, reachable, and accountable. Each item
 below makes one piece of the human side concrete.
 
@@ -212,7 +212,7 @@ polymarket:
 ```
 
 Empty value pitfall: `_first_live_order_gate`
-(`src/pms/runner.py:2098-2104`) treats an empty string as
+(`src/pms/runner.py:2110-2116`) treats an empty string as
 `DenyFirstLiveOrderGate` — the gate **locks shut**, it does not
 "disable." Do not set the field to empty as a workaround.
 
@@ -353,7 +353,7 @@ recorded.
 
 "First" means **first since the actuator was instantiated** (see the
 in-memory state at
-`src/pms/actuator/adapters/polymarket.py:571-576`). A process restart
+`src/pms/actuator/adapters/polymarket.py:632-637`). A process restart
 resets the gate to denied — the next decision will re-prompt the
 operator. **This re-prompt on restart is intentional**, not a bug: any
 disruption that warrants a restart also warrants re-validating the
@@ -364,9 +364,9 @@ Concretely, an approval is consumed exactly once per actuator lifetime:
 1. Operator drops the approval JSON at the configured path.
 2. Adapter matches the next decision against the file and submits.
 3. Adapter calls `consume()`, which unlinks the file
-   (`polymarket.py:324-330`).
+   (`polymarket.py:358-373`).
 4. `_approval_state.approved = True` flips the fast path open
-   (`polymarket.py:599-604`); subsequent orders skip the slow path.
+   (`polymarket.py:660-665`); subsequent orders skip the slow path.
 5. On any process restart, step 1 must repeat with a freshly-filed
    approval.
 
@@ -391,7 +391,7 @@ A record carries: `ts`, `event`, `approver_id` (from sidecar, may be
 `null`), `venue`, `market_id`, `token_id`, `side`, `outcome`,
 `max_notional_usdc`, `limit_price`, `max_slippage_bps`, `market_slug`,
 `question`. The audit writer is non-blocking — a write failure logs
-WARN and the order proceeds, mirroring `runner.py:1307-1308`.
+WARN and the order proceeds, mirroring `runner.py:1319-1320`.
 
 `approval_consume_failed` is the operator's signal to clean up
 manually: the venue submit succeeded, but the approval JSON and/or

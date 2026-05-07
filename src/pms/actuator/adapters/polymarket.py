@@ -307,7 +307,7 @@ class FirstOrderAuditWriter(Protocol):
     Implementations record one event per call. Failures must NOT raise into
     the trading hot path — the actuator wraps each call in try/except to
     keep audit-write degradation independent of order submission. See
-    `runner.py:1307-1308` for the same pattern on emergency-audit writes.
+    `runner.py:1319-1320` for the same pattern on emergency-audit writes.
     """
 
     async def record_event(
@@ -772,7 +772,7 @@ class PolymarketActuator:
     ) -> None:
         # Audit emission is fire-and-forget from the trading hot path: a
         # writer outage must never block or roll back an order. Mirrors the
-        # precedent at runner.py:1307-1308 for emergency-audit append.
+        # precedent at runner.py:1319-1320 for emergency-audit append.
         try:
             await self.audit_writer.record_event(
                 event=event,

@@ -16,7 +16,7 @@ class JsonlFirstOrderAuditWriter:
     """Append-only JSONL sink for first-live-order operator events.
 
     Records the gate's match-keys (the same fields
-    `_approval_payload_matches` checks at polymarket.py:976-998) plus
+    `_approval_payload_matches` checks at polymarket.py:1122-1144) plus
     timestamp, event name, and an optional approver_id supplied by the
     operator's tooling. One record per event, one event per `record_event`
     call. Parent directory is created on demand to mirror
