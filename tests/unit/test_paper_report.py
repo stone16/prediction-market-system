@@ -58,6 +58,13 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
         status={
             "mode": "paper",
             "runner_started_at": "2026-05-03T09:03:03.240858+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "stale",
+                    "last_signal_at": "2026-05-04T01:00:00+00:00",
+                }
+            ],
             "controller": {
                 "decisions_total": 17,
                 "diagnostics_total": 3,
@@ -81,8 +88,17 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
                 {"locked_usdc": 2.0, "unrealized_pnl": -0.25},
             ],
         },
+        strategies={
+            "strategies": [
+                {
+                    "strategy_id": "default",
+                    "active_version_id": "default-v2",
+                }
+            ],
+        },
     )
 
+    assert metrics.strategy == "default@default-v2"
     assert metrics.day_of_soak == 2
     assert metrics.decisions_made == 17
     assert metrics.decisions_rejected == 3
@@ -91,6 +107,11 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
     assert metrics.total_exposure == 5.0
     assert metrics.cumulative_pnl == 1.0
     assert metrics.brier_score_7d == 0.18
+    assert (
+        "sensor",
+        "MarketDataSensor stale",
+        "last_signal_at=2026-05-04T01:00:00+00:00",
+    ) in metrics.risk_events
 
 
 def test_metrics_from_api_payloads_records_missing_status_as_risk_event() -> None:

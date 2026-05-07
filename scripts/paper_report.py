@@ -19,7 +19,7 @@ _API_TIMEOUT_S = 5.0
 @dataclass(frozen=True)
 class PaperReportMetrics:
     report_date: date
-    strategy: str = "ripple_v2"
+    strategy: str = "unknown"
     day_of_soak: int = 0
     decisions_made: int = 0
     decisions_accepted: int = 0
@@ -48,9 +48,11 @@ def metrics_from_api_payloads(
     status: dict[str, Any],
     trades: dict[str, Any],
     positions: dict[str, Any],
+    strategies: dict[str, Any] | None = None,
     risk_events: tuple[tuple[str, str, str], ...] = (),
 ) -> PaperReportMetrics:
     events = list(risk_events)
+    events.extend(_sensor_risk_events(status))
     started_at = _parse_datetime(status.get("runner_started_at"))
     if started_at is None:
         events.append(("report generation", "runner_started_at missing", "check /status"))
@@ -69,7 +71,7 @@ def metrics_from_api_payloads(
 
     return PaperReportMetrics(
         report_date=report_date,
-        strategy=str(status.get("strategy") or "ripple_v2"),
+        strategy=_strategy_label(status=status, strategies=strategies or {}),
         day_of_soak=day_of_soak,
         decisions_made=_int_from_dict(controller, "decisions_total"),
         decisions_rejected=_int_from_dict(controller, "diagnostics_total"),
@@ -120,11 +122,21 @@ def load_live_metrics(
         events.append(("report generation", "/positions unavailable", positions_error))
         positions = {}
 
+    strategies, strategies_error = _fetch_api_json(
+        api_base_url=api_base_url,
+        path="/strategies",
+        api_token=api_token,
+    )
+    if strategies_error is not None:
+        events.append(("report generation", "/strategies unavailable", strategies_error))
+        strategies = {}
+
     return metrics_from_api_payloads(
         report_date=report_date,
         status=status,
         trades=trades,
         positions=positions,
+        strategies=strategies,
         risk_events=tuple(events),
     )
 
@@ -266,6 +278,42 @@ def _fmt_ratio_percent(value: float | None) -> str:
     if value is None:
         return "N/A"
     return f"{value * 100.0:.1f}%"
+
+
+def _strategy_label(*, status: dict[str, Any], strategies: dict[str, Any]) -> str:
+    status_strategy = status.get("strategy")
+    if isinstance(status_strategy, str) and status_strategy:
+        return status_strategy
+
+    rows = _list_value(strategies, "strategies")
+    labels: list[str] = []
+    for row in rows:
+        strategy_id = row.get("strategy_id")
+        if not isinstance(strategy_id, str) or not strategy_id:
+            continue
+        active_version_id = row.get("active_version_id")
+        if isinstance(active_version_id, str) and active_version_id:
+            labels.append(f"{strategy_id}@{active_version_id}")
+        else:
+            labels.append(strategy_id)
+    return ", ".join(labels) if labels else "unknown"
+
+
+def _sensor_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
+    events: list[tuple[str, str, str]] = []
+    for row in _list_value(status, "sensors"):
+        sensor_status = row.get("status")
+        if sensor_status not in {"failed", "stale"}:
+            continue
+        name = str(row.get("name") or "unknown")
+        last_signal_at = row.get("last_signal_at")
+        detail = (
+            f"last_signal_at={last_signal_at}"
+            if isinstance(last_signal_at, str) and last_signal_at
+            else "last_signal_at=none"
+        )
+        events.append(("sensor", f"{name} {sensor_status}", detail))
+    return events
 
 
 def _fetch_api_json(
