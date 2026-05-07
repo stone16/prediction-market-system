@@ -2646,3 +2646,341 @@ async def test_polymarket_partial_fill_accepts_sub_cent_rounding_drift(
         _live_settings().polymarket.credentials(),
     )
     assert result.filled_notional_usdc == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# STO-10 cp-02: first-order audit emission
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RecordingFirstOrderAuditWriter:
+    events: list[tuple[str, LiveOrderPreview, str | None]] = field(default_factory=list)
+    raise_on_event: str | None = None
+
+    async def record_event(
+        self,
+        *,
+        event: str,
+        preview: LiveOrderPreview,
+        approver_id: str | None = None,
+    ) -> None:
+        self.events.append((event, preview, approver_id))
+        if self.raise_on_event == event:
+            raise RuntimeError(f"audit write failed: {event}")
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_emits_audit_on_gate_match_and_consume() -> None:
+    """STO-10 cp-02: happy path emits approval_matched then approval_consumed
+    with the same preview, so a forensic walker can reconstruct what was
+    authorized and confirm the consume completed."""
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    assert [event for event, _, _ in writer.events] == [
+        "approval_matched",
+        "approval_consumed",
+    ]
+    matched_preview = writer.events[0][1]
+    consumed_preview = writer.events[1][1]
+    assert matched_preview == consumed_preview
+    assert matched_preview.market_id == "m-cp06"
+    assert matched_preview.token_id == "t-yes"
+    assert matched_preview.side == Side.BUY.value
+    assert matched_preview.max_notional_usdc == 10.0
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_emits_audit_on_gate_denial() -> None:
+    """STO-10 cp-02: denial path emits approval_denied with the preview
+    that was rejected, so the audit log records every gate consultation
+    even when the gate refuses."""
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=RecordingOperatorGate(approved=False),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    with pytest.raises(OperatorApprovalRequiredError):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert [event for event, _, _ in writer.events] == ["approval_denied"]
+    assert writer.events[0][1].market_id == "m-cp06"
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_audit_writer_failure_does_not_break_submit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """STO-10 cp-02: an audit-writer failure must NOT block the submit
+    or leave the gate in an inconsistent state. Audit failure logs WARN
+    and the order proceeds. Mirrors precedent at runner.py:1319-1320 where
+    LiveEmergencyAuditWriter failures degrade gracefully rather than
+    interrupting the trading hot path."""
+    writer = RecordingFirstOrderAuditWriter(raise_on_event="approval_matched")
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="pms.actuator.adapters.polymarket"):
+        state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    # approval_matched emit raised; approval_consumed must still fire so the
+    # audit log records the eventual consume even when the matched-event
+    # write failed transiently.
+    assert [event for event, _, _ in writer.events] == [
+        "approval_matched",
+        "approval_consumed",
+    ]
+    assert any(
+        "first-order audit" in record.message and "approval_matched" in record.message
+        for record in caplog.records
+    ), (
+        "expected WARN log mentioning approval_matched failure, got: "
+        f"{[r.message for r in caplog.records]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# STO-10 follow-up: sidecar approver_id reader on FileFirstLiveOrderGate
+# ---------------------------------------------------------------------------
+
+
+def _approval_payload(*, market_id: str = "m-cp06") -> dict[str, object]:
+    return {
+        "approved": True,
+        "max_notional_usdc": 10.0,
+        "venue": "polymarket",
+        "market_id": market_id,
+        "token_id": "t-yes",
+        "side": Side.BUY.value,
+        "outcome": "YES",
+        "limit_price": 0.4,
+        "max_slippage_bps": 50,
+    }
+
+
+def _sidecar_path(approval_path: Path) -> Path:
+    return Path(str(approval_path) + ".meta.json")
+
+
+def test_file_first_live_order_gate_reads_approver_id_from_sidecar(
+    tmp_path: Path,
+) -> None:
+    """STO-10 sidecar: approver_id from <path>.meta.json is captured so
+    the audit log records who authorized the order."""
+    approval_path = tmp_path / "approval.json"
+    _sidecar_path(approval_path).write_text(
+        json.dumps({"approver_id": "operator-alice", "ts": "2026-05-07T00:00:00Z"}),
+        encoding="utf-8",
+    )
+
+    gate = FileFirstLiveOrderGate(approval_path)
+
+    assert gate.read_approver_id() == "operator-alice"
+
+
+def test_file_first_live_order_gate_returns_none_when_sidecar_missing(
+    tmp_path: Path,
+) -> None:
+    """No sidecar → approver_id is None (degraded but unblocked: the
+    runbook's gate's job is to authorize the trade, not to enforce
+    metadata hygiene)."""
+    gate = FileFirstLiveOrderGate(tmp_path / "approval.json")
+
+    assert gate.read_approver_id() is None
+
+
+def test_file_first_live_order_gate_returns_none_when_sidecar_malformed(
+    tmp_path: Path,
+) -> None:
+    """Malformed sidecar (invalid JSON, wrong shape, non-string
+    approver_id) must degrade to None without raising."""
+    approval_path = tmp_path / "approval.json"
+
+    _sidecar_path(approval_path).write_text("not-json", encoding="utf-8")
+    assert FileFirstLiveOrderGate(approval_path).read_approver_id() is None
+
+    _sidecar_path(approval_path).write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    assert FileFirstLiveOrderGate(approval_path).read_approver_id() is None
+
+    _sidecar_path(approval_path).write_text(
+        json.dumps({"approver_id": 42}), encoding="utf-8"
+    )
+    assert FileFirstLiveOrderGate(approval_path).read_approver_id() is None
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_consume_unlinks_sidecar(
+    tmp_path: Path,
+) -> None:
+    """STO-10 sidecar: consume() must unlink the sidecar alongside the
+    approval JSON so a stale `<path>.meta.json` cannot linger and
+    misattribute a future authorization to the previous approver."""
+    approval_path = tmp_path / "approval.json"
+    sidecar = _sidecar_path(approval_path)
+    approval_path.write_text(json.dumps(_approval_payload()), encoding="utf-8")
+    sidecar.write_text(json.dumps({"approver_id": "operator-alice"}), encoding="utf-8")
+
+    gate = FileFirstLiveOrderGate(approval_path)
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+    )
+
+    await gate.consume(preview)
+
+    assert approval_path.exists() is False
+    assert sidecar.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_audit_includes_approver_id_from_sidecar(
+    tmp_path: Path,
+) -> None:
+    """STO-10 follow-up: end-to-end the approver_id flows from the
+    operator's sidecar file into every audit record (matched and
+    consumed). This closes the loop on 'who authorized this order' for
+    forensic walkers."""
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(json.dumps(_approval_payload()), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps({"approver_id": "operator-alice"}), encoding="utf-8"
+    )
+
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=FileFirstLiveOrderGate(approval_path),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    # Both matched and consumed events must carry the approver_id;
+    # capturing once before consume() unlinks the sidecar guarantees
+    # consumed sees the same approver as matched.
+    assert [
+        (event, approver_id) for event, _, approver_id in writer.events
+    ] == [
+        ("approval_matched", "operator-alice"),
+        ("approval_consumed", "operator-alice"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_emits_consume_failed_when_consume_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """STO-10 review-loop f1: when `consume()` raises after a successful
+    submit, the audit log must NOT claim the approval was cleanly
+    consumed — the artifact may still be on disk and could replay on
+    restart. Emit a distinct `approval_consume_failed` event instead so
+    forensic walkers can separate "successfully consumed" from "consumed
+    but cleanup failed", and log at ERROR rather than WARN.
+
+    The fast path (`_approval_state.approved=True`) MUST stay set after
+    submit succeeds — flipping it back would cause the *next* in-process
+    decision to re-prompt the gate and double-submit on the same
+    approval file. The cleanup-failure handling is forensic, not
+    transactional."""
+
+    @dataclass
+    class _ConsumeRaisesGate:
+        consume_error: Exception
+        previews: list[LiveOrderPreview] = field(default_factory=list)
+
+        async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+            self.previews.append(preview)
+            return True
+
+        async def consume(self, preview: LiveOrderPreview) -> None:
+            del preview
+            raise self.consume_error
+
+    writer = RecordingFirstOrderAuditWriter()
+    gate = _ConsumeRaisesGate(consume_error=OSError("disk full"))
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="pms.actuator.adapters.polymarket"):
+        state = await actuator.execute(_decision(), _portfolio())
+
+    # Submit succeeded; the in-process fast path must stay open so the
+    # next decision doesn't re-trigger the gate.
+    assert state.status == OrderStatus.MATCHED.value
+    assert actuator._first_order_approved() is True
+
+    # Audit log records the failure honestly, not a clean consume.
+    events = [event for event, _, _ in writer.events]
+    assert events == ["approval_matched", "approval_consume_failed"]
+    assert "approval_consumed" not in events
+
+    # ERROR-level log fires on consume failure (not the previous WARN).
+    assert any(
+        record.levelname == "ERROR" and "consume" in record.message.lower()
+        for record in caplog.records
+    ), (
+        "expected ERROR log on consume failure, got: "
+        f"{[(r.levelname, r.message) for r in caplog.records]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_audit_approver_id_is_none_when_sidecar_absent(
+    tmp_path: Path,
+) -> None:
+    """Regression: actuator must still emit cleanly when no sidecar
+    exists (the unattributed-but-authorized fallback path)."""
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(json.dumps(_approval_payload()), encoding="utf-8")
+
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=FileFirstLiveOrderGate(approval_path),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    assert [
+        (event, approver_id) for event, _, approver_id in writer.events
+    ] == [
+        ("approval_matched", None),
+        ("approval_consumed", None),
+    ]

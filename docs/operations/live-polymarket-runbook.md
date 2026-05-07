@@ -148,6 +148,294 @@ Keep the first-order notional at the minimum production risk cap. The approval
 file is not a credential, but it should still live outside the repo so stale
 approvals are not committed or reused accidentally.
 
+## Pre-launch Operator Checklist (STO-10)
+
+This is the human work that must happen before flipping
+`live_trading_enabled=true`. Walk top to bottom. Items are tagged
+**[setup]** (one-time), **[fill-in]** (replace `__FILL_IN__` in this
+file), or **[confirm]** (verify each launch).
+
+The first-order gate is fail-closed by code
+(`src/pms/actuator/adapters/polymarket.py:645-764`), but it only does its
+job when the human side is named, reachable, and accountable. Each item
+below makes one piece of the human side concrete.
+
+### 0. Prerequisites — Polymarket account [setup]
+
+Done outside this repo.
+
+- [ ] Polymarket account in good standing. The funder wallet
+      (`PMS_POLYMARKET__FUNDER_ADDRESS`) holds USDC.e on Polygon
+      (chain id 137). Minimum balance: at least the live-soak
+      `max_total_exposure` (\$50) plus a buffer for slippage and gas.
+- [ ] CLOB API credentials issued from the Polymarket dashboard:
+      `private_key`, `api_key`, `api_secret`, `api_passphrase`,
+      `signature_type` (use `1` for Polymarket-managed signing).
+- [ ] Two-factor enabled on the Polymarket account; the funder wallet
+      private key is held in a hardware wallet or 1Password vault, not
+      in plaintext on a laptop.
+
+### 1. Stage credentials in the local secret file [setup]
+
+LIVE mode currently runs locally on the operator's machine — see the
+"Credential Setup" section above for the canonical `secret_source:
+local_file` workflow that PMS validates at startup
+(`src/pms/config.py:233`+: `secret_source` must be `"fly"` or
+`"local_file"`; `local_file` requires `local_secret_file` to point
+at a 0o600 regular file outside the repo). Walk that section first,
+then return here to set up the operator-side artifacts.
+
+In short: install the credentials YAML at
+`~/.config/pms/polymarket.local-secrets.yaml` with `chmod 600`, and
+point `local_secret_file` in `config.live.yaml` at it. Do not export
+`PMS_POLYMARKET__*` in shell history or `.env`. The `secret_source:
+fly` branch exists for a future Fly deployment but is not the current
+target.
+
+### 2. Set up the approval-file path [setup]
+
+The first-live-order approval JSON lives on the operator's machine
+alongside (but separate from) the credentials. The canonical config
+example in the "Credential Setup" section uses
+`/secure/pms/first-order.json`; make sure that path exists and is
+writable only by the operator UID before flipping the gate on.
+
+```bash
+sudo install -d -m 700 -o "$USER" /secure/pms
+```
+
+Set the path on `config.live.yaml`:
+
+```yaml
+polymarket:
+  first_live_order_approval_path: /secure/pms/first-order.json
+```
+
+Empty value pitfall: `_first_live_order_gate`
+(`src/pms/runner.py:2110-2116`) treats an empty string as
+`DenyFirstLiveOrderGate` — the gate **locks shut**, it does not
+"disable." Do not set the field to empty as a workaround.
+
+For dev work without `sudo`, a freeform path under your home is
+fine. Recommended: `~/.local/share/pms/first-order.json`. Create the
+parent dir with `umask 077` so only your user account can read it.
+
+### 3. Name the primary and backup operators [fill-in]
+
+Edit the lines below. The gate has no concept of "operator" — naming
+is enforced socially, by this runbook, and audited via the sidecar
+metadata file.
+
+- **Primary operator**: `__FILL_IN__` — handle (e.g. GitHub username),
+  contact (Slack DM, phone), and time-zone window of availability.
+- **Backup operator**: `__FILL_IN__` — same fields. Covers when the
+  primary is unreachable.
+- **Reachability rule**: at least one named operator must be reachable
+  for every first-order event during the configured operator window.
+  First-order signals outside that window stall the strategy by design;
+  there is no on-call escalation path until you explicitly fund one.
+
+Whoever happens to be on Slack at the time is **not** the operator. An
+anonymous gate is no gate.
+
+### 4. Configure operator alerting [setup, recommended default]
+
+**Recommended default**: tail the runner log for the literal string
+`OperatorApprovalRequiredError` and post to a Slack webhook. Lightweight,
+no extra paid service, sufficient at \$100 bankroll.
+
+Suggested log shipper rule (Vector, or `journalctl -fu pms-api | grep
+OperatorApprovalRequiredError` piped through `curl` while LIVE runs
+locally; switch to Fly Log Shipper if/when LIVE moves to Fly):
+
+- Match: log line contains `OperatorApprovalRequiredError`.
+- Action: POST to `SLACK_OPERATOR_WEBHOOK_URL` with the matched line.
+- Throttle: 1 message per 60 s (the gate is one-shot per actuator
+  lifetime so floods are unlikely, but the log line repeats per
+  decision until the file is filed).
+
+If you skip this step, the operator must actively poll
+`/status`. That is acceptable only for the first cp-03 rehearsal.
+
+### 5. Confirm the SLA threshold [confirm, recommended default]
+
+**Recommended default**: 15 minutes from
+`OperatorApprovalRequiredError` raise to `approval_consumed` event in
+the audit JSONL. Below 15 minutes is normal; above 15 minutes triggers
+a follow-up to streamline the procedure (or, if it happens twice in a
+row, revert to PAPER until the bottleneck is fixed).
+
+This is your risk tolerance call. Tighten to 5 minutes if you trade
+short-lived markets; loosen to 60 minutes if you only trade long-dated
+ones.
+
+### 6. Run the cp-03 rehearsal before going live [confirm]
+
+Before flipping `live_trading_enabled=true`, walk the procedure end
+to end. The `scripts/rehearse_first_order.py` driver does this in
+one command — drives the real `PolymarketActuator` slow path with a
+real `FileFirstLiveOrderGate` and a real `JsonlFirstOrderAuditWriter`
+backed by inline fakes for the venue client and quote provider. No
+network, no DB, no real money.
+
+```bash
+uv run python scripts/rehearse_first_order.py --approver-id <your-handle>
+# ✓ PASS  events=['approval_denied', 'approval_matched', 'approval_consumed']
+#   audit log:    /tmp/pms-rehearsal-…/audit.jsonl
+```
+
+For a manual end-to-end against `config.live-soak.yaml` (PAPER mode,
+no submit), use the helper for the operator-side write:
+
+```bash
+# Terminal A — start the runner against the soak config.
+PMS_CONFIG_PATH=config.live-soak.yaml uv run pms-api
+
+# Terminal B — file the approval using the operator helper.
+uv run python scripts/approve_first_order.py \
+  --from-error '<paste the full OperatorApprovalRequiredError line>' \
+  --approver-id <your-handle> \
+  --path /secure/pms/first-order.json
+
+# Confirm the audit log records matched -> consumed.
+tail -n 5 .data/live-emergency-audit.jsonl
+```
+
+The rehearsal is acceptance-complete when:
+
+- The audit JSONL shows exactly `approval_matched` followed by
+  `approval_consumed` for the rehearsal decision (no spurious events).
+- The approval file is unlinked after consume.
+- Both primary and backup have run the rehearsal at least once.
+- Elapsed time from raise to consume is below the chosen SLA from
+  step 5.
+
+Append a short sign-off entry to this runbook ("Rehearsal log
+YYYY-MM-DD: primary X, backup Y, elapsed N minutes") on completion.
+
+### 7. Final go/no-go
+
+Only flip `PMS_LIVE_TRADING_ENABLED=true` when steps 0-6 are all
+checked. The first live decision will hit the slow path; the gate will
+deny; the operator follows the playbook in the **Reference** section
+below.
+
+---
+
+## Reference
+
+### Named operators
+
+Replace the `__FILL_IN__` markers in step 3 above. The reachability
+rule and "anonymous gate is no gate" framing apply once names are
+recorded.
+
+### Approval-file location
+
+- **Local LIVE (current target)**: `/secure/pms/first-order.json`,
+  matching the canonical example in the "Credential Setup" section.
+  Read only by the operator UID; create the parent dir with
+  `install -d -m 700 -o "$USER" /secure/pms`.
+- **Local development**: a freeform path under the operator's home,
+  for example `~/.local/share/pms/first-order.json`. Created with
+  `umask 077`.
+- **Future Fly deployment**: a `[[mounts]]`-backed volume path such
+  as `/data/pms/first-order.json` so it persists across deploys. Not
+  the current target.
+- **Sidecar metadata**: alongside the approval JSON, the operator
+  writes `<approval-path>.meta.json` containing
+  `{ "approver_id": "<id>", "ts": "<ISO 8601>" }`. The audit writer
+  reads this and records the approver in the JSONL.
+- **Never** commit either file to the repo. Both are gitignored under
+  `.data/` and operator-specific paths.
+
+### "First" order semantics
+
+"First" means **first since the actuator was instantiated** (see the
+in-memory state at
+`src/pms/actuator/adapters/polymarket.py:632-637`). A process restart
+resets the gate to denied — the next decision will re-prompt the
+operator. **This re-prompt on restart is intentional**, not a bug: any
+disruption that warrants a restart also warrants re-validating the
+operating environment before the next live submit.
+
+Concretely, an approval is consumed exactly once per actuator lifetime:
+
+1. Operator drops the approval JSON at the configured path.
+2. Adapter matches the next decision against the file and submits.
+3. Adapter calls `consume()`, which unlinks the file
+   (`polymarket.py:358-373`).
+4. `_approval_state.approved = True` flips the fast path open
+   (`polymarket.py:660-665`); subsequent orders skip the slow path.
+5. On any process restart, step 1 must repeat with a freshly-filed
+   approval.
+
+### Audit trail
+
+Every gate consultation appends one record to the JSONL at
+`live_emergency_audit_path` (default `.data/live-emergency-audit.jsonl`,
+configurable via `PMS_LIVE_EMERGENCY_AUDIT_PATH`). The audit writer is
+the same `JsonlFirstOrderAuditWriter` wired in
+`src/pms/storage/first_order_audit.py`.
+
+Four event types:
+
+| `event`                    | When                                                  |
+|----------------------------|-------------------------------------------------------|
+| `approval_matched`         | Gate returned True; submit is about to proceed.       |
+| `approval_denied`          | Gate returned False; `OperatorApprovalRequiredError`. |
+| `approval_consumed`        | Submit succeeded and `consume()` ran cleanly (both approval JSON and sidecar unlinked). |
+| `approval_consume_failed`  | Submit succeeded but `consume()` raised; the approval artefacts may still be on disk. |
+
+A record carries: `ts`, `event`, `approver_id` (from sidecar, may be
+`null`), `venue`, `market_id`, `token_id`, `side`, `outcome`,
+`max_notional_usdc`, `limit_price`, `max_slippage_bps`, `market_slug`,
+`question`. The audit writer is non-blocking — a write failure logs
+WARN and the order proceeds, mirroring `runner.py:1319-1320`.
+
+`approval_consume_failed` is the operator's signal to clean up
+manually: the venue submit succeeded, but the approval JSON and/or
+its sidecar are still on disk, so a process restart could replay the
+approval against the next decision. Page on this event with the same
+priority as a runner halt: stop the runner if it has not stopped on
+its own, unlink any remaining files at the configured approval path,
+and confirm the audit JSONL has no further `approval_matched` records
+for the same `market_id` before resuming.
+
+The runbook reuses `live_emergency_audit_path` as the single
+consolidated authorization log; filter records by the `event` field
+(first-order) vs the `phase` field (emergency-halt) when reading.
+Switching to a dedicated path is a deferred decision; revisit if
+authorization-event volume grows enough to make filtering noisy.
+
+### End-to-end procedure (operator playbook)
+
+When `OperatorApprovalRequiredError` is observed (in logs or via the
+Slack alert from step 4):
+
+1. Pull the preview details from the error message (venue, market,
+   token, side, outcome, max_notional_usdc, limit_price,
+   max_slippage_bps).
+2. Validate the preview against current strategy intent and risk caps.
+3. If approved, write the approval JSON (matching every field) and
+   the `<path>.meta.json` sidecar with your `approver_id` to the
+   configured path. The `scripts/approve_first_order.py` helper
+   handles both files in one command (see step 6 in the checklist
+   for usage); for local LIVE the path defaults to
+   `/secure/pms/first-order.json`. If LIVE later moves to Fly, the
+   same helper runs inside `fly ssh console` against the volume-
+   backed path.
+4. Wait for the next decision; the gate consults the file, matches,
+   submits.
+5. Confirm `approval_consumed` lands in the audit JSONL.
+6. The fast path is now open for the rest of the actuator's lifetime;
+   if the runner restarts, repeat from step 1 on the next decision.
+
+If at any step you decide **not** to approve, do nothing. The next
+decision will trigger another `OperatorApprovalRequiredError`; the
+audit log will record `approval_denied`. The strategy stalls — that
+is the gate working as intended.
+
 ## Rollback
 
 1. Stop the runner: `curl -X POST http://127.0.0.1:8000/run/stop`.

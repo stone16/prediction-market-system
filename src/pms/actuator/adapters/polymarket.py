@@ -301,6 +301,40 @@ class DenyFirstLiveOrderGate:
         del preview
 
 
+class FirstOrderAuditWriter(Protocol):
+    """Persistence sink for first-live-order operator events.
+
+    Implementations record one event per call. Failures must NOT raise into
+    the trading hot path — the actuator wraps each call in try/except to
+    keep audit-write degradation independent of order submission. See
+    `runner.py:1319-1320` for the same pattern on emergency-audit writes.
+    """
+
+    async def record_event(
+        self,
+        *,
+        event: str,
+        preview: LiveOrderPreview,
+        approver_id: str | None = None,
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
+class _NoopFirstOrderAuditWriter:
+    """Default no-op audit writer used when no first-order audit sink is
+    configured. Keeps offline tests, paper mode, and dev runs from
+    requiring a writable audit path on disk."""
+
+    async def record_event(
+        self,
+        *,
+        event: str,
+        preview: LiveOrderPreview,
+        approver_id: str | None = None,
+    ) -> None:
+        del event, preview, approver_id
+
+
 @dataclass
 class FirstLiveOrderApprovalState:
     approved: bool = False
@@ -324,11 +358,35 @@ class FileFirstLiveOrderGate:
     async def consume(self, preview: LiveOrderPreview) -> None:
         # Atomically consume the approval artefact so it cannot be replayed
         # by a future restart or a concurrent `approve_first_order` call.
+        # Both the approval JSON and its sidecar metadata file share a
+        # single authorization lifetime; unlink both so a stale sidecar
+        # cannot misattribute a future authorization to the previous
+        # approver.
         del preview
         try:
             self.path.unlink()
         except FileNotFoundError:
             pass
+        try:
+            self._sidecar_path().unlink()
+        except FileNotFoundError:
+            pass
+
+    def read_approver_id(self) -> str | None:
+        sidecar = self._sidecar_path()
+        if not sidecar.exists():
+            return None
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        approver_id = payload.get("approver_id")
+        return approver_id if isinstance(approver_id, str) else None
+
+    def _sidecar_path(self) -> Path:
+        return Path(str(self.path) + ".meta.json")
 
 
 @dataclass(frozen=True)
@@ -568,6 +626,9 @@ class PolymarketActuator:
     client: PolymarketClient = field(default_factory=MissingPolymarketClient)
     operator_gate: FirstLiveOrderGate = field(default_factory=DenyFirstLiveOrderGate)
     quote_provider: LiveQuoteProvider = field(default_factory=MissingLiveQuoteProvider)
+    audit_writer: FirstOrderAuditWriter = field(
+        default_factory=_NoopFirstOrderAuditWriter,
+    )
     _approval_state: FirstLiveOrderApprovalState = field(
         default_factory=FirstLiveOrderApprovalState,
         init=False,
@@ -626,7 +687,18 @@ class PolymarketActuator:
 
             preview = await self._live_order_preview(decision)
             approved = await self.operator_gate.approve_first_order(preview)
+            # Capture approver_id from the operator gate once, before
+            # consume() can unlink any sidecar. Threading the same
+            # value through matched/denied/consumed events guarantees
+            # the audit log answers "who authorized this" consistently
+            # across all three records for one authorization act.
+            approver_id = self._read_approver_id()
             if not approved:
+                await self._emit_audit(
+                    event="approval_denied",
+                    preview=preview,
+                    approver_id=approver_id,
+                )
                 msg = (
                     "First Polymarket live order requires operator approval: "
                     f"venue={preview.venue} market={preview.market_id} "
@@ -637,6 +709,12 @@ class PolymarketActuator:
                     f"max_slippage_bps={preview.max_slippage_bps}"
                 )
                 raise OperatorApprovalRequiredError(msg)
+
+            await self._emit_audit(
+                event="approval_matched",
+                preview=preview,
+                approver_id=approver_id,
+            )
 
             # Submit while still holding the lock. If this raises, the
             # `async with` releases the lock and `_approval_state.approved`
@@ -651,13 +729,81 @@ class PolymarketActuator:
             # First venue submission succeeded: lock in first-order
             # completion and consume the operator-side approval artefact
             # so it cannot be replayed by a future restart.
+            #
+            # `_approval_state.approved=True` MUST stay set even if
+            # consume() fails — flipping it back would cause the next
+            # in-process decision to re-prompt the gate and double-submit
+            # against the still-present approval file. The cleanup-
+            # failure handling below is forensic, not transactional.
             self._approval_state.approved = True
             try:
                 await self.operator_gate.consume(preview)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("first-order gate consume failed: %s", exc)
+                # Record the truth: cleanup failed, the artefact may
+                # still be on disk, a future restart could replay it.
+                # ERROR-level so an external alerter can page the
+                # operator for manual cleanup.
+                logger.error(
+                    "first-order gate consume failed: %s. Approval "
+                    "artefact may remain on disk and could replay on "
+                    "restart; manual cleanup required.",
+                    exc,
+                )
+                await self._emit_audit(
+                    event="approval_consume_failed",
+                    preview=preview,
+                    approver_id=approver_id,
+                )
+            else:
+                await self._emit_audit(
+                    event="approval_consumed",
+                    preview=preview,
+                    approver_id=approver_id,
+                )
 
         return order_state
+
+    async def _emit_audit(
+        self,
+        *,
+        event: str,
+        preview: LiveOrderPreview,
+        approver_id: str | None,
+    ) -> None:
+        # Audit emission is fire-and-forget from the trading hot path: a
+        # writer outage must never block or roll back an order. Mirrors the
+        # precedent at runner.py:1319-1320 for emergency-audit append.
+        try:
+            await self.audit_writer.record_event(
+                event=event,
+                preview=preview,
+                approver_id=approver_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "first-order audit write failed: event=%s err=%s",
+                event,
+                exc,
+            )
+
+    def _read_approver_id(self) -> str | None:
+        # Duck-typed: only FileFirstLiveOrderGate exposes
+        # `read_approver_id` today. Other gates (Recording, Deny,
+        # Blocking, *CountingFile) fall through to None — they have
+        # no sidecar concept. Same getattr pattern used at
+        # _submit_with_quote_guard to keep optional gate features off
+        # the FirstLiveOrderGate Protocol surface.
+        reader = getattr(self.operator_gate, "read_approver_id", None)
+        if not callable(reader):
+            return None
+        try:
+            result = reader()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "first-order operator gate read_approver_id failed: %s", exc
+            )
+            return None
+        return result if isinstance(result, str) else None
 
     def _first_order_approved(self) -> bool:
         return self._approval_state.approved

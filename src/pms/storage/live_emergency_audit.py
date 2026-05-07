@@ -73,6 +73,12 @@ def _audit_record(
 
 def _append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Single `write()` so the underlying `O_APPEND` write(2) is atomic
+    # with respect to other concurrent writers on the same path
+    # (e.g. `JsonlFirstOrderAuditWriter` sharing the same audit log).
+    # Splitting the JSON body and the trailing newline into two
+    # `file.write` calls risks two non-atomic write(2) flushes, which
+    # can interleave with another writer's record under contention.
+    line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
     with path.open("a", encoding="utf-8") as file:
-        file.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
-        file.write("\n")
+        file.write(line)
