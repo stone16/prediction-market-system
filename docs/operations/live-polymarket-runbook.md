@@ -175,73 +175,50 @@ Done outside this repo.
       private key is held in a hardware wallet or 1Password vault, not
       in plaintext on a laptop.
 
-### 1. Stage credentials in Fly secrets [setup]
+### 1. Stage credentials in the local secret file [setup]
 
-The production target is the Fly app `pms-paper-soak` (`fly.toml:1`).
-All secrets stay on Fly's encrypted secret store, never in the repo,
-never in shell history. From a shell with `flyctl` authenticated:
+LIVE mode currently runs locally on the operator's machine — see the
+"Credential Setup" section above for the canonical `secret_source:
+local_file` workflow that PMS validates at startup
+(`src/pms/config.py:233`+: `secret_source` must be `"fly"` or
+`"local_file"`; `local_file` requires `local_secret_file` to point
+at a 0o600 regular file outside the repo). Walk that section first,
+then return here to set up the operator-side artifacts.
 
-```bash
-fly secrets set \
-  PMS_POLYMARKET__PRIVATE_KEY='0x...' \
-  PMS_POLYMARKET__API_KEY='...' \
-  PMS_POLYMARKET__API_SECRET='...' \
-  PMS_POLYMARKET__API_PASSPHRASE='...' \
-  PMS_POLYMARKET__SIGNATURE_TYPE='1' \
-  PMS_POLYMARKET__FUNDER_ADDRESS='0x...' \
-  --app pms-paper-soak
-```
+In short: install the credentials YAML at
+`~/.config/pms/polymarket.local-secrets.yaml` with `chmod 600`, and
+point `local_secret_file` in `config.live.yaml` at it. Do not export
+`PMS_POLYMARKET__*` in shell history or `.env`. The `secret_source:
+fly` branch exists for a future Fly deployment but is not the current
+target.
 
-Confirm without revealing values:
+### 2. Set up the approval-file path [setup]
 
-```bash
-fly secrets list --app pms-paper-soak
-```
-
-For local development (NOT production): export the same variables in
-the shell that launches `uv run pms-api` (or use `direnv` with a
-`.envrc.local` that is gitignored). Never commit a `.env` containing
-these.
-
-> Required-fields validation runs at LIVE-mode startup
-> (`src/pms/config.py` →
-> `validate_live_mode_ready`). A missing field fails closed before any
-> venue call.
-
-### 2. Provision a Fly volume for the approval-file path [setup]
-
-The approval JSON must persist across deploys but live outside the
-container image. On Fly that means a mounted volume.
+The first-live-order approval JSON lives on the operator's machine
+alongside (but separate from) the credentials. The canonical config
+example in the "Credential Setup" section uses
+`/secure/pms/first-order.json`; make sure that path exists and is
+writable only by the operator UID before flipping the gate on.
 
 ```bash
-fly volumes create pms_data --region iad --size 1 --app pms-paper-soak
+sudo install -d -m 700 -o "$USER" /secure/pms
 ```
 
-Then add this block to `fly.toml` (anywhere after the `[env]` block):
+Set the path on `config.live.yaml`:
 
-```toml
-[[mounts]]
-  source = "pms_data"
-  destination = "/data"
-```
-
-Set the canonical path as a Fly secret (it is not strictly secret, but
-keeping it next to the credentials makes rotation simpler):
-
-```bash
-fly secrets set \
-  PMS_POLYMARKET__FIRST_LIVE_ORDER_APPROVAL_PATH=/data/pms/first-order.json \
-  --app pms-paper-soak
+```yaml
+polymarket:
+  first_live_order_approval_path: /secure/pms/first-order.json
 ```
 
 Empty value pitfall: `_first_live_order_gate`
 (`src/pms/runner.py:2098-2104`) treats an empty string as
 `DenyFirstLiveOrderGate` — the gate **locks shut**, it does not
-"disable." Do not set the env to empty as a workaround.
+"disable." Do not set the field to empty as a workaround.
 
-For local development the path is freeform. Recommended:
-`~/.local/share/pms/first-order.json`. Create the parent dir with
-`umask 077` so only your user account can read it.
+For dev work without `sudo`, a freeform path under your home is
+fine. Recommended: `~/.local/share/pms/first-order.json`. Create the
+parent dir with `umask 077` so only your user account can read it.
 
 ### 3. Name the primary and backup operators [fill-in]
 
@@ -267,8 +244,9 @@ anonymous gate is no gate.
 `OperatorApprovalRequiredError` and post to a Slack webhook. Lightweight,
 no extra paid service, sufficient at \$100 bankroll.
 
-Suggested log shipper rule (Fly Log Shipper, Vector, or
-`fly logs --app pms-paper-soak` piped through grep):
+Suggested log shipper rule (Vector, or `journalctl -fu pms-api | grep
+OperatorApprovalRequiredError` piped through `curl` while LIVE runs
+locally; switch to Fly Log Shipper if/when LIVE moves to Fly):
 
 - Match: log line contains `OperatorApprovalRequiredError`.
 - Action: POST to `SLACK_OPERATOR_WEBHOOK_URL` with the matched line.
@@ -293,25 +271,31 @@ ones.
 
 ### 6. Run the cp-03 rehearsal before going live [confirm]
 
-Before flipping `live_trading_enabled=true`, walk the procedure end to
-end against the paper-soak config with a fake client. Do this from a
-clean shell at the repo root:
+Before flipping `live_trading_enabled=true`, walk the procedure end
+to end. The `scripts/rehearse_first_order.py` driver does this in
+one command — drives the real `PolymarketActuator` slow path with a
+real `FileFirstLiveOrderGate` and a real `JsonlFirstOrderAuditWriter`
+backed by inline fakes for the venue client and quote provider. No
+network, no DB, no real money.
 
 ```bash
-# Terminal A — start the runner.
+uv run python scripts/rehearse_first_order.py --approver-id <your-handle>
+# ✓ PASS  events=['approval_denied', 'approval_matched', 'approval_consumed']
+#   audit log:    /tmp/pms-rehearsal-…/audit.jsonl
+```
+
+For a manual end-to-end against `config.live-soak.yaml` (PAPER mode,
+no submit), use the helper for the operator-side write:
+
+```bash
+# Terminal A — start the runner against the soak config.
 PMS_CONFIG_PATH=config.live-soak.yaml uv run pms-api
 
-# Terminal B — drop a matching approval JSON + sidecar.
-mkdir -p $(dirname $PMS_POLYMARKET__FIRST_LIVE_ORDER_APPROVAL_PATH)
-cat > $PMS_POLYMARKET__FIRST_LIVE_ORDER_APPROVAL_PATH <<'JSON'
-{ "approved": true, "max_notional_usdc": 5.0, "venue": "polymarket",
-  "market_id": "<from preview>", "token_id": "<from preview>",
-  "side": "BUY", "outcome": "YES",
-  "limit_price": 0.4, "max_slippage_bps": 50 }
-JSON
-cat > "${PMS_POLYMARKET__FIRST_LIVE_ORDER_APPROVAL_PATH}.meta.json" <<'JSON'
-{ "approver_id": "<your-handle>", "ts": "2026-05-07T00:00:00Z" }
-JSON
+# Terminal B — file the approval using the operator helper.
+uv run python scripts/approve_first_order.py \
+  --from-error '<paste the full OperatorApprovalRequiredError line>' \
+  --approver-id <your-handle> \
+  --path /secure/pms/first-order.json
 
 # Confirm the audit log records matched -> consumed.
 tail -n 5 .data/live-emergency-audit.jsonl
@@ -348,11 +332,16 @@ recorded.
 
 ### Approval-file location
 
-- **Production (Fly)**: `/data/pms/first-order.json` (provisioned in
-  step 2). Read only by the runner container's process UID.
+- **Local LIVE (current target)**: `/secure/pms/first-order.json`,
+  matching the canonical example in the "Credential Setup" section.
+  Read only by the operator UID; create the parent dir with
+  `install -d -m 700 -o "$USER" /secure/pms`.
 - **Local development**: a freeform path under the operator's home,
   for example `~/.local/share/pms/first-order.json`. Created with
   `umask 077`.
+- **Future Fly deployment**: a `[[mounts]]`-backed volume path such
+  as `/data/pms/first-order.json` so it persists across deploys. Not
+  the current target.
 - **Sidecar metadata**: alongside the approval JSON, the operator
   writes `<approval-path>.meta.json` containing
   `{ "approver_id": "<id>", "ts": "<ISO 8601>" }`. The audit writer
@@ -420,9 +409,12 @@ Slack alert from step 4):
 2. Validate the preview against current strategy intent and risk caps.
 3. If approved, write the approval JSON (matching every field) and
    the `<path>.meta.json` sidecar with your `approver_id` to the
-   configured path. On Fly: `fly ssh console --app pms-paper-soak`,
-   then write to `/data/pms/first-order.json` and the matching
-   sidecar.
+   configured path. The `scripts/approve_first_order.py` helper
+   handles both files in one command (see step 6 in the checklist
+   for usage); for local LIVE the path defaults to
+   `/secure/pms/first-order.json`. If LIVE later moves to Fly, the
+   same helper runs inside `fly ssh console` against the volume-
+   backed path.
 4. Wait for the next decision; the gate consults the file, matches,
    submits.
 5. Confirm `approval_consumed` lands in the audit JSONL.
