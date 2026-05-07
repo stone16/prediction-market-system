@@ -50,7 +50,7 @@ async def test_jsonl_first_order_audit_writer_appends_one_record_per_event(
     assert record_consumed["event"] == "approval_consumed"
 
     # Match-keys (the same fields _approval_payload_matches checks
-    # at polymarket.py around 976-998).
+    # at polymarket.py:1122-1144).
     assert record_matched["venue"] == "polymarket"
     assert record_matched["market_id"] == "m-x"
     assert record_matched["token_id"] == "t-yes"
