@@ -250,10 +250,11 @@ def test_posterior_branch_missing_all_inputs_does_not_emit_statistical_probabili
     assert "statistical" not in branch_probabilities
 
 
-def _live_settings(*, tif: str = "IOC") -> PMSSettings:
+def _live_settings(*, tif: str = "IOC", secret_source: str | None = "fly") -> PMSSettings:
     return PMSSettings(
         mode=RunMode.LIVE,
         live_trading_enabled=True,
+        secret_source=secret_source,
         auto_migrate_default_v2=False,
         controller=ControllerSettings(time_in_force=tif, min_volume=0.0),
         risk=RiskSettings(
@@ -306,6 +307,11 @@ def _decision(
 def test_live_mode_rejects_gtc_until_open_order_ledger_exists() -> None:
     with pytest.raises(LiveTradingDisabledError, match="LIVE GTC disabled"):
         validate_live_mode_ready(_live_settings(tif="GTC"))
+
+
+def test_live_mode_requires_approved_secret_source_marker() -> None:
+    with pytest.raises(LiveTradingDisabledError, match="PMS_SECRET_SOURCE=local_file"):
+        validate_live_mode_ready(_live_settings(secret_source=None))
 
 
 def test_trade_decision_rejects_action_side_mismatch() -> None:

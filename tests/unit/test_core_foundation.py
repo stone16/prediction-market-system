@@ -187,6 +187,7 @@ def test_live_mode_validation_requires_all_polymarket_credentials() -> None:
 def test_live_mode_validation_returns_redacted_credentials() -> None:
     settings = PMSSettings(
         mode=RunMode.LIVE,
+        secret_source="fly",
         live_trading_enabled=True,
         controller=ControllerSettings(time_in_force="IOC"),
         polymarket=PolymarketSettings(
@@ -206,6 +207,73 @@ def test_live_mode_validation_returns_redacted_credentials() -> None:
     assert credentials.host == "https://clob.polymarket.com"
     assert credentials.private_key == "private-key"
     assert "private-key" not in repr(credentials)
+
+
+def test_live_mode_loads_local_secret_file_before_env_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_path = tmp_path / "polymarket.local-secrets.yaml"
+    secret_path.write_text(
+        "\n".join(
+            [
+                "polymarket:",
+                "  private_key: file-private-key",
+                "  api_key: file-api-key",
+                "  api_secret: file-api-secret",
+                "  api_passphrase: file-passphrase",
+                "  signature_type: 1",
+                "  funder_address: '0xfile'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    secret_path.chmod(0o600)
+    config_path = tmp_path / "config.live.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: live",
+                "secret_source: local_file",
+                f"local_secret_file: {secret_path}",
+                "live_trading_enabled: true",
+                "controller:",
+                "  time_in_force: IOC",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PMS_POLYMARKET__PRIVATE_KEY", "shell-private-key")
+
+    settings = PMSSettings.load(config_path)
+    credentials = validate_live_mode_ready(settings)
+
+    assert settings.secret_source == "local_file"
+    assert settings.local_secret_file == str(secret_path)
+    assert credentials.private_key == "file-private-key"
+    assert credentials.api_key == "file-api-key"
+    assert credentials.funder_address == "0xfile"
+
+
+def test_local_secret_file_must_not_be_group_or_world_readable(tmp_path: Path) -> None:
+    secret_path = tmp_path / "polymarket.local-secrets.yaml"
+    secret_path.write_text("polymarket: {}\n", encoding="utf-8")
+    secret_path.chmod(0o644)
+    config_path = tmp_path / "config.live.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: live",
+                "secret_source: local_file",
+                f"local_secret_file: {secret_path}",
+                "live_trading_enabled: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="chmod 600"):
+        PMSSettings.load(config_path)
 
 
 def test_core_enums_use_stable_wire_values() -> None:
@@ -251,9 +319,11 @@ def test_core_protocol_interfaces_are_declared() -> None:
 
 def test_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PMS_MODE", raising=False)
+    monkeypatch.delenv("PMS_SECRET_SOURCE", raising=False)
     default_settings = PMSSettings()
 
     assert default_settings.mode is RunMode.BACKTEST
+    assert default_settings.secret_source is None
     assert default_settings.live_trading_enabled is False
     assert default_settings.risk.max_position_per_market == 100.0
     assert set(RiskSettings.model_fields) == {
@@ -267,9 +337,11 @@ def test_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) -> Non
     }
 
     monkeypatch.setenv("PMS_MODE", "paper")
+    monkeypatch.setenv("PMS_SECRET_SOURCE", "fly")
     env_settings = PMSSettings()
 
     assert env_settings.mode is RunMode.PAPER
+    assert env_settings.secret_source == "fly"
 
 
 def test_database_dsn_honours_database_url_override(

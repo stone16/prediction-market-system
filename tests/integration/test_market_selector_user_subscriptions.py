@@ -149,6 +149,7 @@ class _MatchingVenueReconciler:
 def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.LIVE,
+        secret_source="fly",
         live_trading_enabled=True,
         auto_migrate_default_v2=False,
         controller=ControllerSettings(time_in_force="IOC"),

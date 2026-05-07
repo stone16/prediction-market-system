@@ -58,25 +58,62 @@ Install the live SDK in the runtime environment:
 uv sync --extra live
 ```
 
-Export credentials in the operator shell or secret manager that launches PMS:
+The temporary approved local path is a file-mounted secret outside the repo.
+It is weaker than a real secret manager, but avoids shell history, dotfiles,
+and `.env` files while we keep LIVE local. Do not export Polymarket
+credentials in an operator shell, dotfile, `.env`, compose override, or normal
+config file.
+
+Create a private local secret file and edit it with an editor. The file must
+be readable only by the operator account:
 
 ```bash
-export PMS_MODE=live
-export PMS_LIVE_TRADING_ENABLED=true
-export PMS_LIVE_ACCOUNT_RECONCILIATION_REQUIRED=true
-export PMS_CONTROLLER__TIME_IN_FORCE=IOC
-export PMS_POLYMARKET__PRIVATE_KEY=...
-export PMS_POLYMARKET__API_KEY=...
-export PMS_POLYMARKET__API_SECRET=...
-export PMS_POLYMARKET__API_PASSPHRASE=...
-export PMS_POLYMARKET__SIGNATURE_TYPE=1
-export PMS_POLYMARKET__FUNDER_ADDRESS=...
-export PMS_POLYMARKET__FIRST_LIVE_ORDER_APPROVAL_PATH=/secure/pms/first-order.json
+install -d -m 700 ~/.config/pms
+install -m 600 /dev/null ~/.config/pms/polymarket.local-secrets.yaml
+$EDITOR ~/.config/pms/polymarket.local-secrets.yaml
+```
+
+Use this YAML shape in the secret file:
+
+```yaml
+polymarket:
+  private_key: <paste private key>
+  api_key: <paste API key>
+  api_secret: <paste API secret>
+  api_passphrase: <paste API passphrase>
+  signature_type: 1
+  funder_address: <paste wallet address>
+```
+
+PMS refuses local LIVE startup if the file is missing, not a regular file, or
+is group/world readable. Fix permissions with:
+
+```bash
+chmod 600 ~/.config/pms/polymarket.local-secrets.yaml
 ```
 
 Required fields are validated before LIVE mode starts:
 `private_key`, `api_key`, `api_secret`, `api_passphrase`, `signature_type`,
 and `funder_address`.
+
+Configure LIVE mode with non-secret runtime config, not with credential
+exports. For example, `config.live.yaml` should include:
+
+```yaml
+mode: live
+secret_source: local_file
+local_secret_file: ~/.config/pms/polymarket.local-secrets.yaml
+live_trading_enabled: true
+live_account_reconciliation_required: true
+controller:
+  time_in_force: IOC
+polymarket:
+  first_live_order_approval_path: /secure/pms/first-order.json
+```
+
+Before the first live run, rotate any Polymarket credential that was ever
+pasted into a shell, issue, PR, chat, local `.env`, or dotfile during
+development. Treat those values as compromised.
 
 ## First Live Order
 

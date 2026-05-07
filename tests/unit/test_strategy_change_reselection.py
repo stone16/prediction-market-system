@@ -263,6 +263,7 @@ def _signal() -> MarketSignal:
 def _settings(mode: RunMode) -> PMSSettings:
     return PMSSettings(
         mode=mode,
+        secret_source="fly" if mode == RunMode.LIVE else None,
         live_trading_enabled=mode == RunMode.LIVE,
         auto_migrate_default_v2=False,
         database=DatabaseSettings(
@@ -588,6 +589,7 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
 
     settings = PMSSettings(
         mode=RunMode.LIVE,
+        secret_source="fly",
         live_trading_enabled=True,
         auto_migrate_default_v2=True,
         database=DatabaseSettings(

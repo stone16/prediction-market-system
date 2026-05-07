@@ -45,15 +45,9 @@ polymarket:
   host: https://clob.polymarket.com
   websocket_url: wss://ws-subscriptions-clob.polymarket.com/ws/
   chain_id: 137
-  # Keep live credentials out of config.yaml and load them from the process
-  # environment instead:
-  #
-  #   PMS_POLYMARKET__PRIVATE_KEY=...
-  #   PMS_POLYMARKET__API_KEY=...
-  #   PMS_POLYMARKET__API_SECRET=...
-  #   PMS_POLYMARKET__API_PASSPHRASE=...
-  #   PMS_POLYMARKET__SIGNATURE_TYPE=1
-  #   PMS_POLYMARKET__FUNDER_ADDRESS=...
+  # Keep live credentials out of config.yaml. Temporary local LIVE uses
+  # secret_source: local_file plus local_secret_file pointing at a chmod 600
+  # YAML file outside the repo. See docs/operations/live-polymarket-runbook.md.
   #
   # The first real-money order also needs a non-secret approval JSON file:
   #   PMS_POLYMARKET__FIRST_LIVE_ORDER_APPROVAL_PATH=/secure/pms/first-order.json

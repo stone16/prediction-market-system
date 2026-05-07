@@ -126,16 +126,14 @@ uv run python scripts/paper-report.py --date 2026-05-03
 After at least 24 hours of paper soak validating signal quality:
 
 ```bash
-# 1. Set Polymarket credentials (env vars only, never in config)
-export PMS_POLYMARKET_PRIVATE_KEY="<your private key>"
-export PMS_POLYMARKET_API_KEY="<your API key>"
-export PMS_POLYMARKET_API_SECRET="<your API secret>"
-export PMS_POLYMARKET_API_PASSPHRASE="<your API passphrase>"
-export PMS_POLYMARKET_FUNDER_ADDRESS="<your wallet address>"
-export PMS_POLYMARKET_SIGNATURE_TYPE="<your signature type>"
+# 1. Stage Polymarket credentials in a chmod 600 local secret file,
+#    never shell exports or .env:
+#    ~/.config/pms/polymarket.local-secrets.yaml
 
 # 2. Create config.live.yaml
 #    mode: live
+#    secret_source: local_file
+#    local_secret_file: ~/.config/pms/polymarket.local-secrets.yaml
 #    live_trading_enabled: true
 #    risk: (copy from your validated paper soak config)
 
@@ -143,8 +141,6 @@ export PMS_POLYMARKET_SIGNATURE_TYPE="<your signature type>"
 #    /secure/pms/first-order.json — reviewed and approved by operator
 
 # 4. Start live mode (stub-gated — not implemented until paper soak + compliance gates pass)
-export PMS_MODE=live
-export PMS_LIVE_TRADING_ENABLED=true
 uv run pms-api --config config.live.yaml
 ```
 
