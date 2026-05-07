@@ -1,0 +1,6 @@
+# CODEOWNERS — risk-enveloped files
+# Changes to these files require an approved review before merge
+# to prevent accidental drift of production risk parameters.
+
+# Live-soak risk parameters (auto-halt triggers, position limits)
+config.live-soak.yaml	@stone16

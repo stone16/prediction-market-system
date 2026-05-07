@@ -36,8 +36,15 @@ Three things remain between paper soak and real capital:
 1. **Polymarket credentials** — 6 fields (private_key, api_key, api_secret,
    api_passphrase, funder_address, signature_type). Set as env vars, never in
    config files.
-2. **Confirm risk envelope** — Proposed defaults: $100 bankroll, $5/market
-   max, $20 daily max loss. Adjust via `config.live-soak.yaml`.
+2. **Confirm risk envelope** — Ratified defaults from
+   `config.live-soak.yaml`: `max_position_per_market=$5`,
+   `max_total_exposure=$50`, `max_drawdown_pct=20%`,
+   `max_open_positions=5`, `min_order_usdc=$1`,
+   `slippage_threshold_bps=50`, `max_quantity_shares=500`.
+   TODO_DECISION: `$20 daily max loss` was mentioned here previously but
+   has no corresponding config key or enforcement. File a child issue to
+   add `risk.max_daily_loss_usdc` as a 7th auto-halt trigger, or drop
+   it entirely. See [MUL-8](mention://issue/850c30cc-2b18-41cc-8caa-533444b2c6fe).
 3. **24-hour paper soak** — Run with live Polymarket data to verify sensors,
    risk engine, order lifecycle, and auto-halt triggers before risking capital.
    See [Orchestration guide](#orchestration-guide) below.
@@ -108,7 +115,7 @@ uv run alembic upgrade head
 cp config.live-soak.yaml config.local.live-soak.yaml
 # Edit config.local.live-soak.yaml:
 #   - Adjust risk.max_position_per_market (proposed: $5)
-#   - Adjust risk.max_total_exposure (proposed: $100)
+#   - Adjust risk.max_total_exposure (proposed: $50)
 #   - Adjust risk.max_drawdown_pct (proposed: 20)
 
 # 5. Start paper soak (live data, no real orders)
