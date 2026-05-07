@@ -2757,3 +2757,167 @@ async def test_polymarket_actuator_audit_writer_failure_does_not_break_submit(
         "expected WARN log mentioning approval_matched failure, got: "
         f"{[r.message for r in caplog.records]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# STO-10 follow-up: sidecar approver_id reader on FileFirstLiveOrderGate
+# ---------------------------------------------------------------------------
+
+
+def _approval_payload(*, market_id: str = "m-cp06") -> dict[str, object]:
+    return {
+        "approved": True,
+        "max_notional_usdc": 10.0,
+        "venue": "polymarket",
+        "market_id": market_id,
+        "token_id": "t-yes",
+        "side": Side.BUY.value,
+        "outcome": "YES",
+        "limit_price": 0.4,
+        "max_slippage_bps": 50,
+    }
+
+
+def _sidecar_path(approval_path: Path) -> Path:
+    return Path(str(approval_path) + ".meta.json")
+
+
+def test_file_first_live_order_gate_reads_approver_id_from_sidecar(
+    tmp_path: Path,
+) -> None:
+    """STO-10 sidecar: approver_id from <path>.meta.json is captured so
+    the audit log records who authorized the order."""
+    approval_path = tmp_path / "approval.json"
+    _sidecar_path(approval_path).write_text(
+        json.dumps({"approver_id": "operator-alice", "ts": "2026-05-07T00:00:00Z"}),
+        encoding="utf-8",
+    )
+
+    gate = FileFirstLiveOrderGate(approval_path)
+
+    assert gate.read_approver_id() == "operator-alice"
+
+
+def test_file_first_live_order_gate_returns_none_when_sidecar_missing(
+    tmp_path: Path,
+) -> None:
+    """No sidecar → approver_id is None (degraded but unblocked: the
+    runbook's gate's job is to authorize the trade, not to enforce
+    metadata hygiene)."""
+    gate = FileFirstLiveOrderGate(tmp_path / "approval.json")
+
+    assert gate.read_approver_id() is None
+
+
+def test_file_first_live_order_gate_returns_none_when_sidecar_malformed(
+    tmp_path: Path,
+) -> None:
+    """Malformed sidecar (invalid JSON, wrong shape, non-string
+    approver_id) must degrade to None without raising."""
+    approval_path = tmp_path / "approval.json"
+
+    _sidecar_path(approval_path).write_text("not-json", encoding="utf-8")
+    assert FileFirstLiveOrderGate(approval_path).read_approver_id() is None
+
+    _sidecar_path(approval_path).write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    assert FileFirstLiveOrderGate(approval_path).read_approver_id() is None
+
+    _sidecar_path(approval_path).write_text(
+        json.dumps({"approver_id": 42}), encoding="utf-8"
+    )
+    assert FileFirstLiveOrderGate(approval_path).read_approver_id() is None
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_consume_unlinks_sidecar(
+    tmp_path: Path,
+) -> None:
+    """STO-10 sidecar: consume() must unlink the sidecar alongside the
+    approval JSON so a stale `<path>.meta.json` cannot linger and
+    misattribute a future authorization to the previous approver."""
+    approval_path = tmp_path / "approval.json"
+    sidecar = _sidecar_path(approval_path)
+    approval_path.write_text(json.dumps(_approval_payload()), encoding="utf-8")
+    sidecar.write_text(json.dumps({"approver_id": "operator-alice"}), encoding="utf-8")
+
+    gate = FileFirstLiveOrderGate(approval_path)
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+    )
+
+    await gate.consume(preview)
+
+    assert approval_path.exists() is False
+    assert sidecar.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_audit_includes_approver_id_from_sidecar(
+    tmp_path: Path,
+) -> None:
+    """STO-10 follow-up: end-to-end the approver_id flows from the
+    operator's sidecar file into every audit record (matched and
+    consumed). This closes the loop on 'who authorized this order' for
+    forensic walkers."""
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(json.dumps(_approval_payload()), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps({"approver_id": "operator-alice"}), encoding="utf-8"
+    )
+
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=FileFirstLiveOrderGate(approval_path),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    # Both matched and consumed events must carry the approver_id;
+    # capturing once before consume() unlinks the sidecar guarantees
+    # consumed sees the same approver as matched.
+    assert [
+        (event, approver_id) for event, _, approver_id in writer.events
+    ] == [
+        ("approval_matched", "operator-alice"),
+        ("approval_consumed", "operator-alice"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_audit_approver_id_is_none_when_sidecar_absent(
+    tmp_path: Path,
+) -> None:
+    """Regression: actuator must still emit cleanly when no sidecar
+    exists (the unattributed-but-authorized fallback path)."""
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(json.dumps(_approval_payload()), encoding="utf-8")
+
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=FileFirstLiveOrderGate(approval_path),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    assert [
+        (event, approver_id) for event, _, approver_id in writer.events
+    ] == [
+        ("approval_matched", None),
+        ("approval_consumed", None),
+    ]

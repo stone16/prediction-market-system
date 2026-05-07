@@ -358,11 +358,35 @@ class FileFirstLiveOrderGate:
     async def consume(self, preview: LiveOrderPreview) -> None:
         # Atomically consume the approval artefact so it cannot be replayed
         # by a future restart or a concurrent `approve_first_order` call.
+        # Both the approval JSON and its sidecar metadata file share a
+        # single authorization lifetime; unlink both so a stale sidecar
+        # cannot misattribute a future authorization to the previous
+        # approver.
         del preview
         try:
             self.path.unlink()
         except FileNotFoundError:
             pass
+        try:
+            self._sidecar_path().unlink()
+        except FileNotFoundError:
+            pass
+
+    def read_approver_id(self) -> str | None:
+        sidecar = self._sidecar_path()
+        if not sidecar.exists():
+            return None
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        approver_id = payload.get("approver_id")
+        return approver_id if isinstance(approver_id, str) else None
+
+    def _sidecar_path(self) -> Path:
+        return Path(str(self.path) + ".meta.json")
 
 
 @dataclass(frozen=True)
@@ -663,8 +687,18 @@ class PolymarketActuator:
 
             preview = await self._live_order_preview(decision)
             approved = await self.operator_gate.approve_first_order(preview)
+            # Capture approver_id from the operator gate once, before
+            # consume() can unlink any sidecar. Threading the same
+            # value through matched/denied/consumed events guarantees
+            # the audit log answers "who authorized this" consistently
+            # across all three records for one authorization act.
+            approver_id = self._read_approver_id()
             if not approved:
-                await self._emit_audit(event="approval_denied", preview=preview)
+                await self._emit_audit(
+                    event="approval_denied",
+                    preview=preview,
+                    approver_id=approver_id,
+                )
                 msg = (
                     "First Polymarket live order requires operator approval: "
                     f"venue={preview.venue} market={preview.market_id} "
@@ -676,7 +710,11 @@ class PolymarketActuator:
                 )
                 raise OperatorApprovalRequiredError(msg)
 
-            await self._emit_audit(event="approval_matched", preview=preview)
+            await self._emit_audit(
+                event="approval_matched",
+                preview=preview,
+                approver_id=approver_id,
+            )
 
             # Submit while still holding the lock. If this raises, the
             # `async with` releases the lock and `_approval_state.approved`
@@ -696,22 +734,55 @@ class PolymarketActuator:
                 await self.operator_gate.consume(preview)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("first-order gate consume failed: %s", exc)
-            await self._emit_audit(event="approval_consumed", preview=preview)
+            await self._emit_audit(
+                event="approval_consumed",
+                preview=preview,
+                approver_id=approver_id,
+            )
 
         return order_state
 
-    async def _emit_audit(self, *, event: str, preview: LiveOrderPreview) -> None:
+    async def _emit_audit(
+        self,
+        *,
+        event: str,
+        preview: LiveOrderPreview,
+        approver_id: str | None,
+    ) -> None:
         # Audit emission is fire-and-forget from the trading hot path: a
         # writer outage must never block or roll back an order. Mirrors the
         # precedent at runner.py:1307-1308 for emergency-audit append.
         try:
-            await self.audit_writer.record_event(event=event, preview=preview)
+            await self.audit_writer.record_event(
+                event=event,
+                preview=preview,
+                approver_id=approver_id,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "first-order audit write failed: event=%s err=%s",
                 event,
                 exc,
             )
+
+    def _read_approver_id(self) -> str | None:
+        # Duck-typed: only FileFirstLiveOrderGate exposes
+        # `read_approver_id` today. Other gates (Recording, Deny,
+        # Blocking, *CountingFile) fall through to None — they have
+        # no sidecar concept. Same getattr pattern used at
+        # _submit_with_quote_guard to keep optional gate features off
+        # the FirstLiveOrderGate Protocol surface.
+        reader = getattr(self.operator_gate, "read_approver_id", None)
+        if not callable(reader):
+            return None
+        try:
+            result = reader()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "first-order operator gate read_approver_id failed: %s", exc
+            )
+            return None
+        return result if isinstance(result, str) else None
 
     def _first_order_approved(self) -> bool:
         return self._approval_state.approved
