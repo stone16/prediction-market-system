@@ -378,19 +378,29 @@ configurable via `PMS_LIVE_EMERGENCY_AUDIT_PATH`). The audit writer is
 the same `JsonlFirstOrderAuditWriter` wired in
 `src/pms/storage/first_order_audit.py`.
 
-Three event types:
+Four event types:
 
-| `event`              | When                                                  |
-|----------------------|-------------------------------------------------------|
-| `approval_matched`   | Gate returned True; submit is about to proceed.       |
-| `approval_denied`    | Gate returned False; `OperatorApprovalRequiredError`. |
-| `approval_consumed`  | Submit succeeded and `consume()` ran (file unlinked). |
+| `event`                    | When                                                  |
+|----------------------------|-------------------------------------------------------|
+| `approval_matched`         | Gate returned True; submit is about to proceed.       |
+| `approval_denied`          | Gate returned False; `OperatorApprovalRequiredError`. |
+| `approval_consumed`        | Submit succeeded and `consume()` ran cleanly (both approval JSON and sidecar unlinked). |
+| `approval_consume_failed`  | Submit succeeded but `consume()` raised; the approval artefacts may still be on disk. |
 
 A record carries: `ts`, `event`, `approver_id` (from sidecar, may be
 `null`), `venue`, `market_id`, `token_id`, `side`, `outcome`,
 `max_notional_usdc`, `limit_price`, `max_slippage_bps`, `market_slug`,
 `question`. The audit writer is non-blocking — a write failure logs
 WARN and the order proceeds, mirroring `runner.py:1307-1308`.
+
+`approval_consume_failed` is the operator's signal to clean up
+manually: the venue submit succeeded, but the approval JSON and/or
+its sidecar are still on disk, so a process restart could replay the
+approval against the next decision. Page on this event with the same
+priority as a runner halt: stop the runner if it has not stopped on
+its own, unlink any remaining files at the configured approval path,
+and confirm the audit JSONL has no further `approval_matched` records
+for the same `market_id` before resuming.
 
 The runbook reuses `live_emergency_audit_path` as the single
 consolidated authorization log; filter records by the `event` field
