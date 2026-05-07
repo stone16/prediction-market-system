@@ -19,6 +19,10 @@ passphrases into chat, issues, PRs, logs, or config files.
 5. Review order notional, slippage, rejected orders, and portfolio exposure.
 6. Keep `live_trading_enabled=false` until the 30-day soak and compliance
    checklist are accepted.
+7. Ratify the strategic exit criteria (the kill plan) defined in
+   [live-exit-criteria.md](live-exit-criteria.md) **before** the first live
+   order. Do not flip `live_trading_enabled=true` while any threshold is
+   marked `TODO_DECISION:`.
 
 ## Auto-Halt Triggers
 
