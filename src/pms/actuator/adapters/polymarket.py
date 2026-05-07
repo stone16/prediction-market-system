@@ -301,6 +301,40 @@ class DenyFirstLiveOrderGate:
         del preview
 
 
+class FirstOrderAuditWriter(Protocol):
+    """Persistence sink for first-live-order operator events.
+
+    Implementations record one event per call. Failures must NOT raise into
+    the trading hot path — the actuator wraps each call in try/except to
+    keep audit-write degradation independent of order submission. See
+    `runner.py:1307-1308` for the same pattern on emergency-audit writes.
+    """
+
+    async def record_event(
+        self,
+        *,
+        event: str,
+        preview: LiveOrderPreview,
+        approver_id: str | None = None,
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
+class _NoopFirstOrderAuditWriter:
+    """Default no-op audit writer used when no first-order audit sink is
+    configured. Keeps offline tests, paper mode, and dev runs from
+    requiring a writable audit path on disk."""
+
+    async def record_event(
+        self,
+        *,
+        event: str,
+        preview: LiveOrderPreview,
+        approver_id: str | None = None,
+    ) -> None:
+        del event, preview, approver_id
+
+
 @dataclass
 class FirstLiveOrderApprovalState:
     approved: bool = False
@@ -568,6 +602,9 @@ class PolymarketActuator:
     client: PolymarketClient = field(default_factory=MissingPolymarketClient)
     operator_gate: FirstLiveOrderGate = field(default_factory=DenyFirstLiveOrderGate)
     quote_provider: LiveQuoteProvider = field(default_factory=MissingLiveQuoteProvider)
+    audit_writer: FirstOrderAuditWriter = field(
+        default_factory=_NoopFirstOrderAuditWriter,
+    )
     _approval_state: FirstLiveOrderApprovalState = field(
         default_factory=FirstLiveOrderApprovalState,
         init=False,
@@ -627,6 +664,7 @@ class PolymarketActuator:
             preview = await self._live_order_preview(decision)
             approved = await self.operator_gate.approve_first_order(preview)
             if not approved:
+                await self._emit_audit(event="approval_denied", preview=preview)
                 msg = (
                     "First Polymarket live order requires operator approval: "
                     f"venue={preview.venue} market={preview.market_id} "
@@ -637,6 +675,8 @@ class PolymarketActuator:
                     f"max_slippage_bps={preview.max_slippage_bps}"
                 )
                 raise OperatorApprovalRequiredError(msg)
+
+            await self._emit_audit(event="approval_matched", preview=preview)
 
             # Submit while still holding the lock. If this raises, the
             # `async with` releases the lock and `_approval_state.approved`
@@ -656,8 +696,22 @@ class PolymarketActuator:
                 await self.operator_gate.consume(preview)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("first-order gate consume failed: %s", exc)
+            await self._emit_audit(event="approval_consumed", preview=preview)
 
         return order_state
+
+    async def _emit_audit(self, *, event: str, preview: LiveOrderPreview) -> None:
+        # Audit emission is fire-and-forget from the trading hot path: a
+        # writer outage must never block or roll back an order. Mirrors the
+        # precedent at runner.py:1307-1308 for emergency-audit append.
+        try:
+            await self.audit_writer.record_event(event=event, preview=preview)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "first-order audit write failed: event=%s err=%s",
+                event,
+                exc,
+            )
 
     def _first_order_approved(self) -> bool:
         return self._approval_state.approved

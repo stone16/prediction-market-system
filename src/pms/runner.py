@@ -84,6 +84,7 @@ from pms.storage.decision_store import DecisionStore
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
 from pms.storage.fill_store import FillStore
+from pms.storage.first_order_audit import JsonlFirstOrderAuditWriter
 from pms.storage.live_emergency_audit import LiveEmergencyAuditWriter
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.market_subscription_store import PostgresMarketSubscriptionStore
@@ -936,11 +937,22 @@ class Runner:
                 ),
                 settings=self.config,
             )
+        # STO-10 cp-02: reuse `live_emergency_audit_path` as the single
+        # consolidated authorization-event log. First-order audit records
+        # have a distinct schema (event/preview fields) from emergency
+        # records (phase/decision/error), so a reader filters by the
+        # `event` vs `phase` field to extract first-order events.
+        # TODO_DECISION (user): switch to a dedicated `first_order_audit_path`
+        # if you prefer separate sinks; this is the recommended default
+        # from the STO-10 spec.
         return PolymarketActuator(
             self.config,
             client=PolymarketSDKClient(),
             operator_gate=_first_live_order_gate(self.config),
             quote_provider=quote_provider,
+            audit_writer=JsonlFirstOrderAuditWriter(
+                Path(self.config.live_emergency_audit_path)
+            ),
         )
 
     def _remember_paper_orderbook(self, signal: MarketSignal) -> None:

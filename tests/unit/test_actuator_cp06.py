@@ -2646,3 +2646,114 @@ async def test_polymarket_partial_fill_accepts_sub_cent_rounding_drift(
         _live_settings().polymarket.credentials(),
     )
     assert result.filled_notional_usdc == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# STO-10 cp-02: first-order audit emission
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RecordingFirstOrderAuditWriter:
+    events: list[tuple[str, LiveOrderPreview, str | None]] = field(default_factory=list)
+    raise_on_event: str | None = None
+
+    async def record_event(
+        self,
+        *,
+        event: str,
+        preview: LiveOrderPreview,
+        approver_id: str | None = None,
+    ) -> None:
+        self.events.append((event, preview, approver_id))
+        if self.raise_on_event == event:
+            raise RuntimeError(f"audit write failed: {event}")
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_emits_audit_on_gate_match_and_consume() -> None:
+    """STO-10 cp-02: happy path emits approval_matched then approval_consumed
+    with the same preview, so a forensic walker can reconstruct what was
+    authorized and confirm the consume completed."""
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    assert [event for event, _, _ in writer.events] == [
+        "approval_matched",
+        "approval_consumed",
+    ]
+    matched_preview = writer.events[0][1]
+    consumed_preview = writer.events[1][1]
+    assert matched_preview == consumed_preview
+    assert matched_preview.market_id == "m-cp06"
+    assert matched_preview.token_id == "t-yes"
+    assert matched_preview.side == Side.BUY.value
+    assert matched_preview.max_notional_usdc == 10.0
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_emits_audit_on_gate_denial() -> None:
+    """STO-10 cp-02: denial path emits approval_denied with the preview
+    that was rejected, so the audit log records every gate consultation
+    even when the gate refuses."""
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=RecordingOperatorGate(approved=False),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    with pytest.raises(OperatorApprovalRequiredError):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert [event for event, _, _ in writer.events] == ["approval_denied"]
+    assert writer.events[0][1].market_id == "m-cp06"
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_audit_writer_failure_does_not_break_submit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """STO-10 cp-02: an audit-writer failure must NOT block the submit
+    or leave the gate in an inconsistent state. Audit failure logs WARN
+    and the order proceeds. Mirrors precedent at runner.py:1307-1308 where
+    LiveEmergencyAuditWriter failures degrade gracefully rather than
+    interrupting the trading hot path."""
+    writer = RecordingFirstOrderAuditWriter(raise_on_event="approval_matched")
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=RecordingPolymarketClient(),
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="pms.actuator.adapters.polymarket"):
+        state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    # approval_matched emit raised; approval_consumed must still fire so the
+    # audit log records the eventual consume even when the matched-event
+    # write failed transiently.
+    assert [event for event, _, _ in writer.events] == [
+        "approval_matched",
+        "approval_consumed",
+    ]
+    assert any(
+        "first-order audit" in record.message and "approval_matched" in record.message
+        for record in caplog.records
+    ), (
+        "expected WARN log mentioning approval_matched failure, got: "
+        f"{[r.message for r in caplog.records]}"
+    )
