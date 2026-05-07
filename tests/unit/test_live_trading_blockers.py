@@ -250,7 +250,11 @@ def test_posterior_branch_missing_all_inputs_does_not_emit_statistical_probabili
     assert "statistical" not in branch_probabilities
 
 
-def _live_settings(*, tif: str = "IOC", secret_source: str | None = "fly") -> PMSSettings:
+def _live_settings(
+    *,
+    tif: str = "IOC",
+    secret_source: Literal["fly", "local_file"] | None = "fly",
+) -> PMSSettings:
     return PMSSettings(
         mode=RunMode.LIVE,
         live_trading_enabled=True,
