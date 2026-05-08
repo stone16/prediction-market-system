@@ -22,6 +22,7 @@ from pms.config import (
     PMSSettings,
     PolymarketSettings,
     RiskSettings,
+    SecretSource,
     validate_live_mode_ready,
 )
 from pms.controller.calibrators.netcal import NetcalCalibrator
@@ -253,7 +254,7 @@ def test_posterior_branch_missing_all_inputs_does_not_emit_statistical_probabili
 def _live_settings(
     *,
     tif: str = "IOC",
-    secret_source: Literal["fly", "local_file"] | None = "fly",
+    secret_source: SecretSource | None = "fly",
 ) -> PMSSettings:
     return PMSSettings(
         mode=RunMode.LIVE,
