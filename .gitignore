@@ -19,6 +19,11 @@ htmlcov/
 build/
 dist/
 
+# Runtime logs (never commit — may contain credentials / debug output)
+*.log
+pms-api.log
+dashboard/dashboard.log
+
 # Local output directories (pms-v1 harness artifacts — kept ignored so a
 # stale working copy can't accidentally commit them into v2).
 reports/
