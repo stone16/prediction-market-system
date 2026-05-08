@@ -15,9 +15,18 @@ passphrases into chat, issues, PRs, logs, or config files.
    `uv run pms-api --config config.live-soak.yaml`.
    For process managers that cannot pass CLI args, set
    `PMS_CONFIG_PATH=config.live-soak.yaml`.
-4. Confirm `/status`, `/trades`, `/positions`, and evaluator metrics update.
-5. Review order notional, slippage, rejected orders, and portfolio exposure.
-6. Keep `live_trading_enabled=false` until the 30-day soak and compliance
+4. Confirm `/status` reports every active sensor as `running`, not `stale` or
+   `failed`. `MarketDataSensor` must have a fresh `last_signal_at`; a runner
+   process that is alive but has stale market-data signals is not a valid soak.
+5. Confirm `/strategies` shows the intended active strategy. Use
+   `paper_canary_v1` when the goal is to verify live-data -> controller ->
+   paper-actuator plumbing. Use the real default strategy only after its
+   required factors are populated; 0 decisions from missing factors is not a
+   market signal.
+6. Confirm `/trades`, `/positions`, and evaluator metrics update when the
+   selected strategy emits paper decisions.
+7. Review order notional, slippage, rejected orders, and portfolio exposure.
+8. Keep `live_trading_enabled=false` until the 30-day soak and compliance
    checklist are accepted.
 7. Ratify the strategic exit criteria (the kill plan) defined in
    [live-exit-criteria.md](live-exit-criteria.md) **before** the first live
@@ -53,6 +62,8 @@ Reports are written under `docs/paper-reports/YYYY-MM-DD.md` by default. Use
 `--dry-run` to print the report in CI or during review. The report includes
 Gate 3 metrics: decisions, fills, slippage, daily and cumulative P&L, drawdown,
 exposure, Brier score, hit rate, average edge, Sharpe ratio, and risk events.
+The strategy row is read from `/strategies`; stale or failed sensors from
+`/status` are recorded as risk events.
 
 ## Credential Setup
 

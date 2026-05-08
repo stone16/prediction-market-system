@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,6 +99,12 @@ def _signal() -> MarketSignal:
     )
 
 
+async def _empty_signal_stream() -> AsyncIterator[MarketSignal]:
+    signals: tuple[MarketSignal, ...] = ()
+    for signal in signals:
+        yield signal
+
+
 def _decision() -> TradeDecision:
     return TradeDecision(
         decision_id="decision-api",
@@ -192,7 +200,14 @@ async def test_api_routes_expose_mock_runner_state() -> None:
 
     assert status["mode"] == "backtest"
     assert status["runner_started_at"] == "2026-04-14T00:00:00+00:00"
-    assert status["sensors"][0].keys() == {"name", "status", "last_signal_at"}
+    assert status["sensors"][0].keys() == {
+        "name",
+        "status",
+        "last_signal_at",
+        "last_signal_age_seconds",
+        "stale_after_seconds",
+        "task_done",
+    }
     assert status["controller"] == {"decisions_total": 1, "diagnostics_total": 0}
     assert status["actuator"] == {"fills_total": 1, "mode": "backtest"}
     assert status["evaluator"] == {"eval_records_total": 1, "brier_overall": 0.09}
@@ -223,6 +238,82 @@ async def test_api_routes_expose_mock_runner_state() -> None:
         }
     ]
     assert [item["feedback_id"] for item in feedback] == ["fb-pending"]
+
+
+@pytest.mark.asyncio
+async def test_status_marks_running_sensor_stale_when_last_signal_is_old() -> None:
+    class MarketDataSensorStub:
+        def __aiter__(self) -> AsyncIterator[MarketSignal]:
+            return _empty_signal_stream()
+
+    async def _pending() -> None:
+        await asyncio.Event().wait()
+
+    runner = _runner_with_state()
+    runner.config.dashboard.stale_snapshot_threshold_s = 120.0
+    runner._active_sensors = (MarketDataSensorStub(),)  # noqa: SLF001
+    task = asyncio.create_task(_pending())
+    runner.sensor_stream._tasks = (task,)  # noqa: SLF001
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            status = (await client.get("/status")).json()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        runner.sensor_stream._tasks = ()  # noqa: SLF001
+
+    assert status["running"] is True
+    assert status["sensors"] == [
+        {
+            "name": "MarketDataSensorStub",
+            "status": "stale",
+            "last_signal_at": "2026-04-14T00:00:00+00:00",
+            "last_signal_age_seconds": status["sensors"][0]["last_signal_age_seconds"],
+            "stale_after_seconds": 120.0,
+            "task_done": False,
+        }
+    ]
+    assert status["sensors"][0]["last_signal_age_seconds"] > 120.0
+
+
+@pytest.mark.asyncio
+async def test_status_marks_market_data_stale_when_no_signal_arrives_after_start() -> None:
+    class MarketDataSensorStub:
+        def __aiter__(self) -> AsyncIterator[MarketSignal]:
+            return _empty_signal_stream()
+
+    async def _pending() -> None:
+        await asyncio.Event().wait()
+
+    runner = Runner(config=_settings(), eval_store=cast(EvalStore, InMemoryEvalStore([])))
+    runner.state.runner_started_at = datetime(2026, 4, 14, tzinfo=UTC)
+    runner.config.dashboard.stale_snapshot_threshold_s = 120.0
+    runner._active_sensors = (MarketDataSensorStub(),)  # noqa: SLF001
+    task = asyncio.create_task(_pending())
+    runner.sensor_stream._tasks = (task,)  # noqa: SLF001
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            status = (await client.get("/status")).json()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        runner.sensor_stream._tasks = ()  # noqa: SLF001
+
+    assert status["sensors"][0]["status"] == "stale"
+    assert status["sensors"][0]["last_signal_at"] is None
+    assert status["sensors"][0]["last_signal_age_seconds"] > 120.0
 
 
 @pytest.mark.asyncio

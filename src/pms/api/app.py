@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, is_dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal, TypeVar, cast
@@ -883,8 +883,19 @@ def _request_metadata(request: Request) -> dict[str, object]:
     }
 
 
-def _sensor_statuses(runner: Runner) -> list[dict[str, Any]]:
+def _sensor_statuses(
+    runner: Runner,
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    current_time = now or datetime.now(tz=UTC)
     last_signal_at = _last_signal_at(runner.state.signals)
+    last_signal_age_seconds = _signal_freshness_age_seconds(
+        runner.state.signals,
+        runner_started_at=runner.state.runner_started_at,
+        now=current_time,
+    )
+    stale_after_seconds = runner.config.dashboard.stale_snapshot_threshold_s
     if not runner.active_sensors:
         return [
             {
@@ -893,18 +904,28 @@ def _sensor_statuses(runner: Runner) -> list[dict[str, Any]]:
                 if runner.state.runner_started_at is None
                 else "idle",
                 "last_signal_at": last_signal_at,
+                "last_signal_age_seconds": last_signal_age_seconds,
+                "stale_after_seconds": stale_after_seconds,
+                "task_done": True,
             }
         ]
 
-    running = any(not task.done() for task in runner.sensor_stream.tasks)
-    status = "running" if running else "idle"
+    tasks = runner.sensor_stream.tasks
     return [
         {
             "name": sensor.__class__.__name__,
-            "status": status,
+            "status": _sensor_status(
+                sensor=sensor,
+                task=tasks[index] if index < len(tasks) else None,
+                last_signal_age_seconds=last_signal_age_seconds,
+                stale_after_seconds=stale_after_seconds,
+            ),
             "last_signal_at": last_signal_at,
+            "last_signal_age_seconds": last_signal_age_seconds,
+            "stale_after_seconds": stale_after_seconds,
+            "task_done": tasks[index].done() if index < len(tasks) else True,
         }
-        for sensor in runner.active_sensors
+        for index, sensor in enumerate(runner.active_sensors)
     ]
 
 
@@ -912,6 +933,52 @@ def _last_signal_at(signals: Sequence[MarketSignal]) -> str | None:
     if not signals:
         return None
     return signals[-1].fetched_at.isoformat()
+
+
+def _signal_freshness_age_seconds(
+    signals: Sequence[MarketSignal],
+    *,
+    runner_started_at: datetime | None,
+    now: datetime,
+) -> float | None:
+    if signals:
+        signal_time = signals[-1].fetched_at
+    elif runner_started_at is not None:
+        signal_time = runner_started_at
+    else:
+        return None
+    if signal_time.tzinfo is None:
+        signal_time = signal_time.replace(tzinfo=UTC)
+    return max(0.0, (now - signal_time).total_seconds())
+
+
+def _sensor_status(
+    *,
+    sensor: object,
+    task: asyncio.Task[None] | None,
+    last_signal_age_seconds: float | None,
+    stale_after_seconds: float,
+) -> str:
+    if task is None:
+        return "idle"
+    if task.cancelled():
+        return "idle"
+    if task.done():
+        return "failed" if task.exception() is not None else "idle"
+    if (
+        _sensor_depends_on_signal_freshness(sensor)
+        and last_signal_age_seconds is not None
+        and last_signal_age_seconds > stale_after_seconds
+    ):
+        return "stale"
+    return "running"
+
+
+def _sensor_depends_on_signal_freshness(sensor: object) -> bool:
+    name = sensor.__class__.__name__
+    return name.startswith("MarketDataSensor") or callable(
+        getattr(sensor, "update_subscription", None)
+    )
 
 
 def _start_alerting_if_configured(app_inst: FastAPI, runner: Runner) -> None:
