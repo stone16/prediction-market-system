@@ -56,15 +56,25 @@ def test_live_soak_config_enables_llm_forecaster_with_widened_budget() -> None:
 
     assert settings.llm.enabled is True
     assert settings.llm.provider == "anthropic"
-    assert settings.llm.model == "claude-sonnet-4-6"
     assert settings.llm.max_daily_llm_cost_usdc == 25.0
 
 
-def test_live_soak_config_keeps_llm_api_key_out_of_yaml(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The committed YAML must not carry api_key; key flows from PMS_LLM__API_KEY."""
-    monkeypatch.delenv("PMS_LLM__API_KEY", raising=False)
-    with pytest.raises(Exception) as exc_info:
-        PMSSettings.load(ROOT / "config.live-soak.yaml")
-    assert "api_key is required" in str(exc_info.value)
+def test_live_soak_config_yaml_does_not_pin_model_or_credentials() -> None:
+    """The committed YAML must not carry api_key / model / base_url so the
+    operator can switch between native Anthropic and Anthropic-compatible
+    providers (DeepSeek, OpenRouter) by editing only their local .env / shell.
+
+    YAML init args override env vars in pydantic-settings, so any of these
+    fields in the committed YAML would silently mute the operator's .env.
+    """
+    yaml_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
+    forbidden = ("api_key:", "model:", "base_url:")
+    # Carve out the LLM section so we don't accidentally false-positive on
+    # the polymarket section (which legitimately has api_key: null etc.).
+    llm_section_start = yaml_text.index("llm:")
+    llm_section = yaml_text[llm_section_start:]
+    for keyword in forbidden:
+        assert keyword not in llm_section, (
+            f"config.live-soak.yaml llm section must not pin '{keyword}'; "
+            f"found one. Remove it so PMS_LLM__* env vars can fill the field."
+        )

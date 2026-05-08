@@ -39,3 +39,11 @@ target/
 
 # Claude worktrees (created by agent skills; local only)
 .claude/
+
+# Local secrets — env vars for LLM / Polymarket / dev DSN overrides.
+# PMSSettings auto-loads .env in CWD via pydantic-settings (config.py).
+# .envrc covers direnv users.
+.env
+.env.local
+.env.*.local
+.envrc

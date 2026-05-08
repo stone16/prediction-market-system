@@ -45,8 +45,17 @@ polymarket:
 llm:
   enabled: true
   provider: anthropic
-  model: claude-sonnet-4-6
   max_daily_llm_cost_usdc: 25.0
-  # api_key intentionally omitted — supply via PMS_LLM__API_KEY env var.
-  # See docs/operations/live-polymarket-runbook.md for the env-var conventions
-  # (env_prefix=PMS_, env_nested_delimiter=__).
+  # api_key, model, and base_url are intentionally omitted from the committed
+  # YAML so the operator's .env or shell can choose between native Anthropic
+  # and any Anthropic-compatible provider (DeepSeek's /anthropic endpoint,
+  # OpenRouter, Bedrock proxies). Required env vars when running this config:
+  #
+  #   PMS_LLM__API_KEY    = "sk-..."                         (always required)
+  #   PMS_LLM__MODEL      = "claude-sonnet-4-6"              (or e.g. DeepSeek-V4-Pro)
+  #   PMS_LLM__BASE_URL   = ""                               (empty for native Anthropic;
+  #                          "https://api.deepseek.com/anthropic" for DeepSeek)
+  #
+  # PMSSettings auto-loads .env in CWD via pydantic-settings (config.py:166).
+  # Init args from YAML override env vars, so do NOT add model/api_key/base_url
+  # back into this file unless you want to pin a single provider for everyone.
