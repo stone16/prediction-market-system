@@ -43,6 +43,10 @@ polymarket:
   funder_address: null
 
 llm:
-  enabled: false
-  provider: null
-  model: claude-3-5-sonnet-latest
+  enabled: true
+  provider: anthropic
+  model: claude-sonnet-4-6
+  max_daily_llm_cost_usdc: 25.0
+  # api_key intentionally omitted — supply via PMS_LLM__API_KEY env var.
+  # See docs/operations/live-polymarket-runbook.md for the env-var conventions
+  # (env_prefix=PMS_, env_nested_delimiter=__).
