@@ -12,19 +12,33 @@ def test_resolve_alembic_database_url_prefers_database_url() -> None:
         "PMS_DATABASE_URL": "postgresql://legacy/pms",
     }
 
-    assert resolve_alembic_database_url(env) == "postgresql://primary/pms"
+    assert resolve_alembic_database_url(env) == "postgresql+psycopg://primary/pms"
 
 
 @pytest.mark.parametrize(
     ("env", "expected"),
     [
         (
+            {
+                "DATABASE_URL": "",
+                "PMS_DATABASE__DSN": "postgresql://nested/pms",
+            },
+            "postgresql+psycopg://nested/pms",
+        ),
+        (
+            {
+                "DATABASE_URL": "",
+                "PMS_DATABASE_URL": "postgresql://legacy/pms",
+            },
+            "postgresql+psycopg://legacy/pms",
+        ),
+        (
             {"PMS_DATABASE__DSN": "postgresql://nested/pms"},
-            "postgresql://nested/pms",
+            "postgresql+psycopg://nested/pms",
         ),
         (
             {"PMS_DATABASE_URL": "postgresql://legacy/pms"},
-            "postgresql://legacy/pms",
+            "postgresql+psycopg://legacy/pms",
         ),
     ],
 )
@@ -41,5 +55,5 @@ def test_resolve_alembic_database_url_reports_supported_env_vars() -> None:
 
     assert str(exc_info.value) == (
         "Database URL is not configured. Set one of DATABASE_URL, "
-        "PMS_DATABASE__DSN, or PMS_DATABASE_URL before running alembic."
+        "PMS_DATABASE__DSN, or PMS_DATABASE_URL before running Alembic commands."
     )

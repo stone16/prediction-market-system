@@ -8,6 +8,13 @@ class AlembicDatabaseUrlError(RuntimeError):
     """Raised when Alembic cannot resolve a database URL from the environment."""
 
 
+_ALEMBIC_DATABASE_URL_ENV_VARS = (
+    "DATABASE_URL",
+    "PMS_DATABASE__DSN",
+    "PMS_DATABASE_URL",
+)
+
+
 def _normalize_sqlalchemy_url(database_url: str) -> str:
     if database_url.startswith("postgresql+"):
         return database_url
@@ -20,13 +27,13 @@ def _normalize_sqlalchemy_url(database_url: str) -> str:
 
 def resolve_alembic_database_url(env: Mapping[str, str] | None = None) -> str:
     environment = os.environ if env is None else env
-    for key in ("DATABASE_URL", "PMS_DATABASE_URL"):
+    for key in _ALEMBIC_DATABASE_URL_ENV_VARS:
         value = environment.get(key)
         if value is not None and value.strip():
             return _normalize_sqlalchemy_url(value)
 
     msg = (
-        "DATABASE_URL or PMS_DATABASE_URL must be set before running Alembic "
-        "commands"
+        "Database URL is not configured. Set one of DATABASE_URL, "
+        "PMS_DATABASE__DSN, or PMS_DATABASE_URL before running Alembic commands."
     )
     raise AlembicDatabaseUrlError(msg)

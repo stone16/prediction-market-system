@@ -135,7 +135,7 @@ class TestWarehouseCsvLoading:
         with pytest.raises(ValueError, match="exact final payout vector"):
             load_warehouse_markets(path)
 
-    def test_rejects_ambiguous_fifty_fifty_payout_vector(self, tmp_path: Path) -> None:
+    def test_skips_ambiguous_fifty_fifty_payout_vector(self, tmp_path: Path) -> None:
         """Ambiguous 50/50 resolutions are silently skipped — not safe labels for H1 FLB."""
         path = tmp_path / "fifty_fifty.csv"
         _write_warehouse_csv(path, [

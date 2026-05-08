@@ -432,16 +432,43 @@ Where:
 
 **New script:** `scripts/paper-report.py`
 
-**Daily output (Markdown in `docs/paper-reports/YYYY-MM-DD.md` + optional Discord/Slack):**
-```
-📊 Paper 日报 2026-05-03
-策略: ripple_v2
-今日交易: 3 笔 | 成交: 2 笔 | 滑点: 15bps
-今日 P&L: +$2.40 | 累计 P&L: +$18.70
-当前持仓: 4 个市场 | 总敞口: $28.50
-风控事件: 0
-Brier score (7d rolling): 0.19
-⚠️ 提醒: paper soak 还需 23 天
+**Daily output:** `scripts/paper_report.py` writes archival Markdown to
+`docs/paper-reports/YYYY-MM-DD.md`; notifier jobs may post a compact
+Discord/Slack summary derived from the same metrics.
+
+```markdown
+# Paper Daily Report - 2026-05-03
+
+## Summary
+
+| Metric | Value | Gate |
+|---|---:|---|
+| Strategy | ripple_v2 | - |
+| Day of soak | 0 | 30 required |
+| Decisions made | 0 | - |
+| Decisions accepted | 0 | - |
+| Decisions rejected | 0 | - |
+| Fills | 0 | - |
+| Average slippage (bps) | N/A | <= 50 |
+| Today's P&L | +$0.00 | >= -daily limit |
+| Cumulative P&L | +$0.00 | > 0 by soak end |
+| Max drawdown | N/A | <= 20.0% |
+| Open positions | 0 | <= 5 |
+| Total exposure | $0.00 | <= $50.00 |
+| Brier score (7d rolling) | N/A | < 0.20 |
+| Hit rate (all trades) | N/A | > 45% |
+| Average edge (bps) | N/A | > 5 |
+| Sharpe ratio (cumulative) | N/A | > 0 |
+
+## Risk Events
+
+| Time | Trigger | Status |
+|---|---|---|
+| (none today) | - | - |
+
+## Trade Notes
+
+No trades today.
 ```
 
 **Integration:** GitHub Actions daily cron or local cron job.
@@ -474,7 +501,7 @@ Brier score (7d rolling): 0.19
 - [ ] Paper daily report auto-generates
 - [ ] Compliance checklist all green
 
-### Gate 3: Paper Evidence (Week 8 end)
+### Gate 3: Paper Evidence (after 30+ calendar days)
 
 - [ ] ≥ 30 days of paper trading data
 - [ ] ≥ 50 fills
@@ -510,13 +537,13 @@ Week 3-4: Strategy Substance + Risk (P0-3 through P0-5 start)
 ├── P1-7: Paper daily report script
 └── Gate 2 review → start paper soak
 
-Week 5-8: Paper Soak (30 days minimum, cannot skip)
+Week 5-9: Paper Soak (30 days minimum, cannot skip)
 ├── Daily: paper mode + auto report
 ├── Weekly: Brier/P&L/Sharpe assessment
 ├── Strategy iteration: weight tuning, threshold optimization
-└── Gate 3 review → proceed to live or extend paper
+└── Gate 3 review after day 30 → proceed to live or extend paper
 
-Week 9-10: Advanced Alpha (P1 items, parallelizable)
+Week 9-10: Advanced Alpha (P1 items, parallelizable after Gate 3 evidence is sufficient)
 ├── P1-1: Feature-weighted ensemble (optimized weights)
 ├── P1-2: Additional strategy diversity (2+ strategies)
 ├── P1-3: Automated safety halts
