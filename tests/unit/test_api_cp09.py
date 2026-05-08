@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -96,6 +97,12 @@ def _signal() -> MarketSignal:
         fetched_at=datetime(2026, 4, 14, tzinfo=UTC),
         market_status="open",
     )
+
+
+async def _empty_signal_stream() -> AsyncIterator[MarketSignal]:
+    signals: tuple[MarketSignal, ...] = ()
+    for signal in signals:
+        yield signal
 
 
 def _decision() -> TradeDecision:
@@ -236,7 +243,8 @@ async def test_api_routes_expose_mock_runner_state() -> None:
 @pytest.mark.asyncio
 async def test_status_marks_running_sensor_stale_when_last_signal_is_old() -> None:
     class MarketDataSensorStub:
-        pass
+        def __aiter__(self) -> AsyncIterator[MarketSignal]:
+            return _empty_signal_stream()
 
     async def _pending() -> None:
         await asyncio.Event().wait()
@@ -277,7 +285,8 @@ async def test_status_marks_running_sensor_stale_when_last_signal_is_old() -> No
 @pytest.mark.asyncio
 async def test_status_marks_market_data_stale_when_no_signal_arrives_after_start() -> None:
     class MarketDataSensorStub:
-        pass
+        def __aiter__(self) -> AsyncIterator[MarketSignal]:
+            return _empty_signal_stream()
 
     async def _pending() -> None:
         await asyncio.Event().wait()
