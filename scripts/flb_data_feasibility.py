@@ -230,7 +230,9 @@ def _parse_market(row: dict[str, Any]) -> ResolvedMarket | None:
         elif abs(no_price - 1.0) < _SETTLED_TOLERANCE:
             resolved_yes = False
         else:
-            # Not clearly resolved — skip.
+            # Not clearly resolved — skip. This also excludes 50/50
+            # resolutions (both prices ≈ 0.5), refunds, and cancelled
+            # markets where no single side is the unambiguous winner.
             return None
 
         # The "entry" price is the last trade price before resolution.
@@ -300,7 +302,7 @@ def _extract_category(slug: str, question: str) -> str:
 # ── Historical Warehouse Loading ─────────────────────────────────────────────
 
 
-def load_warehouse_markets(path: Path) -> list[ResolvedMarket]:
+def load_warehouse_markets(path: Path) -> tuple[list[ResolvedMarket], int]:
     """Load resolved binary markets from an explicit warehouse/Dune CSV export.
 
     The warehouse path is intentionally stricter than the Gamma fallback:
@@ -308,6 +310,13 @@ def load_warehouse_markets(path: Path) -> list[ResolvedMarket]:
     (``yes_payout,no_payout`` equal to ``1,0`` or ``0,1``).  Near-settled
     prices such as ``0.995,0.005`` are rejected because they are trade prices,
     not oracle settlement labels.
+
+    Markets with 50/50 resolutions (both payouts 0.5) are silently skipped
+    because the binary outcome model cannot represent partial payouts.
+
+    Returns:
+        (markets, skipped_50_50_count) — parsed markets and count of skipped
+        50/50 resolution rows.
     """
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -319,8 +328,12 @@ def load_warehouse_markets(path: Path) -> list[ResolvedMarket]:
 
         markets: list[ResolvedMarket] = []
         market_ids: set[str] = set()
+        skipped_50_50 = 0
         for row_number, row in enumerate(reader, start=2):
             market = _parse_warehouse_row(row, row_number=row_number)
+            if market is None:
+                skipped_50_50 += 1
+                continue
             if market.market_id in market_ids:
                 raise ValueError(
                     f"warehouse row {row_number}: duplicate market_id "
@@ -329,15 +342,19 @@ def load_warehouse_markets(path: Path) -> list[ResolvedMarket]:
             market_ids.add(market.market_id)
             markets.append(market)
 
-    return markets
+    return markets, skipped_50_50
 
 
 def _parse_warehouse_row(
     row: dict[str, str | None],
     *,
     row_number: int,
-) -> ResolvedMarket:
-    """Parse one strict warehouse CSV row into a resolved binary market."""
+) -> ResolvedMarket | None:
+    """Parse one strict warehouse CSV row into a resolved binary market.
+
+    Returns None for rows that should be skipped without error (e.g. 50/50
+    resolutions where neither side is the unambiguous winner).
+    """
     entry_yes_price = _required_float(row, "entry_yes_price", row_number=row_number)
     if entry_yes_price <= 0.0 or entry_yes_price >= 1.0:
         raise ValueError(
@@ -345,6 +362,8 @@ def _parse_warehouse_row(
         )
 
     resolved_yes = _resolved_yes_from_exact_payout(row, row_number=row_number)
+    if resolved_yes is None:
+        return None  # 50/50 resolution — skip without error
 
     entry_timestamp = _required_text(row, "entry_timestamp", row_number=row_number)
     resolved_at = _required_text(row, "resolved_at", row_number=row_number)
@@ -379,8 +398,17 @@ def _resolved_yes_from_exact_payout(
     row: dict[str, str | None],
     *,
     row_number: int,
-) -> bool:
-    """Return resolution from an exact final payout vector."""
+) -> bool | None:
+    """Return resolution from an exact final payout vector.
+
+    Returns:
+        True — market resolved YES (payout = 1,0).
+        False — market resolved NO (payout = 0,1).
+        None — non-standard resolution (50/50 tie, refund, cancelled).
+          These markets must be excluded from FLB analysis because the
+          binary outcome model cannot represent partial payouts.  Including
+          them would bias the Brier score and FLB gap toward zero.
+    """
     yes_payout = _required_float(row, "yes_payout", row_number=row_number)
     no_payout = _required_float(row, "no_payout", row_number=row_number)
 
@@ -389,9 +417,14 @@ def _resolved_yes_from_exact_payout(
     if yes_payout == 0.0 and no_payout == 1.0:
         return False
 
+    # 50/50 resolution (both payouts 0.5), refunds, or cancelled markets.
+    # These have no clear "correct" side and must be excluded.
+    if yes_payout == 0.5 and no_payout == 0.5:
+        return None
+
     raise ValueError(
         f"warehouse row {row_number}: expected exact final payout vector "
-        "(yes_payout,no_payout) of (1,0) or (0,1)"
+        "(yes_payout,no_payout) of (1,0), (0,1), or (0.5,0.5) for 50/50 resolutions"
     )
 
 
@@ -867,8 +900,14 @@ def main() -> int:
             parser.error("--input is required when --source=warehouse-csv")
         source_label = f"warehouse CSV: {args.input}"
         print(f"Loading resolved binary markets from {args.input}...", file=sys.stderr)
-        markets = load_warehouse_markets(args.input)
+        markets, skipped_50_50 = load_warehouse_markets(args.input)
         print(f"Loaded {len(markets)} resolved binary markets.", file=sys.stderr)
+        if skipped_50_50:
+            print(
+                f"Skipped {skipped_50_50} market(s) with 50/50 resolution "
+                "(no unambiguous winner — excluded from FLB analysis).",
+                file=sys.stderr,
+            )
 
     if not markets:
         print("ERROR: No resolved markets found.", file=sys.stderr)

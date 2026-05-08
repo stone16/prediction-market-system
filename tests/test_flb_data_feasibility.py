@@ -116,9 +116,10 @@ class TestWarehouseCsvLoading:
             ),
         ])
 
-        markets = load_warehouse_markets(path)
+        markets, skipped = load_warehouse_markets(path)
 
         assert len(markets) == 2
+        assert skipped == 0
         assert markets[0].resolved_yes is True
         assert markets[0].yes_price == pytest.approx(0.92)
         assert markets[1].resolved_yes is False
@@ -134,15 +135,16 @@ class TestWarehouseCsvLoading:
         with pytest.raises(ValueError, match="exact final payout vector"):
             load_warehouse_markets(path)
 
-    def test_rejects_ambiguous_fifty_fifty_payout_vector(self, tmp_path: Path) -> None:
-        """Ambiguous 50/50 resolutions are not safe labels for H1 FLB."""
+    def test_skips_ambiguous_fifty_fifty_payout_vector(self, tmp_path: Path) -> None:
+        """Ambiguous 50/50 resolutions are silently skipped — not safe labels for H1 FLB."""
         path = tmp_path / "fifty_fifty.csv"
         _write_warehouse_csv(path, [
             _warehouse_row(yes_payout="0.5", no_payout="0.5")
         ])
 
-        with pytest.raises(ValueError, match="exact final payout vector"):
-            load_warehouse_markets(path)
+        markets, skipped = load_warehouse_markets(path)
+        assert len(markets) == 0
+        assert skipped == 1  # 50/50 market skipped without error
 
     def test_rejects_missing_required_column(self, tmp_path: Path) -> None:
         path = tmp_path / "missing_column.csv"
@@ -204,9 +206,39 @@ class TestWarehouseCsvLoading:
             )
         ])
 
-        markets = load_warehouse_markets(path)
+        markets, _ = load_warehouse_markets(path)
 
         assert len(markets) == 1
+
+    def test_mixed_dataset_normal_and_fifty_fifty_resolutions(
+        self, tmp_path: Path
+    ) -> None:
+        """50/50 markets are skipped, normal markets are still loaded."""
+        path = tmp_path / "mixed_fifty_fifty.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                market_id="normal-yes",
+                yes_payout="1",
+                no_payout="0",
+            ),
+            _warehouse_row(
+                market_id="fifty-fifty",
+                yes_payout="0.5",
+                no_payout="0.5",
+            ),
+            _warehouse_row(
+                market_id="normal-no",
+                yes_payout="0",
+                no_payout="1",
+            ),
+        ])
+
+        markets, skipped = load_warehouse_markets(path)
+        assert skipped == 1  # the 50/50 market
+        assert len(markets) == 2  # normal markets still loaded
+        assert [m.market_id for m in markets] == ["normal-yes", "normal-no"]
+        assert markets[0].resolved_yes is True
+        assert markets[1].resolved_yes is False
 
     def test_mixed_timezone_post_resolution_entry_is_validation_error(
         self, tmp_path: Path
@@ -232,7 +264,8 @@ class TestWarehouseCsvLoading:
             for i in range(120)
         ])
 
-        markets = load_warehouse_markets(path)
+        markets, skipped = load_warehouse_markets(path)
+        assert skipped == 0  # no 50/50 resolutions in this dataset
         contracts = markets_to_contracts(markets)
         stats = compute_decile_stats(contracts)
         gate = check_sample_gate(stats)
