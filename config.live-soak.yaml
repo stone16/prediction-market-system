@@ -25,7 +25,15 @@ sensor:
 
 controller:
   min_volume: 0.0
-  max_slippage_bps: 50
+  # 200bps slippage band for PAPER sim against live Polymarket data:
+  # typical small-market spreads on PM are 100-300bps, and the
+  # PaperActuator applies max_slippage_bps as an effective-limit band
+  # in _vwap_fill (see fix/paper-actuator-slippage-band). 50bps was
+  # tight enough to keep fills near-zero through the 2026-05-03..05
+  # paper soak. **Before flipping mode=live, lower this back to 50**
+  # — the live planner does its own slippage gate via _violates_limit
+  # and the wider band here is intentionally paper-only.
+  max_slippage_bps: 200
   time_in_force: IOC
   decision_cooldown_s: 60.0
   max_book_age_ms: 1000.0
