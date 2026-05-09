@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+import logging
 from typing import Any, cast
 
 import pytest
@@ -88,6 +89,19 @@ class MissingFactor(FactorDefinition):
         return None
 
 
+class ExplodingFactor(FactorDefinition):
+    factor_id = "exploding_factor"
+    required_inputs = ("yes_price",)
+
+    def compute(
+        self,
+        signal: MarketSignal,
+        outer_ring: object,
+    ) -> FactorValueRow | None:
+        del signal, outer_ring
+        raise ValueError("factor exploded")
+
+
 @pytest.mark.asyncio
 async def test_factor_service_compute_once_persists_non_none_rows(
     monkeypatch: pytest.MonkeyPatch,
@@ -121,6 +135,35 @@ async def test_factor_service_compute_once_persists_non_none_rows(
         )
     ]
     assert "factor-service-market" in store.markets
+
+
+@pytest.mark.asyncio
+async def test_factor_service_compute_once_continues_after_factor_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    persisted: list[FactorValueRow] = []
+
+    async def fake_persist(pool: object, row: FactorValueRow) -> None:
+        del pool
+        persisted.append(row)
+
+    monkeypatch.setattr("pms.factors.service.persist_factor_value", fake_persist)
+    service = FactorService(
+        pool=cast(Any, object()),
+        store=cast(Any, FakeStore()),
+        cadence_s=0.1,
+        factors=(ExplodingFactor, PersistedFactor),
+        signal_stream=SequenceSignalStream([]),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="pms.factors.service"):
+        count = await service.compute_once([_signal(market_id="survives-factor-error")])
+
+    assert count == 1
+    assert [row.market_id for row in persisted] == ["survives-factor-error"]
+    assert "factor compute failed" in caplog.text
+    assert "exploding_factor" in caplog.text
 
 
 @pytest.mark.asyncio

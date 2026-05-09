@@ -48,7 +48,6 @@ class AnchoringLagDivergence(FactorDefinition):
     ) -> FactorValueRow | None:
         del outer_ring
 
-        yes_price = _require_open_probability(signal.yes_price, "yes_price")
         if (
             "llm_posterior" not in signal.external_signal
             or "news_timestamp" not in signal.external_signal
@@ -56,6 +55,7 @@ class AnchoringLagDivergence(FactorDefinition):
             or signal.external_signal["news_timestamp"] is None
         ):
             return None
+        yes_price = _require_open_probability(signal.yes_price, "yes_price")
         llm_posterior = _require_open_probability(
             signal.external_signal.get("llm_posterior"),
             "llm_posterior",

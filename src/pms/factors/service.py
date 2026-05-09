@@ -77,10 +77,14 @@ class FactorService:
                     await self.compute_once(list(self._latest_signals.values()))
                 if self._stream_exhausted:
                     self._raise_stream_error(stream_task)
+                    logger.warning("factor signal stream exhausted; factor service exiting")
                     return
                 await asyncio.sleep(self.cadence_s)
         except asyncio.CancelledError:
             logger.info("factor service cancelled")
+            raise
+        except Exception:
+            logger.exception("factor service failed")
             raise
         finally:
             if not stream_task.done():
@@ -92,7 +96,16 @@ class FactorService:
         for signal in signals:
             await self._ensure_market_shell(signal)
             for factor_cls in self.factors:
-                row = factor_cls().compute(signal, self.store)
+                try:
+                    row = factor_cls().compute(signal, self.store)
+                except Exception:
+                    logger.exception(
+                        "factor compute failed factor_id=%s market_id=%s ts=%s",
+                        factor_cls.factor_id,
+                        signal.market_id,
+                        signal.timestamp.isoformat(),
+                    )
+                    continue
                 if row is None:
                     continue
                 dedupe_key = (row.factor_id, row.market_id, row.param)
