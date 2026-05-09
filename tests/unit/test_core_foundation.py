@@ -320,12 +320,20 @@ def test_core_protocol_interfaces_are_declared() -> None:
 def test_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PMS_MODE", raising=False)
     monkeypatch.delenv("PMS_SECRET_SOURCE", raising=False)
+    monkeypatch.delenv("PMS_CONTROLLER__DECISION_COOLDOWN_S", raising=False)
+    monkeypatch.delenv("PMS_DATABASE__EXPIRED_DECISION_RETENTION_S", raising=False)
+    monkeypatch.delenv("PMS_SENSOR__PERSIST_DISCOVERY_PRICE_SNAPSHOTS", raising=False)
+    monkeypatch.delenv("PMS_SENSOR__PERSIST_PRICE_CHANGES", raising=False)
     default_settings = PMSSettings()
 
     assert default_settings.mode is RunMode.BACKTEST
     assert default_settings.secret_source is None
     assert default_settings.live_trading_enabled is False
     assert default_settings.risk.max_position_per_market == 100.0
+    assert default_settings.controller.decision_cooldown_s == 60.0
+    assert default_settings.database.expired_decision_retention_s == 24 * 60 * 60
+    assert default_settings.sensor.persist_discovery_price_snapshots is False
+    assert default_settings.sensor.persist_price_changes is False
     assert set(RiskSettings.model_fields) == {
         "max_position_per_market",
         "max_total_exposure",
@@ -338,10 +346,16 @@ def test_config_defaults_and_env_loading(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setenv("PMS_MODE", "paper")
     monkeypatch.setenv("PMS_SECRET_SOURCE", "fly")
+    monkeypatch.setenv("PMS_CONTROLLER__DECISION_COOLDOWN_S", "15")
+    monkeypatch.setenv("PMS_DATABASE__EXPIRED_DECISION_RETENTION_S", "3600")
+    monkeypatch.setenv("PMS_SENSOR__PERSIST_PRICE_CHANGES", "true")
     env_settings = PMSSettings()
 
     assert env_settings.mode is RunMode.PAPER
     assert env_settings.secret_source == "fly"
+    assert env_settings.controller.decision_cooldown_s == 15.0
+    assert env_settings.database.expired_decision_retention_s == 3600.0
+    assert env_settings.sensor.persist_price_changes is True
 
 
 def test_database_dsn_honours_database_url_override(

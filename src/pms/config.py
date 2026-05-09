@@ -163,6 +163,7 @@ class DatabaseSettings(BaseModel):
     dsn: str = Field(default_factory=_default_database_dsn)
     pool_min_size: int = 2
     pool_max_size: int = 10
+    expired_decision_retention_s: float = Field(default=24 * 60 * 60, ge=0.0)
 
 
 class PMSSettings(BaseSettings):

@@ -1336,9 +1336,13 @@ class Runner:
         *,
         now: datetime | None = None,
     ) -> int:
-        return await self.decision_store.expire_pending(
-            before=now or datetime.now(tz=UTC)
+        sweep_time = now or datetime.now(tz=UTC)
+        expired = await self.decision_store.expire_pending(before=sweep_time)
+        await self.decision_store.prune_expired(
+            before=sweep_time
+            - timedelta(seconds=self.config.database.expired_decision_retention_s)
         )
+        return expired
 
     async def _assert_no_unresolved_submission_unknown_incidents(self) -> None:
         pool = self._pg_pool

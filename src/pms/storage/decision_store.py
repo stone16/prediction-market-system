@@ -114,6 +114,13 @@ LEFT JOIN opportunities
 
 
 @dataclass(frozen=True)
+class DecisionPruneResult:
+    decisions_deleted: int
+    order_intents_deleted: int
+    opportunities_deleted: int
+
+
+@dataclass(frozen=True)
 class StoredDecisionRow:
     decision: TradeDecision
     status: DecisionStatus
@@ -293,6 +300,94 @@ class DecisionStore:
                 before,
             )
         return len(rows)
+
+    async def prune_expired(
+        self,
+        *,
+        before: datetime,
+        limit: int = 10_000,
+    ) -> DecisionPruneResult:
+        if self.pool is None or not hasattr(self.pool, "acquire"):
+            return DecisionPruneResult(
+                decisions_deleted=0,
+                order_intents_deleted=0,
+                opportunities_deleted=0,
+            )
+        if limit <= 0:
+            return DecisionPruneResult(
+                decisions_deleted=0,
+                order_intents_deleted=0,
+                opportunities_deleted=0,
+            )
+
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                rows = await connection.fetch(
+                    """
+                    SELECT decision_id, opportunity_id
+                    FROM decisions
+                    WHERE status = 'expired'
+                      AND updated_at < $1
+                    ORDER BY updated_at ASC, decision_id ASC
+                    LIMIT $2
+                    """,
+                    before,
+                    limit,
+                )
+                if not rows:
+                    return DecisionPruneResult(
+                        decisions_deleted=0,
+                        order_intents_deleted=0,
+                        opportunities_deleted=0,
+                    )
+
+                decision_ids = tuple(cast(str, row["decision_id"]) for row in rows)
+                opportunity_ids = tuple(
+                    sorted(
+                        {
+                            cast(str, row["opportunity_id"])
+                            for row in rows
+                            if row["opportunity_id"] is not None
+                        }
+                    )
+                )
+                intent_rows = await connection.fetch(
+                    """
+                    DELETE FROM order_intents
+                    WHERE decision_id = ANY($1::text[])
+                    RETURNING decision_id
+                    """,
+                    list(decision_ids),
+                )
+                decision_rows = await connection.fetch(
+                    """
+                    DELETE FROM decisions
+                    WHERE decision_id = ANY($1::text[])
+                    RETURNING decision_id
+                    """,
+                    list(decision_ids),
+                )
+                opportunity_rows: Sequence[asyncpg.Record] = []
+                if opportunity_ids:
+                    opportunity_rows = await connection.fetch(
+                        """
+                        DELETE FROM opportunities
+                        WHERE opportunity_id = ANY($1::text[])
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM decisions
+                              WHERE decisions.opportunity_id = opportunities.opportunity_id
+                          )
+                        RETURNING opportunity_id
+                        """,
+                        list(opportunity_ids),
+                    )
+
+        return DecisionPruneResult(
+            decisions_deleted=len(decision_rows),
+            order_intents_deleted=len(intent_rows),
+            opportunities_deleted=len(opportunity_rows),
+        )
 
 
 def validate_decision_status_transition(

@@ -9,7 +9,11 @@ import pytest
 
 from pms.core.enums import TimeInForce
 from pms.core.models import TradeDecision
-from pms.storage.decision_store import DecisionStore, validate_decision_status_transition
+from pms.storage.decision_store import (
+    DecisionPruneResult,
+    DecisionStore,
+    validate_decision_status_transition,
+)
 
 
 class _TransactionRecorder:
@@ -32,6 +36,7 @@ class _RecordingConnection:
         self.transaction_entries = 0
         self.execute_calls: list[tuple[str, tuple[object, ...], bool]] = []
         self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetch_results: list[list[object]] = []
         self.fetchrow_calls: list[tuple[str, tuple[object, ...]]] = []
         self.fetch_rows: list[object] = []
         self.fetchrow_row: object | None = None
@@ -42,6 +47,8 @@ class _RecordingConnection:
 
     async def fetch(self, query: str, *args: object) -> list[object]:
         self.fetch_calls.append((query, args))
+        if self.fetch_results:
+            return self.fetch_results.pop(0)
         return list(self.fetch_rows)
 
     async def fetchrow(self, query: str, *args: object) -> object | None:
@@ -299,3 +306,39 @@ async def test_decision_store_expire_pending_updates_matching_rows() -> None:
     assert "status IN ('pending', 'accepted', 'queued')" in query
     assert "RETURNING decision_id" in query
     assert args == (cutoff,)
+
+
+@pytest.mark.asyncio
+async def test_decision_store_prune_expired_deletes_decisions_and_orphan_products() -> None:
+    cutoff = datetime(2026, 4, 24, 10, 30, tzinfo=UTC)
+    connection = _RecordingConnection()
+    connection.fetch_results = [
+        [
+            {
+                "decision_id": "decision-old-expired",
+                "opportunity_id": "opportunity-old-expired",
+            }
+        ],
+        [{"decision_id": "decision-old-expired"}],
+        [{"decision_id": "decision-old-expired"}],
+        [{"opportunity_id": "opportunity-old-expired"}],
+    ]
+    store = DecisionStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    result = await store.prune_expired(before=cutoff, limit=100)
+
+    assert result == DecisionPruneResult(
+        decisions_deleted=1,
+        order_intents_deleted=1,
+        opportunities_deleted=1,
+    )
+    assert connection.transaction_entries == 1
+    select_query, select_args = connection.fetch_calls[0]
+    assert "FROM decisions" in select_query
+    assert "status = 'expired'" in select_query
+    assert "updated_at < $1" in select_query
+    assert "LIMIT $2" in select_query
+    assert select_args == (cutoff, 100)
+    assert "DELETE FROM order_intents" in connection.fetch_calls[1][0]
+    assert "DELETE FROM decisions" in connection.fetch_calls[2][0]
+    assert "DELETE FROM opportunities" in connection.fetch_calls[3][0]

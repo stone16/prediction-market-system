@@ -48,6 +48,11 @@ controller:
   direct_quote_min_notional_usdc: 100.0
   dual_quote_max_price_delta_bps: 25.0
 
+database:
+  pool_min_size: 2
+  pool_max_size: 10
+  expired_decision_retention_s: 86400.0
+
 polymarket:
   host: https://clob.polymarket.com
   websocket_url: wss://ws-subscriptions-clob.polymarket.com/ws/
