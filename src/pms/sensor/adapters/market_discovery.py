@@ -36,6 +36,7 @@ class MarketDiscoverySensor:
     store: PostgresMarketDataStore
     http_client: httpx.AsyncClient
     poll_interval_s: float = 60.0
+    persist_price_snapshots: bool = False
     on_poll_complete: Callable[[], Awaitable[None]] | None = None
 
     _INITIAL_BACKOFF_S = 1.0
@@ -106,27 +107,28 @@ class MarketDiscoverySensor:
                 tokens = _gamma_market_to_tokens(row, market.condition_id)
                 await self.store.write_market(market)
                 written_markets.append(market)
-                try:
-                    await self.store.write_price_snapshot(
-                        condition_id=market.condition_id,
-                        snapshot_at=fetched_at,
-                        yes_price=market.yes_price,
-                        no_price=market.no_price,
-                        best_bid=market.best_bid,
-                        best_ask=market.best_ask,
-                        last_trade_price=market.last_trade_price,
-                        liquidity=market.liquidity,
-                        volume_24h=market.volume_24h,
-                    )
-                    increment_metric(
-                        SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC
-                    )
-                except asyncpg.PostgresError as error:
-                    logger.warning(
-                        "discovery write_price_snapshot failed for %s: %s",
-                        market.condition_id,
-                        error,
-                    )
+                if self.persist_price_snapshots:
+                    try:
+                        await self.store.write_price_snapshot(
+                            condition_id=market.condition_id,
+                            snapshot_at=fetched_at,
+                            yes_price=market.yes_price,
+                            no_price=market.no_price,
+                            best_bid=market.best_bid,
+                            best_ask=market.best_ask,
+                            last_trade_price=market.last_trade_price,
+                            liquidity=market.liquidity,
+                            volume_24h=market.volume_24h,
+                        )
+                        increment_metric(
+                            SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC
+                        )
+                    except asyncpg.PostgresError as error:
+                        logger.warning(
+                            "discovery write_price_snapshot failed for %s: %s",
+                            market.condition_id,
+                            error,
+                        )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
                 logger.warning("skipping malformed Gamma market row: %s", error)
                 continue

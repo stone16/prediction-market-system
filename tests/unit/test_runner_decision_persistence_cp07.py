@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -156,10 +156,15 @@ class _RecordingDecisionStore:
 class _RecordingSweepStore:
     def __init__(self) -> None:
         self.calls: list[datetime] = []
+        self.prune_calls: list[datetime] = []
 
     async def expire_pending(self, *, before: datetime) -> int:
         self.calls.append(before)
         return 2
+
+    async def prune_expired(self, *, before: datetime) -> object:
+        self.prune_calls.append(before)
+        return object()
 
 
 @pytest.mark.asyncio
@@ -221,7 +226,9 @@ async def test_runner_sweep_expired_decisions_once_delegates_to_store() -> None:
     expired = await runner._sweep_expired_decisions_once(now=now)  # noqa: SLF001
 
     assert expired == 2
-    assert cast(_RecordingSweepStore, runner.decision_store).calls == [now]
+    store = cast(_RecordingSweepStore, runner.decision_store)
+    assert store.calls == [now]
+    assert store.prune_calls == [now - timedelta(hours=24)]
 
 
 def test_decision_expiry_uses_signal_resolution_when_opportunity_has_no_expiry() -> None:

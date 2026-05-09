@@ -733,6 +733,7 @@ class Runner:
         market_data_sensor = MarketDataSensor(
             store=PostgresMarketDataStore(self._pg_pool),
             asset_ids=[],
+            persist_price_changes=self.config.sensor.persist_price_changes,
         )
         market_data_sensor.max_reconnect_interval_s = (
             self.config.sensor.max_reconnect_interval_s
@@ -744,6 +745,9 @@ class Runner:
                     base_url="https://gamma-api.polymarket.com"
                 ),
                 poll_interval_s=self.config.sensor.poll_interval_s,
+                persist_price_snapshots=(
+                    self.config.sensor.persist_discovery_price_snapshots
+                ),
             ),
             market_data_sensor,
         )
@@ -1332,9 +1336,13 @@ class Runner:
         *,
         now: datetime | None = None,
     ) -> int:
-        return await self.decision_store.expire_pending(
-            before=now or datetime.now(tz=UTC)
+        sweep_time = now or datetime.now(tz=UTC)
+        expired = await self.decision_store.expire_pending(before=sweep_time)
+        await self.decision_store.prune_expired(
+            before=sweep_time
+            - timedelta(seconds=self.config.database.expired_decision_retention_s)
         )
+        return expired
 
     async def _assert_no_unresolved_submission_unknown_incidents(self) -> None:
         pool = self._pg_pool

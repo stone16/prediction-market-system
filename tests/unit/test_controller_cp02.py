@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from pms.config import ControllerSettings, RiskSettings
+from pms.config import ControllerSettings, PMSSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.pipeline import ControllerPipeline
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
+from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, Portfolio
 
 
@@ -23,7 +24,7 @@ class StaticForecaster:
         return 0.67
 
 
-def _signal() -> MarketSignal:
+def _signal(*, fetched_at: datetime | None = None) -> MarketSignal:
     return MarketSignal(
         market_id="market-cp02",
         token_id="token-cp02",
@@ -34,7 +35,7 @@ def _signal() -> MarketSignal:
         resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
         orderbook={"bids": [], "asks": []},
         external_signal={"fair_value": 0.61, "confidence": 0.8, "label": "skip"},
-        fetched_at=datetime(2026, 4, 19, tzinfo=UTC),
+        fetched_at=fetched_at or datetime(2026, 4, 19, tzinfo=UTC),
         market_status="open",
     )
 
@@ -109,3 +110,37 @@ async def test_controller_pipeline_decide_returns_notional_decision() -> None:
     assert decision is not None
     assert decision.notional_usdc == pytest.approx(_expected_kelly_notional())
     assert decision.limit_price == pytest.approx(0.4)
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_suppresses_duplicate_paper_decisions_within_cooldown() -> None:
+    first_ts = datetime(2026, 4, 19, tzinfo=UTC)
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                min_volume=100.0,
+                decision_cooldown_s=60.0,
+            ),
+        ),
+    )
+
+    first = await pipeline.on_signal(_signal(fetched_at=first_ts), portfolio=_portfolio())
+    duplicate = await pipeline.on_signal(
+        _signal(fetched_at=first_ts + timedelta(seconds=30)),
+        portfolio=_portfolio(),
+    )
+    after_cooldown = await pipeline.on_signal(
+        _signal(fetched_at=first_ts + timedelta(seconds=61)),
+        portfolio=_portfolio(),
+    )
+
+    assert first is not None
+    assert duplicate is None
+    assert after_cooldown is not None

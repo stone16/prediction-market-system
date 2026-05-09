@@ -60,6 +60,10 @@ class ControllerPipeline:
     settings: PMSSettings = field(default_factory=PMSSettings)
     last_diagnostic: ControllerDiagnostic | None = field(init=False, default=None)
     suppressed_zero_size: int = field(init=False, default=0)
+    _last_decision_emitted_at: dict[tuple[str, str, str, str, str], datetime] = field(
+        init=False,
+        default_factory=dict,
+    )
 
     def __post_init__(self) -> None:
         if self.strategy is not None:
@@ -305,6 +309,21 @@ class ControllerPipeline:
         if size <= 0.0 or size < min_order_usdc:
             self.suppressed_zero_size += 1
             return None
+        cooldown_key = (
+            self.strategy_id,
+            self.strategy_version_id,
+            signal.market_id,
+            decision_token_id,
+            decision_outcome,
+        )
+        if _within_decision_cooldown(
+            self._last_decision_emitted_at,
+            key=cooldown_key,
+            current_ts=signal.timestamp,
+            settings=self.settings,
+        ):
+            return None
+        self._last_decision_emitted_at[cooldown_key] = signal.timestamp
         opportunity = Opportunity(
             opportunity_id=f"opportunity-{uuid.uuid4().hex}",
             market_id=signal.market_id,
@@ -454,6 +473,24 @@ def _signal_factor_values(signal: MarketSignal) -> dict[tuple[str, str], float]:
 
 def _strict_factor_gates(settings: PMSSettings) -> bool:
     return settings.mode == RunMode.LIVE or settings.controller.strict_factor_gates
+
+
+def _within_decision_cooldown(
+    emitted_at_by_key: dict[tuple[str, str, str, str, str], datetime],
+    *,
+    key: tuple[str, str, str, str, str],
+    current_ts: datetime,
+    settings: PMSSettings,
+) -> bool:
+    if settings.mode == RunMode.BACKTEST:
+        return False
+    cooldown_s = settings.controller.decision_cooldown_s
+    if cooldown_s <= 0.0:
+        return False
+    previous_ts = emitted_at_by_key.get(key)
+    if previous_ts is None:
+        return False
+    return (current_ts - previous_ts).total_seconds() < cooldown_s
 
 
 def _factor_key_label(key: FactorKey) -> str:
