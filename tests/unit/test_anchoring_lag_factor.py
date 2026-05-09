@@ -99,6 +99,13 @@ def test_anchoring_lag_factor_returns_none_when_llm_news_inputs_are_absent() -> 
     assert AnchoringLagDivergence().compute(signal, EMPTY_OUTER_RING) is None
 
 
+def test_anchoring_lag_factor_ignores_book_signal_without_llm_news_inputs() -> None:
+    signal = _signal(yes_price=0.0)
+    signal.external_signal.clear()
+
+    assert AnchoringLagDivergence().compute(signal, EMPTY_OUTER_RING) is None
+
+
 def test_anchoring_lag_factor_returns_none_for_null_llm_news_inputs() -> None:
     signal = _signal()
     signal.external_signal["llm_posterior"] = None
