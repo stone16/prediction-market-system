@@ -96,6 +96,10 @@ class FactorService:
         for signal in signals:
             await self._ensure_market_shell(signal)
             for factor_cls in self.factors:
+                if _requires_open_yes_price(factor_cls) and not _has_open_yes_price(
+                    signal
+                ):
+                    continue
                 try:
                     row = factor_cls().compute(signal, self.store)
                 except Exception:
@@ -201,3 +205,12 @@ def _is_constraint_violation(
 ) -> bool:
     actual_constraint = getattr(exc, "constraint_name", None)
     return actual_constraint == constraint_name or constraint_name in str(exc)
+
+
+def _requires_open_yes_price(factor_cls: type[FactorDefinition]) -> bool:
+    return "yes_price" in factor_cls.required_inputs
+
+
+def _has_open_yes_price(signal: MarketSignal) -> bool:
+    yes_price = signal.yes_price
+    return 0.0 < yes_price < 1.0 and yes_price == yes_price

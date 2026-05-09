@@ -15,13 +15,17 @@ from pms.factors.service import FactorService
 from pms.sensor.stream import SensorStream
 
 
-def _signal(*, market_id: str = "factor-service-market") -> MarketSignal:
+def _signal(
+    *,
+    market_id: str = "factor-service-market",
+    yes_price: float = 0.4,
+) -> MarketSignal:
     return MarketSignal(
         market_id=market_id,
         token_id="yes-token",
         venue="polymarket",
         title="Will FactorService persist factors?",
-        yes_price=0.4,
+        yes_price=yes_price,
         volume_24h=1000.0,
         resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
         orderbook={
@@ -87,6 +91,25 @@ class MissingFactor(FactorDefinition):
     ) -> FactorValueRow | None:
         del signal, outer_ring
         return None
+
+
+class OrderbookOnlyFactor(FactorDefinition):
+    factor_id = "orderbook_only_factor"
+    required_inputs = ("orderbook",)
+
+    def compute(
+        self,
+        signal: MarketSignal,
+        outer_ring: object,
+    ) -> FactorValueRow | None:
+        del outer_ring
+        return FactorValueRow(
+            factor_id=self.factor_id,
+            param="",
+            market_id=signal.market_id,
+            ts=signal.timestamp,
+            value=float(len(signal.orderbook.get("bids", []))),
+        )
 
 
 class ExplodingFactor(FactorDefinition):
@@ -164,6 +187,35 @@ async def test_factor_service_compute_once_continues_after_factor_error(
     assert [row.market_id for row in persisted] == ["survives-factor-error"]
     assert "factor compute failed" in caplog.text
     assert "exploding_factor" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_factor_service_skips_yes_price_factors_for_sentinel_book_signals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[FactorValueRow] = []
+
+    async def fake_persist(pool: object, row: FactorValueRow) -> None:
+        del pool
+        persisted.append(row)
+
+    monkeypatch.setattr("pms.factors.service.persist_factor_value", fake_persist)
+    service = FactorService(
+        pool=cast(Any, object()),
+        store=cast(Any, FakeStore()),
+        cadence_s=0.1,
+        factors=(PersistedFactor, OrderbookOnlyFactor),
+        signal_stream=SequenceSignalStream([]),
+    )
+
+    count = await service.compute_once(
+        [_signal(market_id="sentinel-book-signal", yes_price=0.0)]
+    )
+
+    assert count == 1
+    assert [(row.factor_id, row.market_id) for row in persisted] == [
+        ("orderbook_only_factor", "sentinel-book-signal")
+    ]
 
 
 @pytest.mark.asyncio
