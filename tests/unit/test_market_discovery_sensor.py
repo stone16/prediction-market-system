@@ -298,6 +298,41 @@ async def test_market_discovery_sensor_preserves_zero_volume_rows() -> None:
 
 
 @pytest.mark.asyncio
+async def test_market_discovery_sensor_default_skips_price_snapshot_history() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    payload = [
+        _gamma_market(
+            "pm-scan-only",
+            token_ids=["yes-token", "no-token"],
+            outcomes=["Yes", "No"],
+            outcome_prices=["0.61", "0.39"],
+            last_trade_price="0.60",
+        )
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    store_mock.write_market_mock.assert_awaited_once()
+    assert store_mock.write_token_mock.await_count == 2
+    assert store_mock.write_price_snapshot_mock.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_market_discovery_sensor_updates_price_field_ratio_metric() -> None:
     store = _store_mock()
     store_mock = cast(StoreMock, store)
@@ -327,6 +362,7 @@ async def test_market_discovery_sensor_updates_price_field_ratio_metric() -> Non
             base_url="https://gamma.example.test",
         ),
         poll_interval_s=60.0,
+        persist_price_snapshots=True,
     )
 
     await sensor.poll_once()

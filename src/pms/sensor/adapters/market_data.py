@@ -66,10 +66,12 @@ class MarketDataSensor:
         store: PostgresMarketDataStore,
         ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market",
         asset_ids: list[str] | None = None,
+        persist_price_changes: bool = False,
     ) -> None:
         self.store = store
         self.ws_url = ws_url
         self._asset_ids: list[str] = list(asset_ids) if asset_ids else []
+        self.persist_price_changes = persist_price_changes
         self._subscribed_asset_ids: frozenset[str] = frozenset()
         self._books: dict[str, _BookState] = {}
         self._websocket: Any = None
@@ -324,20 +326,21 @@ class MarketDataSensor:
             best_ask = _optional_float(change.get("best_ask"))
             state.last_hash = _optional_str(change.get("hash"))
 
-            await self.store.write_price_change(
-                PriceChange(
-                    id=0,
-                    market_id=market_id,
-                    token_id=asset_id,
-                    ts=timestamp,
-                    side=side,
-                    price=price,
-                    size=size,
-                    best_bid=best_bid,
-                    best_ask=best_ask,
-                    hash=state.last_hash,
+            if self.persist_price_changes:
+                await self.store.write_price_change(
+                    PriceChange(
+                        id=0,
+                        market_id=market_id,
+                        token_id=asset_id,
+                        ts=timestamp,
+                        side=side,
+                        price=price,
+                        size=size,
+                        best_bid=best_bid,
+                        best_ask=best_ask,
+                        hash=state.last_hash,
+                    )
                 )
-            )
             signals.append(
                 _signal_from_state(
                     state=state,

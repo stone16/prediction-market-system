@@ -115,6 +115,7 @@ class ControllerSettings(BaseModel):
     min_volume: float = 0.0
     max_slippage_bps: int = 50
     time_in_force: str = "GTC"
+    decision_cooldown_s: float = Field(default=60.0, ge=0.0)
     max_book_age_ms: float = 1_000.0
     allowed_book_clock_skew_ms: float = 250.0
     max_spread_bps: float = 100.0
@@ -143,6 +144,8 @@ class SensorSettings(BaseModel):
     poll_interval_s: float = 5.0
     max_reconnect_interval_s: float = 60.0
     max_subscription_asset_ids: int | None = Field(default=100, ge=1)
+    persist_discovery_price_snapshots: bool = False
+    persist_price_changes: bool = False
 
 
 class DashboardSettings(BaseModel):

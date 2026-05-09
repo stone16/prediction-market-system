@@ -207,6 +207,37 @@ def test_message_timestamp_supports_millisecond_and_second_epoch_values(
 
 
 @pytest.mark.asyncio
+async def test_market_data_sensor_default_keeps_price_change_in_memory_without_raw_db_write() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    sensor = MarketDataSensor(store=store)
+
+    signals = await sensor._handle_message(
+        {
+            "event_type": "price_change",
+            "market": "m-scan-only",
+            "timestamp": "1757908892352",
+            "price_changes": [
+                {
+                    "asset_id": "asset-scan-only",
+                    "price": "0.49",
+                    "size": "12",
+                    "side": "BUY",
+                    "hash": "delta-hash",
+                    "best_bid": "0.49",
+                    "best_ask": "0.52",
+                }
+            ],
+        }
+    )
+    await sensor.aclose()
+
+    assert len(signals) == 1
+    assert signals[0].orderbook["bids"] == [{"price": 0.49, "size": 12.0}]
+    assert store_mock.write_price_change_mock.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_market_data_sensor_replays_fixture_losslessly_and_persists_piecewise_deltas(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -222,6 +253,7 @@ async def test_market_data_sensor_replays_fixture_losslessly_and_persists_piecew
         store=store,
         ws_url="ws://market-data.example.test",
         asset_ids=["asset-yes"],
+        persist_price_changes=True,
     )
     sensor._heartbeat_interval_s = 1.0
 

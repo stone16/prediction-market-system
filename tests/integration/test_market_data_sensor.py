@@ -130,6 +130,7 @@ async def test_market_data_sensor_persists_book_price_changes_and_trades_from_lo
             store=store,
             ws_url=f"ws://127.0.0.1:{port}",
             asset_ids=["asset-local"],
+            persist_price_changes=True,
         )
         task = asyncio.create_task(_consume_until_cancel(sensor))
         try:

@@ -733,6 +733,7 @@ class Runner:
         market_data_sensor = MarketDataSensor(
             store=PostgresMarketDataStore(self._pg_pool),
             asset_ids=[],
+            persist_price_changes=self.config.sensor.persist_price_changes,
         )
         market_data_sensor.max_reconnect_interval_s = (
             self.config.sensor.max_reconnect_interval_s
@@ -744,6 +745,9 @@ class Runner:
                     base_url="https://gamma-api.polymarket.com"
                 ),
                 poll_interval_s=self.config.sensor.poll_interval_s,
+                persist_price_snapshots=(
+                    self.config.sensor.persist_discovery_price_snapshots
+                ),
             ),
             market_data_sensor,
         )

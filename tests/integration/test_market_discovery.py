@@ -251,6 +251,7 @@ async def test_discovery_poll_writes_one_snapshot_per_market(
             base_url="https://gamma.example.test",
         ),
         poll_interval_s=60.0,
+        persist_price_snapshots=True,
     )
 
     await sensor.poll_once()
@@ -289,6 +290,7 @@ async def test_discovery_poll_idempotent_on_duplicate_timestamp(
             base_url="https://gamma.example.test",
         ),
         poll_interval_s=60.0,
+        persist_price_snapshots=True,
     )
 
     await sensor.poll_once()
@@ -378,6 +380,7 @@ async def test_discovery_poll_continues_after_snapshot_write_failure(
             base_url="https://gamma.example.test",
         ),
         poll_interval_s=60.0,
+        persist_price_snapshots=True,
     )
 
     with caplog.at_level("WARNING"):
