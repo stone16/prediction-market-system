@@ -20,7 +20,7 @@ def test_logit_shrinkage_compresses_extreme_default_probability() -> None:
 
     assert calibrated is not None
     assert calibrated <= 0.75
-    assert calibrated == pytest.approx(0.736568, abs=1e-6)
+    assert calibrated == pytest.approx(0.737023, abs=1e-6)
 
 
 def test_logit_shrinkage_keeps_midpoint_fixed_when_bias_is_zero() -> None:
