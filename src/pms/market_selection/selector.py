@@ -32,6 +32,7 @@ class MarketSelector:
         self._registry = registry
         self._merge_policy = merge_policy
         self._market_subscription_store = market_subscription_store
+        self._last_discovered_count = 0
 
     async def select(self) -> MergeResult:
         selections = await self.select_per_strategy()
@@ -47,15 +48,19 @@ class MarketSelector:
         merged = self._merge_policy.merge(selections)
         user_asset_ids = await self._read_user_subscriptions()
         if not user_asset_ids:
+            _log_selector_funnel(self._last_discovered_count, len(merged.asset_ids))
             return merged
-        return MergeResult(
+        result = MergeResult(
             asset_ids=sorted(frozenset(merged.asset_ids) | user_asset_ids),
             conflicts=merged.conflicts,
         )
+        _log_selector_funnel(self._last_discovered_count, len(result.asset_ids))
+        return result
 
     async def select_per_strategy(self) -> list[StrategyMarketSet]:
         strategy_specs = await self._registry.list_market_selections()
         selections: list[StrategyMarketSet] = []
+        self._last_discovered_count = 0
         for strategy_id, strategy_version_id, spec in strategy_specs:
             venue = normalize_venue(
                 spec.venue,
@@ -68,6 +73,7 @@ class MarketSelector:
                 spec.resolution_time_max_horizon_days,
                 spec.volume_min_usdc,
             )
+            self._last_discovered_count += len(eligible_markets)
             filtered_markets = await self._filter_markets(eligible_markets, spec)
             selections.append(
                 StrategyMarketSet(
@@ -119,6 +125,19 @@ class MarketSelector:
         if self._market_subscription_store is None:
             return frozenset()
         return frozenset(await self._market_subscription_store.read_user_subscriptions())
+
+
+def _log_selector_funnel(discovered_count: int, selected_count: int) -> None:
+    logger.info(
+        "market selector funnel discovered=%d selected=%d",
+        discovered_count,
+        selected_count,
+        extra={
+            "event": "funnel_selector",
+            "discovered_count": discovered_count,
+            "selected_count": selected_count,
+        },
+    )
 
 
 def _asset_ids_from_eligible_markets(

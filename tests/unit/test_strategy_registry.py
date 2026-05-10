@@ -413,6 +413,9 @@ def test_strategy_from_config_json_validates_nested_fields() -> None:
 
 def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None:
     payload = json.loads(serialize_strategy_config_json(*_strategy().snapshot()))
+    del payload["market_selection"]["spread_max_bps"]
+    del payload["market_selection"]["depth_min_usdc"]
+    payload["calibration"] = {}
     selection = _market_selection_from_config_json(payload)
     calibration = _calibration_from_config_json(payload)
 
@@ -420,6 +423,7 @@ def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None
     assert selection.depth_min_usdc == 250.0
     assert selection.liquidity_min_usdc is None
     assert selection.accepting_orders is True
+    assert calibration.enabled is True
     assert calibration.shrinkage_factor == 0.35
     assert calibration.shrinkage_bias == 0.0
     assert calibration.min_resolved_for_extreme == 500

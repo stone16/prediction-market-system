@@ -13,6 +13,9 @@ class NetcalCalibrator:
     def add_samples(self, model_id: str, records: list[EvalRecord]) -> None:
         self._samples.setdefault(model_id, []).extend(records)
 
+    def sample_count(self, model_id: str) -> int:
+        return len(self._samples.get(model_id, []))
+
     def calibrate(self, prob: float, *, model_id: str) -> float:
         records = self._samples.get(model_id, [])
         if len(records) < self.min_samples:
@@ -44,4 +47,3 @@ def _pava(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
 
 def _clip_probability(value: float) -> float:
     return min(max(value, 0.0), 1.0)
-

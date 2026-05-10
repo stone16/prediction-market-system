@@ -12,7 +12,9 @@ from typing import Literal, TypeVar
 
 from pms.config import PMSSettings
 from pms.controller._price_utils import best_ask, spread_bps_at_decision
+from pms.controller.calibrators.extreme_clamp import ExtremeProbClamp
 from pms.controller.calibrators.netcal import NetcalCalibrator
+from pms.controller.calibrators.shrinkage import LogitShrinkageCalibrator
 from pms.controller.diagnostics import ControllerDiagnostic
 from pms.controller.factor_snapshot import (
     FactorKey,
@@ -30,10 +32,10 @@ from pms.controller.outcome_tokens import (
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import RunMode, TimeInForce
-from pms.core.interfaces import ICalibrator, IForecaster, ISizer
+from pms.core.interfaces import ICalibrator, IForecaster, IPreCalibrator, ISizer
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
 from pms.factors.composition import apply_composition, evaluate_branch_probabilities
-from pms.strategies.projections import ActiveStrategy
+from pms.strategies.projections import ActiveStrategy, CalibrationContext, CalibrationSpec
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +92,10 @@ class ControllerPipeline:
         self.last_diagnostic = None
         router = _required(self.router, "router")
         if not router.gate(signal):
+            _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
             return None
         if signal.token_id is None:
+            _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
             return None
 
         forecasters = _required(self.forecasters, "forecasters")
@@ -134,6 +138,7 @@ class ControllerPipeline:
                 runtime_probabilities[runtime_factor_id] = calibrated_probability
 
         if not probabilities:
+            _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
             return None
 
         prob_estimate = sum(probabilities) / len(probabilities)
@@ -246,7 +251,27 @@ class ControllerPipeline:
                     }
             except (KeyError, ValueError) as exc:
                 logger.warning("composition resolution failed: %s", exc)
+                _log_pipeline_funnel(
+                    signal,
+                    forecasted_count=len(probabilities),
+                    traded_count=0,
+                )
                 return None
+        calibrated_estimate = _apply_pre_calibrators(
+            prob_estimate,
+            model_ids=model_ids,
+            calibrator=calibrator,
+            strategy=self.strategy,
+            signal=signal,
+        )
+        if calibrated_estimate is None:
+            _log_pipeline_funnel(
+                signal,
+                forecasted_count=len(probabilities),
+                traded_count=0,
+            )
+            return None
+        prob_estimate = calibrated_estimate
         yes_probability = prob_estimate
         yes_reference_price = _yes_reference_price(signal, self.strategy)
         yes_edge = yes_probability - yes_reference_price
@@ -297,6 +322,11 @@ class ControllerPipeline:
             decision_price = max(1e-6, min(1.0 - 1e-6, 1.0 - yes_reference_price))
             decision_edge = decision_probability - decision_price
         if decision_edge <= 0.0:
+            _log_pipeline_funnel(
+                signal,
+                forecasted_count=len(probabilities),
+                traded_count=0,
+            )
             return None
         size = sizer.size(
             prob=decision_probability,
@@ -308,6 +338,11 @@ class ControllerPipeline:
             min_order_usdc = self.strategy.risk.min_order_size_usdc
         if size <= 0.0 or size < min_order_usdc:
             self.suppressed_zero_size += 1
+            _log_pipeline_funnel(
+                signal,
+                forecasted_count=len(probabilities),
+                traded_count=0,
+            )
             return None
         cooldown_key = (
             self.strategy_id,
@@ -322,8 +357,18 @@ class ControllerPipeline:
             current_ts=signal.timestamp,
             settings=self.settings,
         ):
+            _log_pipeline_funnel(
+                signal,
+                forecasted_count=len(probabilities),
+                traded_count=0,
+            )
             return None
         self._last_decision_emitted_at[cooldown_key] = signal.timestamp
+        _log_pipeline_funnel(
+            signal,
+            forecasted_count=len(probabilities),
+            traded_count=1,
+        )
         opportunity = Opportunity(
             opportunity_id=f"opportunity-{uuid.uuid4().hex}",
             market_id=signal.market_id,
@@ -411,6 +456,76 @@ class ControllerPipeline:
         signal: MarketSignal,
     ) -> ForecastResult | None:
         return await asyncio.to_thread(forecaster.predict, signal)
+
+
+def _apply_pre_calibrators(
+    prob_estimate: float,
+    *,
+    model_ids: Sequence[str],
+    calibrator: ICalibrator,
+    strategy: ActiveStrategy | None,
+    signal: MarketSignal,
+) -> float | None:
+    raw_prob = prob_estimate
+    spec = strategy.calibration if strategy is not None else CalibrationSpec()
+    if not spec.enabled:
+        return raw_prob
+    context = CalibrationContext(
+        resolved_sample_count=_resolved_sample_count(calibrator, model_ids),
+        model_id=_decision_model_id(model_ids) or "unknown",
+    )
+    current: float | None = raw_prob
+    for pre_calibrator in _pre_calibrators(spec):
+        if current is None:
+            return None
+        next_prob = pre_calibrator.calibrate(current, context=context)
+        if next_prob is None:
+            logger.info(
+                "calibration clamp rejected forecast for %s",
+                signal.market_id,
+                extra={
+                    "event": "clamp_rejection",
+                    "market_id": signal.market_id,
+                    "raw_prob": raw_prob,
+                    "calibrated_prob": current,
+                    "clamp_action": "reject",
+                    "resolved_sample_count": context.resolved_sample_count,
+                },
+            )
+            return None
+        current = next_prob
+    return current
+
+
+def _pre_calibrators(spec: CalibrationSpec) -> tuple[IPreCalibrator, ...]:
+    return (LogitShrinkageCalibrator(spec), ExtremeProbClamp(spec))
+
+
+def _resolved_sample_count(calibrator: ICalibrator, model_ids: Sequence[str]) -> int:
+    sample_count = getattr(calibrator, "sample_count", None)
+    if not callable(sample_count) or not model_ids:
+        return 0
+    return max(int(sample_count(model_id)) for model_id in model_ids)
+
+
+def _log_pipeline_funnel(
+    signal: MarketSignal,
+    *,
+    forecasted_count: int,
+    traded_count: int,
+) -> None:
+    logger.info(
+        "controller pipeline funnel market_id=%s forecasted=%d traded=%d",
+        signal.market_id,
+        forecasted_count,
+        traded_count,
+        extra={
+            "event": "funnel_pipeline",
+            "market_id": signal.market_id,
+            "forecasted_count": forecasted_count,
+            "traded_count": traded_count,
+        },
+    )
 
 
 def _model_id(result: ForecastResult, forecaster: IForecaster) -> str:

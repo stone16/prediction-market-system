@@ -49,6 +49,7 @@ EXPECTED_FIELD_TYPES: dict[str, dict[str, Any]] = {
         "forecasters": tuple[tuple[str, tuple[tuple[str, str], ...]], ...],
     },
     "CalibrationSpec": {
+        "enabled": bool,
         "shrinkage_factor": float,
         "shrinkage_bias": float,
         "extreme_clamp_low": float,
@@ -222,6 +223,7 @@ def test_calibration_spec_defaults_are_part_of_projection_contract() -> None:
 
     calibration = module.CalibrationSpec()
 
+    assert calibration.enabled is False
     assert calibration.shrinkage_factor == 0.35
     assert calibration.shrinkage_bias == 0.0
     assert calibration.extreme_clamp_low == 0.08

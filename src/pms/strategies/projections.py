@@ -52,6 +52,7 @@ class ForecasterSpec:
 
 @dataclass(frozen=True, slots=True)
 class CalibrationSpec:
+    enabled: bool = False
     shrinkage_factor: float = 0.35
     shrinkage_bias: float = 0.0
     extreme_clamp_low: float = 0.08

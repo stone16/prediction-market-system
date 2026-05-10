@@ -259,6 +259,15 @@ class IdentitySampleCalibrator:
 
 
 def _calibrated_strategy(calibration: CalibrationSpec) -> ActiveStrategy:
+    if not calibration.enabled:
+        calibration = CalibrationSpec(
+            enabled=True,
+            shrinkage_factor=calibration.shrinkage_factor,
+            shrinkage_bias=calibration.shrinkage_bias,
+            extreme_clamp_low=calibration.extreme_clamp_low,
+            extreme_clamp_high=calibration.extreme_clamp_high,
+            min_resolved_for_extreme=calibration.min_resolved_for_extreme,
+        )
     return ActiveStrategy(
         strategy_id="alpha",
         strategy_version_id="alpha-v1",
