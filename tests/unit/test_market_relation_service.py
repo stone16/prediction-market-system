@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -59,11 +59,9 @@ class _MarketSourceDouble:
 
 def test_relation_detector_matches_correlation_fixture_mapping() -> None:
     payload = json.loads(
-        (
-            Path(__file__).resolve().parents[1]
-            / "fixtures"
-            / "correlation_test_set.json"
-        ).read_text(encoding="utf-8")
+        (Path(__file__).resolve().parents[1] / "fixtures" / "correlation_test_set.json").read_text(
+            encoding="utf-8"
+        )
     )
     mapping = {
         "subset_or_superset": MarketRelationType.SUBSET,
@@ -74,16 +72,8 @@ def test_relation_detector_matches_correlation_fixture_mapping() -> None:
     for pair in payload["pairs"]:
         expected = str(pair["expected_relation"])
         detected = detect_market_relation(
-            _candidate(
-                str(pair["market_a"]["market_id"]),
-                str(pair["market_a"]["title"]),
-                yes_price=0.62 if expected == "contradictory" else 0.5,
-            ),
-            _candidate(
-                str(pair["market_b"]["market_id"]),
-                str(pair["market_b"]["title"]),
-                yes_price=0.43 if expected == "contradictory" else 0.5,
-            ),
+            _candidate(str(pair["market_a"]["market_id"]), str(pair["market_a"]["title"]), yes_price=0.62 if expected == "contradictory" else 0.5),
+            _candidate(str(pair["market_b"]["market_id"]), str(pair["market_b"]["title"]), yes_price=0.43 if expected == "contradictory" else 0.5),
         )
         assert detected.relation_type is mapping[expected], pair["id"]
 
@@ -128,10 +118,7 @@ async def test_relation_service_caps_pairwise_scan_and_persists_subset_rows() ->
     factor_sink = _FactorSinkDouble()
 
     persisted = await MarketRelationService(
-        market_source=source,
-        relation_store=relation_store,
-        factor_sink=factor_sink,
-        max_markets=2,
+        market_source=source, relation_store=relation_store, factor_sink=factor_sink, max_markets=2,
         clock=lambda: datetime(2026, 5, 10, 10, 0, tzinfo=UTC),
     ).compute_once()
 
@@ -153,11 +140,10 @@ async def test_relation_service_emits_contradiction_and_mispricing_factors() -> 
                 _candidate("under", "Apple stock price less than 200 dollars", yes_price=0.44),
             ]
         ),
-        relation_store=relation_store,
-        factor_sink=factor_sink,
+        relation_store=relation_store, factor_sink=factor_sink,
     )
 
-    assert service.interval == timedelta(minutes=30)
+    assert service.interval.total_seconds() == 1800
     assert await service.compute_once() == 1
     assert relation_store.relations[0].relation_type is MarketRelationType.CONTRADICTION
     rows = {(row.factor_id, row.market_id): row.value for row in factor_sink.rows}

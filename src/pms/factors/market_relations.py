@@ -9,12 +9,8 @@ import math
 import re
 from typing import Any, Protocol, cast
 
-import asyncpg
-
 from pms.core.models import MarketRelation, MarketRelationType
 from pms.factors.base import FactorValueRow
-from pms.factors.catalog import ensure_factor_catalog
-from pms.factors.service import persist_factor_value
 
 RELATION_FACTOR_IDS = (
     "subset_relation",
@@ -59,17 +55,6 @@ class FactorValueSink(Protocol):
 
 
 @dataclass
-class PostgresFactorValueSink:
-    pool: asyncpg.Pool
-
-    async def write_factor_values(self, rows: Sequence[FactorValueRow]) -> None:
-        if rows:
-            await ensure_factor_catalog(self.pool, factor_ids=RELATION_FACTOR_IDS)
-        for row in rows:
-            await persist_factor_value(self.pool, row)
-
-
-@dataclass
 class MarketRelationService:
     market_source: MarketRelationCandidateSource
     relation_store: MarketRelationWriter
@@ -79,14 +64,6 @@ class MarketRelationService:
     similarity_threshold: float = 0.42
     include_independent: bool = False
     clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC)
-
-    def __post_init__(self) -> None:
-        if self.interval <= timedelta(0):
-            raise ValueError("interval must be positive")
-        if self.max_markets <= 0:
-            raise ValueError("max_markets must be positive")
-        if not 0.0 <= self.similarity_threshold <= 1.0:
-            raise ValueError("similarity_threshold must be between 0.0 and 1.0")
 
     async def run(self) -> None:
         while True:
@@ -114,13 +91,13 @@ class MarketRelationService:
                 ):
                     continue
                 relation = MarketRelation(
-                    id=None,
-                    market_id_a=market_a.market_id,
-                    market_id_b=market_b.market_id,
-                    relation_type=detected.relation_type,
-                    confidence=detected.confidence,
-                    detected_at=detected_at,
-                    metadata=detected.metadata,
+                    None,
+                    market_a.market_id,
+                    market_b.market_id,
+                    detected.relation_type,
+                    detected.confidence,
+                    detected_at,
+                    detected.metadata,
                 )
                 relations.append(relation)
                 rows.extend(_factor_rows(relation))
@@ -158,10 +135,7 @@ def _similarity_relation(
     return DetectedMarketRelation(
         relation_type=relation_type,
         confidence=similarity if relation_type is MarketRelationType.SIMILAR else 1.0 - similarity,
-        metadata={
-            "basis": "tfidf_cosine" if relation_type is MarketRelationType.SIMILAR else "low_similarity",
-            "similarity": similarity,
-        },
+        metadata={"basis": "tfidf_cosine" if relation_type is MarketRelationType.SIMILAR else "low_similarity", "similarity": similarity},
     )
 
 
@@ -173,19 +147,10 @@ def _factor_rows(relation: MarketRelation) -> list[FactorValueRow]:
         values.append(("semantic_similarity", relation.confidence))
     elif relation.relation_type is MarketRelationType.CONTRADICTION:
         values.append(("contradiction_relation", relation.confidence))
-        values.append(
-            (
-                "cross_market_mispricing",
-                float(cast(float, relation.metadata.get("mispricing", 0.0))),
-            )
-        )
+        values.append(("cross_market_mispricing", float(cast(float, relation.metadata.get("mispricing", 0.0)))))
     return [
         FactorValueRow(
-            factor_id=factor_id,
-            param=other_id,
-            market_id=market_id,
-            ts=relation.detected_at,
-            value=value,
+            factor_id=factor_id, param=other_id, market_id=market_id, ts=relation.detected_at, value=value
         )
         for factor_id, value in values
         for market_id, other_id in (
@@ -196,27 +161,12 @@ def _factor_rows(relation: MarketRelation) -> list[FactorValueRow]:
 
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-_MONTHS = {
-    "january": 1,
-    "february": 2,
-    "march": 3,
-    "april": 4,
-    "may": 5,
-    "june": 6,
-    "july": 7,
-    "august": 8,
-    "september": 9,
-    "october": 10,
-    "november": 11,
-    "december": 12,
-}
+_MONTHS = {month: index for index, month in enumerate("january february march april may june july august september october november december".split(), start=1)}
 _STOP = {"a", "an", "by", "during", "in", "the", "this", "will", "year"}
 _UNITS = {"basis", "dollar", "dollars", "percent", "point", "points"}
 _HIGH = ("more than", "at least", "above", "over", "greater than")
 _LOW = ("less than", "below", "under", "fewer than")
-_COMPARISON_RE = re.compile(
-    r"\b(" + "|".join(re.escape(term) for term in (*_HIGH, *_LOW)) + r")\s+(\d+(?:\.\d+)?)\b"
-)
+_COMPARISON_RE = re.compile(r"\b(" + "|".join(re.escape(term) for term in (*_HIGH, *_LOW)) + r")\s+(\d+(?:\.\d+)?)\b")
 
 
 def _contradiction(
@@ -240,12 +190,7 @@ def _contradiction(
     return DetectedMarketRelation(
         MarketRelationType.CONTRADICTION,
         1.0,
-        {
-            "basis": "opposite_threshold_pricing_violation",
-            "mispricing": mispricing,
-            "threshold": threshold_a,
-            "subject_similarity": subject_similarity,
-        },
+        {"basis": "opposite_threshold_pricing_violation", "mispricing": mispricing, "threshold": threshold_a, "subject_similarity": subject_similarity},
     )
 
 
@@ -267,23 +212,13 @@ def _subset(
     base_a = _terms(market_a.text)
     base_b = _terms(market_b.text)
     if any(month is not None for month in months) and _jaccard(base_a, base_b) >= 0.8:
-        return DetectedMarketRelation(
-            MarketRelationType.SUBSET,
-            0.9,
-            {"basis": "temporal_containment", "month_a": months[0], "month_b": months[1]},
-        )
+        return DetectedMarketRelation(MarketRelationType.SUBSET, 0.9, {"basis": "temporal_containment", "month_a": months[0], "month_b": months[1]})
     if not base_a or not base_b or base_a == base_b:
         return None
     shorter, longer = (base_a, base_b) if len(base_a) < len(base_b) else (base_b, base_a)
     if len(shorter) >= 2 and shorter <= longer:
         return DetectedMarketRelation(
-            MarketRelationType.SUBSET,
-            0.9,
-            {
-                "basis": "lexical_containment",
-                "shorter_terms": sorted(shorter),
-                "longer_terms": sorted(longer),
-            },
+            MarketRelationType.SUBSET, 0.9, {"basis": "lexical_containment", "shorter_terms": sorted(shorter), "longer_terms": sorted(longer)}
         )
     return None
 
@@ -297,15 +232,12 @@ def _tfidf_cosine(text_a: str, text_b: str) -> float:
     for counts in (counts_a, counts_b):
         weights.append(
             {
-                term: count
-                * (math.log(3.0 / (1.0 + int(term in counts_a) + int(term in counts_b))) + 1.0)
+                term: count * (math.log(3.0 / (1.0 + int(term in counts_a) + int(term in counts_b))) + 1.0)
                 for term, count in counts.items()
             }
         )
     dot = sum(weights[0].get(term, 0.0) * weights[1].get(term, 0.0) for term in set(weights[0]) | set(weights[1]))
-    norms = [
-        math.sqrt(sum(value * value for value in side.values())) for side in weights
-    ]
+    norms = [math.sqrt(sum(value * value for value in side.values())) for side in weights]
     return 0.0 if 0.0 in norms else dot / (norms[0] * norms[1])
 
 
