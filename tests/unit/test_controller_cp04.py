@@ -120,6 +120,8 @@ def test_netcal_calibrator_identity_boundary_at_99_samples() -> None:
     calibrator.add_samples("model-a", _records(99))
 
     assert calibrator.calibrate(0.8, model_id="model-a") == 0.8
+    assert calibrator.sample_count("model-a") == 99
+    assert calibrator.sample_count("unknown-model") == 0
 
 
 def test_netcal_calibrator_applies_isotonic_at_100_samples() -> None:
