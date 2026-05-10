@@ -9,17 +9,27 @@ live_emergency_audit_path: .data/live-emergency-audit.jsonl
 
 risk:
   max_position_per_market: 5.0
-  max_total_exposure: 50.0
+  # Bumped 50 → 100 for paper soak day-2: 18 positions filled the original
+  # $50 cap within 20 minutes on day-1, leaving 12+ hours of zero new fills
+  # and only mark-to-market drift on existing positions. Doubling exposes
+  # ~25 more position slots so the sample size approaches Gate 3 minimums.
+  # **Lower this back to 50 before flipping mode=live** — first-live-order
+  # tight envelope is the operator audit gate.
+  max_total_exposure: 100.0
   max_drawdown_pct: 20.0
-  # 20 slots is paper-only headroom: $50 max_total_exposure / $2 per fill
-  # (paper_multifactor sets max_position_notional_usdc=2.0) caps the
-  # **real** open-position count at ~25 anyway, so this is the discovery
-  # ceiling, not the risk ceiling. **Lower this back to 5 before flipping
-  # mode=live** — first-live-order soak intentionally runs with a tiny
-  # concurrent fleet so the operator can audit each fill.
-  max_open_positions: 20
+  # 60 slots is paper-only headroom paired with max_total_exposure=100:
+  # $100 / $2 per fill (paper_multifactor max_position_notional_usdc=2.0)
+  # caps the **real** open-position count at ~50, so 60 keeps a small
+  # buffer. The dollar exposure cap above is the binding ceiling.
+  # **Lower this back to 5 before flipping mode=live** — first-live-order
+  # soak intentionally runs with a tiny concurrent fleet so the operator
+  # can audit each fill.
+  max_open_positions: 60
   min_order_usdc: 1.0
-  slippage_threshold_bps: 50.0
+  # PAPER-only: align RiskManager with controller.max_slippage_bps below so
+  # the 200bps paper fill band reaches PaperActuator. **Lower this back to 50
+  # before flipping mode=live**; live execution keeps the tighter risk gate.
+  slippage_threshold_bps: 200.0
   max_quantity_shares: 500.0
 
 sensor:
