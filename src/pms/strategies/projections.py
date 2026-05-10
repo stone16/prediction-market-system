@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -51,10 +51,30 @@ class ForecasterSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class CalibrationSpec:
+    enabled: bool = False
+    shrinkage_factor: float = 0.35
+    shrinkage_bias: float = 0.0
+    extreme_clamp_low: float = 0.08
+    extreme_clamp_high: float = 0.92
+    min_resolved_for_extreme: int = 500
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationContext:
+    resolved_sample_count: int
+    model_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class MarketSelectionSpec:
     venue: str
     resolution_time_max_horizon_days: int | None
     volume_min_usdc: float
+    spread_max_bps: float | None = None
+    depth_min_usdc: float | None = None
+    liquidity_min_usdc: float | None = None
+    accepting_orders: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +100,7 @@ class ActiveStrategy:
     eval_spec: EvalSpec
     forecaster: ForecasterSpec
     market_selection: MarketSelectionSpec
+    calibration: CalibrationSpec = field(default_factory=CalibrationSpec)
 
     def __post_init__(self) -> None:
         if not self.strategy_id:

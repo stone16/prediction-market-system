@@ -33,6 +33,7 @@ from pms.core.enums import MarketStatus
 from pms.core.models import MarketSignal, Portfolio
 from pms.strategies.projections import (
     ActiveStrategy,
+    CalibrationSpec,
     EvalSpec,
     FactorCompositionStep,
     ForecasterSpec,
@@ -242,6 +243,49 @@ class FixedSizer:
     def size(self, *, prob: float, market_price: float, portfolio: Portfolio) -> float:
         del prob, market_price, portfolio
         return self._size
+
+
+class IdentitySampleCalibrator:
+    def __init__(self, sample_count: int) -> None:
+        self._sample_count = sample_count
+
+    def calibrate(self, probability: float, *, model_id: str) -> float:
+        del model_id
+        return probability
+
+    def sample_count(self, model_id: str) -> int:
+        del model_id
+        return self._sample_count
+
+
+def _calibrated_strategy(calibration: CalibrationSpec) -> ActiveStrategy:
+    if not calibration.enabled:
+        calibration = CalibrationSpec(
+            enabled=True,
+            shrinkage_factor=calibration.shrinkage_factor,
+            shrinkage_bias=calibration.shrinkage_bias,
+            extreme_clamp_low=calibration.extreme_clamp_low,
+            extreme_clamp_high=calibration.extreme_clamp_high,
+            min_resolved_for_extreme=calibration.min_resolved_for_extreme,
+        )
+    return ActiveStrategy(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        config=StrategyConfig(strategy_id="alpha", factor_composition=(), metadata=()),
+        risk=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier",)),
+        forecaster=ForecasterSpec(forecasters=(("rules", ()),)),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=100.0,
+        ),
+        calibration=calibration,
+    )
 
 
 def test_llm_forecaster_predict_uses_anthropic_system_prompt_and_caches() -> None:
@@ -946,6 +990,60 @@ async def test_controller_pipeline_emits_opportunity_and_decision_for_positive_s
     assert decision.model_id == "ConstantForecaster"
     assert decision.opportunity_id == opportunity.opportunity_id
     assert pipeline.suppressed_zero_size == 0
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_applies_shrinkage_after_ensemble_average() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_calibrated_strategy(CalibrationSpec()),
+        forecasters=[ConstantForecaster(0.95)],
+        calibrator=NetcalCalibrator(),
+        sizer=FixedSizer(2.0),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is not None
+    _, decision = emission
+    assert decision.prob_estimate <= 0.75
+    assert decision.prob_estimate > 0.5
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_clamp_rejection_skips_sizing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="pms.controller.pipeline")
+    pipeline = ControllerPipeline(
+        strategy=_calibrated_strategy(CalibrationSpec(shrinkage_factor=1.0)),
+        forecasters=[ConstantForecaster(0.95)],
+        calibrator=IdentitySampleCalibrator(sample_count=0),
+        sizer=FixedSizer(2.0),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is None
+    assert any(getattr(record, "event", None) == "clamp_rejection" for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_allows_extreme_probability_with_enough_samples() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_calibrated_strategy(CalibrationSpec(shrinkage_factor=1.0)),
+        forecasters=[ConstantForecaster(0.95)],
+        calibrator=IdentitySampleCalibrator(sample_count=500),
+        sizer=FixedSizer(2.0),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is not None
+    _, decision = emission
+    assert decision.prob_estimate == pytest.approx(0.95)
 
 
 @pytest.mark.asyncio

@@ -138,24 +138,41 @@ class FillStore:
                     aggregated_positions.shares_held,
                     aggregated_positions.avg_entry_price,
                     aggregated_positions.locked_usdc,
-                    CASE
-                        WHEN tokens.outcome = 'YES' THEN COALESCE(
-                            markets.yes_price,
-                            CASE
-                                WHEN markets.no_price IS NULL THEN NULL
-                                ELSE 1 - markets.no_price
-                            END
-                        )
-                        WHEN tokens.outcome = 'NO' THEN COALESCE(
-                            markets.no_price,
-                            CASE
-                                WHEN markets.yes_price IS NULL THEN NULL
-                                ELSE 1 - markets.yes_price
-                            END
-                        )
-                        ELSE markets.yes_price
-                    END AS current_price
+                    COALESCE(
+                        clob_marks.best_bid,
+                        CASE
+                            WHEN tokens.outcome = 'YES' THEN COALESCE(
+                                markets.yes_price::double precision,
+                                CASE
+                                    WHEN markets.no_price IS NULL THEN NULL
+                                    ELSE (1 - markets.no_price)::double precision
+                                END
+                            )
+                            WHEN tokens.outcome = 'NO' THEN COALESCE(
+                                markets.no_price::double precision,
+                                CASE
+                                    WHEN markets.yes_price IS NULL THEN NULL
+                                    ELSE (1 - markets.yes_price)::double precision
+                                END
+                            )
+                            ELSE markets.yes_price::double precision
+                        END
+                    ) AS current_price
                 FROM aggregated_positions
+                LEFT JOIN LATERAL (
+                    SELECT MAX(book_levels.price) AS best_bid
+                    FROM book_levels
+                    WHERE book_levels.snapshot_id = (
+                        SELECT book_snapshots.id
+                        FROM book_snapshots
+                        WHERE book_snapshots.market_id = aggregated_positions.market_id
+                          AND book_snapshots.token_id = aggregated_positions.token_id
+                        ORDER BY book_snapshots.ts DESC, book_snapshots.id DESC
+                        LIMIT 1
+                    )
+                      AND book_levels.market_id = aggregated_positions.market_id
+                      AND book_levels.side = 'BUY'
+                ) AS clob_marks ON TRUE
                 LEFT JOIN tokens
                     ON tokens.token_id = aggregated_positions.token_id
                 LEFT JOIN markets

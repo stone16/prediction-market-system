@@ -2,6 +2,8 @@
 
 from .aggregate import Strategy
 from .projections import (
+    CalibrationContext,
+    CalibrationSpec,
     EvalSpec,
     ForecasterSpec,
     MarketSelectionSpec,
@@ -10,6 +12,8 @@ from .projections import (
 )
 
 __all__ = [
+    "CalibrationContext",
+    "CalibrationSpec",
     "EvalSpec",
     "ForecasterSpec",
     "MarketSelectionSpec",

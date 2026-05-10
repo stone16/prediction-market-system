@@ -150,6 +150,21 @@ CREATE TABLE IF NOT EXISTS factor_values (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_factor_values_factor_param_market_ts
     ON factor_values(factor_id, param, market_id, ts DESC);
 
+CREATE TABLE IF NOT EXISTS market_relations (
+    id SERIAL PRIMARY KEY,
+    market_id_a TEXT NOT NULL,
+    market_id_b TEXT NOT NULL,
+    relation_type TEXT NOT NULL CHECK (
+        relation_type IN ('subset', 'contradiction', 'independent', 'similar')
+    ),
+    confidence FLOAT NOT NULL,
+    detected_at TIMESTAMPTZ NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_relations_pair_type
+    ON market_relations (market_id_a, market_id_b, relation_type);
+
 -- END MIDDLE RING
 
 -- strategies: inner-ring identity table (Invariants 3, 8)

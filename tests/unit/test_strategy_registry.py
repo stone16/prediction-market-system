@@ -8,6 +8,7 @@ import pytest
 
 from pms.storage.strategy_registry import (
     PostgresStrategyRegistry,
+    _calibration_from_config_json,
     _ensure_utc,
     _json_float,
     _json_object,
@@ -16,6 +17,7 @@ from pms.storage.strategy_registry import (
     _json_string,
     _json_string_list,
     _load_json_object,
+    _market_selection_from_config_json,
     _strategy_from_config_json,
 )
 from pms.strategies.aggregate import Strategy
@@ -407,3 +409,50 @@ def test_strategy_from_config_json_validates_nested_fields() -> None:
         match="risk.max_daily_drawdown_pct must decode to a float-compatible value",
     ):
         _strategy_from_config_json(payload)
+
+
+def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None:
+    payload = json.loads(serialize_strategy_config_json(*_strategy().snapshot()))
+    del payload["market_selection"]["spread_max_bps"]
+    del payload["market_selection"]["depth_min_usdc"]
+    payload["calibration"] = {}
+    selection = _market_selection_from_config_json(payload)
+    calibration = _calibration_from_config_json(payload)
+
+    assert selection.spread_max_bps == 100.0
+    assert selection.depth_min_usdc == 250.0
+    assert selection.liquidity_min_usdc is None
+    assert selection.accepting_orders is True
+    assert calibration.enabled is True
+    assert calibration.shrinkage_factor == 0.35
+    assert calibration.shrinkage_bias == 0.0
+    assert calibration.min_resolved_for_extreme == 500
+
+    payload["calibration"] = {
+        "shrinkage_factor": 0.2,
+        "bias": -0.1,
+        "extreme_clamp_low": 0.05,
+        "extreme_clamp_high": 0.95,
+        "min_resolved": 750,
+    }
+    payload["market_selection"].update(
+        {
+            "spread_max_bps": 80.0,
+            "depth_min_usdc": 300.0,
+            "liquidity_min_usdc": 500.0,
+            "accepting_orders": False,
+        }
+    )
+
+    selection = _market_selection_from_config_json(payload)
+    calibration = _calibration_from_config_json(payload)
+
+    assert selection.spread_max_bps == 80.0
+    assert selection.depth_min_usdc == 300.0
+    assert selection.liquidity_min_usdc == 500.0
+    assert selection.accepting_orders is False
+    assert calibration.shrinkage_factor == 0.2
+    assert calibration.shrinkage_bias == -0.1
+    assert calibration.extreme_clamp_low == 0.05
+    assert calibration.extreme_clamp_high == 0.95
+    assert calibration.min_resolved_for_extreme == 750

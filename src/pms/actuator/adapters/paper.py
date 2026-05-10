@@ -56,6 +56,11 @@ def _vwap_fill(orderbook: dict[str, Any], decision: TradeDecision) -> tuple[floa
     )
     action = decision.action or decision.side
     is_buy = action == Side.BUY.value
+    effective_limit = _slippage_adjusted_limit(
+        limit_price,
+        decision.max_slippage_bps,
+        is_buy=is_buy,
+    )
     side_key = "asks" if is_buy else "bids"
     raw_levels = orderbook.get(side_key)
     if not isinstance(raw_levels, list) or not raw_levels:
@@ -80,9 +85,9 @@ def _vwap_fill(orderbook: dict[str, Any], decision: TradeDecision) -> tuple[floa
     filled_quantity = Decimal("0")
     epsilon = Decimal("1e-9")
     for price, size in levels:
-        if is_buy and price > limit_price:
+        if is_buy and price > effective_limit:
             break
-        if not is_buy and price < limit_price:
+        if not is_buy and price < effective_limit:
             break
         take_notional = min(remaining, price * size)
         filled_notional += take_notional
@@ -93,9 +98,25 @@ def _vwap_fill(orderbook: dict[str, Any], decision: TradeDecision) -> tuple[floa
 
     if remaining > epsilon or filled_quantity <= 0:
         raise InsufficientLiquidityError(
-            f"{side_key} executable depth is insufficient at limit={decision.limit_price}"
+            f"{side_key} executable depth is insufficient at "
+            f"limit={decision.limit_price} effective={float(effective_limit):.6f} "
+            f"(slippage={decision.max_slippage_bps}bps)"
         )
     return float(filled_notional / filled_quantity), float(filled_quantity)
+
+
+def _slippage_adjusted_limit(
+    limit_price: Decimal,
+    max_slippage_bps: int,
+    *,
+    is_buy: bool,
+) -> Decimal:
+    if max_slippage_bps <= 0:
+        return limit_price
+    slippage = Decimal(max_slippage_bps) / Decimal("10000")
+    if is_buy:
+        return limit_price * (Decimal("1") + slippage)
+    return limit_price * (Decimal("1") - slippage)
 
 
 def _matched_order_state(

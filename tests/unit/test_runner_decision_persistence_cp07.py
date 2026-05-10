@@ -147,6 +147,8 @@ class _RecordingDecisionStore:
         next_status: str,
         updated_at: datetime,
     ) -> bool:
+        if current_status == "accepted" and next_status == "queued":
+            assert self.runner._decision_queue.empty()  # noqa: SLF001
         self.transitions.append(
             (decision_id, current_status, next_status, updated_at)
         )

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from pms.core.models import Market, Token, Venue
+from pms.core.models import BookSummary, Market, Token, Venue
 from pms.strategies.projections import MarketSelectionSpec
 
 
@@ -25,6 +25,8 @@ def _eligible_market(
     *,
     venue: Venue = "polymarket",
     token_ids: tuple[str, ...] = ("yes", "no"),
+    liquidity: float | None = None,
+    accepting_orders: bool | None = None,
 ) -> tuple[Market, list[Token]]:
     now = datetime(2026, 4, 18, 9, 0, tzinfo=UTC)
     return (
@@ -36,6 +38,8 @@ def _eligible_market(
             resolves_at=now + timedelta(days=3),
             created_at=now - timedelta(days=2),
             last_seen_at=now,
+            liquidity=liquidity,
+            accepting_orders=accepting_orders,
         ),
         [
             Token(
@@ -45,6 +49,20 @@ def _eligible_market(
             )
             for index, token_id in enumerate(token_ids)
         ],
+    )
+
+
+def _book_summary(
+    *,
+    spread_bps: float = 50.0,
+    depth_usdc: float = 500.0,
+) -> BookSummary:
+    return BookSummary(
+        best_bid=0.49,
+        best_ask=0.51,
+        spread_bps=spread_bps,
+        depth_usdc=depth_usdc,
+        timestamp=datetime(2026, 4, 18, 9, 0, tzinfo=UTC),
     )
 
 
@@ -342,3 +360,181 @@ async def test_market_selector_logs_count_and_warns_when_no_active_strategies(
     assert result.asset_ids == []
     assert "processed 0 active strategies" in caplog.text
     assert "data sensor will idle until a strategy is activated" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_market_selector_applies_spread_depth_liquidity_and_status_filters() -> None:
+    selector_module = importlib.import_module("pms.market_selection.selector")
+    market_selector_cls = getattr(selector_module, "MarketSelector")
+    strategy_market_set_cls = _load_symbol(
+        "pms.market_selection.merge",
+        "StrategyMarketSet",
+    )
+
+    class FakeRegistry:
+        async def list_market_selections(
+            self,
+        ) -> list[tuple[str, str, MarketSelectionSpec]]:
+            return [
+                (
+                    "alpha",
+                    "alpha-v1",
+                    MarketSelectionSpec(
+                        venue="polymarket",
+                        resolution_time_max_horizon_days=7,
+                        volume_min_usdc=500.0,
+                        spread_max_bps=100.0,
+                        depth_min_usdc=250.0,
+                        liquidity_min_usdc=400.0,
+                        accepting_orders=True,
+                    ),
+                )
+            ]
+
+    class FakeStore:
+        async def read_eligible_markets(
+            self,
+            venue: str,
+            max_horizon_days: int | None,
+            min_volume_usdc: float,
+        ) -> list[tuple[Market, list[Token]]]:
+            del venue, max_horizon_days, min_volume_usdc
+            return [
+                _eligible_market(
+                    "all-pass",
+                    token_ids=("all-pass-yes", "all-pass-no"),
+                    liquidity=500.0,
+                    accepting_orders=True,
+                ),
+                _eligible_market(
+                    "wide-spread",
+                    token_ids=("wide-spread-yes", "wide-spread-no"),
+                    liquidity=500.0,
+                    accepting_orders=True,
+                ),
+                _eligible_market(
+                    "shallow-depth",
+                    token_ids=("shallow-depth-yes", "shallow-depth-no"),
+                    liquidity=500.0,
+                    accepting_orders=True,
+                ),
+                _eligible_market(
+                    "low-liquidity",
+                    token_ids=("low-liquidity-yes", "low-liquidity-no"),
+                    liquidity=300.0,
+                    accepting_orders=True,
+                ),
+                _eligible_market(
+                    "not-accepting",
+                    token_ids=("not-accepting-yes", "not-accepting-no"),
+                    liquidity=500.0,
+                    accepting_orders=False,
+                ),
+                _eligible_market(
+                    "missing-book",
+                    token_ids=("missing-book-yes", "missing-book-no"),
+                    liquidity=500.0,
+                    accepting_orders=True,
+                ),
+            ]
+
+        async def get_latest_book_summary(self, market_id: str) -> BookSummary | None:
+            return {
+                "all-pass": _book_summary(),
+                "wide-spread": _book_summary(spread_bps=150.0),
+                "shallow-depth": _book_summary(depth_usdc=200.0),
+                "low-liquidity": _book_summary(),
+                "not-accepting": _book_summary(),
+                "missing-book": None,
+            }[market_id]
+
+    class FailingMergePolicy:
+        def merge(self, selections: list[object]) -> object:
+            msg = f"select_per_strategy should not merge selections: {selections!r}"
+            raise AssertionError(msg)
+
+    selector = market_selector_cls(
+        store=FakeStore(),
+        registry=FakeRegistry(),
+        merge_policy=FailingMergePolicy(),
+    )
+
+    selections = await selector.select_per_strategy()
+
+    assert selections == [
+        strategy_market_set_cls(
+            strategy_id="alpha",
+            strategy_version_id="alpha-v1",
+            asset_ids=frozenset({"all-pass-yes"}),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_market_selector_bypasses_book_query_when_book_filters_are_disabled() -> None:
+    selector_module = importlib.import_module("pms.market_selection.selector")
+    market_selector_cls = getattr(selector_module, "MarketSelector")
+    strategy_market_set_cls = _load_symbol(
+        "pms.market_selection.merge",
+        "StrategyMarketSet",
+    )
+
+    class FakeRegistry:
+        async def list_market_selections(
+            self,
+        ) -> list[tuple[str, str, MarketSelectionSpec]]:
+            return [
+                (
+                    "alpha",
+                    "alpha-v1",
+                    MarketSelectionSpec(
+                        venue="polymarket",
+                        resolution_time_max_horizon_days=7,
+                        volume_min_usdc=500.0,
+                        spread_max_bps=None,
+                        depth_min_usdc=None,
+                        liquidity_min_usdc=None,
+                        accepting_orders=False,
+                    ),
+                )
+            ]
+
+    class FakeStore:
+        async def read_eligible_markets(
+            self,
+            venue: str,
+            max_horizon_days: int | None,
+            min_volume_usdc: float,
+        ) -> list[tuple[Market, list[Token]]]:
+            del venue, max_horizon_days, min_volume_usdc
+            return [
+                _eligible_market(
+                    "missing-book",
+                    token_ids=("missing-book-yes", "missing-book-no"),
+                    accepting_orders=False,
+                )
+            ]
+
+        async def get_latest_book_summary(self, market_id: str) -> BookSummary | None:
+            raise AssertionError(f"book summary should not be queried for {market_id}")
+
+    class FailingMergePolicy:
+        def merge(self, selections: list[object]) -> object:
+            msg = f"select_per_strategy should not merge selections: {selections!r}"
+            raise AssertionError(msg)
+
+    selector = market_selector_cls(
+        store=FakeStore(),
+        registry=FakeRegistry(),
+        merge_policy=FailingMergePolicy(),
+    )
+
+    selections = await selector.select_per_strategy()
+
+    assert selections == [
+        strategy_market_set_cls(
+            strategy_id="alpha",
+            strategy_version_id="alpha-v1",
+            asset_ids=frozenset({"missing-book-yes"}),
+        )
+    ]

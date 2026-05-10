@@ -8,7 +8,7 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
-from pms.core.models import Market, Token, Venue
+from pms.core.models import BookLevel, BookSnapshot, Market, Token, Venue
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
@@ -229,3 +229,82 @@ async def test_market_selector_returns_merged_asset_ids_from_active_strategies(
         "pm-near-secondary-yes",
     ]
     assert result.conflicts == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_market_data_store_returns_latest_book_summary(
+    db_conn: asyncpg.Connection,
+) -> None:
+    pool = cast(asyncpg.Pool, _SingleConnectionPool(db_conn))
+    store = PostgresMarketDataStore(pool)
+    now = datetime.now(tz=UTC)
+
+    await _seed_market(
+        store,
+        market_id="pm-book-summary",
+        venue="polymarket",
+        resolves_at=now + timedelta(days=5),
+        volume_24h=800.0,
+    )
+
+    await store.write_book_snapshot(
+        BookSnapshot(
+            id=0,
+            market_id="pm-book-summary",
+            token_id="pm-book-summary-yes",
+            ts=now,
+            hash="book-old",
+            source="subscribe",
+        ),
+        [
+            BookLevel(
+                snapshot_id=0,
+                market_id="pm-book-summary",
+                side="BUY",
+                price=0.40,
+                size=100.0,
+            ),
+            BookLevel(
+                snapshot_id=0,
+                market_id="pm-book-summary",
+                side="SELL",
+                price=0.60,
+                size=100.0,
+            ),
+        ],
+    )
+    await store.write_book_snapshot(
+        BookSnapshot(
+            id=0,
+            market_id="pm-book-summary",
+            token_id="pm-book-summary-yes",
+            ts=now + timedelta(seconds=10),
+            hash="book-new",
+            source="subscribe",
+        ),
+        [
+            BookLevel(
+                snapshot_id=0,
+                market_id="pm-book-summary",
+                side="BUY",
+                price=0.49,
+                size=300.0,
+            ),
+            BookLevel(
+                snapshot_id=0,
+                market_id="pm-book-summary",
+                side="SELL",
+                price=0.51,
+                size=300.0,
+            ),
+        ],
+    )
+
+    summary = await store.get_latest_book_summary("pm-book-summary")
+
+    assert summary is not None
+    assert summary.best_bid == 0.49
+    assert summary.best_ask == 0.51
+    assert summary.spread_bps == pytest.approx(400.0)
+    assert summary.depth_usdc == pytest.approx(300.0)
+    assert summary.timestamp == now + timedelta(seconds=10)

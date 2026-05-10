@@ -11,6 +11,7 @@ import asyncpg
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
     ActiveStrategy,
+    CalibrationSpec,
     DEFAULT_MAX_BRIER_SCORE,
     DEFAULT_MIN_WIN_RATE,
     DEFAULT_SLIPPAGE_THRESHOLD_BPS,
@@ -274,6 +275,7 @@ class PostgresStrategyRegistry:
         active_strategies: list[ActiveStrategy] = []
         for row in rows:
             strategy = _strategy_from_config_json(row["config_json"])
+            calibration = _calibration_from_config_json(row["config_json"])
             strategy_version_id = row["strategy_version_id"]
             if not isinstance(strategy_version_id, str):
                 msg = "strategies.active_version_id did not return a string"
@@ -287,6 +289,7 @@ class PostgresStrategyRegistry:
                     eval_spec=strategy.eval_spec,
                     forecaster=strategy.forecaster,
                     market_selection=strategy.market_selection,
+                    calibration=calibration,
                 )
             )
         return active_strategies
@@ -425,17 +428,7 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
                 for item in _json_pairs(forecaster_payload["forecasters"])
             )
         ),
-        market_selection=MarketSelectionSpec(
-            venue=_json_string(market_selection_payload["venue"], "market_selection.venue"),
-            resolution_time_max_horizon_days=_json_optional_int(
-                market_selection_payload["resolution_time_max_horizon_days"],
-                "market_selection.resolution_time_max_horizon_days",
-            ),
-            volume_min_usdc=_json_float(
-                market_selection_payload["volume_min_usdc"],
-                "market_selection.volume_min_usdc",
-            ),
-        ),
+        market_selection=_market_selection_from_payload(market_selection_payload),
     )
 
 
@@ -445,8 +438,17 @@ def _market_selection_from_config_json(raw_value: object) -> MarketSelectionSpec
         payload["market_selection"],
         "market_selection",
     )
+    return _market_selection_from_payload(market_selection_payload)
+
+
+def _market_selection_from_payload(
+    market_selection_payload: dict[str, object],
+) -> MarketSelectionSpec:
     return MarketSelectionSpec(
-        venue=_json_string(market_selection_payload["venue"], "market_selection.venue"),
+        venue=_json_string(
+            market_selection_payload["venue"],
+            "market_selection.venue",
+        ),
         resolution_time_max_horizon_days=_json_optional_int(
             market_selection_payload["resolution_time_max_horizon_days"],
             "market_selection.resolution_time_max_horizon_days",
@@ -455,6 +457,71 @@ def _market_selection_from_config_json(raw_value: object) -> MarketSelectionSpec
             market_selection_payload["volume_min_usdc"],
             "market_selection.volume_min_usdc",
         ),
+        spread_max_bps=_json_optional_float(
+            _default_when_missing(market_selection_payload, "spread_max_bps", 100.0),
+            "market_selection.spread_max_bps",
+        ),
+        depth_min_usdc=_json_optional_float(
+            _default_when_missing(market_selection_payload, "depth_min_usdc", 250.0),
+            "market_selection.depth_min_usdc",
+        ),
+        liquidity_min_usdc=_json_optional_float(
+            market_selection_payload.get("liquidity_min_usdc"),
+            "market_selection.liquidity_min_usdc",
+        ),
+        accepting_orders=_json_optional_bool(
+            market_selection_payload.get("accepting_orders"),
+            "market_selection.accepting_orders",
+            default=True,
+        ),
+    )
+
+
+def _default_when_missing(
+    payload: dict[str, object],
+    key: str,
+    default: object,
+) -> object:
+    if key not in payload:
+        return default
+    return payload[key]
+
+
+def _calibration_from_config_json(raw_value: object) -> CalibrationSpec:
+    payload = _load_json_object(raw_value)
+    if "calibration" not in payload:
+        return CalibrationSpec()
+    calibration_payload = _json_object(payload["calibration"], "calibration")
+    min_resolved = _json_optional_int(
+        calibration_payload.get(
+            "min_resolved",
+            calibration_payload.get("min_resolved_for_extreme", 500),
+        ),
+        "calibration.min_resolved",
+    )
+    return CalibrationSpec(
+        enabled=_json_optional_bool(
+            calibration_payload.get("enabled"),
+            "calibration.enabled",
+            default=True,
+        ),
+        shrinkage_factor=_json_float(
+            calibration_payload.get("shrinkage_factor", 0.35),
+            "calibration.shrinkage_factor",
+        ),
+        shrinkage_bias=_json_float(
+            calibration_payload.get("bias", calibration_payload.get("shrinkage_bias", 0.0)),
+            "calibration.bias",
+        ),
+        extreme_clamp_low=_json_float(
+            calibration_payload.get("extreme_clamp_low", 0.08),
+            "calibration.extreme_clamp_low",
+        ),
+        extreme_clamp_high=_json_float(
+            calibration_payload.get("extreme_clamp_high", 0.92),
+            "calibration.extreme_clamp_high",
+        ),
+        min_resolved_for_extreme=500 if min_resolved is None else min_resolved,
     )
 
 

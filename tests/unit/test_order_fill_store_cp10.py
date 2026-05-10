@@ -182,6 +182,25 @@ async def test_fill_store_insert_wraps_shell_and_payload_writes_in_transaction()
 
 @pytest.mark.real_fill_store
 @pytest.mark.asyncio
+async def test_fill_store_read_positions_marks_with_latest_clob_best_bid() -> None:
+    connection = _RecordingConnection()
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    await store.read_positions()
+
+    query = connection.fetch_calls[0][0]
+    assert "LEFT JOIN LATERAL" in query
+    assert "book_snapshots" in query
+    assert "book_levels" in query
+    assert "MAX(book_levels.price)" in query
+    assert "book_levels.side = 'BUY'" in query
+    assert "book_snapshots.token_id = aggregated_positions.token_id" in query
+    assert "ORDER BY book_snapshots.ts DESC, book_snapshots.id DESC" in query
+    assert query.index("clob_marks.best_bid") < query.index("markets.yes_price")
+
+
+@pytest.mark.real_fill_store
+@pytest.mark.asyncio
 async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
     connection = _RecordingConnection()
     connection.fetch_rows = [

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from pms.core.models import (
+    BookSummary,
     EvalRecord,
     FillRecord,
     Market,
@@ -14,7 +15,7 @@ from pms.core.models import (
     Token,
     TradeDecision,
 )
-from pms.strategies.projections import MarketSelectionSpec
+from pms.strategies.projections import CalibrationContext, MarketSelectionSpec
 
 
 class ISensor(Protocol):
@@ -36,6 +37,8 @@ class MarketDataStore(Protocol):
         max_horizon_days: int | None,
         min_volume_usdc: float,
     ) -> list[tuple[Market, list[Token]]]: ...
+
+    async def get_latest_book_summary(self, market_id: str) -> BookSummary | None: ...
 
 
 class StrategySelectionRegistry(Protocol):
@@ -103,6 +106,15 @@ class IForecaster(Protocol):
 
 class ICalibrator(Protocol):
     def calibrate(self, probability: float, *, model_id: str) -> float: ...
+
+
+class IPreCalibrator(Protocol):
+    def calibrate(
+        self,
+        prob: float,
+        *,
+        context: CalibrationContext,
+    ) -> float | None: ...
 
 
 class ISizer(Protocol):

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
 
-from pms.core.models import FillRecord, OrderState
+from pms.core.models import BookLevel, BookSnapshot, FillRecord, Market, OrderState, Token
 from pms.storage.fill_store import FillStore
+from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.order_store import OrderStore
 
 
@@ -151,3 +152,134 @@ async def test_fill_store_round_trips_fill_record(pg_pool: asyncpg.Pool) -> None
     assert row["fill_quantity"] == expected.fill_quantity
     assert row["strategy_id"] == expected.strategy_id
     assert row["strategy_version_id"] == expected.strategy_version_id
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_fill_store_read_positions_prefers_clob_bid_over_stale_market_price(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    market_store = PostgresMarketDataStore(pg_pool)
+    fill_store = FillStore(pg_pool)
+    order_store = OrderStore(pg_pool)
+    now = datetime(2026, 5, 9, 12, 50, 34, tzinfo=UTC)
+    market_id = "market-cp10-mtm"
+    token_id = "token-cp10-mtm-yes"
+
+    await market_store.write_market(
+        Market(
+            condition_id=market_id,
+            slug=market_id,
+            question="Will MtM prefer the live CLOB bid?",
+            venue="polymarket",
+            resolves_at=now + timedelta(days=7),
+            created_at=now - timedelta(days=1),
+            last_seen_at=now,
+            yes_price=0.6306,
+            no_price=0.3694,
+            price_updated_at=now - timedelta(hours=3),
+        )
+    )
+    await market_store.write_token(
+        Token(token_id=token_id, condition_id=market_id, outcome="YES")
+    )
+    await market_store.write_book_snapshot(
+        BookSnapshot(
+            id=0,
+            market_id=market_id,
+            token_id=token_id,
+            ts=now - timedelta(minutes=5),
+            hash="old-book",
+            source="subscribe",
+        ),
+        [
+            BookLevel(
+                snapshot_id=0,
+                market_id=market_id,
+                side="BUY",
+                price=0.55,
+                size=50.0,
+            )
+        ],
+    )
+    await market_store.write_book_snapshot(
+        BookSnapshot(
+            id=0,
+            market_id=market_id,
+            token_id=token_id,
+            ts=now,
+            hash="latest-book",
+            source="subscribe",
+        ),
+        [
+            BookLevel(
+                snapshot_id=0,
+                market_id=market_id,
+                side="BUY",
+                price=0.25,
+                size=20.0,
+            ),
+            BookLevel(
+                snapshot_id=0,
+                market_id=market_id,
+                side="BUY",
+                price=0.261,
+                size=20.0,
+            ),
+            BookLevel(
+                snapshot_id=0,
+                market_id=market_id,
+                side="SELL",
+                price=0.29,
+                size=20.0,
+            ),
+        ],
+    )
+    await order_store.insert(
+        OrderState(
+            order_id="order-cp10-mtm-1",
+            decision_id="decision-cp10-mtm-1",
+            status="matched",
+            market_id=market_id,
+            token_id=token_id,
+            venue="polymarket",
+            requested_notional_usdc=1.99923,
+            filled_notional_usdc=1.99923,
+            remaining_notional_usdc=0.0,
+            fill_price=0.309,
+            submitted_at=now - timedelta(minutes=1),
+            last_updated_at=now - timedelta(minutes=1),
+            raw_status="matched",
+            strategy_id="default",
+            strategy_version_id="default-v2",
+            filled_quantity=6.47,
+            action="BUY",
+            outcome="YES",
+        )
+    )
+    await fill_store.insert(
+        FillRecord(
+            trade_id="trade-cp10-mtm-1",
+            fill_id="fill-cp10-mtm-1",
+            order_id="order-cp10-mtm-1",
+            decision_id="decision-cp10-mtm-1",
+            market_id=market_id,
+            token_id=token_id,
+            venue="polymarket",
+            side="BUY",
+            fill_price=0.309,
+            fill_notional_usdc=1.99923,
+            fill_quantity=6.47,
+            executed_at=now - timedelta(minutes=1),
+            filled_at=now - timedelta(minutes=1),
+            status="filled",
+            anomaly_flags=[],
+            strategy_id="default",
+            strategy_version_id="default-v2",
+        )
+    )
+
+    positions = await fill_store.read_positions()
+
+    assert len(positions) == 1
+    assert positions[0].avg_entry_price == pytest.approx(0.309)
+    assert positions[0].unrealized_pnl == pytest.approx((0.261 - 0.309) * 6.47)

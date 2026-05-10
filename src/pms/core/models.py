@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Literal, cast
 
 from pms.core.enums import TimeInForce
@@ -19,6 +20,13 @@ Venue = Literal["polymarket", "kalshi"]
 Outcome = Literal["YES", "NO"]
 BookSide = Literal["BUY", "SELL"]
 BookSource = Literal["subscribe", "reconnect", "checkpoint"]
+
+
+class MarketRelationType(StrEnum):
+    SUBSET = "subset"
+    CONTRADICTION = "contradiction"
+    INDEPENDENT = "independent"
+    SIMILAR = "similar"
 
 
 class LiveTradingDisabledError(RuntimeError):
@@ -256,6 +264,26 @@ class BookLevel:
     side: BookSide
     price: float
     size: float
+
+
+@dataclass(frozen=True)
+class BookSummary:
+    best_bid: float
+    best_ask: float
+    spread_bps: float
+    depth_usdc: float
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class MarketRelation:
+    id: int | None
+    market_id_a: str
+    market_id_b: str
+    relation_type: MarketRelationType
+    confidence: float
+    detected_at: datetime
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

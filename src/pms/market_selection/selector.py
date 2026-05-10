@@ -10,6 +10,7 @@ from pms.core.interfaces import MarketDataStore, StrategySelectionRegistry
 from pms.core.models import Market, Token
 from pms.core.venue_support import kalshi_stub_error, normalize_venue
 from pms.market_selection.merge import MergePolicy, MergeResult, StrategyMarketSet
+from pms.strategies.projections import MarketSelectionSpec
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class MarketSelector:
         self._registry = registry
         self._merge_policy = merge_policy
         self._market_subscription_store = market_subscription_store
+        self._last_discovered_count = 0
 
     async def select(self) -> MergeResult:
         selections = await self.select_per_strategy()
@@ -46,15 +48,19 @@ class MarketSelector:
         merged = self._merge_policy.merge(selections)
         user_asset_ids = await self._read_user_subscriptions()
         if not user_asset_ids:
+            _log_selector_funnel(self._last_discovered_count, len(merged.asset_ids))
             return merged
-        return MergeResult(
+        result = MergeResult(
             asset_ids=sorted(frozenset(merged.asset_ids) | user_asset_ids),
             conflicts=merged.conflicts,
         )
+        _log_selector_funnel(self._last_discovered_count, len(result.asset_ids))
+        return result
 
     async def select_per_strategy(self) -> list[StrategyMarketSet]:
         strategy_specs = await self._registry.list_market_selections()
         selections: list[StrategyMarketSet] = []
+        self._last_discovered_count = 0
         for strategy_id, strategy_version_id, spec in strategy_specs:
             venue = normalize_venue(
                 spec.venue,
@@ -67,19 +73,71 @@ class MarketSelector:
                 spec.resolution_time_max_horizon_days,
                 spec.volume_min_usdc,
             )
+            self._last_discovered_count += len(eligible_markets)
+            filtered_markets = await self._filter_markets(eligible_markets, spec)
             selections.append(
                 StrategyMarketSet(
                     strategy_id=strategy_id,
                     strategy_version_id=strategy_version_id,
-                    asset_ids=_asset_ids_from_eligible_markets(eligible_markets),
+                    asset_ids=_asset_ids_from_eligible_markets(filtered_markets),
                 )
             )
         return selections
+
+    async def _filter_markets(
+        self,
+        eligible_markets: Sequence[tuple[Market, Sequence[Token]]],
+        spec: MarketSelectionSpec,
+    ) -> list[tuple[Market, Sequence[Token]]]:
+        filtered_markets: list[tuple[Market, Sequence[Token]]] = []
+        for market, tokens in eligible_markets:
+            if not await self._market_passes_filters(market, spec):
+                continue
+            filtered_markets.append((market, tokens))
+        return filtered_markets
+
+    async def _market_passes_filters(
+        self,
+        market: Market,
+        spec: MarketSelectionSpec,
+    ) -> bool:
+        if spec.accepting_orders and market.accepting_orders is False:
+            return False
+
+        if spec.liquidity_min_usdc is not None and (
+            market.liquidity is None or market.liquidity < spec.liquidity_min_usdc
+        ):
+            return False
+
+        if spec.spread_max_bps is None and spec.depth_min_usdc is None:
+            return True
+
+        summary = await self._store.get_latest_book_summary(market.condition_id)
+        if summary is None:
+            return False
+        if spec.spread_max_bps is not None and summary.spread_bps > spec.spread_max_bps:
+            return False
+        if spec.depth_min_usdc is not None and summary.depth_usdc < spec.depth_min_usdc:
+            return False
+        return True
 
     async def _read_user_subscriptions(self) -> frozenset[str]:
         if self._market_subscription_store is None:
             return frozenset()
         return frozenset(await self._market_subscription_store.read_user_subscriptions())
+
+
+def _log_selector_funnel(discovered_count: int, selected_count: int) -> None:
+    logger.info(
+        "market selector funnel discovered=%d selected=%d",
+        discovered_count,
+        selected_count,
+        extra={
+            "event": "funnel_selector",
+            "discovered_count": discovered_count,
+            "selected_count": selected_count,
+        },
+    )
 
 
 def _asset_ids_from_eligible_markets(
