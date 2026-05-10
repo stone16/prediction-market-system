@@ -491,8 +491,7 @@ def _calibration_from_config_json(raw_value: object) -> CalibrationSpec:
     payload = _load_json_object(raw_value)
     if "calibration" not in payload:
         return CalibrationSpec()
-    raw_calibration = payload.get("calibration", {})
-    calibration_payload = _json_object(raw_calibration, "calibration")
+    calibration_payload = _json_object(payload["calibration"], "calibration")
     min_resolved = _json_optional_int(
         calibration_payload.get(
             "min_resolved",

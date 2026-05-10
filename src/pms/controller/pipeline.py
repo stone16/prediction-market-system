@@ -144,13 +144,11 @@ class ControllerPipeline:
         prob_estimate = sum(probabilities) / len(probabilities)
         factor_snapshot_hash: str | None = None
         composition_trace: dict[str, object] = {}
-        factor_values = _signal_factor_values(signal)
-        factor_values.update(
-            {
-                (factor_id, ""): value
-                for factor_id, value in runtime_probabilities.items()
-            }
-        )
+        signal_factor_values = _signal_factor_values(signal)
+        runtime_factor_values = {
+            (factor_id, ""): value
+            for factor_id, value in runtime_probabilities.items()
+        }
         if self.strategy is not None and self.strategy.config.factor_composition:
             factor_snapshot = await self.factor_reader.snapshot(
                 market_id=signal.market_id,
@@ -159,15 +157,9 @@ class ControllerPipeline:
                 strategy_id=self.strategy.strategy_id,
                 strategy_version_id=self.strategy.strategy_version_id,
             )
-            signal_factor_values = _signal_factor_values(signal)
             factor_values = dict(factor_snapshot.values)
             factor_values.update(signal_factor_values)
-            factor_values.update(
-                {
-                    (factor_id, ""): value
-                    for factor_id, value in runtime_probabilities.items()
-                }
-            )
+            factor_values.update(runtime_factor_values)
             reported_missing_factors = factor_snapshot.missing_factors
             if not reported_missing_factors and not factor_snapshot.values:
                 reported_missing_factors = required_factor_keys(
@@ -257,6 +249,9 @@ class ControllerPipeline:
                     traded_count=0,
                 )
                 return None
+        else:
+            factor_values = dict(signal_factor_values)
+            factor_values.update(runtime_factor_values)
         calibrated_estimate = _apply_pre_calibrators(
             prob_estimate,
             model_ids=model_ids,

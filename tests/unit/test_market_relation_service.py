@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,22 @@ class _MarketSourceDouble:
         return self.candidates
 
 
+class _FailThenCancelRelationService(MarketRelationService):
+    def __init__(self) -> None:
+        super().__init__(
+            market_source=_MarketSourceDouble([]),
+            relation_store=_RelationStoreDouble(),
+            interval=timedelta(seconds=0),
+        )
+        self.calls = 0
+
+    async def compute_once(self) -> int:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("transient relation failure")
+        raise asyncio.CancelledError
+
+
 def test_relation_detector_matches_correlation_fixture_mapping() -> None:
     payload = json.loads(
         (Path(__file__).resolve().parents[1] / "fixtures" / "correlation_test_set.json").read_text(
@@ -103,6 +120,18 @@ def test_relation_detector_handles_temporal_contradiction_and_similarity() -> No
     assert non_violating.relation_type is not MarketRelationType.CONTRADICTION
     assert similar.relation_type is MarketRelationType.SIMILAR
     assert similar.confidence >= 0.4
+
+
+@pytest.mark.asyncio
+async def test_relation_service_run_logs_cycle_errors_and_continues(caplog: pytest.LogCaptureFixture) -> None:
+    service = _FailThenCancelRelationService()
+    caplog.set_level("ERROR", logger="pms.factors.market_relations")
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.run()
+
+    assert service.calls == 2
+    assert "market relation detection cycle failed" in caplog.text
 
 
 @pytest.mark.asyncio

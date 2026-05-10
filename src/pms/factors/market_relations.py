@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+import logging
 import math
 import re
 from typing import Any, Protocol, cast
@@ -18,6 +19,8 @@ RELATION_FACTOR_IDS = (
     "semantic_similarity",
     "cross_market_mispricing",
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +70,10 @@ class MarketRelationService:
 
     async def run(self) -> None:
         while True:
-            await self.compute_once()
+            try:
+                await self.compute_once()
+            except Exception:
+                logger.exception("market relation detection cycle failed")
             await asyncio.sleep(self.interval.total_seconds())
 
     async def compute_once(self) -> int:
