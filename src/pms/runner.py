@@ -1256,18 +1256,18 @@ class Runner:
         dedup_acquired: bool = False,
         queued_at: datetime | None = None,
     ) -> None:
+        await self._update_decision_status_if_supported(
+            decision.decision_id,
+            current_status="accepted",
+            next_status="queued",
+            updated_at=queued_at or (signal.fetched_at if signal is not None else None),
+        )
         await self._decision_queue.put(
             ActuatorWorkItem(
                 decision=decision,
                 signal=signal,
                 dedup_acquired=dedup_acquired,
             )
-        )
-        await self._update_decision_status_if_supported(
-            decision.decision_id,
-            current_status="accepted",
-            next_status="queued",
-            updated_at=queued_at or (signal.fetched_at if signal is not None else None),
         )
 
     async def _update_decision_status_if_supported(
