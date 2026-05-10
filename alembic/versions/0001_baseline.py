@@ -30,6 +30,7 @@ _CREATED_TABLES: Final[tuple[str, ...]] = (
     "strategy_factors",
     "strategy_versions",
     "strategies",
+    "market_relations",
     "factor_values",
     "factors",
     "trades",

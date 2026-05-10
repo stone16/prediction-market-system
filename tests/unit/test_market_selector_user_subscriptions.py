@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from pms.core.models import Market, Token
+from pms.core.models import BookSummary, Market, Token
 from pms.market_selection.merge import UnionMergePolicy
 from pms.market_selection.selector import MarketSelector
 from pms.strategies.projections import MarketSelectionSpec
@@ -40,6 +40,9 @@ class _MarketStoreDouble:
             for token_id in self.token_ids
         ]
         return [(market, tokens)]
+
+    async def get_latest_book_summary(self, market_id: str) -> BookSummary | None:
+        return None
 
 
 @dataclass
