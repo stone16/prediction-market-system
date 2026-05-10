@@ -5,15 +5,50 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from pms.config import PMSSettings, RiskSettings
+from pms.core.models import EvalRecord, TradeDecision
 
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
 _API_TIMEOUT_S = 5.0
+
+
+@dataclass(frozen=True)
+class ReliabilityBin:
+    predicted_prob_range: str
+    count: int
+    actual_resolution_rate: float | None
+
+
+@dataclass(frozen=True)
+class TradeCostBreakdown:
+    decision_id: str
+    market_id: str
+    gross_edge: float
+    spread_cost: float
+    net_edge: float
+
+
+@dataclass(frozen=True)
+class SelectionFunnel:
+    discovered: int = 0
+    selected: int = 0
+    routed: int = 0
+    forecasted: int = 0
+    traded: int = 0
+
+
+@dataclass(frozen=True)
+class PaperReportDiagnostics:
+    reliability_bins: tuple[ReliabilityBin, ...]
+    trade_costs: tuple[TradeCostBreakdown, ...]
+    clamp_rejections: tuple[tuple[str, int], ...]
+    selection_funnel: SelectionFunnel
 
 
 @dataclass(frozen=True)
@@ -36,6 +71,10 @@ class PaperReportMetrics:
     average_edge_bps: float | None = None
     sharpe_ratio: float | None = None
     risk_events: tuple[tuple[str, str, str], ...] = ()
+    reliability_bins: tuple[ReliabilityBin, ...] = ()
+    trade_costs: tuple[TradeCostBreakdown, ...] = ()
+    clamp_rejections: tuple[tuple[str, int], ...] = ()
+    selection_funnel: SelectionFunnel | None = None
 
     @classmethod
     def empty(cls, *, report_date: date) -> PaperReportMetrics:
@@ -81,6 +120,20 @@ def metrics_from_api_payloads(
         total_exposure=total_exposure,
         brier_score_7d=_optional_float_from_dict(evaluator, "brier_overall"),
         risk_events=tuple(events),
+    )
+
+
+def build_paper_report_diagnostics(
+    *,
+    eval_records: Sequence[EvalRecord],
+    decisions: Sequence[TradeDecision],
+    log_events: Sequence[Mapping[str, object]],
+) -> PaperReportDiagnostics:
+    return PaperReportDiagnostics(
+        reliability_bins=_reliability_bins(eval_records),
+        trade_costs=_trade_costs(decisions),
+        clamp_rejections=_clamp_rejections(log_events),
+        selection_funnel=_selection_funnel(log_events),
     )
 
 
@@ -188,6 +241,10 @@ def render_report(metrics: PaperReportMetrics, *, risk: RiskSettings) -> str:
             f"{metrics.fills} fills executed with average slippage "
             f"{_fmt_optional(metrics.average_slippage_bps, 1)} bps."
         )
+    lines.extend(_render_reliability_section(metrics.reliability_bins))
+    lines.extend(_render_trade_cost_section(metrics.trade_costs))
+    lines.extend(_render_clamp_rejection_section(metrics.clamp_rejections))
+    lines.extend(_render_selection_funnel_section(metrics.selection_funnel))
     lines.append("")
     return "\n".join(lines)
 
@@ -278,6 +335,180 @@ def _fmt_ratio_percent(value: float | None) -> str:
     if value is None:
         return "N/A"
     return f"{value * 100.0:.1f}%"
+
+
+def _fmt_probability_percent(value: float) -> str:
+    return f"{value * 100.0:.1f}%"
+
+
+def _reliability_bins(records: Sequence[EvalRecord]) -> tuple[ReliabilityBin, ...]:
+    outcomes_by_bin: list[list[float]] = [[] for _ in range(10)]
+    for record in records:
+        index = min(9, max(0, int(record.prob_estimate * 10)))
+        outcomes_by_bin[index].append(record.resolved_outcome)
+
+    bins: list[ReliabilityBin] = []
+    for index, outcomes in enumerate(outcomes_by_bin):
+        count = len(outcomes)
+        actual_rate = None if count < 5 else sum(outcomes) / count
+        bins.append(
+            ReliabilityBin(
+                predicted_prob_range=_probability_range_label(index),
+                count=count,
+                actual_resolution_rate=actual_rate,
+            )
+        )
+    return tuple(bins)
+
+
+def _probability_range_label(index: int) -> str:
+    lower = index * 10
+    upper = lower + 10
+    if index == 9:
+        return f"[{lower}%-{upper}%]"
+    return f"[{lower}%-{upper}%)"
+
+
+def _trade_costs(decisions: Sequence[TradeDecision]) -> tuple[TradeCostBreakdown, ...]:
+    costs: list[TradeCostBreakdown] = []
+    for decision in decisions:
+        if decision.spread_bps_at_decision is None:
+            continue
+        gross_edge = abs(decision.prob_estimate - decision.limit_price)
+        spread_cost = decision.spread_bps_at_decision / 10_000.0
+        costs.append(
+            TradeCostBreakdown(
+                decision_id=decision.decision_id,
+                market_id=decision.market_id,
+                gross_edge=gross_edge,
+                spread_cost=spread_cost,
+                net_edge=gross_edge - spread_cost,
+            )
+        )
+    return tuple(costs)
+
+
+def _clamp_rejections(
+    log_events: Sequence[Mapping[str, object]],
+) -> tuple[tuple[str, int], ...]:
+    counts: dict[str, int] = {}
+    for event in log_events:
+        if event.get("event") != "clamp_rejection":
+            continue
+        market_id = event.get("market_id")
+        key = market_id if isinstance(market_id, str) and market_id else "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
+def _selection_funnel(log_events: Sequence[Mapping[str, object]]) -> SelectionFunnel:
+    discovered = 0
+    selected = 0
+    routed = 0
+    forecasted = 0
+    traded = 0
+    for event in log_events:
+        event_name = event.get("event")
+        if event_name == "funnel_selector":
+            discovered += _event_int(event, "discovered_count")
+            selected += _event_int(event, "selected_count")
+        elif event_name == "funnel_router":
+            routed += _event_int(event, "routed_count")
+        elif event_name == "funnel_pipeline":
+            forecasted += _event_int(event, "forecasted_count")
+            traded += _event_int(event, "traded_count")
+    return SelectionFunnel(
+        discovered=discovered,
+        selected=selected,
+        routed=routed,
+        forecasted=forecasted,
+        traded=traded,
+    )
+
+
+def _event_int(event: Mapping[str, object], key: str) -> int:
+    value = event.get(key)
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _render_reliability_section(bins: Sequence[ReliabilityBin]) -> list[str]:
+    lines = ["", "## Calibration Reliability", ""]
+    if not bins:
+        lines.append("No resolved evaluation records.")
+        return lines
+    lines.extend(
+        [
+            "| Predicted probability | Count | Actual resolution rate |",
+            "|---|---:|---:|",
+        ]
+    )
+    for bin_item in bins:
+        actual_rate = (
+            "insufficient data"
+            if bin_item.actual_resolution_rate is None
+            else _fmt_probability_percent(bin_item.actual_resolution_rate)
+        )
+        lines.append(
+            f"| {bin_item.predicted_prob_range} | {bin_item.count} | {actual_rate} |"
+        )
+    return lines
+
+
+def _render_trade_cost_section(costs: Sequence[TradeCostBreakdown]) -> list[str]:
+    lines = ["", "## Spread Cost Decomposition", ""]
+    if not costs:
+        lines.append("No trade cost data.")
+        return lines
+    lines.extend(
+        [
+            "| Decision | Market | Gross edge | Spread cost | Net edge |",
+            "|---|---|---:|---:|---:|",
+        ]
+    )
+    for cost in costs:
+        lines.append(
+            f"| {cost.decision_id} | {cost.market_id} | "
+            f"{_fmt_probability_percent(cost.gross_edge)} | "
+            f"{_fmt_probability_percent(cost.spread_cost)} | "
+            f"{_fmt_probability_percent(cost.net_edge)} |"
+        )
+    return lines
+
+
+def _render_clamp_rejection_section(rejections: Sequence[tuple[str, int]]) -> list[str]:
+    lines = ["", "## Extreme Probability Rejections", ""]
+    if not rejections:
+        lines.append("No clamp rejections recorded.")
+        return lines
+    lines.extend(["| Market | Rejections |", "|---|---:|"])
+    for market_id, count in rejections:
+        lines.append(f"| {market_id} | {count} |")
+    return lines
+
+
+def _render_selection_funnel_section(funnel: SelectionFunnel | None) -> list[str]:
+    lines = ["", "## Selection Funnel", ""]
+    if funnel is None:
+        lines.append("No funnel events recorded.")
+        return lines
+    lines.extend(["| Stage | Count |", "|---|---:|"])
+    lines.append(f"| Discovered | {funnel.discovered} |")
+    lines.append(f"| Selected | {funnel.selected} |")
+    lines.append(f"| Routed | {funnel.routed} |")
+    lines.append(f"| Forecasted | {funnel.forecasted} |")
+    lines.append(f"| Traded | {funnel.traded} |")
+    return lines
 
 
 def _strategy_label(*, status: dict[str, Any], strategies: dict[str, Any]) -> str:
