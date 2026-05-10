@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import pytest
 
