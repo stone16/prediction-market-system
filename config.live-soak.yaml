@@ -9,27 +9,11 @@ live_emergency_audit_path: .data/live-emergency-audit.jsonl
 
 risk:
   max_position_per_market: 5.0
-  # Bumped 50 → 100 for paper soak day-2: 18 positions filled the original
-  # $50 cap within 20 minutes on day-1, leaving 12+ hours of zero new fills
-  # and only mark-to-market drift on existing positions. Doubling exposes
-  # ~25 more position slots so the sample size approaches Gate 3 minimums.
-  # **Lower this back to 50 before flipping mode=live** — first-live-order
-  # tight envelope is the operator audit gate.
-  max_total_exposure: 100.0
+  max_total_exposure: 50.0
   max_drawdown_pct: 20.0
-  # 60 slots is paper-only headroom paired with max_total_exposure=100:
-  # $100 / $2 per fill (paper_multifactor max_position_notional_usdc=2.0)
-  # caps the **real** open-position count at ~50, so 60 keeps a small
-  # buffer. The dollar exposure cap above is the binding ceiling.
-  # **Lower this back to 5 before flipping mode=live** — first-live-order
-  # soak intentionally runs with a tiny concurrent fleet so the operator
-  # can audit each fill.
-  max_open_positions: 60
+  max_open_positions: 5
   min_order_usdc: 1.0
-  # PAPER-only: align RiskManager with controller.max_slippage_bps below so
-  # the 200bps paper fill band reaches PaperActuator. **Lower this back to 50
-  # before flipping mode=live**; live execution keeps the tighter risk gate.
-  slippage_threshold_bps: 200.0
+  slippage_threshold_bps: 50.0
   max_quantity_shares: 500.0
 
 sensor:
@@ -41,15 +25,7 @@ sensor:
 
 controller:
   min_volume: 0.0
-  # 200bps slippage band for PAPER sim against live Polymarket data:
-  # typical small-market spreads on PM are 100-300bps, and the
-  # PaperActuator applies max_slippage_bps as an effective-limit band
-  # in _vwap_fill (see fix/paper-actuator-slippage-band). 50bps was
-  # tight enough to keep fills near-zero through the 2026-05-03..05
-  # paper soak. **Before flipping mode=live, lower this back to 50**
-  # — the live planner does its own slippage gate via _violates_limit
-  # and the wider band here is intentionally paper-only.
-  max_slippage_bps: 200
+  max_slippage_bps: 50
   time_in_force: IOC
   decision_cooldown_s: 60.0
   max_book_age_ms: 1000.0
