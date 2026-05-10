@@ -10,6 +10,7 @@ from pms.core.interfaces import MarketDataStore, StrategySelectionRegistry
 from pms.core.models import Market, Token
 from pms.core.venue_support import kalshi_stub_error, normalize_venue
 from pms.market_selection.merge import MergePolicy, MergeResult, StrategyMarketSet
+from pms.strategies.projections import MarketSelectionSpec
 
 
 logger = logging.getLogger(__name__)
@@ -67,14 +68,52 @@ class MarketSelector:
                 spec.resolution_time_max_horizon_days,
                 spec.volume_min_usdc,
             )
+            filtered_markets = await self._filter_markets(eligible_markets, spec)
             selections.append(
                 StrategyMarketSet(
                     strategy_id=strategy_id,
                     strategy_version_id=strategy_version_id,
-                    asset_ids=_asset_ids_from_eligible_markets(eligible_markets),
+                    asset_ids=_asset_ids_from_eligible_markets(filtered_markets),
                 )
             )
         return selections
+
+    async def _filter_markets(
+        self,
+        eligible_markets: Sequence[tuple[Market, Sequence[Token]]],
+        spec: MarketSelectionSpec,
+    ) -> list[tuple[Market, Sequence[Token]]]:
+        filtered_markets: list[tuple[Market, Sequence[Token]]] = []
+        for market, tokens in eligible_markets:
+            if not await self._market_passes_filters(market, spec):
+                continue
+            filtered_markets.append((market, tokens))
+        return filtered_markets
+
+    async def _market_passes_filters(
+        self,
+        market: Market,
+        spec: MarketSelectionSpec,
+    ) -> bool:
+        if spec.accepting_orders and market.accepting_orders is False:
+            return False
+
+        if spec.liquidity_min_usdc is not None and (
+            market.liquidity is None or market.liquidity < spec.liquidity_min_usdc
+        ):
+            return False
+
+        if spec.spread_max_bps is None and spec.depth_min_usdc is None:
+            return True
+
+        summary = await self._store.get_latest_book_summary(market.condition_id)
+        if summary is None:
+            return False
+        if spec.spread_max_bps is not None and summary.spread_bps > spec.spread_max_bps:
+            return False
+        if spec.depth_min_usdc is not None and summary.depth_usdc < spec.depth_min_usdc:
+            return False
+        return True
 
     async def _read_user_subscriptions(self) -> frozenset[str]:
         if self._market_subscription_store is None:

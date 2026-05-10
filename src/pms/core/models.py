@@ -259,6 +259,15 @@ class BookLevel:
 
 
 @dataclass(frozen=True)
+class BookSummary:
+    best_bid: float
+    best_ask: float
+    spread_bps: float
+    depth_usdc: float
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
 class PriceChange:
     id: int
     market_id: str

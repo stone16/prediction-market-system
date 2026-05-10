@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from pms.core.models import (
+    BookSummary,
     EvalRecord,
     FillRecord,
     Market,
@@ -36,6 +37,8 @@ class MarketDataStore(Protocol):
         max_horizon_days: int | None,
         min_volume_usdc: float,
     ) -> list[tuple[Market, list[Token]]]: ...
+
+    async def get_latest_book_summary(self, market_id: str) -> BookSummary | None: ...
 
 
 class StrategySelectionRegistry(Protocol):

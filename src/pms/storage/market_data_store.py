@@ -9,6 +9,7 @@ import asyncpg
 from pms.core.models import (
     BookLevel,
     BookSnapshot,
+    BookSummary,
     Market,
     Outcome,
     PriceChange,
@@ -436,6 +437,7 @@ class PostgresMarketDataStore:
             markets.created_at,
             markets.last_seen_at,
             markets.volume_24h,
+            markets.liquidity,
             markets.active,
             markets.closed,
             markets.accepting_orders,
@@ -496,6 +498,7 @@ class PostgresMarketDataStore:
                             created_at=cast(datetime, row["created_at"]),
                             last_seen_at=cast(datetime, row["last_seen_at"]),
                             volume_24h=cast(float | None, row["volume_24h"]),
+                            liquidity=_optional_float(row["liquidity"]),
                             active=cast(bool | None, _row_value(row, "active")),
                             closed=cast(bool | None, _row_value(row, "closed")),
                             accepting_orders=cast(
@@ -734,6 +737,58 @@ class PostgresMarketDataStore:
                         level.size,
                     )
         return snapshot_id
+
+    async def get_latest_book_summary(self, market_id: str) -> BookSummary | None:
+        query = """
+        WITH latest_snapshot AS (
+            SELECT id, ts
+            FROM book_snapshots
+            WHERE market_id = $1
+            ORDER BY ts DESC, id DESC
+            LIMIT 1
+        )
+        SELECT
+            latest_snapshot.ts,
+            book_levels.side,
+            book_levels.price,
+            book_levels.size
+        FROM latest_snapshot
+        JOIN book_levels
+            ON book_levels.snapshot_id = latest_snapshot.id
+        WHERE book_levels.market_id = $1
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query, market_id)
+        if not rows:
+            return None
+
+        bids = [
+            (float(row["price"]), float(row["size"]))
+            for row in rows
+            if row["side"] == "BUY"
+        ]
+        asks = [
+            (float(row["price"]), float(row["size"]))
+            for row in rows
+            if row["side"] == "SELL"
+        ]
+        if not bids or not asks:
+            return None
+
+        best_bid = max(price for price, _ in bids)
+        best_ask = min(price for price, _ in asks)
+        midpoint = (best_bid + best_ask) / 2.0
+        if midpoint <= 0.0:
+            return None
+        top_bid_depth = sum(price * size for price, size in bids if price == best_bid)
+        top_ask_depth = sum(price * size for price, size in asks if price == best_ask)
+        return BookSummary(
+            best_bid=best_bid,
+            best_ask=best_ask,
+            spread_bps=((best_ask - best_bid) / midpoint) * 10_000.0,
+            depth_usdc=top_bid_depth + top_ask_depth,
+            timestamp=cast(datetime, rows[0]["ts"]),
+        )
 
     async def write_price_change(self, price_change: PriceChange) -> None:
         query = """
