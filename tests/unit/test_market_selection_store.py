@@ -49,6 +49,7 @@ def _row(
     created_at: datetime,
     last_seen_at: datetime,
     volume_24h: float | None = 1000.0,
+    liquidity: float | None = None,
     token_id: str | None,
     outcome: str | None,
 ) -> dict[str, object]:
@@ -61,6 +62,7 @@ def _row(
         "created_at": created_at,
         "last_seen_at": last_seen_at,
         "volume_24h": volume_24h,
+        "liquidity": liquidity,
         "token_id": token_id,
         "outcome": outcome,
     }
