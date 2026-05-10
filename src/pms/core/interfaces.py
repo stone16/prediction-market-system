@@ -14,7 +14,7 @@ from pms.core.models import (
     Token,
     TradeDecision,
 )
-from pms.strategies.projections import MarketSelectionSpec
+from pms.strategies.projections import CalibrationContext, MarketSelectionSpec
 
 
 class ISensor(Protocol):
@@ -103,6 +103,15 @@ class IForecaster(Protocol):
 
 class ICalibrator(Protocol):
     def calibrate(self, probability: float, *, model_id: str) -> float: ...
+
+
+class IPreCalibrator(Protocol):
+    def calibrate(
+        self,
+        prob: float,
+        *,
+        context: CalibrationContext,
+    ) -> float | None: ...
 
 
 class ISizer(Protocol):
