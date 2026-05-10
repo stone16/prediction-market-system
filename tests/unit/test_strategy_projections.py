@@ -13,6 +13,8 @@ PROJECTION_NAMES = [
     "RiskParams",
     "EvalSpec",
     "ForecasterSpec",
+    "CalibrationSpec",
+    "CalibrationContext",
     "MarketSelectionSpec",
 ]
 
@@ -46,10 +48,25 @@ EXPECTED_FIELD_TYPES: dict[str, dict[str, Any]] = {
     "ForecasterSpec": {
         "forecasters": tuple[tuple[str, tuple[tuple[str, str], ...]], ...],
     },
+    "CalibrationSpec": {
+        "shrinkage_factor": float,
+        "shrinkage_bias": float,
+        "extreme_clamp_low": float,
+        "extreme_clamp_high": float,
+        "min_resolved_for_extreme": int,
+    },
+    "CalibrationContext": {
+        "resolved_sample_count": int,
+        "model_id": str,
+    },
     "MarketSelectionSpec": {
         "venue": str,
         "resolution_time_max_horizon_days": int | None,
         "volume_min_usdc": float,
+        "spread_max_bps": float | None,
+        "depth_min_usdc": float | None,
+        "liquidity_min_usdc": float | None,
+        "accepting_orders": bool,
     },
 }
 
@@ -103,10 +120,19 @@ def _sample_projection_values() -> dict[str, Any]:
                 ("stats", (("window", "15m"),)),
             )
         ),
+        "CalibrationSpec": module.CalibrationSpec(),
+        "CalibrationContext": module.CalibrationContext(
+            resolved_sample_count=12,
+            model_id="llm",
+        ),
         "MarketSelectionSpec": module.MarketSelectionSpec(
             venue="polymarket",
             resolution_time_max_horizon_days=7,
             volume_min_usdc=500.0,
+            spread_max_bps=100.0,
+            depth_min_usdc=250.0,
+            liquidity_min_usdc=None,
+            accepting_orders=True,
         ),
     }
 
@@ -189,6 +215,46 @@ def test_eval_spec_defaults_are_part_of_projection_contract() -> None:
     assert sample.max_brier_score == module.DEFAULT_MAX_BRIER_SCORE
     assert sample.slippage_threshold_bps == module.DEFAULT_SLIPPAGE_THRESHOLD_BPS
     assert sample.min_win_rate == module.DEFAULT_MIN_WIN_RATE
+
+
+def test_calibration_spec_defaults_are_part_of_projection_contract() -> None:
+    module = _load_projections_module()
+
+    calibration = module.CalibrationSpec()
+
+    assert calibration.shrinkage_factor == 0.35
+    assert calibration.shrinkage_bias == 0.0
+    assert calibration.extreme_clamp_low == 0.08
+    assert calibration.extreme_clamp_high == 0.92
+    assert calibration.min_resolved_for_extreme == 500
+
+
+def test_active_strategy_carries_default_calibration_projection() -> None:
+    module = _load_projections_module()
+
+    strategy = module.ActiveStrategy(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        config=module.StrategyConfig(
+            strategy_id="alpha",
+            factor_composition=(),
+            metadata=(("owner", "test"),),
+        ),
+        risk=module.RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=module.EvalSpec(metrics=("brier",)),
+        forecaster=module.ForecasterSpec(forecasters=(("rules", ()),)),
+        market_selection=module.MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+        ),
+    )
+
+    assert strategy.calibration == module.CalibrationSpec()
 
 
 def test_active_strategy_rejects_identity_mismatch() -> None:
