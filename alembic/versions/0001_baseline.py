@@ -25,6 +25,7 @@ _CREATED_TABLES: Final[tuple[str, ...]] = (
     "order_intents",
     "orders",
     "decisions",
+    "quote_eval_records",
     "eval_records",
     "feedback",
     "strategy_factors",

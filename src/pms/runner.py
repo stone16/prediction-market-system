@@ -65,6 +65,7 @@ from pms.evaluation.metrics import (
     StrategyMetricsSnapshot,
     StrategyVersionKey,
 )
+from pms.evaluation.quote_reader import TokenBookQuoteReader
 from pms.evaluation.spool import EvalSpool
 from pms.event_stream import RuntimeEventBus
 from pms.factors.catalog import ensure_factor_catalog
@@ -90,6 +91,7 @@ from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.market_subscription_store import PostgresMarketSubscriptionStore
 from pms.storage.opportunity_store import OpportunityStore
 from pms.storage.order_store import OrderStore
+from pms.storage.quote_eval_store import QuoteEvalStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
 from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
@@ -227,6 +229,7 @@ class Runner:
     decision_store: DecisionStore = field(default_factory=DecisionStore)
     order_store: OrderStore = field(default_factory=OrderStore)
     fill_store: FillStore = field(default_factory=FillStore)
+    quote_eval_store: QuoteEvalStore = field(default_factory=QuoteEvalStore)
     opportunity_store: OpportunityStore = field(default_factory=OpportunityStore)
     venue_account_reconciler: VenueAccountReconciler | None = None
     portfolio: Portfolio = field(default_factory=lambda: Portfolio(
@@ -301,6 +304,7 @@ class Runner:
             scorer=Scorer(),
             feedback_generator=EvaluatorFeedback(self.feedback_store),
             metrics_provider=self._metrics_by_strategy,
+            quote_store=self.quote_eval_store,
         )
         self._decision_queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
@@ -884,6 +888,12 @@ class Runner:
             self.order_store.bind_pool(self._pg_pool)
         if isinstance(self.fill_store, FillStore):
             self.fill_store.bind_pool(self._pg_pool)
+        if isinstance(self.quote_eval_store, QuoteEvalStore):
+            self.quote_eval_store.bind_pool(self._pg_pool)
+            self._evaluator_spool.quote_store = self.quote_eval_store
+            self._evaluator_spool.quote_reader = TokenBookQuoteReader(
+                PostgresMarketDataStore(self._pg_pool)
+            )
         if isinstance(self.opportunity_store, OpportunityStore):
             self.opportunity_store.bind_pool(self._pg_pool)
         self.actuator_executor = self._build_executor(self.config.mode)
@@ -901,6 +911,9 @@ class Runner:
             self.order_store.pool = None
         if isinstance(self.fill_store, FillStore):
             self.fill_store.pool = None
+        if isinstance(self.quote_eval_store, QuoteEvalStore):
+            self.quote_eval_store.pool = None
+            self._evaluator_spool.quote_reader = None
         if isinstance(self.opportunity_store, OpportunityStore):
             self.opportunity_store.pool = None
         self.actuator_executor = self._build_executor(self.config.mode)

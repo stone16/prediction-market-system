@@ -18,6 +18,8 @@ from pms.core.models import (
     Feedback,
     FillRecord,
     MarketSignal,
+    Position,
+    QuoteEvalRecord,
     TradeDecision,
 )
 from pms.metrics import (
@@ -29,6 +31,8 @@ from pms.metrics import (
 from pms.runner import Runner
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.fill_store import FillStore
+from pms.storage.quote_eval_store import QuoteEvalStore
 from pms.storage.schema_check import SchemaVersionMismatchError
 from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
@@ -181,6 +185,79 @@ def _feedback(feedback_id: str) -> Feedback:
         created_at=datetime(2026, 4, 14, tzinfo=UTC),
         category="brier:model-a",
     )
+
+
+def _quote_eval_record() -> QuoteEvalRecord:
+    return QuoteEvalRecord(
+        fill_id="trade-api",
+        decision_id="decision-api",
+        market_id="api-market",
+        token_id="yes-token",
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        prob_estimate=0.7,
+        quote_price=0.64,
+        quote_source="postgres_snapshot",
+        quote_lag_seconds=3600,
+        quote_score=0.0036,
+        mtm_pnl=1.2,
+        book_ts=datetime(2026, 4, 14, 1, tzinfo=UTC),
+        recorded_at=datetime(2026, 4, 14, 1, tzinfo=UTC),
+        citations=["trade-api"],
+        category="model-a",
+        model_id="model-a",
+    )
+
+
+class _PositionStore:
+    async def read_positions(self) -> list[Position]:
+        return [
+            Position(
+                market_id="api-market",
+                token_id="yes-token",
+                venue="polymarket",
+                side=Side.BUY.value,
+                shares_held=10.0,
+                avg_entry_price=0.50,
+                unrealized_pnl=1.2,
+                locked_usdc=5.0,
+            )
+        ]
+
+
+class _QuoteEvalStore:
+    async def all(self) -> list[QuoteEvalRecord]:
+        return [_quote_eval_record()]
+
+
+@pytest.mark.asyncio
+async def test_api_quality_payload_separates_brier_mtm_and_quote_calibration() -> None:
+    runner = _runner_with_state()
+    runner.fill_store = cast(FillStore, _PositionStore())
+    runner.quote_eval_store = cast(QuoteEvalStore, _QuoteEvalStore())
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        status = (await client.get("/status")).json()
+        metrics = (await client.get("/metrics")).json()
+
+    assert status["quality"]["final_brier"] == {
+        "record_count": 1,
+        "brier_overall": 0.09,
+    }
+    assert status["quality"]["mark_to_market"] == {
+        "open_positions": 1,
+        "locked_usdc": 5.0,
+        "unrealized_pnl": 1.2,
+    }
+    assert status["quality"]["quote_calibration"] == {
+        "record_count": 1,
+        "quote_score_overall": 0.0036,
+        "mtm_pnl": 1.2,
+    }
+    assert metrics["mark_to_market"]["unrealized_pnl"] == 1.2
+    assert metrics["quote_calibration"]["quote_score_overall"] == 0.0036
 
 
 @pytest.mark.asyncio

@@ -80,6 +80,7 @@ def test_inner_ring_product_tables_continue_to_carry_strategy_tags() -> None:
     expected_per_row_tables = {
         "feedback",
         "eval_records",
+        "quote_eval_records",
         "orders",
         "fills",
         "opportunities",

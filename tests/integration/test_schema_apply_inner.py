@@ -20,6 +20,7 @@ STRATEGY_TABLES = [
     "order_intents",
     "opportunities",
     "orders",
+    "quote_eval_records",
     "strategy_execution_artifacts",
     "strategy_judgement_artifacts",
 ]
@@ -29,6 +30,7 @@ CHECK_CONSTRAINTS = [
     "fills_strategy_identity_check",
     "opportunities_strategy_identity_check",
     "orders_strategy_identity_check",
+    "quote_eval_records_strategy_identity_check",
     "strategy_execution_artifacts_strategy_identity_check",
     "strategy_judgement_artifacts_strategy_identity_check",
 ]
@@ -38,6 +40,7 @@ STRATEGY_INDEXES = [
     "idx_fills_strategy_identity",
     "idx_opportunities_strategy_identity",
     "idx_orders_strategy_identity",
+    "idx_quote_eval_records_strategy_identity_recorded_at",
     "idx_strategy_execution_artifacts_strategy_created_at",
     "idx_strategy_judgement_artifacts_strategy_created_at",
 ]
