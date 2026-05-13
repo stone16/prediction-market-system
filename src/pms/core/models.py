@@ -331,6 +331,27 @@ class EvalRecord:
 
 
 @dataclass(frozen=True)
+class QuoteEvalRecord:
+    fill_id: str
+    decision_id: str
+    market_id: str
+    token_id: str | None
+    strategy_id: str
+    strategy_version_id: str
+    prob_estimate: float
+    quote_price: float
+    quote_source: str
+    quote_lag_seconds: int
+    quote_score: float
+    mtm_pnl: float
+    book_ts: datetime
+    recorded_at: datetime
+    citations: list[str]
+    category: str | None = None
+    model_id: str | None = None
+
+
+@dataclass(frozen=True)
 class Feedback:
     feedback_id: str
     target: str

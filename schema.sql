@@ -282,6 +282,27 @@ ALTER TABLE eval_records
     ADD COLUMN IF NOT EXISTS edge_at_decision DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     ADD COLUMN IF NOT EXISTS spread_bps_at_decision INTEGER;
 
+CREATE TABLE IF NOT EXISTS quote_eval_records (
+    fill_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    token_id TEXT,
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL,
+    prob_estimate DOUBLE PRECISION NOT NULL,
+    quote_price DOUBLE PRECISION NOT NULL,
+    quote_source TEXT NOT NULL,
+    quote_lag_seconds INTEGER NOT NULL,
+    quote_score DOUBLE PRECISION NOT NULL,
+    mtm_pnl DOUBLE PRECISION NOT NULL,
+    book_ts TIMESTAMPTZ NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL,
+    citations JSONB NOT NULL DEFAULT '[]'::jsonb,
+    category TEXT,
+    model_id TEXT,
+    PRIMARY KEY (fill_id, quote_lag_seconds)
+);
+
 CREATE TABLE IF NOT EXISTS strategy_performance_peaks (
     strategy_id TEXT NOT NULL,
     strategy_version_id TEXT NOT NULL,
@@ -600,6 +621,10 @@ ALTER TABLE eval_records
     ALTER COLUMN strategy_id SET NOT NULL,
     ALTER COLUMN strategy_version_id SET NOT NULL;
 
+ALTER TABLE quote_eval_records
+    ALTER COLUMN strategy_id SET NOT NULL,
+    ALTER COLUMN strategy_version_id SET NOT NULL;
+
 ALTER TABLE orders
     ALTER COLUMN strategy_id SET NOT NULL,
     ALTER COLUMN strategy_version_id SET NOT NULL;
@@ -641,6 +666,20 @@ BEGIN
     ) THEN
         ALTER TABLE eval_records
             ADD CONSTRAINT eval_records_strategy_identity_check
+            CHECK (strategy_id != '' AND strategy_version_id != '');
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'quote_eval_records_strategy_identity_check'
+    ) THEN
+        ALTER TABLE quote_eval_records
+            ADD CONSTRAINT quote_eval_records_strategy_identity_check
             CHECK (strategy_id != '' AND strategy_version_id != '');
     END IF;
 END
@@ -780,6 +819,9 @@ CREATE INDEX IF NOT EXISTS idx_eval_records_strategy_identity
 
 CREATE INDEX IF NOT EXISTS idx_eval_records_strategy_identity_recorded_at
     ON eval_records(strategy_id, strategy_version_id, recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_quote_eval_records_strategy_identity_recorded_at
+    ON quote_eval_records(strategy_id, strategy_version_id, recorded_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_orders_strategy_identity
     ON orders(strategy_id, strategy_version_id);

@@ -73,8 +73,16 @@ from pms.alerting.discord import DiscordWebhookClient
 from pms.alerting.scheduler import EODScheduler
 from pms.alerting.subscriber import run_alerting_subscription
 from pms.core.enums import RunMode
-from pms.core.models import EvalRecord, LiveTradingDisabledError, MarketSignal, TradeDecision
+from pms.core.models import (
+    EvalRecord,
+    LiveTradingDisabledError,
+    MarketSignal,
+    Position,
+    QuoteEvalRecord,
+    TradeDecision,
+)
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
+from pms.evaluation.quote_metrics import QuoteMetricsCollector, QuoteMetricsSnapshot
 from pms.metrics import metrics_snapshot
 from pms.runner import Runner
 from pms.storage.schema_check import ensure_schema_current
@@ -198,6 +206,9 @@ def create_app(
     async def status(request: Request) -> dict[str, Any]:
         records = await active_runner.eval_store.all()
         metrics_snapshot = MetricsCollector(records).global_ops_snapshot()
+        quote_records = await _quote_eval_records(active_runner)
+        quote_snapshot = QuoteMetricsCollector(quote_records).global_ops_snapshot()
+        mark_to_market = await _mark_to_market_payload(active_runner)
         return {
             "mode": active_runner.state.mode.value,
             "runner_started_at": _jsonable(active_runner.state.runner_started_at),
@@ -219,6 +230,12 @@ def create_app(
                 "eval_records_total": len(records),
                 "brier_overall": metrics_snapshot.brier_overall,
             },
+            "quality": _quality_payload(
+                records=records,
+                metrics_snapshot=metrics_snapshot,
+                mark_to_market=mark_to_market,
+                quote_snapshot=quote_snapshot,
+            ),
         }
 
     @app.get("/health")
@@ -466,9 +483,16 @@ def create_app(
             await active_runner.eval_store.all(),
             key=lambda record: (record.recorded_at, record.decision_id),
         )
+        quote_records = sorted(
+            await _quote_eval_records(active_runner),
+            key=lambda record: (record.recorded_at, record.fill_id),
+        )
+        mark_to_market = await _mark_to_market_payload(active_runner)
         first_trade_time_seconds = await _first_trade_time_seconds(active_runner.pg_pool)
         return _metrics_payload(
             records,
+            quote_records=quote_records,
+            mark_to_market=mark_to_market,
             first_trade_time_seconds=first_trade_time_seconds,
         )
 
@@ -720,13 +744,78 @@ def _latest(items: Sequence[T], limit: int) -> list[T]:
     return list(items[-bounded_limit:])
 
 
+async def _quote_eval_records(runner: Runner) -> list[QuoteEvalRecord]:
+    store = getattr(runner, "quote_eval_store", None)
+    all_records = getattr(store, "all", None)
+    if not callable(all_records):
+        return []
+    try:
+        return list(await all_records())
+    except Exception:  # noqa: BLE001
+        logger.exception("quote evaluation metrics unavailable")
+        return []
+
+
+async def _mark_to_market_payload(runner: Runner) -> dict[str, float | int]:
+    read_positions = getattr(runner.fill_store, "read_positions", None)
+    if not callable(read_positions):
+        return _mark_to_market_from_positions([])
+    try:
+        positions = list(await read_positions())
+    except Exception:  # noqa: BLE001
+        logger.exception("mark-to-market metrics unavailable")
+        return _mark_to_market_from_positions([])
+    return _mark_to_market_from_positions(positions)
+
+
+def _mark_to_market_from_positions(
+    positions: Sequence[Position],
+) -> dict[str, float | int]:
+    return {
+        "open_positions": len(positions),
+        "locked_usdc": float(sum(Decimal(str(item.locked_usdc)) for item in positions)),
+        "unrealized_pnl": float(
+            sum(Decimal(str(item.unrealized_pnl)) for item in positions)
+        ),
+    }
+
+
+def _quality_payload(
+    *,
+    records: Sequence[EvalRecord],
+    metrics_snapshot: MetricsSnapshot,
+    mark_to_market: dict[str, float | int],
+    quote_snapshot: QuoteMetricsSnapshot,
+) -> dict[str, Any]:
+    return {
+        "final_brier": {
+            "record_count": len(records),
+            "brier_overall": metrics_snapshot.brier_overall,
+        },
+        "mark_to_market": mark_to_market,
+        "quote_calibration": _quote_calibration_payload(quote_snapshot),
+    }
+
+
+def _quote_calibration_payload(snapshot: QuoteMetricsSnapshot) -> dict[str, Any]:
+    return {
+        "record_count": snapshot.record_count,
+        "quote_score_overall": snapshot.quote_score_overall,
+        "mtm_pnl": snapshot.mtm_pnl,
+    }
+
+
 def _metrics_payload(
     records: list[EvalRecord],
     *,
+    quote_records: list[QuoteEvalRecord] | None = None,
+    mark_to_market: dict[str, float | int] | None = None,
     first_trade_time_seconds: float | None = None,
 ) -> dict[str, Any]:
     collector = MetricsCollector(records)
     ops_view = _metrics_aggregate_payload(records, collector.global_ops_snapshot())
+    quote_records = [] if quote_records is None else quote_records
+    quote_snapshot = QuoteMetricsCollector(quote_records).global_ops_snapshot()
     strategy_snapshots = collector.snapshot_by_strategy()
     grouped_records: dict[tuple[str, str], list[EvalRecord]] = defaultdict(list)
     for record in records:
@@ -755,6 +844,18 @@ def _metrics_payload(
     payload.update(metrics_snapshot())
     payload["per_strategy"] = per_strategy
     payload["ops_view"] = ops_view
+    payload["mark_to_market"] = (
+        _mark_to_market_from_positions([])
+        if mark_to_market is None
+        else mark_to_market
+    )
+    payload["quote_calibration"] = _quote_calibration_payload(quote_snapshot)
+    payload["quality"] = _quality_payload(
+        records=records,
+        metrics_snapshot=collector.global_ops_snapshot(),
+        mark_to_market=payload["mark_to_market"],
+        quote_snapshot=quote_snapshot,
+    )
     return payload
 
 

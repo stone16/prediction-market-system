@@ -8,13 +8,14 @@ from typing import cast
 import pytest
 
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side, TimeInForce
-from pms.core.models import EvalRecord, Feedback, FillRecord, TradeDecision
+from pms.core.models import BookSummary, EvalRecord, Feedback, FillRecord, TradeDecision
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
 from pms.evaluation.metrics import (
     MetricsCollector,
     StrategyMetricsSnapshot,
 )
+from pms.evaluation.quote_scoring import QuoteScorer
 from pms.evaluation.spool import EvalSpool
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
@@ -157,6 +158,32 @@ def test_scorer_brier_known_values() -> None:
 
     assert first.brier_score == pytest.approx(0.09)
     assert second.brier_score == pytest.approx(0.25)
+
+
+def test_quote_scorer_uses_midpoint_for_calibration_and_bid_for_buy_mtm() -> None:
+    quote = BookSummary(
+        best_bid=0.62,
+        best_ask=0.66,
+        spread_bps=625.0,
+        depth_usdc=250.0,
+        timestamp=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    record = QuoteScorer().score(
+        _fill(decision_id="d-quote", resolved_outcome=None, fill_price=0.50),
+        _decision(decision_id="d-quote", prob=0.70, price=0.50),
+        quote,
+        quote_lag_seconds=3600,
+        recorded_at=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    assert record.fill_id == "trade-d-quote"
+    assert record.quote_lag_seconds == 3600
+    assert record.prob_estimate == pytest.approx(0.70)
+    assert record.quote_price == pytest.approx(0.64)
+    assert record.quote_score == pytest.approx((0.70 - 0.64) ** 2)
+    assert record.mtm_pnl == pytest.approx((0.62 - 0.50) * 10.0)
+    assert record.category == "model-a"
 
 
 def test_scorer_pnl_for_buy_no_uses_complementary_contract_outcome() -> None:

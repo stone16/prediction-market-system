@@ -20,6 +20,7 @@ STRATEGY_TABLES = [
     "order_intents",
     "opportunities",
     "orders",
+    "quote_eval_records",
     "strategy_execution_artifacts",
     "strategy_judgement_artifacts",
 ]
@@ -29,6 +30,7 @@ CHECK_CONSTRAINTS = [
     "fills_strategy_identity_check",
     "opportunities_strategy_identity_check",
     "orders_strategy_identity_check",
+    "quote_eval_records_strategy_identity_check",
     "strategy_execution_artifacts_strategy_identity_check",
     "strategy_judgement_artifacts_strategy_identity_check",
 ]
@@ -38,6 +40,7 @@ STRATEGY_INDEXES = [
     "idx_fills_strategy_identity",
     "idx_opportunities_strategy_identity",
     "idx_orders_strategy_identity",
+    "idx_quote_eval_records_strategy_identity_recorded_at",
     "idx_strategy_execution_artifacts_strategy_created_at",
     "idx_strategy_judgement_artifacts_strategy_created_at",
 ]
@@ -239,6 +242,7 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
                 'orders',
                 'fills',
                 'opportunities',
+                'quote_eval_records',
                 'strategy_execution_artifacts',
                 'strategy_judgement_artifacts'
               )
@@ -264,6 +268,8 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
             ("opportunities", "strategy_version_id", "NO"),
             ("orders", "strategy_id", "NO"),
             ("orders", "strategy_version_id", "NO"),
+            ("quote_eval_records", "strategy_id", "NO"),
+            ("quote_eval_records", "strategy_version_id", "NO"),
             ("strategy_execution_artifacts", "strategy_id", "NO"),
             ("strategy_execution_artifacts", "strategy_version_id", "NO"),
             ("strategy_judgement_artifacts", "strategy_id", "NO"),
@@ -283,6 +289,7 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
                 'orders_strategy_identity_check',
                 'fills_strategy_identity_check',
                 'opportunities_strategy_identity_check',
+                'quote_eval_records_strategy_identity_check',
                 'strategy_execution_artifacts_strategy_identity_check',
                 'strategy_judgement_artifacts_strategy_identity_check'
             )
@@ -305,6 +312,7 @@ def test_schema_sql_applies_inner_ring_strategy_identity_constraints() -> None:
                 'idx_orders_strategy_identity',
                 'idx_fills_strategy_identity',
                 'idx_opportunities_strategy_identity',
+                'idx_quote_eval_records_strategy_identity_recorded_at',
                 'idx_strategy_execution_artifacts_strategy_created_at',
                 'idx_strategy_judgement_artifacts_strategy_created_at'
             )

@@ -5,12 +5,16 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
+from typing import Protocol
 
+from pms.core.models import BookSummary
 from pms.core.models import FillRecord, TradeDecision
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
 from pms.evaluation.metrics import StrategyMetricsSnapshot, StrategyVersionKey
+from pms.evaluation.quote_scoring import QuoteScorer
 from pms.storage.eval_store import EvalStore
+from pms.storage.quote_eval_store import QuoteEvalStore
 from pms.strategies.projections import EvalSpec
 
 
@@ -27,12 +31,24 @@ StrategyMetricsProvider = Callable[
 ]
 
 
+class QuoteReader(Protocol):
+    async def latest_book_summary(
+        self,
+        market_id: str,
+        token_id: str | None,
+    ) -> BookSummary | None: ...
+
+
 @dataclass
 class EvalSpool:
     store: EvalStore
     scorer: Scorer
     feedback_generator: EvaluatorFeedback | None = None
     metrics_provider: StrategyMetricsProvider | None = None
+    quote_store: QuoteEvalStore | None = None
+    quote_reader: QuoteReader | None = None
+    quote_scorer: QuoteScorer = field(default_factory=QuoteScorer)
+    quote_lag_seconds: int = 0
     _queue: asyncio.Queue[tuple[FillRecord, TradeDecision]] = field(
         default_factory=asyncio.Queue,
     )
@@ -61,10 +77,7 @@ class EvalSpool:
             fill, decision = await self._queue.get()
             try:
                 if fill.resolved_outcome is None:
-                    logger.info(
-                        "skipping unresolved fill in evaluator spool: %s",
-                        fill.trade_id,
-                    )
+                    await self._record_quote_eval(fill, decision)
                     continue
                 await self.store.append(self.scorer.score(fill, decision))
                 try:
@@ -81,3 +94,36 @@ class EvalSpool:
         if not metrics_by_strategy:
             return
         await self.feedback_generator.generate(metrics_by_strategy)
+
+    async def _record_quote_eval(
+        self,
+        fill: FillRecord,
+        decision: TradeDecision,
+    ) -> None:
+        if self.quote_store is None or self.quote_reader is None:
+            logger.info(
+                "skipping unresolved fill in evaluator spool: %s",
+                fill.trade_id,
+            )
+            return
+        try:
+            quote = await self.quote_reader.latest_book_summary(
+                fill.market_id,
+                fill.token_id,
+            )
+            if quote is None:
+                logger.info(
+                    "skipping unresolved fill without quote in evaluator spool: %s",
+                    fill.trade_id,
+                )
+                return
+            await self.quote_store.append(
+                self.quote_scorer.score(
+                    fill,
+                    decision,
+                    quote,
+                    quote_lag_seconds=self.quote_lag_seconds,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("quote evaluation failed in evaluator spool")
