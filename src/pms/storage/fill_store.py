@@ -157,21 +157,37 @@ class FillStore:
                             )
                             ELSE markets.yes_price::double precision
                         END
-                    ) AS current_price
+                    ) AS current_price,
+                    CASE
+                        WHEN clob_marks.best_bid IS NOT NULL THEN 'clob'
+                        ELSE 'gamma'
+                    END AS mark_source,
+                    CASE
+                        WHEN clob_marks.snapshot_ts IS NOT NULL
+                        THEN EXTRACT(EPOCH FROM NOW() - clob_marks.snapshot_ts)
+                        ELSE NULL
+                    END AS mark_age_seconds
                 FROM aggregated_positions
                 LEFT JOIN LATERAL (
-                    SELECT MAX(book_levels.price) AS best_bid
-                    FROM book_levels
-                    WHERE book_levels.snapshot_id = (
-                        SELECT book_snapshots.id
+                    SELECT
+                        MAX(book_levels.price) AS best_bid,
+                        latest_snapshot.snapshot_ts
+                    FROM (
+                        SELECT
+                            book_snapshots.id,
+                            book_snapshots.ts AS snapshot_ts
                         FROM book_snapshots
                         WHERE book_snapshots.market_id = aggregated_positions.market_id
                           AND book_snapshots.token_id = aggregated_positions.token_id
+                          AND book_snapshots.ts > NOW() - INTERVAL '60 seconds'
                         ORDER BY book_snapshots.ts DESC, book_snapshots.id DESC
                         LIMIT 1
-                    )
+                    ) AS latest_snapshot
+                    INNER JOIN book_levels
+                       ON book_levels.snapshot_id = latest_snapshot.id
                       AND book_levels.market_id = aggregated_positions.market_id
                       AND book_levels.side = 'BUY'
+                    GROUP BY latest_snapshot.snapshot_ts
                 ) AS clob_marks ON TRUE
                 LEFT JOIN tokens
                     ON tokens.token_id = aggregated_positions.token_id
@@ -306,6 +322,8 @@ def _position_from_row(row: asyncpg.Record) -> Position:
         avg_entry_price=float(cast(float, row["avg_entry_price"])),
         unrealized_pnl=_unrealized_pnl_from_row(row),
         locked_usdc=float(cast(float, row["locked_usdc"])),
+        mark_source=cast(str | None, _optional_row_value(row, "mark_source")),
+        mark_age_seconds=_float_or_none(_optional_row_value(row, "mark_age_seconds")),
     )
 
 
@@ -334,6 +352,12 @@ def _decimal_or_none(value: object | None) -> Decimal | None:
     if value is None:
         return None
     return Decimal(str(value))
+
+
+def _float_or_none(value: object | None) -> float | None:
+    if value is None:
+        return None
+    return float(cast(float, value))
 
 
 def _trade_from_row(row: asyncpg.Record) -> StoredTradeRow:

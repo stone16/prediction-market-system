@@ -176,6 +176,8 @@ class Position:
     avg_entry_price: float
     unrealized_pnl: float
     locked_usdc: float
+    mark_source: str | None = None
+    mark_age_seconds: float | None = None
 
 
 @dataclass(frozen=True)

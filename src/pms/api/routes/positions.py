@@ -24,6 +24,8 @@ class PositionRow(BaseModel):
     avg_entry_price: float
     unrealized_pnl: float
     locked_usdc: float
+    mark_source: str | None = None
+    mark_age_seconds: float | None = None
 
 
 class PositionsResponse(BaseModel):
@@ -43,6 +45,8 @@ async def list_positions(store: PositionsReader) -> PositionsResponse:
                 avg_entry_price=position.avg_entry_price,
                 unrealized_pnl=position.unrealized_pnl,
                 locked_usdc=position.locked_usdc,
+                mark_source=position.mark_source,
+                mark_age_seconds=position.mark_age_seconds,
             )
             for position in positions
         ]

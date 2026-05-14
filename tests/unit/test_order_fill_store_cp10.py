@@ -195,6 +195,10 @@ async def test_fill_store_read_positions_marks_with_latest_clob_best_bid() -> No
     assert "MAX(book_levels.price)" in query
     assert "book_levels.side = 'BUY'" in query
     assert "book_snapshots.token_id = aggregated_positions.token_id" in query
+    assert "book_snapshots.ts > NOW() - INTERVAL '60 seconds'" in query
+    assert "book_snapshots.ts AS snapshot_ts" in query
+    assert "mark_source" in query
+    assert "mark_age_seconds" in query
     assert "ORDER BY book_snapshots.ts DESC, book_snapshots.id DESC" in query
     assert query.index("clob_marks.best_bid") < query.index("markets.yes_price")
 
@@ -213,6 +217,8 @@ async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
             "avg_entry_price": 0.25,
             "current_price": 0.31,
             "locked_usdc": 100.0,
+            "mark_source": "clob",
+            "mark_age_seconds": 12.5,
         }
     ]
     store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
@@ -229,6 +235,8 @@ async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
             avg_entry_price=0.25,
             unrealized_pnl=24.0,
             locked_usdc=100.0,
+            mark_source="clob",
+            mark_age_seconds=12.5,
         )
     ]
     assert "GROUP BY" in connection.fetch_calls[0][0]
@@ -250,6 +258,8 @@ async def test_fill_store_read_positions_maps_missing_market_price_to_zero_pnl()
             "avg_entry_price": 0.42,
             "current_price": None,
             "locked_usdc": 21.0,
+            "mark_source": "gamma",
+            "mark_age_seconds": None,
         }
     ]
     store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
@@ -266,6 +276,8 @@ async def test_fill_store_read_positions_maps_missing_market_price_to_zero_pnl()
             avg_entry_price=0.42,
             unrealized_pnl=0.0,
             locked_usdc=21.0,
+            mark_source="gamma",
+            mark_age_seconds=None,
         )
     ]
 

@@ -34,6 +34,8 @@ async def test_list_positions_returns_serialized_positions() -> None:
                 avg_entry_price=0.41,
                 unrealized_pnl=0.0,
                 locked_usdc=20.5,
+                mark_source="clob",
+                mark_age_seconds=14.25,
             )
         ]
     )
@@ -52,6 +54,8 @@ async def test_list_positions_returns_serialized_positions() -> None:
                 "avg_entry_price": 0.41,
                 "unrealized_pnl": 0.0,
                 "locked_usdc": 20.5,
+                "mark_source": "clob",
+                "mark_age_seconds": 14.25,
             }
         ]
     }

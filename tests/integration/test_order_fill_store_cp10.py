@@ -161,7 +161,7 @@ async def test_fill_store_read_positions_prefers_clob_bid_over_stale_market_pric
     market_store = PostgresMarketDataStore(pg_pool)
     fill_store = FillStore(pg_pool)
     order_store = OrderStore(pg_pool)
-    now = datetime(2026, 5, 9, 12, 50, 34, tzinfo=UTC)
+    now = datetime.now(UTC)
     market_id = "market-cp10-mtm"
     token_id = "token-cp10-mtm-yes"
 
@@ -283,3 +283,106 @@ async def test_fill_store_read_positions_prefers_clob_bid_over_stale_market_pric
     assert len(positions) == 1
     assert positions[0].avg_entry_price == pytest.approx(0.309)
     assert positions[0].unrealized_pnl == pytest.approx((0.261 - 0.309) * 6.47)
+    assert positions[0].mark_source == "clob"
+    assert positions[0].mark_age_seconds is not None
+    assert positions[0].mark_age_seconds < 60
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_fill_store_read_positions_falls_back_to_gamma_when_clob_snapshot_stale(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    market_store = PostgresMarketDataStore(pg_pool)
+    fill_store = FillStore(pg_pool)
+    order_store = OrderStore(pg_pool)
+    now = datetime.now(UTC)
+    market_id = "market-cp02-stale-mtm"
+    token_id = "token-cp02-stale-mtm-yes"
+
+    await market_store.write_market(
+        Market(
+            condition_id=market_id,
+            slug=market_id,
+            question="Will MtM fall back when the CLOB book is stale?",
+            venue="polymarket",
+            resolves_at=now + timedelta(days=7),
+            created_at=now - timedelta(days=1),
+            last_seen_at=now,
+            yes_price=0.63,
+            no_price=0.37,
+            price_updated_at=now - timedelta(minutes=2),
+        )
+    )
+    await market_store.write_token(
+        Token(token_id=token_id, condition_id=market_id, outcome="YES")
+    )
+    await market_store.write_book_snapshot(
+        BookSnapshot(
+            id=0,
+            market_id=market_id,
+            token_id=token_id,
+            ts=now - timedelta(minutes=2),
+            hash="stale-book",
+            source="subscribe",
+        ),
+        [
+            BookLevel(
+                snapshot_id=0,
+                market_id=market_id,
+                side="BUY",
+                price=0.25,
+                size=20.0,
+            )
+        ],
+    )
+    await order_store.insert(
+        OrderState(
+            order_id="order-cp02-stale-mtm-1",
+            decision_id="decision-cp02-stale-mtm-1",
+            status="matched",
+            market_id=market_id,
+            token_id=token_id,
+            venue="polymarket",
+            requested_notional_usdc=3.0,
+            filled_notional_usdc=3.0,
+            remaining_notional_usdc=0.0,
+            fill_price=0.30,
+            submitted_at=now - timedelta(minutes=1),
+            last_updated_at=now - timedelta(minutes=1),
+            raw_status="matched",
+            strategy_id="default",
+            strategy_version_id="default-v2",
+            filled_quantity=10.0,
+            action="BUY",
+            outcome="YES",
+        )
+    )
+    await fill_store.insert(
+        FillRecord(
+            trade_id="trade-cp02-stale-mtm-1",
+            fill_id="fill-cp02-stale-mtm-1",
+            order_id="order-cp02-stale-mtm-1",
+            decision_id="decision-cp02-stale-mtm-1",
+            market_id=market_id,
+            token_id=token_id,
+            venue="polymarket",
+            side="BUY",
+            fill_price=0.30,
+            fill_notional_usdc=3.0,
+            fill_quantity=10.0,
+            executed_at=now - timedelta(minutes=1),
+            filled_at=now - timedelta(minutes=1),
+            status="filled",
+            anomaly_flags=[],
+            strategy_id="default",
+            strategy_version_id="default-v2",
+        )
+    )
+
+    positions = await fill_store.read_positions()
+    position = next(item for item in positions if item.market_id == market_id)
+
+    assert position.avg_entry_price == pytest.approx(0.30)
+    assert position.unrealized_pnl == pytest.approx((0.63 - 0.30) * 10.0)
+    assert position.mark_source == "gamma"
+    assert position.mark_age_seconds is None
