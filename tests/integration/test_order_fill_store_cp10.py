@@ -464,3 +464,90 @@ async def test_fill_store_read_positions_excludes_fully_closed_buy_sell_position
     positions = await fill_store.read_positions()
 
     assert all(position.market_id != market_id for position in positions)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_fill_store_read_positions_preserves_lot_basis_after_partial_exit(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    market_store = PostgresMarketDataStore(pg_pool)
+    fill_store = FillStore(pg_pool)
+    order_store = OrderStore(pg_pool)
+    now = datetime.now(UTC)
+    market_id = "market-cp10-lot-basis"
+    token_id = "token-cp10-lot-basis-yes"
+
+    await market_store.write_market(
+        Market(
+            condition_id=market_id,
+            slug=market_id,
+            question="Will lot accounting preserve cost basis after a partial exit?",
+            venue="polymarket",
+            resolves_at=now + timedelta(days=7),
+            created_at=now - timedelta(days=1),
+            last_seen_at=now,
+            yes_price=0.55,
+            no_price=0.45,
+            price_updated_at=now,
+        )
+    )
+    await market_store.write_token(
+        Token(token_id=token_id, condition_id=market_id, outcome="YES")
+    )
+
+    fills = (
+        ("BUY", 0.40, 10.0, "buy-1", now),
+        ("SELL", 0.60, 5.0, "sell", now + timedelta(minutes=1)),
+        ("BUY", 0.50, 5.0, "buy-2", now + timedelta(minutes=2)),
+    )
+    for action, price, quantity, suffix, filled_at in fills:
+        order = OrderState(
+            order_id=f"order-cp10-lot-basis-{suffix}",
+            decision_id=f"decision-cp10-lot-basis-{suffix}",
+            status="matched",
+            market_id=market_id,
+            token_id=token_id,
+            venue="polymarket",
+            requested_notional_usdc=price * quantity,
+            filled_notional_usdc=price * quantity,
+            remaining_notional_usdc=0.0,
+            fill_price=price,
+            submitted_at=filled_at,
+            last_updated_at=filled_at,
+            raw_status="matched",
+            strategy_id="default",
+            strategy_version_id="default-v2",
+            filled_quantity=quantity,
+            action=action,
+            outcome="YES",
+        )
+        await order_store.insert(order)
+        await fill_store.insert(
+            FillRecord(
+                trade_id=f"trade-cp10-lot-basis-{suffix}",
+                fill_id=f"fill-cp10-lot-basis-{suffix}",
+                order_id=order.order_id,
+                decision_id=order.decision_id,
+                market_id=market_id,
+                token_id=token_id,
+                venue="polymarket",
+                side=action,
+                fill_price=price,
+                fill_notional_usdc=price * quantity,
+                fill_quantity=quantity,
+                executed_at=filled_at,
+                filled_at=filled_at,
+                status="filled",
+                anomaly_flags=[],
+                strategy_id="default",
+                strategy_version_id="default-v2",
+            )
+        )
+
+    positions = await fill_store.read_positions()
+    position = next(item for item in positions if item.market_id == market_id)
+
+    assert position.shares_held == pytest.approx(10.0)
+    assert position.avg_entry_price == pytest.approx(0.45)
+    assert position.locked_usdc == pytest.approx(4.50)
+    assert position.unrealized_pnl == pytest.approx((0.55 - 0.45) * 10.0)

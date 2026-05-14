@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 from pms.controller.factor_snapshot import (
     FactorSnapshotReader,
@@ -164,31 +165,46 @@ def _posterior_candidate(
     if not success_steps and not failure_steps:
         return None
     successes = sum(
-        step.weight * factor_values.get((step.factor_id, step.param), 0.0)
-        for step in success_steps
+        (
+            Decimal(str(step.weight))
+            * Decimal(str(factor_values.get((step.factor_id, step.param), 0.0)))
+            for step in success_steps
+        ),
+        Decimal("0"),
     )
     failures = sum(
-        step.weight * factor_values.get((step.factor_id, step.param), 0.0)
-        for step in failure_steps
+        (
+            Decimal(str(step.weight))
+            * Decimal(str(factor_values.get((step.factor_id, step.param), 0.0)))
+            for step in failure_steps
+        ),
+        Decimal("0"),
     )
-    if successes == 0.0 and failures == 0.0:
+    if successes == 0 and failures == 0:
         return None
     prior_steps = tuple(step for step in steps if step.role == "posterior_prior")
-    prior_probability = 0.5
-    prior_weight = prior_strength
+    prior_probability = Decimal("0.5")
+    prior_weight = Decimal(str(prior_strength))
     if prior_steps:
         prior_step = prior_steps[0]
-        prior_probability = factor_values.get(
-            (prior_step.factor_id, prior_step.param),
-            0.5,
+        prior_probability = Decimal(
+            str(
+                factor_values.get(
+                    (prior_step.factor_id, prior_step.param),
+                    0.5,
+                )
+            )
         )
-        prior_weight = prior_step.weight
+        prior_weight = Decimal(str(prior_step.weight))
     alpha = prior_probability * prior_weight + successes
-    beta = (1.0 - prior_probability) * prior_weight + failures
+    beta = (Decimal("1.0") - prior_probability) * prior_weight + failures
     total = alpha + beta
-    if total == 0.0:
+    if total == 0:
         return None
-    return _bounded_probability(alpha / total), max(1.0, successes + failures)
+    return (
+        _bounded_probability(float(alpha / total)),
+        float(max(Decimal("1.0"), successes + failures)),
+    )
 
 
 def _factor_probability(
@@ -205,35 +221,61 @@ def _factor_probability(
 
 
 def _weighted_average(candidates: Sequence[tuple[float, float]]) -> float:
-    total_weight = sum(weight for _, weight in candidates)
-    if total_weight == 0.0:
-        return sum(probability for probability, _ in candidates) / len(candidates)
-    return sum(probability * weight for probability, weight in candidates) / total_weight
+    total_weight = sum((Decimal(str(weight)) for _, weight in candidates), Decimal("0"))
+    if total_weight == 0:
+        total_probability = sum(
+            (Decimal(str(probability)) for probability, _ in candidates),
+            Decimal("0"),
+        )
+        return float(total_probability / Decimal(len(candidates)))
+    weighted_sum = sum(
+        (
+            Decimal(str(probability)) * Decimal(str(weight))
+            for probability, weight in candidates
+        ),
+        Decimal("0"),
+    )
+    return float(weighted_sum / total_weight)
 
 
 def _confidence(probabilities: Sequence[float], weights: Sequence[float]) -> float:
     if len(probabilities) == 1:
         return 0.5
-    total_weight = sum(weights)
-    if total_weight == 0.0:
-        weights = tuple(1.0 for _ in probabilities)
-        total_weight = float(len(probabilities))
+    probability_decimals = tuple(
+        Decimal(str(probability)) for probability in probabilities
+    )
+    weight_decimals = tuple(Decimal(str(weight)) for weight in weights)
+    total_weight = sum(weight_decimals, Decimal("0"))
+    if total_weight == 0:
+        weight_decimals = tuple(Decimal("1.0") for _ in probabilities)
+        total_weight = Decimal(len(probabilities))
     mean = (
         sum(
             probability * weight
-            for probability, weight in zip(probabilities, weights)
+            for probability, weight in zip(
+                probability_decimals,
+                weight_decimals,
+                strict=True,
+            )
         )
         / total_weight
     )
     mean_abs_deviation = (
         sum(
             abs(probability - mean) * weight
-            for probability, weight in zip(probabilities, weights)
+            for probability, weight in zip(
+                probability_decimals,
+                weight_decimals,
+                strict=True,
+            )
         )
         / total_weight
     )
-    agreement = max(0.0, 1.0 - (mean_abs_deviation / 0.5))
-    return min(0.95, 0.35 + 0.60 * agreement)
+    agreement = max(
+        Decimal("0"),
+        Decimal("1.0") - (mean_abs_deviation / Decimal("0.5")),
+    )
+    return float(min(Decimal("0.95"), Decimal("0.35") + Decimal("0.60") * agreement))
 
 
 def _bounded_probability(value: float) -> float:

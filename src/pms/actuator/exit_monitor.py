@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 from uuid import uuid4
 
@@ -83,6 +84,8 @@ def mark_position_from_signal(
     if position.market_id != signal.market_id:
         return None
     current_price = _mark_price_for_position(position, signal)
+    if current_price is None:
+        return None
     pnl = _unrealized_pnl(
         side=position.side,
         shares_held=position.shares_held,
@@ -108,7 +111,12 @@ def build_exit_decision(
     position = exit_signal.position
     side = _opposing_side(position.side)
     limit_price = _limit_order_price(exit_signal.current_price)
-    notional = max(limit_price * position.shares_held, 0.01)
+    notional = float(
+        max(
+            _decimal(limit_price) * _decimal(position.shares_held),
+            Decimal("0.01"),
+        )
+    )
     decision_id = f"exit-{exit_signal.trigger}-{uuid4().hex}"
     outcome = _position_outcome(position, signal)
     return TradeDecision(
@@ -151,22 +159,43 @@ def _position_current_price(position: Position) -> float | None:
     if position.shares_held <= 0.0:
         return None
     if position.side.upper() == "SELL":
-        return position.avg_entry_price - (position.unrealized_pnl / position.shares_held)
-    return position.avg_entry_price + (position.unrealized_pnl / position.shares_held)
+        return float(
+            _decimal(position.avg_entry_price)
+            - (_decimal(position.unrealized_pnl) / _decimal(position.shares_held))
+        )
+    return float(
+        _decimal(position.avg_entry_price)
+        + (_decimal(position.unrealized_pnl) / _decimal(position.shares_held))
+    )
 
 
 def _limit_order_price(current_price: float) -> float:
-    return min(max(current_price, 0.001), 0.999)
+    price = _decimal(current_price)
+    return float(min(max(price, Decimal("0.001")), Decimal("0.999")))
 
 
-def _mark_price_for_position(position: Position, signal: MarketSignal) -> float:
+def _mark_price_for_position(position: Position, signal: MarketSignal) -> float | None:
+    bid = _best_book_price(signal.orderbook.get("bids"), side="bid")
+    ask = _best_book_price(signal.orderbook.get("asks"), side="ask")
     if (
         position.token_id is not None
         and signal.token_id is not None
         and position.token_id != signal.token_id
     ):
-        return 1.0 - signal.yes_price
-    return signal.yes_price
+        if position.side.upper() == "SELL":
+            price = None if bid is None else float(Decimal("1") - _decimal(bid))
+        else:
+            price = None if ask is None else float(Decimal("1") - _decimal(ask))
+        if price is not None:
+            return _open_probability_or_none(price)
+        yes_price = _open_probability_or_none(signal.yes_price)
+        return None if yes_price is None else float(Decimal("1") - _decimal(yes_price))
+    if position.side.upper() == "SELL":
+        if ask is not None:
+            return ask
+    elif bid is not None:
+        return bid
+    return _open_probability_or_none(signal.yes_price)
 
 
 def _position_outcome(position: Position, signal: MarketSignal) -> Literal["YES", "NO"]:
@@ -182,7 +211,10 @@ def _position_outcome(position: Position, signal: MarketSignal) -> Literal["YES"
 def _position_pnl_pct(position: Position) -> float:
     if position.locked_usdc <= 0.0:
         return 0.0
-    return (position.unrealized_pnl / position.locked_usdc) * 100.0
+    return float(
+        (_decimal(position.unrealized_pnl) / _decimal(position.locked_usdc))
+        * Decimal("100")
+    )
 
 
 def _held_days(position: Position, *, now: datetime) -> float | None:
@@ -199,9 +231,68 @@ def _unrealized_pnl(
     current_price: float,
 ) -> float:
     if side.upper() == "SELL":
-        return (avg_entry_price - current_price) * shares_held
-    return (current_price - avg_entry_price) * shares_held
+        return float(
+            (_decimal(avg_entry_price) - _decimal(current_price))
+            * _decimal(shares_held)
+        )
+    return float(
+        (_decimal(current_price) - _decimal(avg_entry_price))
+        * _decimal(shares_held)
+    )
 
 
 def _opposing_side(side: str) -> Literal["BUY", "SELL"]:
     return "SELL" if side.upper() == "BUY" else "BUY"
+
+
+def _best_book_price(raw_levels: object, *, side: Literal["bid", "ask"]) -> float | None:
+    if not isinstance(raw_levels, list):
+        return None
+    prices: list[Decimal] = []
+    for raw_level in raw_levels:
+        if not isinstance(raw_level, dict):
+            continue
+        size = _positive_decimal_or_none(raw_level.get("size"))
+        price = _open_probability_decimal_or_none(raw_level.get("price"))
+        if size is None or price is None:
+            continue
+        prices.append(price)
+    if not prices:
+        return None
+    return float(max(prices) if side == "bid" else min(prices))
+
+
+def _open_probability_or_none(value: object) -> float | None:
+    price = _open_probability_decimal_or_none(value)
+    return None if price is None else float(price)
+
+
+def _open_probability_decimal_or_none(value: object) -> Decimal | None:
+    parsed = _decimal_or_none(value)
+    if parsed is None or parsed <= 0 or parsed >= 1:
+        return None
+    return parsed
+
+
+def _positive_decimal_or_none(value: object) -> Decimal | None:
+    parsed = _decimal_or_none(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not parsed.is_finite():
+        return None
+    return parsed
+
+
+def _decimal(value: object) -> Decimal:
+    parsed = _decimal_or_none(value)
+    if parsed is None:
+        return Decimal("0")
+    return parsed

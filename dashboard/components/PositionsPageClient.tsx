@@ -17,7 +17,7 @@ export function PositionsPageClient() {
           <div>
             <h1>Positions</h1>
             <p className="lede">
-              Current exposure aggregated from persisted fills, grouped by market, token, venue, and side.
+              Current exposure aggregated from persisted fills by strategy, market, token, venue, and side.
             </p>
           </div>
           <div className="hero-actions">

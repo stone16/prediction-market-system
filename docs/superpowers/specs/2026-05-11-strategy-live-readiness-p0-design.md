@@ -292,7 +292,7 @@ pattern in `LiveRippleSource`.
 
 **Composition formula:**
 
-```
+```text
 base_prob = signal.yes_price  (market price as anchor)
 for each enabled rule with role="rule_delta":
     delta = rule_function(factor_value, threshold)
@@ -412,7 +412,7 @@ combines them via weighted average.
 
 **Formula:**
 
-```
+```text
 prob_estimates = []
 weights = []
 for each factor with config:
@@ -571,7 +571,7 @@ misfire.
 
 ## Checkpoint Dependency Graph
 
-```
+```text
 CP1 (CalibrationSpec)     ─── independent
 CP2 (CLOB staleness)      ─── independent
 CP3 (KellySizer)          ─── independent
@@ -590,7 +590,7 @@ Parallelizable cohorts:
 
 ## Execution Timeline
 
-```
+```text
 Week 1:
   Day 1:    CP1 (CalibrationSpec, ~1h) + CP4 (confidence fix, ~0.5d)
   Day 1-2:  CP2 (CLOB staleness, ~0.5-1d)

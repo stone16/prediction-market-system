@@ -383,7 +383,7 @@ def test_risk_manager_reduction_bypass_rejects_oversized_sell() -> None:
         _risk(max_position_per_market=10.0, max_total_exposure=10.0)
     ).check(decision, portfolio)
 
-    assert result == RiskDecision(approved=False, reason="max_position_per_market")
+    assert result == RiskDecision(approved=False, reason="partial_reduction_unsupported")
 
 
 @pytest.mark.parametrize(

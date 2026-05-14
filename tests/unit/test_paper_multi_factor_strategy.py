@@ -120,7 +120,16 @@ def test_paper_multi_factor_config_json_round_trips_enabled_calibration() -> Non
     round_tripped = _strategy_from_config_json(payload)
 
     assert payload["calibration"]["enabled"] is True
+    assert payload["calibration"]["shrinkage_factor"] == pytest.approx(0.35)
+    assert payload["calibration"]["shrinkage_bias"] == pytest.approx(0.0)
+    assert payload["calibration"]["extreme_clamp_low"] == pytest.approx(0.08)
+    assert payload["calibration"]["extreme_clamp_high"] == pytest.approx(0.92)
+    assert payload["calibration"]["min_resolved_for_extreme"] == 20
     assert round_tripped.calibration.enabled is True
+    assert round_tripped.calibration.shrinkage_factor == pytest.approx(0.35)
+    assert round_tripped.calibration.shrinkage_bias == pytest.approx(0.0)
+    assert round_tripped.calibration.extreme_clamp_low == pytest.approx(0.08)
+    assert round_tripped.calibration.extreme_clamp_high == pytest.approx(0.92)
     assert round_tripped.calibration.min_resolved_for_extreme == 20
 
 

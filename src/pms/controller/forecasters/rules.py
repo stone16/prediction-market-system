@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 from pms.controller.factor_snapshot import (
     FactorSnapshotReader,
@@ -68,23 +69,25 @@ def _forecast_from_rules(
     rule_steps: Sequence[FactorCompositionStep],
     factor_values: Mapping[tuple[str, str], float],
 ) -> ForecastResult | None:
-    probability = signal.yes_price
-    max_abs_contribution = 0.0
+    probability = Decimal(str(signal.yes_price))
+    max_abs_contribution = Decimal("0")
     for step in rule_steps:
         factor_value = factor_values.get((step.factor_id, step.param))
         if factor_value is None:
             if step.required:
                 return None
             continue
-        delta = _rule_delta(step, factor_value, market_price=signal.yes_price)
-        if step.threshold is not None and abs(delta) < step.threshold:
+        delta = Decimal(
+            str(_rule_delta(step, factor_value, market_price=signal.yes_price))
+        )
+        if step.threshold is not None and abs(delta) < Decimal(str(step.threshold)):
             continue
-        contribution = delta * step.weight
+        contribution = delta * Decimal(str(step.weight))
         probability += contribution
         max_abs_contribution = max(max_abs_contribution, abs(contribution))
     return (
-        _bounded_probability(probability),
-        min(max_abs_contribution * 5.0, 0.95),
+        _bounded_probability(float(probability)),
+        float(min(max_abs_contribution * Decimal("5.0"), Decimal("0.95"))),
         RULES_MODEL_ID,
     )
 

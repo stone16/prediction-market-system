@@ -604,6 +604,7 @@ The findings below either confirm existing P0 items with empirical evidence, or 
 **Status (2026-05-11 audit):** ❌ Unresolved. `fill_store.py` has no staleness check. No `mark_source` field in `/positions` response.
 
 **Evidence (Colombia outright YES position `0xab6fb278`):**
+
 | Source | Value | Notes |
 |---|---|---|
 | avg_entry | $0.1048 | from `fills` table |
@@ -668,7 +669,8 @@ The findings below either confirm existing P0 items with empirical evidence, or 
 **Status (2026-05-11 audit):** ❌ Confirmed. `rules.py:15` returns `(signal.yes_price, 0.0, "pre-s5-neutral")`. `statistical.py:22` returns same. Zero forecaster diversity — system is LLM-only.
 
 **Evidence:** Every `paper_multi_factor_v1` opportunity row's `rationale` field equals:
-```
+
+```text
 RulesForecaster:pre-s5-neutral | StatisticalForecaster:pre-s5-neutral | DeepSeek
 ```
 
@@ -712,6 +714,7 @@ P0-1 was about activating the LLM forecaster — done; DeepSeek is producing pro
 **Status:** newly observed; root cause unclear
 
 **Evidence (paper_multi_factor_v1 decisions per 5min window):**
+
 | Window | Rate |
 |---|---|
 | 5/10 13:35-14:43 (first 70min, all 10 fills) | **10-15 / 5min** |
@@ -777,6 +780,7 @@ P0-1 was about activating the LLM forecaster — done; DeepSeek is producing pro
 **Status (2026-05-11 audit):** ❌ Confirmed. No stop-loss, no profit-take, no time-decay exit in actuator. Colombia position at -48% with no system response. `grep -rn "exit\|stop.loss\|profit.take" src/pms/actuator/` returns empty.
 
 **Evidence (across 60h, none of the 5 positions saw any exit logic invoked):**
+
 | Position | Entry | Current mark (Gamma) | % move | System response |
 |---|---|---|---|---|
 | Colombia Outright YES | $0.105 | $0.055 | **-48%** | none (no stop-loss) |

@@ -176,6 +176,8 @@ export type PositionRow = {
   avg_entry_price: number;
   unrealized_pnl: number;
   locked_usdc: number;
+  strategy_id: string;
+  strategy_version_id: string;
 };
 
 export type PositionsResponse = {

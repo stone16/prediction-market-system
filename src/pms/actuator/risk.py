@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Literal
 
 from pms.config import RiskSettings
@@ -16,6 +17,12 @@ class InsufficientLiquidityError(RuntimeError):
 class RiskDecision:
     approved: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class ReductionSplit:
+    reducing_shares: float
+    residual_shares: float
 
 
 HaltTriggerKind = Literal[
@@ -82,14 +89,20 @@ class RiskManager:
         if notional < self.risk.min_order_usdc:
             return RiskDecision(False, "min_order_usdc")
 
-        reduces_position = _reduces_open_position(portfolio, decision)
+        reduction = _split_reduction_shares(portfolio, decision)
+        if reduction.reducing_shares > 0.0 and reduction.residual_shares > 1e-9:
+            return RiskDecision(False, "partial_reduction_unsupported")
+        reduces_position = reduction.reducing_shares > 0.0
+        residual_notional = 0.0 if reduces_position else notional
 
-        if not reduces_position:
-            market_exposure = _market_exposure(portfolio, decision.market_id) + notional
+        if residual_notional > 0.0:
+            market_exposure = (
+                _market_exposure(portfolio, decision.market_id) + residual_notional
+            )
             if market_exposure > self.risk.max_position_per_market:
                 return RiskDecision(False, "max_position_per_market")
 
-            total_exposure = portfolio.locked_usdc + notional
+            total_exposure = portfolio.locked_usdc + residual_notional
             if total_exposure > self.risk.max_total_exposure:
                 return RiskDecision(False, "max_total_exposure")
 
@@ -111,15 +124,15 @@ class RiskManager:
         if decision.max_slippage_bps > self.risk.slippage_threshold_bps:
             return RiskDecision(False, "slippage_threshold_bps")
 
-        if not reduces_position and notional > portfolio.free_usdc:
+        if residual_notional > portfolio.free_usdc:
             return RiskDecision(False, "insufficient_free_usdc")
 
         if (
-            not reduces_position
+            residual_notional > 0.0
             and self.risk.max_quantity_shares is not None
             and decision.limit_price > 0.0
         ):
-            estimated_quantity = notional / decision.limit_price
+            estimated_quantity = residual_notional / decision.limit_price
             if estimated_quantity > self.risk.max_quantity_shares:
                 return RiskDecision(False, "max_quantity_shares")
 
@@ -285,17 +298,23 @@ def _has_open_position(portfolio: Portfolio, decision: TradeDecision) -> bool:
     )
 
 
-def _reduces_open_position(portfolio: Portfolio, decision: TradeDecision) -> bool:
+def _split_reduction_shares(
+    portfolio: Portfolio,
+    decision: TradeDecision,
+) -> ReductionSplit:
     decision_shares = _decision_contracts(decision)
     if decision_shares is None:
-        return False
-    return any(
-        _same_contract(position, decision)
+        return ReductionSplit(0.0, 0.0)
+    closable_shares = sum(
+        position.shares_held
+        for position in portfolio.open_positions
+        if _same_contract(position, decision)
         and _same_strategy_version(position, decision)
         and position.side != decision.side
-        and decision_shares <= position.shares_held + 1e-9
-        for position in portfolio.open_positions
     )
+    reducing_shares = min(decision_shares, closable_shares)
+    residual_shares = max(0.0, decision_shares - reducing_shares)
+    return ReductionSplit(reducing_shares, residual_shares)
 
 
 def _same_contract(position: Position, decision: TradeDecision) -> bool:
@@ -316,7 +335,9 @@ def _same_strategy_version(position: Position, decision: TradeDecision) -> bool:
 def _decision_contracts(decision: TradeDecision) -> float | None:
     if decision.limit_price <= 0.0:
         return None
-    return decision.notional_usdc / decision.limit_price
+    return float(
+        Decimal(str(decision.notional_usdc)) / Decimal(str(decision.limit_price))
+    )
 
 
 def _coerce_aware(value: datetime | None) -> datetime:

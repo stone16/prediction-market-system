@@ -43,8 +43,13 @@ def test_live_soak_config_relaxes_paper_factor_gate_for_phase_a() -> None:
 
 def test_live_soak_config_has_no_dead_top_level_calibration_section() -> None:
     yaml_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
+    settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
     assert "\ncalibration:" not in yaml_text
+    assert settings.position_exit.enabled is True
+    assert settings.position_exit.stop_loss_pct == pytest.approx(30.0)
+    assert settings.position_exit.profit_take_pct == pytest.approx(50.0)
+    assert settings.position_exit.max_holding_days == 7
 
 
 def test_live_soak_config_keeps_credentials_env_only() -> None:

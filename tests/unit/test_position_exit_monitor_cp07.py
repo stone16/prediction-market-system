@@ -161,9 +161,29 @@ def test_mark_position_from_yes_signal_marks_no_token_position() -> None:
 
     assert marked is not None
     assert marked.token_id == "exit-token-no"
-    assert marked.current_price == pytest.approx(0.25)
-    assert marked.unrealized_pnl == pytest.approx((0.25 - 0.50) * 100.0)
+    assert marked.current_price == pytest.approx(0.24)
+    assert marked.unrealized_pnl == pytest.approx((0.24 - 0.50) * 100.0)
     assert marked.mark_source == "signal"
+
+
+def test_mark_position_from_unpriced_signal_is_skipped() -> None:
+    from pms.actuator.exit_monitor import mark_position_from_signal
+
+    signal = MarketSignal(
+        market_id="exit-market",
+        token_id="exit-token",
+        venue="polymarket",
+        title="Will the exit monitor skip unpriced book events?",
+        yes_price=0.0,
+        volume_24h=1_000.0,
+        resolves_at=datetime(2026, 6, 1, tzinfo=UTC),
+        orderbook={"bids": [], "asks": []},
+        external_signal={"raw_event_type": "book"},
+        fetched_at=NOW,
+        market_status="open",
+    )
+
+    assert mark_position_from_signal(_position(), signal) is None
 
 
 def test_position_exit_monitor_priority_order() -> None:
@@ -275,8 +295,10 @@ async def test_runner_converts_exit_signal_to_opposing_trade_decision() -> None:
     runner.actuator_executor = executor  # type: ignore[assignment]
 
     await runner.start()
-    await runner.wait_until_idle()
-    await runner.stop()
+    try:
+        await runner.wait_until_idle()
+    finally:
+        await runner.stop()
 
     assert len(executor.decisions) == 1
     decision = executor.decisions[0]

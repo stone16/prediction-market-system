@@ -29,6 +29,7 @@ export function PositionsTable({ rows }: PositionsTableProps) {
         <thead>
           <tr>
             <th>Market</th>
+            <th>Strategy</th>
             <th>Token</th>
             <th>Venue</th>
             <th>Side</th>
@@ -40,8 +41,17 @@ export function PositionsTable({ rows }: PositionsTableProps) {
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={`${row.market_id}-${row.token_id}-${row.side}`}>
+            <tr
+              key={[
+                row.strategy_id,
+                row.strategy_version_id,
+                row.market_id,
+                row.token_id,
+                row.side
+              ].join(':')}
+            >
               <td>{row.market_id}</td>
+              <td>{row.strategy_id}</td>
               <td>{row.token_id ?? '—'}</td>
               <td>{row.venue}</td>
               <td>{row.side}</td>
