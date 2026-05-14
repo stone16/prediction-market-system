@@ -216,6 +216,8 @@ async def test_positions_and_trades_routes_reflect_persisted_paper_fill(
                     "locked_usdc": 20.5,
                     "mark_source": "gamma",
                     "mark_age_seconds": None,
+                    "strategy_id": "default",
+                    "strategy_version_id": "default-v1",
                 }
             ]
         }
