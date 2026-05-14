@@ -575,6 +575,252 @@ Week 11-12: Post-Paper Parameter Tuning + Gated LIVE
 
 ---
 
+## Empirical Findings from 60h Paper Soak (2026-05-10 → 2026-05-13)
+
+> Soak ran on `feat/realtime-quality-signals` (commit `25617e5`) with `paper_multi_factor_v1` strategy. Config: `config.live-soak.yaml` ($50 total exposure, $5/market, 5 max positions, 50bps slippage). LLM: DeepSeek via Anthropic-compatible endpoint, 90s timeout. Result over 60h: **1130 decisions, 10 fills (0.9% fill rate), 0 eval_records, 5 open positions, locked $20 / cap $50, pnl swung -$1.74 to +$2.46 (CLOB-based mark)**.
+
+The findings below either confirm existing P0 items with empirical evidence, or surface new gaps that must enter the P0 list. Items are labeled `F-N` (Finding-N) so they can be referenced from spec deltas and PRs.
+
+---
+
+### F-1: CLOB book staleness corrupts mark-to-market
+
+**Severity:** P0 (LIVE-blocking — kill-plan T1 drawdown gate cannot fire reliably)
+**Status:** newly observed, not in original spec
+
+**Evidence (Colombia outright YES position `0xab6fb278`):**
+| Source | Value | Notes |
+|---|---|---|
+| avg_entry | $0.1048 | from `fills` table |
+| CLOB latest `book_levels` best_bid | $0.12 | written by `MarketDataSensor` WebSocket pushes |
+| `markets.best_bid` | $0.05 | refreshed by Gamma snapshot REST poll |
+| `markets.yes_price` (Gamma) | $0.055 | Gamma last-trade |
+| `/positions` upnl (CLOB-based) | +$0.20 | uses `fill_store.py` LATERAL JOIN to `book_levels` |
+| Gamma-reconciled upnl | **-$1.91** | 38.18 shares × ($0.055 - $0.1048) |
+
+`/positions` and Gamma disagree by **$2.11 on a single $4 position** because the CLOB book in `book_snapshots` is materially older than the Gamma poll. Across all 5 positions the discrepancy aggregates to roughly **$2.5-$3.0 of pnl** at the time of writing — the difference between "we're up 10%" and "we're down 8%".
+
+**Hypothesized root cause** (needs verification before PR):
+- `MarketDataSensor` writes a new `book_snapshots` row on every WebSocket book update, but if the market goes quiet (few quotes), the latest snapshot can be hours old.
+- `fill_store.py:read_positions` LATERAL JOIN picks the most recent `book_snapshots` for the token without checking staleness.
+- Gamma snapshot poll continues independently and is more current for low-liquidity markets.
+
+**Fix proposed (P0):**
+1. Add a `staleness_seconds` check to `fill_store.py` LATERAL JOIN — if `latest_snapshot.ts > N seconds old`, fall back to `markets.best_bid` (Gamma).
+2. Surface staleness in `/positions` response so the dashboard can render a "stale mark" badge.
+3. Add an alert: if any held position's CLOB-vs-Gamma divergence exceeds `staleness_alert_bps` (default 200bps), emit Feedback.
+
+**Acceptance:**
+- `/positions` upnl never disagrees with Gamma `yes_price`-derived pnl by more than 50bps when the underlying book_snapshot is < 60s old.
+- For positions with stale book (> 60s), `/positions` falls back to Gamma and surfaces a `mark_source` field.
+
+**Owner:** TBD (eng) | **Effort:** XS-S (0.5-1 day)
+
+---
+
+### F-2: Calibration pipeline (PR #71) is NOT wired into `paper_multi_factor_v1`
+
+**Severity:** P0 (LIVE-blocking — the entire extreme_prob_clamp + logit_shrinkage layer is dead code for this strategy)
+**Status:** newly observed; PR #71 landed the calibrators but did not update the install script
+
+**Evidence:**
+- `src/pms/controller/calibrators/extreme_clamp.py` exists; default `CalibrationSpec` has `enabled: bool = False`.
+- `src/pms/controller/pipeline.py:465` reads `strategy.calibration`; falls back to default-disabled `CalibrationSpec()` when None.
+- `strategy_versions.config_json -> 'calibration'` for `paper_multi_factor_v1` is **NULL**.
+- `scripts/install_paper_multi_factor_strategy.py` and `src/pms/strategies/paper_multifactor.py:build_paper_multi_factor_strategy()` do not construct a `CalibrationSpec(enabled=True, ...)`.
+
+**Empirical consequence:**
+- **592 of 1116 decisions (53%) have `prob_estimate ≥ 0.99`** — `decision_payloads.payload -> 'prob_estimate'` distribution from DB.
+- LLM "I'm 100% certain" outputs flow through to the actuator unfiltered.
+- Counter-intuitive: PR #71 was meant to make paper soak quality go up, but observed pre-#71 and post-#71 strategy behavior is indistinguishable.
+
+**Fix (P0):**
+1. `src/pms/strategies/paper_multifactor.py:build_paper_multi_factor_strategy()` adds a non-default `CalibrationSpec(enabled=True, min_resolved_for_extreme=20, extreme_clamp_low=0.08, extreme_clamp_high=0.92, ...)`.
+2. Re-install strategy via `scripts/install_paper_multi_factor_strategy.py` (creates new `strategy_version_id` — immutable per Invariant 3).
+3. Restart runner; existing 5 positions are tagged with the old version_id (preserved per architecture invariant), new decisions use the new version with calibration active.
+
+**Acceptance:**
+- After re-install, % of decisions with `prob_estimate ≥ 0.99` should drop below 5%.
+- A new unit test in `tests/unit/test_install_paper_multi_factor_strategy.py` asserts `config_json.calibration.enabled == True`.
+
+**Owner:** TBD (eng) | **Effort:** XS (1-2 hours)
+
+---
+
+### F-3: Only the LLM forecaster is real — Rules and Statistical forecasters return placeholders
+
+**Severity:** P0 (extends P0-1 scope)
+**Status:** P0-1 partially complete (LLM activated); Rules/Stats still placeholder
+
+**Evidence:** Every `paper_multi_factor_v1` opportunity row's `rationale` field equals:
+```
+RulesForecaster:pre-s5-neutral | StatisticalForecaster:pre-s5-neutral | DeepSeek
+```
+
+P0-1 was about activating the LLM forecaster — done; DeepSeek is producing prob_estimates. But `src/pms/controller/forecasters/rules.py` and `src/pms/controller/forecasters/statistical.py` both still return `pre-s5-neutral` (= market price, zero alpha).
+
+**Implication:**
+- The "multi_factor" in `paper_multi_factor_v1` is currently a misnomer — it is LLM-only.
+- The system has **zero forecaster diversity**. If DeepSeek hallucinates (which the 53% extreme-prob rate suggests it does), nothing in the ensemble offsets it.
+- P1-1 (feature-weighted ensemble) cannot meaningfully start until Rules + Stats have real outputs.
+
+**Spec delta:** Split P0-1 into three sub-items:
+- P0-1a: ✅ LLM forecaster active (was P0-1)
+- P0-1b: ⬜ RulesForecaster real implementation (new)
+- P0-1c: ⬜ StatisticalForecaster real implementation (new)
+
+**Owner:** TBD (eng + @Researcher-Ciga for algorithm) | **Effort:** S-M (3-5 days each)
+
+---
+
+### F-4: `default` strategy producing 676 dead decisions, 0 fills
+
+**Severity:** P2 (housekeeping; not LIVE-blocking but wastes resources)
+**Status:** newly observed
+
+**Evidence:**
+- `strategies` table contains both `default` (auto-created at runner startup with hash-based version_id) and `paper_multi_factor_v1`.
+- `default` produced 676 decisions across 60h, all rejected (per `feedback` table breakdown: 114 `max_open_positions`, 62 `max_position_per_market`, 2 `insufficient_liquidity`).
+- Zero fills for `default` — the strategy generates decisions but is rejected by its own RiskManager pass.
+
+**Cost:** ~676 LLM calls × $0.0045 ≈ **$3.04 wasted in 60h** (≈ $36/month if left running).
+
+**Fix:** archive `default` strategy when `paper_multi_factor_v1` is the operative strategy. Either via the install script (set `archived=true` on `strategies.default`) or via a runner config flag that suppresses auto-creation of `default`.
+
+**Owner:** TBD (eng) | **Effort:** XS (30 min) | Can land alongside F-2.
+
+---
+
+### F-5: Decision throughput degrading over the soak
+
+**Severity:** P2 (monitor, do not act yet — could be normal market selector convergence)
+**Status:** newly observed; root cause unclear
+
+**Evidence (paper_multi_factor_v1 decisions per 5min window):**
+| Window | Rate |
+|---|---|
+| 5/10 13:35-14:43 (first 70min, all 10 fills) | **10-15 / 5min** |
+| 5/11 hour 10-15 | 5-9 / 5min |
+| 5/12 evening | 2-3 / 5min |
+| 5/13 21:48 → 00:07Z (latest at status check) | **~0.4 / 5min** (2 decisions in 2h 18min) |
+
+**Hypotheses (need investigation):**
+- (a) LLM rate limit / cost budget hit at DeepSeek.
+- (b) Controller queue backpressure as more book_snapshots accumulate.
+- (c) Calibration filters (even though F-2 shows they're not wired in) — irrelevant given F-2.
+- (d) WebSocket subscription churn or stale subscriptions reducing usable signal.
+- (e) Market discovery sensor narrowing universe as low-volume markets fall off (normal).
+- (f) `RUNNER_STATE_LIMIT = 1000` (in `src/pms/runner.py:128`) cap creating display artifacts but unclear if it also affects controller scheduling.
+
+**Action (P2 monitor):**
+1. Add `decisions_per_minute` gauge to `/metrics`.
+2. Add alert if rate drops below `min_decisions_per_5min` (default 1).
+3. Spend a focused 1-hour debug session next week to disambiguate the hypotheses above.
+
+**Owner:** TBD (eng) | **Effort:** S (instrumentation 0.5 day, root-cause 0.5-1 day)
+
+---
+
+### F-6: Zero `eval_records` after 60h — by design, but kill-plan T2 has structural latency
+
+**Severity:** P0-known-issue (acknowledged constraint, not a bug; affects kill-plan timing)
+**Status:** validates existing P0-6 timeline
+
+**Evidence:**
+- `src/pms/evaluation/spool.py:67`: `if fill.resolved_outcome is None: continue` — `Scorer` requires final resolution before emitting an `EvalRecord`.
+- All 10 fills' underlying markets resolve between 2026-05-31 (Colombia) and 2026-07-20 (World Cup).
+- Until 2026-05-31, Brier score is mathematically unavailable for this paper soak.
+
+**Implication for kill-plan:**
+- Kill-plan threshold T2 = "14 consecutive trading days without Brier improvement vs. baseline" (`docs/operations/live-exit-criteria.md`).
+- The T2 evaluation can only **begin** ~5 calendar days after the first resolution (need at least 5 daily windows of resolved data).
+- For a paper soak starting 2026-05-10, T2 cannot fire before ~2026-06-05, and meaningful T2 enforcement is closer to 2026-06-15.
+- This means the first 21+ days of paper soak have no T2 signal — Brier kill is structurally lagged.
+
+**Mitigation options** (one of these should likely become P0-known-issue-mitigation):
+
+**Option A: Mid-quote pseudo-Brier scorer (recommended, ~1-2 day)**
+- Add a `MidQuoteScorer` alongside `Scorer` that scores each decision at T+1h using CLOB mid as pseudo-outcome.
+- Emits a `quasi_eval_records` row (separate table, not `eval_records`).
+- Daily report computes "mid-quote Brier" and a "resolution Brier" — operator can see early signal without breaking the strict-Brier invariant.
+
+**Option B: Constrain market_selection to shorter-resolving markets (~30 min)**
+- Set `resolution_time_max_horizon_days: 7` in `paper_multi_factor_v1` strategy config.
+- MarketSelector filters out long-horizon markets (World Cup, presidential races).
+- Trades only weekly NFL / event markets that resolve in 7d → first Brier sample within 7 days of soak start.
+- Downside: smaller universe, possibly less diverse alpha.
+
+**Recommendation:** Do Option B first (zero infrastructure cost), evaluate edge after 14 days, then decide whether to invest in Option A.
+
+**Owner:** TBD (eng + @Researcher-Ciga) | **Effort:** XS (Option B) or S (Option A)
+
+---
+
+### F-7: No exit path — confirms P0-3/P0-4 gap, plus drawdown stop is mark-dependent
+
+**Severity:** P0 (confirms existing P0-3/P0-4 + new dependency on F-1)
+**Status:** confirms existing P0 items with empirical evidence
+
+**Evidence (across 60h, none of the 5 positions saw any exit logic invoked):**
+| Position | Entry | Current mark (Gamma) | % move | System response |
+|---|---|---|---|---|
+| Colombia Outright YES | $0.105 | $0.055 | **-48%** | none (no stop-loss) |
+| Abelardo Colombia YES | $0.108 | $0.116 | +7% | none (no profit-take) |
+| Portugal World Cup YES | $0.075 | $0.0755 | 0% | none |
+| James Bond YES | $0.72 | $0.715 | -1% | none |
+| Spain World Cup NO | $0.843 | $0.840 | 0% | none |
+
+**Implication:**
+- For LIVE, kill-plan T1 (35% portfolio drawdown stop) is the **only** exit mechanism.
+- There's no per-position risk management — a 50% adverse move on one position cannot be cut.
+- Combined with F-1 (mark unreliability), the drawdown stop itself may misfire — either firing late (CLOB book stale, underestimating loss) or never firing (mark is wrong, drawdown looks fine).
+
+**Connection to existing P0 items:**
+- P0-3 (Beta-Binomial posterior evaluator) addresses entry quality but not exit.
+- P0-4 (Kelly sizing with edge gate) addresses entry size but not exit.
+- **There is no existing P0 item for exit logic.** This is a gap.
+
+**Spec delta:** add P0-8 (exit logic):
+- Per-position stop-loss: trigger if mark drops > 30% from entry (configurable).
+- Per-position profit-take: trigger if mark rises > 50% from entry (configurable).
+- Time-decay stop: cut position if no movement > 5% within `max_holding_days` (default 7).
+- Action on trigger: place opposing IOC at near-best to flatten; if it doesn't fill within 30s, cancel and re-evaluate.
+
+**Owner:** TBD (eng + @Researcher-Ciga) | **Effort:** M (1-2 weeks)
+
+---
+
+## Spec deltas from 60h soak
+
+The findings above translate into these concrete spec changes:
+
+1. **New P0-8: Exit logic** (per F-7) — was missing entirely; LIVE without this is unsafe.
+2. **Split P0-1 → P0-1a / P0-1b / P0-1c** (per F-3) — LLM is done; Rules + Stats are not.
+3. **New P0-9: CLOB book staleness fix in `fill_store.py`** (per F-1) — quick win, ~1 day.
+4. **New P0-10: Wire `CalibrationSpec` into `paper_multi_factor_v1` config** (per F-2) — quickest win in the entire spec, ~1 hour.
+5. **Add Option B from F-6 mitigation to P0-6** — constrain paper soak universe to ≤ 7-day resolution horizon, so Gate 3 evidence is achievable in 30 days rather than 50+.
+
+## Updated LIVE Readiness Verdict (after F-1 through F-7)
+
+Original spec estimated 8-12 weeks dominated by 30-day paper soak. With findings:
+
+| Critical-path item | Effort | Blocker tier |
+|---|---|---|
+| F-2 / new P0-10: wire CalibrationSpec | 1 hour | hard |
+| F-1 / new P0-9: CLOB staleness fix | 0.5-1 day | hard |
+| F-3 / P0-1b: RulesForecaster real impl | 3-5 days | hard |
+| F-3 / P0-1c: StatisticalForecaster real impl | 3-5 days | hard |
+| F-7 / new P0-8: exit logic | 1-2 weeks | hard |
+| Existing P0-3: Beta-Binomial evaluator | 1 week | hard |
+| Existing P0-4: Kelly sizing | 3-5 days | hard |
+| F-6 mitigation in P0-6: short-horizon universe | 30 min | enabler |
+| Existing P0-6: 30-day paper soak | 30 days | structural |
+| Existing P0-7: legal/compliance | 3-5 days | parallel |
+
+**Revised minimum path to first $5 LIVE order**: ~5-7 weeks from 2026-05-13 (the 30-day soak still dominates; technical fixes parallelize). Soft blockers (F-4, F-5) can land during the soak.
+
+---
+
 ## Overall Acceptance Criteria
 
 The system is "ready for live trading" when ALL P0 items are complete:
@@ -606,5 +852,6 @@ The system is "ready for live trading" when ALL P0 items are complete:
 
 ## Changelog
 
+- **v3 (2026-05-14):** Added "Empirical Findings from 60h Paper Soak (2026-05-10 → 2026-05-13)" section with findings F-1 through F-7. New P0 spec deltas: **P0-8 (exit logic)**, **P0-9 (CLOB book staleness fix in `fill_store.py`)**, **P0-10 (wire CalibrationSpec into `paper_multi_factor_v1` config)**. Split P0-1 into P0-1a (LLM, ✅ done), P0-1b (RulesForecaster, ⬜), P0-1c (StatisticalForecaster, ⬜). Revised LIVE timeline: 5-7 weeks from 2026-05-13. Key empirical signals: 1130 decisions / 10 fills / 0 eval_records over 60h, 53% of decisions have `prob_estimate ≥ 0.99` (calibration not wired in), CLOB-vs-Gamma pnl divergence up to $2.11 on single position (book staleness). Findings include hypothesized root causes that need code-level verification before PR.
 - **v2 (2026-05-03):** Applied @codex's 7 spec deltas from CTO repo validation: (1) `factor_service.snapshot()` → `PostgresFactorSnapshotReader.snapshot()` + `FactorService.compute_once()` (correct API path), (2) LLM config aligned with current `LLMSettings` fields, (3) LLM cost ledger requirement removed (no such surface exists — replaced with log-based cost tracking), (4) Gate 1 inconsistency fixed (ensemble moved out of Gate 1; LLM activation alone sufficient), (5) test baseline updated to current observed: 874 passed, 161 skipped, mypy 331 files, 8 import-linter contracts, (6) runtime smoke test added (0 → nonzero decisions on `POST /run/start`), (7) `uv sync --extra live --extra llm` added to LLM run path. Q5 (ensemble in P0) resolved: no, keep in P1. CTO validation: system runs but 0 decisions in backtest — the 0→nonzero transition is Phase 1 North Star.
 - **v1 (2026-05-03):** Initial unified spec — merged from @PM-Derik process doc, @Researcher-Ciga algorithm spec, @claude's 7 refinements, @codex's P0/P1 separation requirement. LLM forecaster promoted from P1 to P0 (critical to paper soak validity). Beta-Binomial conjugate prior specified for P0-3. Kelly edge gate added (P0-4). F6 (correlation cap) and F7 (quote fade) added as P1-5/P1-6. Auto-halt trigger #4 refined to avoid false positives. LLM cost budget added to P0-1. Gate structure formalized (4 gates with concrete pass criteria).
