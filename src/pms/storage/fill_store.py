@@ -254,21 +254,29 @@ class StoredTradeRow:
     strategy_version_id: str
 
 
-@dataclass
 class _PositionAccumulator:
-    market_id: str
-    token_id: str | None
-    venue: str
-    strategy_id: str
-    strategy_version_id: str
-    side: str | None = None
-    shares_held: Decimal = Decimal("0")
-    locked_usdc: Decimal = Decimal("0")
-    opened_at: datetime | None = None
-    last_fill_at: datetime | None = None
-    current_price: float | None = None
-    mark_source: str | None = None
-    mark_age_seconds: float | None = None
+    def __init__(
+        self,
+        *,
+        market_id: str,
+        token_id: str | None,
+        venue: str,
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> None:
+        self.market_id = market_id
+        self.token_id = token_id
+        self.venue = venue
+        self.strategy_id = strategy_id
+        self.strategy_version_id = strategy_version_id
+        self.side: str | None = None
+        self.shares_held = Decimal("0")
+        self.locked_usdc = Decimal("0")
+        self.opened_at: datetime | None = None
+        self.last_fill_at: datetime | None = None
+        self.current_price: float | None = None
+        self.mark_source: str | None = None
+        self.mark_age_seconds: float | None = None
 
 
 async def _ensure_fill_payloads_table(connection: asyncpg.Connection) -> None:

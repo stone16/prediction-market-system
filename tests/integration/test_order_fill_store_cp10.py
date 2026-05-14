@@ -27,6 +27,15 @@ pytestmark = [
 ]
 
 
+async def _database_now(pg_pool: asyncpg.Pool) -> datetime:
+    async with pg_pool.acquire() as connection:
+        value = await connection.fetchval("SELECT NOW()")
+    if not isinstance(value, datetime):
+        msg = "SELECT NOW() did not return a datetime"
+        raise TypeError(msg)
+    return value
+
+
 def _order_state() -> OrderState:
     return OrderState(
         order_id="order-cp10-1",
@@ -161,7 +170,8 @@ async def test_fill_store_read_positions_prefers_clob_bid_over_stale_market_pric
     market_store = PostgresMarketDataStore(pg_pool)
     fill_store = FillStore(pg_pool)
     order_store = OrderStore(pg_pool)
-    now = datetime.now(UTC)
+    now = await _database_now(pg_pool)
+    fresh_book_ts = now + timedelta(minutes=5)
     market_id = "market-cp10-mtm"
     token_id = "token-cp10-mtm-yes"
 
@@ -206,7 +216,7 @@ async def test_fill_store_read_positions_prefers_clob_bid_over_stale_market_pric
             id=0,
             market_id=market_id,
             token_id=token_id,
-            ts=now,
+            ts=fresh_book_ts,
             hash="latest-book",
             source="subscribe",
         ),
@@ -284,8 +294,7 @@ async def test_fill_store_read_positions_prefers_clob_bid_over_stale_market_pric
     assert positions[0].avg_entry_price == pytest.approx(0.309)
     assert positions[0].unrealized_pnl == pytest.approx((0.261 - 0.309) * 6.47)
     assert positions[0].mark_source == "clob"
-    assert positions[0].mark_age_seconds is not None
-    assert positions[0].mark_age_seconds < 60
+    assert positions[0].mark_age_seconds == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -295,7 +304,7 @@ async def test_fill_store_read_positions_falls_back_to_gamma_when_clob_snapshot_
     market_store = PostgresMarketDataStore(pg_pool)
     fill_store = FillStore(pg_pool)
     order_store = OrderStore(pg_pool)
-    now = datetime.now(UTC)
+    now = await _database_now(pg_pool)
     market_id = "market-cp02-stale-mtm"
     token_id = "token-cp02-stale-mtm-yes"
 
@@ -395,7 +404,7 @@ async def test_fill_store_read_positions_excludes_fully_closed_buy_sell_position
     market_store = PostgresMarketDataStore(pg_pool)
     fill_store = FillStore(pg_pool)
     order_store = OrderStore(pg_pool)
-    now = datetime.now(UTC)
+    now = await _database_now(pg_pool)
     market_id = "market-cp10-net-closed"
     token_id = "token-cp10-net-closed-yes"
 
@@ -473,7 +482,7 @@ async def test_fill_store_read_positions_preserves_lot_basis_after_partial_exit(
     market_store = PostgresMarketDataStore(pg_pool)
     fill_store = FillStore(pg_pool)
     order_store = OrderStore(pg_pool)
-    now = datetime.now(UTC)
+    now = await _database_now(pg_pool)
     market_id = "market-cp10-lot-basis"
     token_id = "token-cp10-lot-basis-yes"
 

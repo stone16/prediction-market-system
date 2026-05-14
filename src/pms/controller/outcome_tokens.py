@@ -48,11 +48,13 @@ class MarketDataOutcomeTokenResolver:
         signal_token_id: str | None,
     ) -> OutcomeTokens:
         tokens = await self.store.read_tokens_for_market(market_id)
-        yes_token_id = signal_token_id
+        yes_token_id: str | None = None
         no_token_id: str | None = None
         for token in tokens:
-            if token.outcome == "YES" and yes_token_id is None:
+            if token.outcome == "YES":
                 yes_token_id = token.token_id
-            if token.outcome == "NO":
+            elif token.outcome == "NO":
                 no_token_id = token.token_id
+        if yes_token_id is None:
+            yes_token_id = signal_token_id
         return OutcomeTokens(yes_token_id=yes_token_id, no_token_id=no_token_id)

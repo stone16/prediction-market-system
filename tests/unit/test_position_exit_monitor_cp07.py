@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -164,6 +165,45 @@ def test_mark_position_from_yes_signal_marks_no_token_position() -> None:
     assert marked.current_price == pytest.approx(0.24)
     assert marked.unrealized_pnl == pytest.approx((0.24 - 0.50) * 100.0)
     assert marked.mark_source == "signal"
+
+
+def test_exit_decision_from_no_signal_preserves_yes_token_outcome() -> None:
+    from pms.actuator.exit_monitor import (
+        PositionExitSignal,
+        build_exit_decision,
+        mark_position_from_signal,
+    )
+    from pms.core.enums import TimeInForce
+
+    position = _position(token_id="asset-yes-token", current_price=0.40)
+    signal = _signal(yes_price=0.25, token_id="asset-no-token")
+    signal = replace(
+        signal,
+        external_signal={
+            "yes_token_id": "asset-yes-token",
+            "no_token_id": "asset-no-token",
+        },
+    )
+
+    marked = mark_position_from_signal(position, signal)
+    assert marked is not None
+    assert marked.current_price == pytest.approx(0.74)
+
+    decision = build_exit_decision(
+        signal,
+        PositionExitSignal(
+            trigger="profit_take",
+            position=marked,
+            pnl_pct=48.0,
+            held_days=1.0,
+            current_price=0.74,
+        ),
+        max_slippage_bps=50,
+        time_in_force=TimeInForce.IOC,
+    )
+
+    assert decision.token_id == "asset-yes-token"
+    assert decision.outcome == "YES"
 
 
 def test_mark_position_from_unpriced_signal_is_skipped() -> None:

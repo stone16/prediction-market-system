@@ -1407,6 +1407,7 @@ class Runner:
         emitted = 0
         if not self.config.position_exit.enabled:
             return emitted
+        signal = await self._signal_with_exit_outcome_tokens(signal)
         for position in tuple(self.portfolio.open_positions):
             marked_position = mark_position_from_signal(position, signal)
             if marked_position is None:
@@ -1465,6 +1466,32 @@ class Runner:
                 raise
             emitted += 1
         return emitted
+
+    async def _signal_with_exit_outcome_tokens(
+        self,
+        signal: MarketSignal,
+    ) -> MarketSignal:
+        if (
+            "yes_token_id" in signal.external_signal
+            and "no_token_id" in signal.external_signal
+        ):
+            return signal
+        if self._pg_pool is None:
+            return signal
+        tokens = await MarketDataOutcomeTokenResolver(
+            PostgresMarketDataStore(self._pg_pool)
+        ).resolve(market_id=signal.market_id, signal_token_id=signal.token_id)
+        token_metadata: dict[str, str] = {}
+        if tokens.yes_token_id is not None:
+            token_metadata["yes_token_id"] = tokens.yes_token_id
+        if tokens.no_token_id is not None:
+            token_metadata["no_token_id"] = tokens.no_token_id
+        if not token_metadata:
+            return signal
+        return replace(
+            signal,
+            external_signal={**signal.external_signal, **token_metadata},
+        )
 
     def _release_position_exit_key(self, decision_id: str) -> None:
         key = self._position_exit_keys_by_decision.pop(decision_id, None)

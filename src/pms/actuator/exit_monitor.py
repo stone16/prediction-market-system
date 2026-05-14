@@ -182,14 +182,24 @@ def _mark_price_for_position(position: Position, signal: MarketSignal) -> float 
         and signal.token_id is not None
         and position.token_id != signal.token_id
     ):
+        position_outcome = _position_outcome_from_signal(position, signal)
+        signal_outcome = _signal_token_outcome(signal)
+        if position_outcome is None or signal_outcome is None:
+            return None
+        if position_outcome == signal_outcome:
+            return None
         if position.side.upper() == "SELL":
             price = None if bid is None else float(Decimal("1") - _decimal(bid))
         else:
             price = None if ask is None else float(Decimal("1") - _decimal(ask))
         if price is not None:
             return _open_probability_or_none(price)
-        yes_price = _open_probability_or_none(signal.yes_price)
-        return None if yes_price is None else float(Decimal("1") - _decimal(yes_price))
+        signal_price = _open_probability_or_none(signal.yes_price)
+        return (
+            None
+            if signal_price is None
+            else float(Decimal("1") - _decimal(signal_price))
+        )
     if position.side.upper() == "SELL":
         if ask is not None:
             return ask
@@ -199,13 +209,71 @@ def _mark_price_for_position(position: Position, signal: MarketSignal) -> float 
 
 
 def _position_outcome(position: Position, signal: MarketSignal) -> Literal["YES", "NO"]:
-    if (
-        position.token_id is not None
-        and signal.token_id is not None
-        and position.token_id != signal.token_id
-    ):
+    return _position_outcome_from_signal(position, signal) or "YES"
+
+
+def _position_outcome_from_signal(
+    position: Position,
+    signal: MarketSignal,
+) -> Literal["YES", "NO"] | None:
+    yes_token_id = _string_or_none(signal.external_signal.get("yes_token_id"))
+    no_token_id = _string_or_none(signal.external_signal.get("no_token_id"))
+    if position.token_id is not None:
+        if position.token_id == yes_token_id:
+            return "YES"
+        if position.token_id == no_token_id:
+            return "NO"
+    hinted = _token_id_outcome_hint(position.token_id)
+    if hinted is not None:
+        return hinted
+    if position.token_id == signal.token_id:
+        return _signal_token_outcome(signal) or "YES"
+    signal_outcome = _signal_token_outcome(signal)
+    return None if signal_outcome is None else _opposite_outcome(signal_outcome)
+
+
+def _signal_token_outcome(signal: MarketSignal) -> Literal["YES", "NO"] | None:
+    yes_token_id = _string_or_none(signal.external_signal.get("yes_token_id"))
+    no_token_id = _string_or_none(signal.external_signal.get("no_token_id"))
+    if signal.token_id is not None:
+        if signal.token_id == yes_token_id:
+            return "YES"
+        if signal.token_id == no_token_id:
+            return "NO"
+    raw_outcome = signal.external_signal.get("signal_token_outcome")
+    if raw_outcome is None:
+        raw_outcome = signal.external_signal.get("token_outcome")
+    normalized = str(raw_outcome).upper() if raw_outcome is not None else ""
+    if normalized == "YES":
+        return "YES"
+    if normalized == "NO":
         return "NO"
-    return "YES"
+    return _token_id_outcome_hint(signal.token_id)
+
+
+def _token_id_outcome_hint(token_id: str | None) -> Literal["YES", "NO"] | None:
+    if token_id is None:
+        return None
+    normalized = token_id.lower()
+    parts = (
+        normalized.replace("_", "-")
+        .replace(":", "-")
+        .replace("/", "-")
+        .split("-")
+    )
+    if "yes" in parts:
+        return "YES"
+    if "no" in parts:
+        return "NO"
+    return None
+
+
+def _opposite_outcome(outcome: Literal["YES", "NO"]) -> Literal["YES", "NO"]:
+    return "NO" if outcome == "YES" else "YES"
+
+
+def _string_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _position_pnl_pct(position: Position) -> float:
