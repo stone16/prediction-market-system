@@ -42,13 +42,6 @@ controller:
   direct_quote_min_notional_usdc: 100.0
   dual_quote_max_price_delta_bps: 25.0
 
-calibration:
-  shrinkage_factor: 0.35
-  bias: 0.0
-  extreme_clamp_low: 0.08
-  extreme_clamp_high: 0.92
-  min_resolved: 500
-
 polymarket:
   host: https://clob.polymarket.com
   websocket_url: wss://ws-subscriptions-clob.polymarket.com/ws/

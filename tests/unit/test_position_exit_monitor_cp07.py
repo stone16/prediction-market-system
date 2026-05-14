@@ -174,6 +174,32 @@ def test_position_exit_dedupe_key_includes_strategy_version() -> None:
     assert exit_key(first) != exit_key(second)
 
 
+@pytest.mark.parametrize(("current_price", "expected"), [(0.0, 0.001), (1.0, 0.999)])
+def test_build_exit_decision_clamps_boundary_mark_prices(
+    current_price: float,
+    expected: float,
+) -> None:
+    from pms.actuator.exit_monitor import PositionExitSignal, build_exit_decision
+    from pms.core.enums import TimeInForce
+
+    position = _position(pnl_pct=-31.0, current_price=current_price)
+    decision = build_exit_decision(
+        _signal(yes_price=current_price),
+        PositionExitSignal(
+            trigger="stop_loss",
+            position=position,
+            pnl_pct=-31.0,
+            held_days=1.0,
+            current_price=current_price,
+        ),
+        max_slippage_bps=50,
+        time_in_force=TimeInForce.IOC,
+    )
+
+    assert decision.limit_price == pytest.approx(expected)
+    assert decision.expected_edge == pytest.approx(0.0)
+
+
 def test_live_soak_config_sets_position_exit_policy() -> None:
     payload = yaml.safe_load(Path("config.live-soak.yaml").read_text(encoding="utf-8"))
     position_exit = payload["position_exit"]

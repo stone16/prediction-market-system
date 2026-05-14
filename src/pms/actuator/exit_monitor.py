@@ -109,7 +109,8 @@ def build_exit_decision(
 ) -> TradeDecision:
     position = exit_signal.position
     side = _opposing_side(position.side)
-    notional = max(exit_signal.current_price * position.shares_held, 0.01)
+    limit_price = _limit_order_price(exit_signal.current_price)
+    notional = max(limit_price * position.shares_held, 0.01)
     decision_id = f"exit-{exit_signal.trigger}-{uuid4().hex}"
     return TradeDecision(
         decision_id=decision_id,
@@ -123,12 +124,12 @@ def build_exit_decision(
         max_slippage_bps=max_slippage_bps,
         stop_conditions=[f"position_exit:{exit_signal.trigger}"],
         prob_estimate=signal.yes_price,
-        expected_edge=exit_signal.pnl_pct / 100.0,
+        expected_edge=0.0,
         time_in_force=time_in_force,
         opportunity_id=decision_id,
         strategy_id=position.strategy_id,
         strategy_version_id=position.strategy_version_id,
-        limit_price=exit_signal.current_price,
+        limit_price=limit_price,
         model_id=f"position-exit:{exit_signal.trigger}",
     )
 
@@ -152,6 +153,10 @@ def _position_current_price(position: Position) -> float | None:
     if position.side.upper() == "SELL":
         return position.avg_entry_price - (position.unrealized_pnl / position.shares_held)
     return position.avg_entry_price + (position.unrealized_pnl / position.shares_held)
+
+
+def _limit_order_price(current_price: float) -> float:
+    return min(max(current_price, 0.001), 0.999)
 
 
 def _position_pnl_pct(position: Position) -> float:
