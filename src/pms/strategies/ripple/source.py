@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from typing import Protocol
+from typing import runtime_checkable
 
 from pms.core.enums import TimeInForce
 from pms.core.models import BookSide, Outcome, Portfolio, Venue
@@ -102,6 +103,7 @@ class RippleMarketSnapshotReader(Protocol):
     ) -> RippleMarketSnapshot | None: ...
 
 
+@runtime_checkable
 class RipplePositionSizer(Protocol):
     def size(
         self,

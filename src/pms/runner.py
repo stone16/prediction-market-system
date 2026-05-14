@@ -7,6 +7,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
@@ -117,6 +118,17 @@ from pms.strategies.projections import (
     MarketSelectionSpec,
     RiskParams,
     StrategyConfig,
+)
+from pms.strategies.ripple import (
+    LiveRippleSource,
+    RippleAgent,
+    RippleController,
+    RippleMarketSnapshot,
+    RippleStrategyModule,
+)
+from pms.strategies.ripple.source import (
+    RippleFactorSnapshotReader,
+    RippleMarketSnapshotReader,
 )
 from pms.strategies.runtime_bridge import StrategyRunResult
 from pms.strategies.versioning import compute_strategy_version_id
@@ -654,6 +666,94 @@ class Runner:
             strategy_id=strategy_id,
             strategy_version_id=strategy_version_id,
             market_ids=market_ids,
+            market_reader=market_reader,
+        )
+        return tuple(
+            await module.run_with_artifacts(
+                StrategyContext(
+                    strategy_id=strategy_id,
+                    strategy_version_id=strategy_version_id,
+                    as_of=as_of or datetime.now(tz=UTC),
+                )
+            )
+        )
+
+    def build_ripple_strategy_module(
+        self,
+        *,
+        strategy_id: str,
+        strategy_version_id: str,
+        market_ids: Sequence[str],
+        factor_reader: RippleFactorSnapshotReader | None = None,
+        market_reader: RippleMarketSnapshotReader | None = None,
+    ) -> RippleStrategyModule:
+        if not market_ids:
+            msg = "market_ids must not be empty"
+            raise ValueError(msg)
+        resolved_factor_reader: RippleFactorSnapshotReader
+        if factor_reader is None:
+            if self._pg_pool is None:
+                msg = (
+                    "Runner PostgreSQL pool is required to build the production "
+                    "Ripple factor reader"
+                )
+                raise RuntimeError(msg)
+            resolved_factor_reader = cast(
+                RippleFactorSnapshotReader,
+                PostgresFactorSnapshotReader(self._pg_pool),
+            )
+        else:
+            resolved_factor_reader = factor_reader
+        resolved_market_reader: RippleMarketSnapshotReader
+        if market_reader is None:
+            if self._pg_pool is None:
+                msg = (
+                    "Runner PostgreSQL pool is required to build the production "
+                    "Ripple market reader"
+                )
+                raise RuntimeError(msg)
+            resolved_market_reader = _PostgresRippleMarketSnapshotReader(
+                PostgresMarketDataStore(self._pg_pool)
+            )
+        else:
+            resolved_market_reader = market_reader
+
+        return RippleStrategyModule(
+            source=LiveRippleSource(
+                market_ids=tuple(market_ids),
+                factor_reader=resolved_factor_reader,
+                market_reader=resolved_market_reader,
+                position_sizer=KellySizer(
+                    risk=self.config.risk,
+                    fraction=Decimal("0.25"),
+                ),
+                portfolio=self.portfolio,
+                max_slippage_bps=self.config.controller.max_slippage_bps,
+                time_in_force=TimeInForce(
+                    self.config.controller.time_in_force.upper()
+                ),
+            ),
+            controller=RippleController(),
+            agent=RippleAgent(),
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+        )
+
+    async def run_ripple_strategy_once(
+        self,
+        *,
+        strategy_id: str,
+        strategy_version_id: str,
+        market_ids: Sequence[str],
+        as_of: datetime | None = None,
+        factor_reader: RippleFactorSnapshotReader | None = None,
+        market_reader: RippleMarketSnapshotReader | None = None,
+    ) -> Sequence[StrategyRunResult]:
+        module = self.build_ripple_strategy_module(
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+            market_ids=market_ids,
+            factor_reader=factor_reader,
             market_reader=market_reader,
         )
         return tuple(
@@ -1989,6 +2089,57 @@ class _PostgresFlbMarketSnapshotReader:
                 no_price=yes_price_source["no_price"],
                 yes_best_bid=yes_price_source["best_bid"],
             ),
+            observed_at=observed_at,
+            resolves_at=cast(datetime | None, market_row["resolves_at"]),
+            venue=cast(Venue, market_row["venue"]),
+        )
+
+
+@dataclass(frozen=True)
+class _PostgresRippleMarketSnapshotReader:
+    store: PostgresMarketDataStore
+
+    async def latest(
+        self,
+        market_id: str,
+        *,
+        as_of: datetime,
+    ) -> RippleMarketSnapshot | None:
+        async with self.store.pool.acquire() as connection:
+            resolved_market_id = await _resolve_flb_market_id(connection, market_id)
+            if resolved_market_id is None:
+                return None
+            market_row = await _read_flb_market_row(connection, resolved_market_id)
+            if market_row is None:
+                return None
+            price_row = await _read_flb_price_row(
+                connection,
+                resolved_market_id,
+                as_of=as_of,
+            )
+
+        if _future_market_status_change(market_row, as_of=as_of):
+            return None
+        if market_row["closed"] is True or market_row["accepting_orders"] is False:
+            return None
+
+        yes_price_source = price_row if price_row is not None else market_row
+        observed_at = _observed_at(yes_price_source)
+        if observed_at is None or observed_at > as_of:
+            return None
+
+        yes_price = _open_probability_or_none(yes_price_source["yes_price"])
+        yes_token_id = market_row["yes_token_id"]
+        if yes_price is None or not isinstance(yes_token_id, str):
+            return None
+
+        return RippleMarketSnapshot(
+            market_id=cast(str, market_row["market_id"]),
+            title=cast(str, market_row["question"]),
+            token_id=yes_token_id,
+            yes_price=yes_price,
+            best_bid=_open_probability_or_none(yes_price_source["best_bid"]),
+            best_ask=_open_probability_or_none(yes_price_source["best_ask"]),
             observed_at=observed_at,
             resolves_at=cast(datetime | None, market_row["resolves_at"]),
             venue=cast(Venue, market_row["venue"]),

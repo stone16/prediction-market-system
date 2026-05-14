@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 import tomllib
 
 import pytest
 
-from pms.config import RiskSettings
+from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import TimeInForce
 from pms.core.models import Portfolio
 from pms.controller.sizers.kelly import KellySizer
+from pms.runner import Runner
 from pms.strategies.base import (
     StrategyAgent,
     StrategyController,
@@ -34,6 +36,7 @@ from pms.strategies.ripple.source import (
     RippleMarketSnapshot,
     RippleObservationFixture,
     RippleObservationSource,
+    RipplePositionSizer,
 )
 from pms.strategies.ripple.strategy import RippleStrategyModule
 from pms.strategies.projections import FactorCompositionStep
@@ -333,6 +336,53 @@ def test_live_ripple_requires_beta_binomial_count_factors() -> None:
 
     assert required_flags["yes_count"] is True
     assert required_flags["no_count"] is True
+
+
+def test_kelly_sizer_satisfies_ripple_position_sizer_protocol() -> None:
+    sizer = KellySizer(risk=RiskSettings(max_position_per_market=100.0))
+
+    assert isinstance(sizer, RipplePositionSizer)
+
+
+@pytest.mark.parametrize(
+    ("prob", "market_price", "expected_notional"),
+    [
+        (0.52, 0.50, 10.0),
+        (0.90, 0.50, 100.0),
+        (0.50, 0.50, 0.0),
+        (0.49, 0.50, 0.0),
+    ],
+)
+def test_kelly_sizer_scales_ripple_edges_and_respects_risk_cap(
+    prob: float,
+    market_price: float,
+    expected_notional: float,
+) -> None:
+    sizer = KellySizer(risk=RiskSettings(max_position_per_market=100.0))
+
+    assert sizer.size(
+        prob=prob,
+        market_price=market_price,
+        portfolio=_portfolio(free_usdc=1000.0),
+    ) == pytest.approx(expected_notional)
+
+
+def test_runner_builds_live_ripple_source_with_fractional_kelly_sizer() -> None:
+    risk = RiskSettings(max_position_per_market=100.0)
+    runner = Runner(config=PMSSettings(risk=risk))
+
+    module = runner.build_ripple_strategy_module(
+        strategy_id="ripple",
+        strategy_version_id="ripple-v1",
+        market_ids=("market-ripple-1",),
+        factor_reader=_RecordingFactorReader(),
+        market_reader=_StaticMarketReader(),
+    )
+
+    assert isinstance(module.source, LiveRippleSource)
+    assert isinstance(module.source.position_sizer, KellySizer)
+    assert module.source.position_sizer.risk == risk
+    assert module.source.position_sizer.fraction == Decimal("0.25")
 
 
 def test_ripple_evaluator_emits_beta_binomial_posterior_edge_and_confidence() -> None:
