@@ -29,6 +29,12 @@ from pms.actuator.adapters.polymarket import (
     PolymarketVenueAccountReconciler,
 )
 from pms.actuator.executor import ActuatorAdapter, ActuatorExecutor
+from pms.actuator.exit_monitor import (
+    PositionExitMonitor,
+    build_exit_decision,
+    exit_key,
+    mark_position_from_signal,
+)
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import PMSSettings, validate_live_mode_ready
@@ -306,6 +312,11 @@ class Runner:
     _paper_orderbooks: dict[str, dict[str, Any]] = field(
         init=False, default_factory=dict
     )
+    _position_exit_monitor: PositionExitMonitor = field(init=False)
+    _emitted_position_exit_keys: set[tuple[str, str, str, str | None, str]] = field(
+        init=False,
+        default_factory=set,
+    )
     _live_trading_suspended_reason: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
@@ -323,6 +334,7 @@ class Runner:
         self._controller_lifecycle_lock = asyncio.Lock()
         self._reselection_lock = asyncio.Lock()
         self._reselection_requested = asyncio.Event()
+        self._position_exit_monitor = PositionExitMonitor(self.config.position_exit)
         self.actuator_executor = self._build_executor(self.config.mode)
 
     @property
@@ -429,6 +441,8 @@ class Runner:
         self._stop_event.clear()
         self._controller_pipeline_error = None
         self._live_trading_suspended_reason = None
+        self._position_exit_monitor = PositionExitMonitor(self.config.position_exit)
+        self._emitted_position_exit_keys.clear()
         self.state = RunnerState(
             mode=self.config.mode,
             runner_started_at=datetime.now(tz=UTC),
@@ -1097,6 +1111,7 @@ class Runner:
                     created_at=signal.fetched_at,
                     market_id=signal.market_id,
                 )
+                await self._emit_position_exit_decisions(signal)
                 for strategy_id, runtime in tuple(self._controller_runtimes.items()):
                     if not _matches_strategy_scope(runtime.asset_ids, signal):
                         continue
@@ -1382,6 +1397,64 @@ class Runner:
                 dedup_acquired=dedup_acquired,
             )
         )
+
+    async def _emit_position_exit_decisions(self, signal: MarketSignal) -> int:
+        emitted = 0
+        if not self.config.position_exit.enabled:
+            return emitted
+        for position in tuple(self.portfolio.open_positions):
+            marked_position = mark_position_from_signal(position, signal)
+            if marked_position is None:
+                continue
+            exit_signal = self._position_exit_monitor.evaluate(
+                marked_position,
+                now=signal.timestamp,
+            )
+            if exit_signal is None:
+                continue
+            key = exit_key(exit_signal)
+            if key in self._emitted_position_exit_keys:
+                continue
+            decision = build_exit_decision(
+                signal,
+                exit_signal,
+                max_slippage_bps=self.config.controller.max_slippage_bps,
+                time_in_force=TimeInForce(
+                    str(self.config.controller.time_in_force).upper()
+                ),
+            )
+            created_at = signal.timestamp
+            expires_at = _decision_expires_at(signal, None, created_at=created_at)
+            await self.decision_store.insert(
+                decision,
+                factor_snapshot_hash=None,
+                created_at=created_at,
+                expires_at=expires_at,
+            )
+            update_status = getattr(self.decision_store, "update_status", None)
+            if callable(update_status):
+                await update_status(
+                    decision.decision_id,
+                    current_status="pending",
+                    next_status="accepted",
+                    updated_at=created_at,
+                )
+            _append_bounded(self.state.decisions, decision)
+            await self.event_bus.publish(
+                "controller.decision",
+                _decision_event_summary(decision),
+                created_at=created_at,
+                market_id=decision.market_id,
+                decision_id=decision.decision_id,
+            )
+            await self._enqueue_decision(
+                decision,
+                signal=signal,
+                queued_at=created_at,
+            )
+            self._emitted_position_exit_keys.add(key)
+            emitted += 1
+        return emitted
 
     async def _update_decision_status_if_supported(
         self,
@@ -2477,9 +2550,30 @@ def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
                 shares_held=new_shares,
                 avg_entry_price=avg_entry_price,
                 locked_usdc=position.locked_usdc + fill_size,
+                current_price=fill.fill_price,
             )
             break
     else:
+        for index, position in enumerate(positions):
+            if _opposes_position(position, fill):
+                closing_contracts = min(position.shares_held, contracts)
+                released_locked = position.avg_entry_price * closing_contracts
+                remaining_shares = position.shares_held - closing_contracts
+                if remaining_shares <= 1e-9:
+                    del positions[index]
+                else:
+                    positions[index] = replace(
+                        position,
+                        shares_held=remaining_shares,
+                        locked_usdc=max(0.0, position.locked_usdc - released_locked),
+                        current_price=fill.fill_price,
+                    )
+                return replace(
+                    portfolio,
+                    free_usdc=portfolio.free_usdc + fill_size,
+                    locked_usdc=max(0.0, portfolio.locked_usdc - released_locked),
+                    open_positions=positions,
+                )
         positions.append(
             Position(
                 market_id=fill.market_id,
@@ -2490,9 +2584,12 @@ def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
                 avg_entry_price=fill.fill_price,
                 unrealized_pnl=0.0,
                 locked_usdc=fill_size,
+                current_price=fill.fill_price,
+                opened_at=fill.filled_at,
+                strategy_id=fill.strategy_id,
+                strategy_version_id=fill.strategy_version_id,
             )
         )
-
     return replace(
         portfolio,
         free_usdc=portfolio.free_usdc - fill_size,
@@ -2523,6 +2620,15 @@ def _same_position(position: Position, fill: FillRecord) -> bool:
         and position.token_id == fill.token_id
         and position.venue == fill.venue
         and position.side == fill.side
+    )
+
+
+def _opposes_position(position: Position, fill: FillRecord) -> bool:
+    return (
+        position.market_id == fill.market_id
+        and position.token_id == fill.token_id
+        and position.venue == fill.venue
+        and position.side != fill.side
     )
 
 

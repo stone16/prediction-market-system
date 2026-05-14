@@ -237,6 +237,7 @@ async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
             locked_usdc=100.0,
             mark_source="clob",
             mark_age_seconds=12.5,
+            current_price=0.31,
         )
     ]
     assert "GROUP BY" in connection.fetch_calls[0][0]

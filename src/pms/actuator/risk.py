@@ -82,13 +82,16 @@ class RiskManager:
         if notional < self.risk.min_order_usdc:
             return RiskDecision(False, "min_order_usdc")
 
-        market_exposure = _market_exposure(portfolio, decision.market_id) + notional
-        if market_exposure > self.risk.max_position_per_market:
-            return RiskDecision(False, "max_position_per_market")
+        reduces_position = _reduces_open_position(portfolio, decision)
 
-        total_exposure = portfolio.locked_usdc + notional
-        if total_exposure > self.risk.max_total_exposure:
-            return RiskDecision(False, "max_total_exposure")
+        if not reduces_position:
+            market_exposure = _market_exposure(portfolio, decision.market_id) + notional
+            if market_exposure > self.risk.max_position_per_market:
+                return RiskDecision(False, "max_position_per_market")
+
+            total_exposure = portfolio.locked_usdc + notional
+            if total_exposure > self.risk.max_total_exposure:
+                return RiskDecision(False, "max_total_exposure")
 
         if (
             self.risk.max_drawdown_pct is not None
@@ -100,6 +103,7 @@ class RiskManager:
         if (
             self.risk.max_open_positions is not None
             and not _has_open_position(portfolio, decision)
+            and not reduces_position
             and len(portfolio.open_positions) >= self.risk.max_open_positions
         ):
             return RiskDecision(False, "max_open_positions")
@@ -107,10 +111,14 @@ class RiskManager:
         if decision.max_slippage_bps > self.risk.slippage_threshold_bps:
             return RiskDecision(False, "slippage_threshold_bps")
 
-        if notional > portfolio.free_usdc:
+        if not reduces_position and notional > portfolio.free_usdc:
             return RiskDecision(False, "insufficient_free_usdc")
 
-        if self.risk.max_quantity_shares is not None and decision.limit_price > 0.0:
+        if (
+            not reduces_position
+            and self.risk.max_quantity_shares is not None
+            and decision.limit_price > 0.0
+        ):
             estimated_quantity = notional / decision.limit_price
             if estimated_quantity > self.risk.max_quantity_shares:
                 return RiskDecision(False, "max_quantity_shares")
@@ -274,6 +282,16 @@ def _has_open_position(portfolio: Portfolio, decision: TradeDecision) -> bool:
         and position.token_id == decision.token_id
         and position.venue == decision.venue
         and position.side == decision.side
+        for position in portfolio.open_positions
+    )
+
+
+def _reduces_open_position(portfolio: Portfolio, decision: TradeDecision) -> bool:
+    return any(
+        position.market_id == decision.market_id
+        and position.token_id == decision.token_id
+        and position.venue == decision.venue
+        and position.side != decision.side
         for position in portfolio.open_positions
     )
 

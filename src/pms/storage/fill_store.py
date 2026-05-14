@@ -114,12 +114,15 @@ class FillStore:
                         fill_payloads.payload->>'token_id' AS token_id,
                         fill_payloads.payload->>'venue' AS venue,
                         fill_payloads.payload->>'side' AS side,
+                        fills.strategy_id,
+                        fills.strategy_version_id,
                         SUM(fills.fill_quantity) AS shares_held,
                         CASE
                             WHEN SUM(fills.fill_quantity) = 0 THEN 0.0
                             ELSE SUM(fills.fill_notional_usdc) / SUM(fills.fill_quantity)
                         END AS avg_entry_price,
                         SUM(fills.fill_notional_usdc) AS locked_usdc,
+                        MIN(fills.ts) AS opened_at,
                         MAX(fills.ts) AS last_fill_at
                     FROM fills
                     INNER JOIN fill_payloads
@@ -128,16 +131,21 @@ class FillStore:
                         fills.market_id,
                         fill_payloads.payload->>'token_id',
                         fill_payloads.payload->>'venue',
-                        fill_payloads.payload->>'side'
+                        fill_payloads.payload->>'side',
+                        fills.strategy_id,
+                        fills.strategy_version_id
                 )
                 SELECT
                     aggregated_positions.market_id,
                     aggregated_positions.token_id,
                     aggregated_positions.venue,
                     aggregated_positions.side,
+                    aggregated_positions.strategy_id,
+                    aggregated_positions.strategy_version_id,
                     aggregated_positions.shares_held,
                     aggregated_positions.avg_entry_price,
                     aggregated_positions.locked_usdc,
+                    aggregated_positions.opened_at,
                     COALESCE(
                         clob_marks.best_bid,
                         CASE
@@ -324,6 +332,13 @@ def _position_from_row(row: asyncpg.Record) -> Position:
         locked_usdc=float(cast(float, row["locked_usdc"])),
         mark_source=cast(str | None, _optional_row_value(row, "mark_source")),
         mark_age_seconds=_float_or_none(_optional_row_value(row, "mark_age_seconds")),
+        current_price=_float_or_none(_optional_row_value(row, "current_price")),
+        opened_at=cast(datetime | None, _optional_row_value(row, "opened_at")),
+        strategy_id=cast(str, _optional_row_value(row, "strategy_id") or "default"),
+        strategy_version_id=cast(
+            str,
+            _optional_row_value(row, "strategy_version_id") or "default-v1",
+        ),
     )
 
 

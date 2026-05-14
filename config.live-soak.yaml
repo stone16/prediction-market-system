@@ -16,6 +16,12 @@ risk:
   slippage_threshold_bps: 50.0
   max_quantity_shares: 500.0
 
+position_exit:
+  enabled: true
+  stop_loss_pct: 30.0
+  profit_take_pct: 50.0
+  max_holding_days: 7
+
 sensor:
   poll_interval_s: 5.0
   max_reconnect_interval_s: 60.0

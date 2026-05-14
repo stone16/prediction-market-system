@@ -140,6 +140,13 @@ class RiskSettings(BaseModel):
     max_quantity_shares: float | None = None
 
 
+class PositionExitSettings(BaseModel):
+    enabled: bool = False
+    stop_loss_pct: float | None = Field(default=None, gt=0.0)
+    profit_take_pct: float | None = Field(default=None, gt=0.0)
+    max_holding_days: int | None = Field(default=None, gt=0)
+
+
 class SensorSettings(BaseModel):
     poll_interval_s: float = 5.0
     max_reconnect_interval_s: float = 60.0
@@ -195,6 +202,7 @@ class PMSSettings(BaseSettings):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     discord: DiscordSettings = Field(default_factory=DiscordSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
+    position_exit: PositionExitSettings = Field(default_factory=PositionExitSettings)
     sensor: SensorSettings = Field(default_factory=SensorSettings)
     controller: ControllerSettings = Field(default_factory=ControllerSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
