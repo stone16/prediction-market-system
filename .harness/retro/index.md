@@ -52,6 +52,12 @@ Cross-checkpoint integration remains `proposed` because the harness-side
 fix (an evaluator integration trace step) belongs in the orchestrator
 template, not in project CLAUDE.md.
 
+`strategy-live-readiness-p0` (2026-05-14) introduced no new patterns and
+did not increment any existing pattern. All 8 active rules were honored.
+Full-verify PASS on first iteration (breaking the prior two-task streak
+of post-consensus failures). This is the cleanest task execution in
+project history: 7/7 first-pass, 0 reverts, 0 rule conflicts.
+
 `npm-build-gate-gap` is `proposed` on first occurrence because severity is
 HIGH (deployment-breaking build failure). The fix is both a project-level
 gate documentation addition and a harness review-loop skill defect (SD-1).
@@ -172,6 +178,7 @@ These are ready for the Orchestrator to auto-create GitHub issues.
 | cathedral-v1 | 2026-04-23 | 12  | 11         | 13    | 0       | [2026-04-23-cathedral-v1.md](./2026-04-23-cathedral-v1.md) |
 | pms-markets-browser-v1 | 2026-04-24 | 14  | 13         | 16    | 0       | [2026-04-24-pms-markets-browser-v1.md](./2026-04-24-pms-markets-browser-v1.md) |
 | pms-agent-strategy-plugins-v1 | 2026-04-28 | 7   | 6          | 8     | 0       | [2026-04-28-pms-agent-strategy-plugins-v1.md](./2026-04-28-pms-agent-strategy-plugins-v1.md) |
+| strategy-live-readiness-p0 | 2026-05-14 | 7   | 7          | 7     | 0       | [2026-05-14-strategy-live-readiness-p0.md](./2026-05-14-strategy-live-readiness-p0.md) |
 
 ## Filed Issues
 - Proposal agent-strategy-P5 (host, label not applied): https://github.com/stone16/prediction-market-system/issues/38
