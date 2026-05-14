@@ -108,20 +108,55 @@ class FillStore:
             await _ensure_fill_payloads_table(connection)
             rows = await connection.fetch(
                 """
-                WITH aggregated_positions AS (
+                WITH raw_positions AS (
                     SELECT
                         fills.market_id,
                         fill_payloads.payload->>'token_id' AS token_id,
                         fill_payloads.payload->>'venue' AS venue,
-                        fill_payloads.payload->>'side' AS side,
                         fills.strategy_id,
                         fills.strategy_version_id,
-                        SUM(fills.fill_quantity) AS shares_held,
-                        CASE
-                            WHEN SUM(fills.fill_quantity) = 0 THEN 0.0
-                            ELSE SUM(fills.fill_notional_usdc) / SUM(fills.fill_quantity)
-                        END AS avg_entry_price,
-                        SUM(fills.fill_notional_usdc) AS locked_usdc,
+                        SUM(
+                            CASE
+                                WHEN UPPER(fill_payloads.payload->>'side') = 'SELL'
+                                THEN -fills.fill_quantity
+                                ELSE fills.fill_quantity
+                            END
+                        ) AS net_shares,
+                        SUM(
+                            CASE
+                                WHEN UPPER(fill_payloads.payload->>'side') = 'SELL'
+                                THEN 0.0
+                                ELSE fills.fill_quantity
+                            END
+                        ) AS buy_shares,
+                        SUM(
+                            CASE
+                                WHEN UPPER(fill_payloads.payload->>'side') = 'SELL'
+                                THEN 0.0
+                                ELSE fills.fill_notional_usdc
+                            END
+                        ) AS buy_notional,
+                        SUM(
+                            CASE
+                                WHEN UPPER(fill_payloads.payload->>'side') = 'SELL'
+                                THEN fills.fill_quantity
+                                ELSE 0.0
+                            END
+                        ) AS sell_shares,
+                        SUM(
+                            CASE
+                                WHEN UPPER(fill_payloads.payload->>'side') = 'SELL'
+                                THEN fills.fill_notional_usdc
+                                ELSE 0.0
+                            END
+                        ) AS sell_notional,
+                        MIN(
+                            CASE
+                                WHEN UPPER(fill_payloads.payload->>'side') = 'SELL'
+                                THEN NULL
+                                ELSE fill_payloads.payload->>'side'
+                            END
+                        ) AS long_side,
                         MIN(fills.ts) AS opened_at,
                         MAX(fills.ts) AS last_fill_at
                     FROM fills
@@ -131,9 +166,55 @@ class FillStore:
                         fills.market_id,
                         fill_payloads.payload->>'token_id',
                         fill_payloads.payload->>'venue',
-                        fill_payloads.payload->>'side',
                         fills.strategy_id,
                         fills.strategy_version_id
+                ),
+                valued_positions AS (
+                    SELECT
+                        raw_positions.market_id,
+                        raw_positions.token_id,
+                        raw_positions.venue,
+                        CASE
+                            WHEN raw_positions.net_shares < 0 THEN 'SELL'
+                            ELSE COALESCE(raw_positions.long_side, 'BUY')
+                        END AS side,
+                        raw_positions.strategy_id,
+                        raw_positions.strategy_version_id,
+                        ABS(raw_positions.net_shares) AS shares_held,
+                        CASE
+                            WHEN raw_positions.net_shares < 0 THEN
+                                CASE
+                                    WHEN raw_positions.sell_shares = 0 THEN 0.0
+                                    ELSE raw_positions.sell_notional / raw_positions.sell_shares
+                                END
+                            ELSE
+                                CASE
+                                    WHEN raw_positions.buy_shares = 0 THEN 0.0
+                                    ELSE raw_positions.buy_notional / raw_positions.buy_shares
+                                END
+                        END AS avg_entry_price,
+                        raw_positions.opened_at,
+                        raw_positions.last_fill_at
+                    FROM raw_positions
+                    WHERE ABS(raw_positions.net_shares) > 1e-9
+                ),
+                aggregated_positions AS (
+                    SELECT
+                        valued_positions.market_id,
+                        valued_positions.token_id,
+                        valued_positions.venue,
+                        valued_positions.side,
+                        valued_positions.strategy_id,
+                        valued_positions.strategy_version_id,
+                        valued_positions.shares_held,
+                        valued_positions.avg_entry_price,
+                        (
+                            valued_positions.avg_entry_price
+                            * valued_positions.shares_held
+                        ) AS locked_usdc,
+                        valued_positions.opened_at,
+                        valued_positions.last_fill_at
+                    FROM valued_positions
                 )
                 SELECT
                     aggregated_positions.market_id,

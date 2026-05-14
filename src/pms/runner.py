@@ -317,6 +317,9 @@ class Runner:
         init=False,
         default_factory=set,
     )
+    _position_exit_keys_by_decision: dict[
+        str, tuple[str, str, str, str | None, str]
+    ] = field(init=False, default_factory=dict)
     _live_trading_suspended_reason: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
@@ -443,6 +446,7 @@ class Runner:
         self._live_trading_suspended_reason = None
         self._position_exit_monitor = PositionExitMonitor(self.config.position_exit)
         self._emitted_position_exit_keys.clear()
+        self._position_exit_keys_by_decision.clear()
         self.state = RunnerState(
             mode=self.config.mode,
             runner_started_at=datetime.now(tz=UTC),
@@ -1356,6 +1360,7 @@ class Runner:
                 )
                 logger.warning("actuator execution failed: %s", error)
             finally:
+                self._release_position_exit_key(decision.decision_id)
                 self._decision_queue.task_done()
 
     async def _decision_expiry_loop(self) -> None:
@@ -1447,14 +1452,24 @@ class Runner:
                 market_id=decision.market_id,
                 decision_id=decision.decision_id,
             )
-            await self._enqueue_decision(
-                decision,
-                signal=signal,
-                queued_at=created_at,
-            )
             self._emitted_position_exit_keys.add(key)
+            self._position_exit_keys_by_decision[decision.decision_id] = key
+            try:
+                await self._enqueue_decision(
+                    decision,
+                    signal=signal,
+                    queued_at=created_at,
+                )
+            except Exception:
+                self._release_position_exit_key(decision.decision_id)
+                raise
             emitted += 1
         return emitted
+
+    def _release_position_exit_key(self, decision_id: str) -> None:
+        key = self._position_exit_keys_by_decision.pop(decision_id, None)
+        if key is not None:
+            self._emitted_position_exit_keys.discard(key)
 
     async def _update_decision_status_if_supported(
         self,
@@ -2620,6 +2635,8 @@ def _same_position(position: Position, fill: FillRecord) -> bool:
         and position.token_id == fill.token_id
         and position.venue == fill.venue
         and position.side == fill.side
+        and position.strategy_id == fill.strategy_id
+        and position.strategy_version_id == fill.strategy_version_id
     )
 
 
@@ -2629,6 +2646,8 @@ def _opposes_position(position: Position, fill: FillRecord) -> bool:
         and position.token_id == fill.token_id
         and position.venue == fill.venue
         and position.side != fill.side
+        and position.strategy_id == fill.strategy_id
+        and position.strategy_version_id == fill.strategy_version_id
     )
 
 

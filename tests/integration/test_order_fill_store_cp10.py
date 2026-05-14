@@ -386,3 +386,81 @@ async def test_fill_store_read_positions_falls_back_to_gamma_when_clob_snapshot_
     assert position.unrealized_pnl == pytest.approx((0.63 - 0.30) * 10.0)
     assert position.mark_source == "gamma"
     assert position.mark_age_seconds is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_fill_store_read_positions_excludes_fully_closed_buy_sell_position(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    market_store = PostgresMarketDataStore(pg_pool)
+    fill_store = FillStore(pg_pool)
+    order_store = OrderStore(pg_pool)
+    now = datetime.now(UTC)
+    market_id = "market-cp10-net-closed"
+    token_id = "token-cp10-net-closed-yes"
+
+    await market_store.write_market(
+        Market(
+            condition_id=market_id,
+            slug=market_id,
+            question="Will netting remove closed positions?",
+            venue="polymarket",
+            resolves_at=now + timedelta(days=7),
+            created_at=now - timedelta(days=1),
+            last_seen_at=now,
+            yes_price=0.42,
+            no_price=0.58,
+            price_updated_at=now,
+        )
+    )
+    await market_store.write_token(
+        Token(token_id=token_id, condition_id=market_id, outcome="YES")
+    )
+
+    for action, price, suffix in (("BUY", 0.30, "buy"), ("SELL", 0.40, "sell")):
+        order = OrderState(
+            order_id=f"order-cp10-net-closed-{suffix}",
+            decision_id=f"decision-cp10-net-closed-{suffix}",
+            status="matched",
+            market_id=market_id,
+            token_id=token_id,
+            venue="polymarket",
+            requested_notional_usdc=price * 10.0,
+            filled_notional_usdc=price * 10.0,
+            remaining_notional_usdc=0.0,
+            fill_price=price,
+            submitted_at=now,
+            last_updated_at=now,
+            raw_status="matched",
+            strategy_id="default",
+            strategy_version_id="default-v2",
+            filled_quantity=10.0,
+            action=action,
+            outcome="YES",
+        )
+        await order_store.insert(order)
+        await fill_store.insert(
+            FillRecord(
+                trade_id=f"trade-cp10-net-closed-{suffix}",
+                fill_id=f"fill-cp10-net-closed-{suffix}",
+                order_id=order.order_id,
+                decision_id=order.decision_id,
+                market_id=market_id,
+                token_id=token_id,
+                venue="polymarket",
+                side=action,
+                fill_price=price,
+                fill_notional_usdc=price * 10.0,
+                fill_quantity=10.0,
+                executed_at=now,
+                filled_at=now,
+                status="filled",
+                anomaly_flags=[],
+                strategy_id="default",
+                strategy_version_id="default-v2",
+            )
+        )
+
+    positions = await fill_store.read_positions()
+
+    assert all(position.market_id != market_id for position in positions)

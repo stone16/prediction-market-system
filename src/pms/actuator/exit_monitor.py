@@ -82,9 +82,7 @@ def mark_position_from_signal(
 ) -> Position | None:
     if position.market_id != signal.market_id:
         return None
-    if position.token_id is not None and signal.token_id != position.token_id:
-        return None
-    current_price = signal.yes_price
+    current_price = _mark_price_for_position(position, signal)
     pnl = _unrealized_pnl(
         side=position.side,
         shares_held=position.shares_held,
@@ -112,6 +110,7 @@ def build_exit_decision(
     limit_price = _limit_order_price(exit_signal.current_price)
     notional = max(limit_price * position.shares_held, 0.01)
     decision_id = f"exit-{exit_signal.trigger}-{uuid4().hex}"
+    outcome = _position_outcome(position, signal)
     return TradeDecision(
         decision_id=decision_id,
         market_id=position.market_id,
@@ -123,13 +122,14 @@ def build_exit_decision(
         order_type="limit",
         max_slippage_bps=max_slippage_bps,
         stop_conditions=[f"position_exit:{exit_signal.trigger}"],
-        prob_estimate=signal.yes_price,
+        prob_estimate=exit_signal.current_price,
         expected_edge=0.0,
         time_in_force=time_in_force,
         opportunity_id=decision_id,
         strategy_id=position.strategy_id,
         strategy_version_id=position.strategy_version_id,
         limit_price=limit_price,
+        outcome=outcome,
         model_id=f"position-exit:{exit_signal.trigger}",
     )
 
@@ -157,6 +157,26 @@ def _position_current_price(position: Position) -> float | None:
 
 def _limit_order_price(current_price: float) -> float:
     return min(max(current_price, 0.001), 0.999)
+
+
+def _mark_price_for_position(position: Position, signal: MarketSignal) -> float:
+    if (
+        position.token_id is not None
+        and signal.token_id is not None
+        and position.token_id != signal.token_id
+    ):
+        return 1.0 - signal.yes_price
+    return signal.yes_price
+
+
+def _position_outcome(position: Position, signal: MarketSignal) -> Literal["YES", "NO"]:
+    if (
+        position.token_id is not None
+        and signal.token_id is not None
+        and position.token_id != signal.token_id
+    ):
+        return "NO"
+    return "YES"
 
 
 def _position_pnl_pct(position: Position) -> float:

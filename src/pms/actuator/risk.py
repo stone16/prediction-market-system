@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from pms.config import RiskSettings
-from pms.core.models import Portfolio, TradeDecision
+from pms.core.models import Portfolio, Position, TradeDecision
 
 
 class InsufficientLiquidityError(RuntimeError):
@@ -278,22 +278,45 @@ def _market_exposure(portfolio: Portfolio, market_id: str) -> float:
 
 def _has_open_position(portfolio: Portfolio, decision: TradeDecision) -> bool:
     return any(
-        position.market_id == decision.market_id
-        and position.token_id == decision.token_id
-        and position.venue == decision.venue
+        _same_contract(position, decision)
+        and _same_strategy_version(position, decision)
         and position.side == decision.side
         for position in portfolio.open_positions
     )
 
 
 def _reduces_open_position(portfolio: Portfolio, decision: TradeDecision) -> bool:
+    decision_shares = _decision_contracts(decision)
+    if decision_shares is None:
+        return False
     return any(
+        _same_contract(position, decision)
+        and _same_strategy_version(position, decision)
+        and position.side != decision.side
+        and decision_shares <= position.shares_held + 1e-9
+        for position in portfolio.open_positions
+    )
+
+
+def _same_contract(position: Position, decision: TradeDecision) -> bool:
+    return (
         position.market_id == decision.market_id
         and position.token_id == decision.token_id
         and position.venue == decision.venue
-        and position.side != decision.side
-        for position in portfolio.open_positions
     )
+
+
+def _same_strategy_version(position: Position, decision: TradeDecision) -> bool:
+    return (
+        position.strategy_id == decision.strategy_id
+        and position.strategy_version_id == decision.strategy_version_id
+    )
+
+
+def _decision_contracts(decision: TradeDecision) -> float | None:
+    if decision.limit_price <= 0.0:
+        return None
+    return decision.notional_usdc / decision.limit_price
 
 
 def _coerce_aware(value: datetime | None) -> datetime:

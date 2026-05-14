@@ -22,12 +22,13 @@ def _position(
     pnl_pct: float = 0.0,
     opened_days_ago: int = 1,
     current_price: float = 0.50,
+    token_id: str = "exit-token",
     strategy_version_id: str = "exit-v1",
 ) -> Position:
     locked_usdc = 50.0
     return Position(
         market_id="exit-market",
-        token_id="exit-token",
+        token_id=token_id,
         venue="polymarket",
         side="BUY",
         shares_held=100.0,
@@ -41,10 +42,10 @@ def _position(
     )
 
 
-def _signal(*, yes_price: float = 0.50) -> MarketSignal:
+def _signal(*, yes_price: float = 0.50, token_id: str = "exit-token") -> MarketSignal:
     return MarketSignal(
         market_id="exit-market",
-        token_id="exit-token",
+        token_id=token_id,
         venue="polymarket",
         title="Will the exit monitor fire?",
         yes_price=yes_price,
@@ -150,6 +151,21 @@ def test_position_exit_monitor_disabled_triggers_never_fire() -> None:
     assert monitor.evaluate(_position(pnl_pct=-99.0, opened_days_ago=30), now=NOW) is None
 
 
+def test_mark_position_from_yes_signal_marks_no_token_position() -> None:
+    from pms.actuator.exit_monitor import mark_position_from_signal
+
+    position = _position(token_id="exit-token-no", current_price=0.40)
+    signal = _signal(yes_price=0.75, token_id="exit-token-yes")
+
+    marked = mark_position_from_signal(position, signal)
+
+    assert marked is not None
+    assert marked.token_id == "exit-token-no"
+    assert marked.current_price == pytest.approx(0.25)
+    assert marked.unrealized_pnl == pytest.approx((0.25 - 0.50) * 100.0)
+    assert marked.mark_source == "signal"
+
+
 def test_position_exit_monitor_priority_order() -> None:
     signal = _monitor().evaluate(_position(pnl_pct=-31.0, opened_days_ago=8), now=NOW)
 
@@ -198,6 +214,32 @@ def test_build_exit_decision_clamps_boundary_mark_prices(
 
     assert decision.limit_price == pytest.approx(expected)
     assert decision.expected_edge == pytest.approx(0.0)
+
+
+def test_build_exit_decision_preserves_no_token_outcome() -> None:
+    from pms.actuator.exit_monitor import PositionExitSignal, build_exit_decision
+    from pms.core.enums import TimeInForce
+
+    signal = _signal(yes_price=0.75, token_id="exit-token-yes")
+    position = _position(token_id="exit-token-no", current_price=0.25)
+    decision = build_exit_decision(
+        signal,
+        PositionExitSignal(
+            trigger="stop_loss",
+            position=position,
+            pnl_pct=-50.0,
+            held_days=1.0,
+            current_price=0.25,
+        ),
+        max_slippage_bps=50,
+        time_in_force=TimeInForce.IOC,
+    )
+
+    assert decision.token_id == "exit-token-no"
+    assert decision.outcome == "NO"
+    assert decision.prob_estimate == pytest.approx(0.25)
+    assert decision.limit_price == pytest.approx(0.25)
+    assert decision.side == "SELL"
 
 
 def test_live_soak_config_sets_position_exit_policy() -> None:

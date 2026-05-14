@@ -205,6 +205,22 @@ async def test_fill_store_read_positions_marks_with_latest_clob_best_bid() -> No
 
 @pytest.mark.real_fill_store
 @pytest.mark.asyncio
+async def test_fill_store_read_positions_nets_opposing_buy_sell_fills() -> None:
+    connection = _RecordingConnection()
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    await store.read_positions()
+
+    query = connection.fetch_calls[0][0]
+    assert "raw_positions AS" in query
+    assert "net_shares" in query
+    assert "ABS(raw_positions.net_shares) AS shares_held" in query
+    assert "WHERE ABS(raw_positions.net_shares) > 1e-9" in query
+    assert "fill_payloads.payload->>'side',\n                        fills.strategy_id" not in query
+
+
+@pytest.mark.real_fill_store
+@pytest.mark.asyncio
 async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
     connection = _RecordingConnection()
     connection.fetch_rows = [
