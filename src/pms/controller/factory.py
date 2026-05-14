@@ -107,7 +107,11 @@ def _build_forecaster(
     if name == "stats":
         prior_strength = params.get("prior_strength")
         return StatisticalForecaster(
-            prior_strength=2.0 if prior_strength is None else float(prior_strength)
+            factor_reader=factor_reader,
+            composition=factor_composition,
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+            prior_strength=2.0 if prior_strength is None else float(prior_strength),
         )
     if name == "llm":
         if raw_params:

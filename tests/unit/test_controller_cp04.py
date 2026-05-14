@@ -83,20 +83,20 @@ def test_rules_forecaster_abstains_without_rule_composition() -> None:
     assert RulesForecaster(min_edge=0.1).predict(_signal(yes_price=0.5)) is None
 
 
-def test_statistical_forecaster_uses_uniform_prior_without_metaculus() -> None:
+def test_statistical_forecaster_requires_factor_composition_without_metaculus() -> None:
     result = StatisticalForecaster().predict(
         _signal(external_signal={"yes_count": 3, "no_count": 1})
     )
 
-    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
+    assert result is None
 
 
-def test_statistical_forecaster_uses_metaculus_prior() -> None:
+def test_statistical_forecaster_requires_factor_composition_with_metaculus() -> None:
     result = StatisticalForecaster(prior_strength=10.0).predict(
         _signal(external_signal={"metaculus_prob": 0.7, "yes_count": 3, "no_count": 7})
     )
 
-    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
+    assert result is None
 
 
 def test_statistical_forecaster_rejects_non_positive_prior_strength() -> None:

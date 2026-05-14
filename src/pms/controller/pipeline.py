@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 ForecastResult = tuple[float, float, str]
 OpportunityEmission = tuple[Opportunity, TradeDecision]
 T = TypeVar("T")
+_ORIGINAL_RULES_PREDICT = RulesForecaster.predict
+_ORIGINAL_STATISTICAL_PREDICT = StatisticalForecaster.predict
 
 
 @dataclass
@@ -137,11 +139,18 @@ class ControllerPipeline:
             ):
                 runtime_probabilities[runtime_factor_id] = calibrated_probability
 
-        if not probabilities:
+        has_factor_composition = bool(
+            self.strategy is not None and self.strategy.config.factor_composition
+        )
+        if not probabilities and not has_factor_composition:
             _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
             return None
 
-        prob_estimate = sum(probabilities) / len(probabilities)
+        prob_estimate = (
+            sum(probabilities) / len(probabilities)
+            if probabilities
+            else signal.yes_price
+        )
         factor_snapshot_hash: str | None = None
         composition_trace: dict[str, object] = {}
         signal_factor_values = _signal_factor_values(signal)
@@ -149,7 +158,7 @@ class ControllerPipeline:
             (factor_id, ""): value
             for factor_id, value in runtime_probabilities.items()
         }
-        if self.strategy is not None and self.strategy.config.factor_composition:
+        if has_factor_composition and self.strategy is not None:
             factor_snapshot = await self.factor_reader.snapshot(
                 market_id=signal.market_id,
                 as_of=signal.timestamp,
@@ -451,7 +460,7 @@ class ControllerPipeline:
         signal: MarketSignal,
     ) -> ForecastResult | None:
         async_predict = getattr(forecaster, "apredict", None)
-        if callable(async_predict):
+        if callable(async_predict) and not _predict_method_overridden(forecaster):
             return await cast(
                 Callable[[MarketSignal], Awaitable[ForecastResult | None]],
                 async_predict,
@@ -581,6 +590,14 @@ def _is_placeholder_forecast(
     model_id: str,
 ) -> bool:
     return model_id == "neutral" or result[2] == "pre-s5-neutral"
+
+
+def _predict_method_overridden(forecaster: IForecaster) -> bool:
+    if isinstance(forecaster, RulesForecaster):
+        return type(forecaster).predict is not _ORIGINAL_RULES_PREDICT
+    if isinstance(forecaster, StatisticalForecaster):
+        return type(forecaster).predict is not _ORIGINAL_STATISTICAL_PREDICT
+    return False
 
 
 def _signal_factor_values(signal: MarketSignal) -> dict[tuple[str, str], float]:

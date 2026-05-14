@@ -29,9 +29,9 @@ def _signal() -> MarketSignal:
     )
 
 
-def test_statistical_forecaster_is_neutral_while_default_v2_keeps_posterior_branch() -> None:
+def test_statistical_forecaster_abstains_without_config_while_default_v2_keeps_posterior_branch() -> None:
     signal = _signal()
-    reference_probability = StatisticalForecaster().predict(signal)[0]
+    reference_result = StatisticalForecaster().predict(signal)
     factor_values: dict[tuple[str, str], float] = {
         ("yes_price", ""): signal.yes_price,
     }
@@ -45,6 +45,6 @@ def test_statistical_forecaster_is_neutral_while_default_v2_keeps_posterior_bran
     )
     composed_probability = apply_composition(DEFAULT_STRATEGY_COMPOSITION, factor_values)
 
-    assert reference_probability == pytest.approx(signal.yes_price, abs=1e-9)
+    assert reference_result is None
     assert branch_probabilities["statistical"] == pytest.approx(11.0 / 30.0, abs=1e-9)
     assert composed_probability == pytest.approx(11.0 / 30.0, abs=1e-9)
