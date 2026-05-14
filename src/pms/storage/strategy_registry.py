@@ -636,6 +636,11 @@ def _json_factor_composition(value: object) -> tuple[FactorCompositionStep, ...]
                     "config.factor_composition.step.allow_neutral_fallback",
                     default=False,
                 ),
+                enabled=_json_optional_bool(
+                    step_payload.get("enabled"),
+                    "config.factor_composition.step.enabled",
+                    default=True,
+                ),
             )
         )
     return tuple(steps)

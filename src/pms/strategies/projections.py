@@ -21,6 +21,7 @@ class FactorCompositionStep:
     required: bool = True
     freshness_sla_s: float | None = None
     allow_neutral_fallback: bool = False
+    enabled: bool = True
 
 
 @dataclass(frozen=True, slots=True)

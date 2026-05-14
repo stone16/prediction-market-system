@@ -19,6 +19,7 @@ from typing import Any
 from .projections import (
     CalibrationSpec,
     EvalSpec,
+    FactorCompositionStep,
     ForecasterSpec,
     MarketSelectionSpec,
     RiskParams,
@@ -39,13 +40,21 @@ def _payload_value(value: Any) -> Any:
     # back into the original projection tuple.
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, FactorCompositionStep):
+        payload = asdict(value, dict_factory=_sorted_dict_factory)
+        if payload.get("enabled") is True:
+            del payload["enabled"]
+        return _payload_value(payload)
     if is_dataclass(value) and not isinstance(value, type):
         return _payload_value(asdict(value, dict_factory=_sorted_dict_factory))
     if isinstance(value, dict):
-        return {
+        payload = {
             key: _payload_value(value[key])
             for key in sorted(value)
         }
+        if _is_factor_composition_step_record(payload) and payload.get("enabled") is True:
+            del payload["enabled"]
+        return payload
     if isinstance(value, tuple):
         return [_payload_value(item) for item in value]
     if isinstance(value, list):

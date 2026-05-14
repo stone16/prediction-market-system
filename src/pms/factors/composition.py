@@ -29,11 +29,15 @@ class FactorCompositionStep(Protocol):
     @property
     def allow_neutral_fallback(self) -> bool: ...
 
+    @property
+    def enabled(self) -> bool: ...
+
 
 def apply_composition(
     composition: Sequence[FactorCompositionStep],
     factor_values: Mapping[tuple[str, str], float],
 ) -> float:
+    composition = _enabled_steps(composition)
     weighted_steps = _eligible_weighted_steps(composition, factor_values)
     non_weighted_steps = tuple(step for step in composition if step.role != "weighted")
     if weighted_steps and not non_weighted_steps:
@@ -93,6 +97,7 @@ def evaluate_branch_probabilities(
     composition: Sequence[FactorCompositionStep],
     factor_values: Mapping[tuple[str, str], float],
 ) -> dict[str, float]:
+    composition = _enabled_steps(composition)
     branch_probabilities: dict[str, float] = {}
 
     rules_probability = _apply_threshold_precedence(composition, factor_values)
@@ -252,6 +257,12 @@ def _apply_posterior(
     if total == 0.0:
         return factor_values.get(("yes_price", ""))
     return (prior_alpha + successes) / total
+
+
+def _enabled_steps(
+    composition: Sequence[FactorCompositionStep],
+) -> tuple[FactorCompositionStep, ...]:
+    return tuple(step for step in composition if step.enabled)
 
 
 def _required_factor_value(

@@ -6,9 +6,9 @@ from datetime import UTC, datetime
 from hashlib import sha256
 import json
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, TypeVar
+from typing import Literal, TypeVar, cast
 
 from pms.config import PMSSettings
 from pms.controller._price_utils import best_ask, spread_bps_at_decision
@@ -450,6 +450,12 @@ class ControllerPipeline:
         forecaster: IForecaster,
         signal: MarketSignal,
     ) -> ForecastResult | None:
+        async_predict = getattr(forecaster, "apredict", None)
+        if callable(async_predict):
+            return await cast(
+                Callable[[MarketSignal], Awaitable[ForecastResult | None]],
+                async_predict,
+            )(signal)
         return await asyncio.to_thread(forecaster.predict, signal)
 
 

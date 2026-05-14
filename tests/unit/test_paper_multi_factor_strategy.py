@@ -101,12 +101,14 @@ def test_paper_multi_factor_strategy_matches_phase_a_contract() -> None:
         ("llm", ()),
     )
     assert tuple(
-        (step.factor_id, step.role, step.threshold, step.required)
+        (step.factor_id, step.role, step.threshold, step.required, step.enabled)
         for step in strategy.config.factor_composition
     ) == (
-        ("orderbook_imbalance", "threshold_edge", 0.10, True),
-        ("orderbook_imbalance", "weighted", None, False),
-        ("rules", "blend_weighted", None, False),
+        ("orderbook_imbalance", "threshold_edge", 0.10, True, True),
+        ("orderbook_imbalance", "weighted", None, False, True),
+        ("metaculus_prior", "rule_delta", None, False, True),
+        ("favorite_longshot_bias", "rule_delta", None, False, True),
+        ("rules", "blend_weighted", None, False, True),
     )
 
 
