@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
+    CalibrationSpec,
     EvalSpec,
     FactorCompositionStep,
     ForecasterSpec,
@@ -81,5 +82,13 @@ def build_paper_multi_factor_strategy() -> Strategy:
             venue="polymarket",
             resolution_time_max_horizon_days=90,
             volume_min_usdc=100.0,
+        ),
+        calibration=CalibrationSpec(
+            enabled=True,
+            shrinkage_factor=0.35,
+            shrinkage_bias=0.0,
+            extreme_clamp_low=0.08,
+            extreme_clamp_high=0.92,
+            min_resolved_for_extreme=20,
         ),
     )

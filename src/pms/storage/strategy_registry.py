@@ -429,6 +429,7 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
             )
         ),
         market_selection=_market_selection_from_payload(market_selection_payload),
+        calibration=_calibration_from_config_json(payload),
     )
 
 
