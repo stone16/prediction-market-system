@@ -97,6 +97,8 @@ def _open_positions(count: int) -> list[Position]:
             avg_entry_price=0.5,
             unrealized_pnl=0.0,
             locked_usdc=1.0,
+            strategy_id="strategy-risk",
+            strategy_version_id="strategy-risk-v1",
         )
         for index in range(count)
     ]
@@ -269,6 +271,8 @@ def test_risk_manager_allows_existing_position_add_at_open_position_cap() -> Non
             avg_entry_price=0.5,
             unrealized_pnl=0.0,
             locked_usdc=1.0,
+            strategy_id="strategy-risk",
+            strategy_version_id="strategy-risk-v1",
         )
     )
     portfolio = _portfolio(
@@ -285,16 +289,115 @@ def test_risk_manager_allows_existing_position_add_at_open_position_cap() -> Non
     assert result == RiskDecision(approved=True, reason="approved")
 
 
+def test_risk_manager_allows_reducing_position_through_exposure_and_cash_caps() -> None:
+    portfolio = _portfolio(
+        total_usdc=100.0,
+        free_usdc=0.0,
+        locked_usdc=50.0,
+        open_positions=[
+            Position(
+                market_id="market-risk",
+                token_id="token-risk",
+                venue="polymarket",
+                side="BUY",
+                shares_held=100.0,
+                avg_entry_price=0.5,
+                unrealized_pnl=-16.0,
+                locked_usdc=50.0,
+                strategy_id="strategy-risk",
+                strategy_version_id="strategy-risk-v1",
+            )
+        ],
+    )
+    decision = _decision(
+        side="SELL",
+        notional_usdc=34.0,
+        max_slippage_bps=25,
+    )
+    risk = RiskSettings(
+        max_position_per_market=10.0,
+        max_total_exposure=10.0,
+        max_open_positions=1,
+        min_order_usdc=1.0,
+        slippage_threshold_bps=50.0,
+        max_quantity_shares=1.0,
+    )
+
+    result = RiskManager(risk).check(decision, portfolio)
+
+    assert result == RiskDecision(approved=True, reason="approved")
+
+
+def test_risk_manager_reduction_bypass_requires_same_strategy_version() -> None:
+    portfolio = _portfolio(
+        total_usdc=100.0,
+        free_usdc=0.0,
+        locked_usdc=50.0,
+        open_positions=[
+            Position(
+                market_id="market-risk",
+                token_id="token-risk",
+                venue="polymarket",
+                side="BUY",
+                shares_held=100.0,
+                avg_entry_price=0.5,
+                unrealized_pnl=-16.0,
+                locked_usdc=50.0,
+                strategy_id="other-strategy",
+                strategy_version_id="other-v1",
+            )
+        ],
+    )
+    decision = _decision(side="SELL", notional_usdc=34.0, max_slippage_bps=25)
+
+    result = RiskManager(
+        _risk(max_position_per_market=10.0, max_total_exposure=10.0)
+    ).check(decision, portfolio)
+
+    assert result == RiskDecision(approved=False, reason="max_position_per_market")
+
+
+def test_risk_manager_reduction_bypass_rejects_oversized_sell() -> None:
+    portfolio = _portfolio(
+        total_usdc=100.0,
+        free_usdc=0.0,
+        locked_usdc=5.0,
+        open_positions=[
+            Position(
+                market_id="market-risk",
+                token_id="token-risk",
+                venue="polymarket",
+                side="BUY",
+                shares_held=10.0,
+                avg_entry_price=0.5,
+                unrealized_pnl=-1.0,
+                locked_usdc=5.0,
+                strategy_id="strategy-risk",
+                strategy_version_id="strategy-risk-v1",
+            )
+        ],
+    )
+    decision = _decision(side="SELL", notional_usdc=10.0, max_slippage_bps=25)
+
+    result = RiskManager(
+        _risk(max_position_per_market=10.0, max_total_exposure=10.0)
+    ).check(decision, portfolio)
+
+    assert result == RiskDecision(approved=False, reason="partial_reduction_unsupported")
+
+
 @pytest.mark.parametrize(
-    "position_venue, position_side",
+    "position_venue, position_side, approved, reason",
     [
-        ("kalshi", "BUY"),
-        ("polymarket", "SELL"),
+        ("kalshi", "BUY", False, "max_open_positions"),
+        ("polymarket", "SELL", True, "approved"),
     ],
 )
-def test_risk_manager_open_position_cap_bypass_requires_full_position_identity(
+def test_risk_manager_open_position_cap_bypass_distinguishes_adds_from_reductions(
     position_venue: Literal["polymarket", "kalshi"],
     position_side: Literal["BUY", "SELL"],
+    approved: bool,
+    reason: str,
 ) -> None:
     positions = _open_positions(4)
     positions.append(
@@ -303,10 +406,12 @@ def test_risk_manager_open_position_cap_bypass_requires_full_position_identity(
             token_id="token-risk",
             venue=position_venue,
             side=position_side,
-            shares_held=1.0,
+            shares_held=100.0,
             avg_entry_price=0.5,
             unrealized_pnl=0.0,
-            locked_usdc=1.0,
+            locked_usdc=50.0,
+            strategy_id="strategy-risk",
+            strategy_version_id="strategy-risk-v1",
         )
     )
     portfolio = _portfolio(
@@ -320,7 +425,7 @@ def test_risk_manager_open_position_cap_bypass_requires_full_position_identity(
         portfolio,
     )
 
-    assert result == RiskDecision(approved=False, reason="max_open_positions")
+    assert result == RiskDecision(approved=approved, reason=reason)
 
 
 def test_risk_manager_rejects_slippage_above_threshold() -> None:

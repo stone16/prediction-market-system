@@ -12,8 +12,9 @@ import pytest
 from pms.actuator.adapters.polymarket import PolymarketSubmissionUnknownError
 from pms.config import ControllerSettings, PMSSettings, PolymarketSettings, RiskSettings
 from pms.core.enums import MarketStatus, OrderStatus, RunMode, Side, TimeInForce
-from pms.core.models import MarketSignal, OrderState, Portfolio, TradeDecision
-from pms.runner import ActuatorWorkItem, Runner
+from pms.core.models import FillRecord, MarketSignal, OrderState, Portfolio, Position
+from pms.core.models import TradeDecision
+from pms.runner import ActuatorWorkItem, Runner, _portfolio_with_fill
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -121,6 +122,55 @@ def _matched_order(decision: TradeDecision) -> OrderState:
         strategy_version_id=decision.strategy_version_id,
         filled_quantity=decision.notional_usdc / decision.limit_price,
     )
+
+
+def test_portfolio_with_fill_keeps_strategy_versions_separate() -> None:
+    portfolio = Portfolio(
+        total_usdc=1_000.0,
+        free_usdc=950.0,
+        locked_usdc=50.0,
+        open_positions=[
+            Position(
+                market_id="market-strategy-tags",
+                token_id="token-strategy-tags",
+                venue="polymarket",
+                side="BUY",
+                shares_held=100.0,
+                avg_entry_price=0.5,
+                unrealized_pnl=0.0,
+                locked_usdc=50.0,
+                strategy_id="strategy-a",
+                strategy_version_id="strategy-a-v1",
+            )
+        ],
+    )
+    fill = FillRecord(
+        trade_id="trade-strategy-tags",
+        fill_id="fill-strategy-tags",
+        order_id="order-strategy-tags",
+        decision_id="decision-strategy-tags",
+        market_id="market-strategy-tags",
+        token_id="token-strategy-tags",
+        venue="polymarket",
+        side="BUY",
+        fill_price=0.25,
+        fill_notional_usdc=25.0,
+        fill_quantity=100.0,
+        executed_at=datetime(2026, 4, 23, 10, 0, tzinfo=UTC),
+        filled_at=datetime(2026, 4, 23, 10, 0, tzinfo=UTC),
+        status="filled",
+        anomaly_flags=[],
+        strategy_id="strategy-b",
+        strategy_version_id="strategy-b-v1",
+    )
+
+    updated = _portfolio_with_fill(portfolio, fill)
+
+    assert len(updated.open_positions) == 2
+    assert {position.strategy_id for position in updated.open_positions} == {
+        "strategy-a",
+        "strategy-b",
+    }
 
 
 class _ExecutorDouble:
@@ -237,6 +287,40 @@ class _SubmissionUnknownExecutorDouble:
         raise PolymarketSubmissionUnknownError(
             "venue timeout",
             order_state=_matched_order(decision),
+        )
+
+
+class _RejectingExecutorDouble:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def execute(
+        self,
+        decision: TradeDecision,
+        portfolio: Portfolio,
+        *,
+        dedup_acquired: bool = False,
+    ) -> OrderState:
+        del portfolio, dedup_acquired
+        self.calls.append(decision.market_id)
+        now = datetime(2026, 4, 23, 10, 0, tzinfo=UTC)
+        return OrderState(
+            order_id=f"order-{decision.market_id}",
+            decision_id=decision.decision_id,
+            status="rejected",
+            market_id=decision.market_id,
+            token_id=decision.token_id,
+            venue=decision.venue,
+            requested_notional_usdc=decision.notional_usdc,
+            filled_notional_usdc=0.0,
+            remaining_notional_usdc=decision.notional_usdc,
+            fill_price=None,
+            submitted_at=now,
+            last_updated_at=now,
+            raw_status="venue_rejection",
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            filled_quantity=0.0,
         )
 
 
@@ -408,6 +492,32 @@ async def test_actuator_loop_supports_legacy_executor_without_dedup_kwarg() -> N
     assert cast(_LegacyExecutorDouble, runner.actuator_executor).calls == [
         "market-cp06-legacy"
     ]
+
+
+@pytest.mark.asyncio
+async def test_actuator_loop_releases_position_exit_key_after_rejected_order() -> None:
+    runner = _runner()
+    runner.actuator_executor = cast(Any, _RejectingExecutorDouble())
+    _mark_controller_done(runner)
+    decision = _decision(market_id="market-exit-retry")
+    key = (
+        decision.strategy_id,
+        decision.strategy_version_id,
+        decision.market_id,
+        decision.token_id,
+        "stop_loss",
+    )
+    runner._emitted_position_exit_keys.add(key)  # noqa: SLF001
+    runner._position_exit_keys_by_decision[decision.decision_id] = key  # noqa: SLF001
+
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(decision, _signal(market_id=decision.market_id))
+    )
+
+    await _run_actuator_loop(runner)
+
+    assert key not in runner._emitted_position_exit_keys  # noqa: SLF001
+    assert decision.decision_id not in runner._position_exit_keys_by_decision  # noqa: SLF001
 
 
 @pytest.mark.asyncio

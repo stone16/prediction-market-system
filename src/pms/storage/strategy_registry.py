@@ -429,6 +429,7 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
             )
         ),
         market_selection=_market_selection_from_payload(market_selection_payload),
+        calibration=_calibration_from_config_json(payload),
     )
 
 
@@ -634,6 +635,11 @@ def _json_factor_composition(value: object) -> tuple[FactorCompositionStep, ...]
                     step_payload.get("allow_neutral_fallback"),
                     "config.factor_composition.step.allow_neutral_fallback",
                     default=False,
+                ),
+                enabled=_json_optional_bool(
+                    step_payload.get("enabled"),
+                    "config.factor_composition.step.enabled",
+                    default=True,
                 ),
             )
         )

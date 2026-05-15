@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -11,11 +12,13 @@ from pms.controller.factor_snapshot import FactorSnapshot
 from pms.controller.factory import ControllerPipelineFactory
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, Portfolio
+from pms.storage.strategy_registry import _strategy_from_config_json
 from pms.strategies.paper_multifactor import (
     PAPER_MULTI_FACTOR_STRATEGY_ID,
     build_paper_multi_factor_strategy,
 )
 from pms.strategies.projections import FactorCompositionStep
+from pms.strategies.versioning import serialize_strategy_config_json
 
 
 def _signal() -> MarketSignal:
@@ -69,6 +72,12 @@ def test_paper_multi_factor_strategy_matches_phase_a_contract() -> None:
     strategy = build_paper_multi_factor_strategy()
 
     assert strategy.config.strategy_id == PAPER_MULTI_FACTOR_STRATEGY_ID
+    assert strategy.calibration.enabled is True
+    assert strategy.calibration.shrinkage_factor == pytest.approx(0.35)
+    assert strategy.calibration.shrinkage_bias == pytest.approx(0.0)
+    assert strategy.calibration.extreme_clamp_low == pytest.approx(0.08)
+    assert strategy.calibration.extreme_clamp_high == pytest.approx(0.92)
+    assert strategy.calibration.min_resolved_for_extreme == 20
     assert dict(strategy.config.metadata) == {
         "owner": "Researcher-Ciga",
         "tier": "paper",
@@ -92,13 +101,36 @@ def test_paper_multi_factor_strategy_matches_phase_a_contract() -> None:
         ("llm", ()),
     )
     assert tuple(
-        (step.factor_id, step.role, step.threshold, step.required)
+        (step.factor_id, step.role, step.threshold, step.required, step.enabled)
         for step in strategy.config.factor_composition
     ) == (
-        ("orderbook_imbalance", "threshold_edge", 0.10, True),
-        ("orderbook_imbalance", "weighted", None, False),
-        ("rules", "blend_weighted", None, False),
+        ("orderbook_imbalance", "threshold_edge", 0.10, True, True),
+        ("orderbook_imbalance", "weighted", None, False, True),
+        ("metaculus_prior", "rule_delta", None, False, True),
+        ("favorite_longshot_bias", "rule_delta", None, False, True),
+        ("rules", "blend_weighted", None, False, True),
     )
+
+
+def test_paper_multi_factor_config_json_round_trips_enabled_calibration() -> None:
+    strategy = build_paper_multi_factor_strategy()
+
+    config_json = serialize_strategy_config_json(*strategy.snapshot())
+    payload = json.loads(config_json)
+    round_tripped = _strategy_from_config_json(payload)
+
+    assert payload["calibration"]["enabled"] is True
+    assert payload["calibration"]["shrinkage_factor"] == pytest.approx(0.35)
+    assert payload["calibration"]["shrinkage_bias"] == pytest.approx(0.0)
+    assert payload["calibration"]["extreme_clamp_low"] == pytest.approx(0.08)
+    assert payload["calibration"]["extreme_clamp_high"] == pytest.approx(0.92)
+    assert payload["calibration"]["min_resolved_for_extreme"] == 20
+    assert round_tripped.calibration.enabled is True
+    assert round_tripped.calibration.shrinkage_factor == pytest.approx(0.35)
+    assert round_tripped.calibration.shrinkage_bias == pytest.approx(0.0)
+    assert round_tripped.calibration.extreme_clamp_low == pytest.approx(0.08)
+    assert round_tripped.calibration.extreme_clamp_high == pytest.approx(0.92)
+    assert round_tripped.calibration.min_resolved_for_extreme == 20
 
 
 def test_paper_multi_factor_strategy_is_rejected_outside_paper_mode() -> None:
@@ -132,7 +164,7 @@ async def test_paper_multi_factor_can_decide_from_orderbook_imbalance_only() -> 
     assert decision.strategy_id == PAPER_MULTI_FACTOR_STRATEGY_ID
     assert decision.outcome == "YES"
     assert decision.limit_price == pytest.approx(0.51)
-    assert decision.prob_estimate == pytest.approx(0.62)
-    assert decision.expected_edge == pytest.approx(0.11)
+    assert decision.prob_estimate == pytest.approx(0.5427309793504078)
+    assert decision.expected_edge == pytest.approx(0.03273097935040781)
     assert decision.notional_usdc == pytest.approx(2.0)
     assert factor_reader.snapshot_calls

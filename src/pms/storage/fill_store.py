@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -108,36 +109,19 @@ class FillStore:
             await _ensure_fill_payloads_table(connection)
             rows = await connection.fetch(
                 """
-                WITH aggregated_positions AS (
-                    SELECT
-                        fills.market_id,
-                        fill_payloads.payload->>'token_id' AS token_id,
-                        fill_payloads.payload->>'venue' AS venue,
-                        fill_payloads.payload->>'side' AS side,
-                        SUM(fills.fill_quantity) AS shares_held,
-                        CASE
-                            WHEN SUM(fills.fill_quantity) = 0 THEN 0.0
-                            ELSE SUM(fills.fill_notional_usdc) / SUM(fills.fill_quantity)
-                        END AS avg_entry_price,
-                        SUM(fills.fill_notional_usdc) AS locked_usdc,
-                        MAX(fills.ts) AS last_fill_at
-                    FROM fills
-                    INNER JOIN fill_payloads
-                        ON fill_payloads.fill_id = fills.fill_id
-                    GROUP BY
-                        fills.market_id,
-                        fill_payloads.payload->>'token_id',
-                        fill_payloads.payload->>'venue',
-                        fill_payloads.payload->>'side'
-                )
                 SELECT
-                    aggregated_positions.market_id,
-                    aggregated_positions.token_id,
-                    aggregated_positions.venue,
-                    aggregated_positions.side,
-                    aggregated_positions.shares_held,
-                    aggregated_positions.avg_entry_price,
-                    aggregated_positions.locked_usdc,
+                    fills.fill_id,
+                    fills.market_id,
+                    fills.ts,
+                    fills.fill_notional_usdc,
+                    fills.fill_quantity,
+                    fills.strategy_id,
+                    fills.strategy_version_id,
+                    fill_payloads.payload->>'token_id' AS token_id,
+                    fill_payloads.payload->>'venue' AS venue,
+                    fill_payloads.payload->>'side' AS side,
+                    (fill_payloads.payload->>'fill_price')::double precision
+                        AS fill_price,
                     COALESCE(
                         clob_marks.best_bid,
                         CASE
@@ -157,31 +141,58 @@ class FillStore:
                             )
                             ELSE markets.yes_price::double precision
                         END
-                    ) AS current_price
-                FROM aggregated_positions
+                    ) AS current_price,
+                    CASE
+                        WHEN clob_marks.best_bid IS NOT NULL THEN 'clob'
+                        ELSE 'gamma'
+                    END AS mark_source,
+                    CASE
+                        WHEN clob_marks.snapshot_ts IS NOT NULL
+                        THEN GREATEST(
+                            EXTRACT(EPOCH FROM NOW() - clob_marks.snapshot_ts),
+                            0.0
+                        )
+                        ELSE NULL
+                    END AS mark_age_seconds
+                FROM fills
+                INNER JOIN fill_payloads
+                    ON fill_payloads.fill_id = fills.fill_id
                 LEFT JOIN LATERAL (
-                    SELECT MAX(book_levels.price) AS best_bid
-                    FROM book_levels
-                    WHERE book_levels.snapshot_id = (
-                        SELECT book_snapshots.id
+                    SELECT
+                        MAX(book_levels.price) AS best_bid,
+                        latest_snapshot.snapshot_ts
+                    FROM (
+                        SELECT
+                            book_snapshots.id,
+                            book_snapshots.ts AS snapshot_ts
                         FROM book_snapshots
-                        WHERE book_snapshots.market_id = aggregated_positions.market_id
-                          AND book_snapshots.token_id = aggregated_positions.token_id
+                        WHERE book_snapshots.market_id = fills.market_id
+                          AND book_snapshots.token_id = fill_payloads.payload->>'token_id'
+                          AND book_snapshots.ts > NOW() - INTERVAL '60 seconds'
                         ORDER BY book_snapshots.ts DESC, book_snapshots.id DESC
                         LIMIT 1
-                    )
-                      AND book_levels.market_id = aggregated_positions.market_id
+                    ) AS latest_snapshot
+                    INNER JOIN book_levels
+                       ON book_levels.snapshot_id = latest_snapshot.id
+                      AND book_levels.market_id = fills.market_id
                       AND book_levels.side = 'BUY'
+                    GROUP BY latest_snapshot.snapshot_ts
                 ) AS clob_marks ON TRUE
                 LEFT JOIN tokens
-                    ON tokens.token_id = aggregated_positions.token_id
+                    ON tokens.token_id = fill_payloads.payload->>'token_id'
                 LEFT JOIN markets
-                    ON markets.condition_id = aggregated_positions.market_id
-                ORDER BY aggregated_positions.last_fill_at DESC,
-                    aggregated_positions.market_id ASC
+                    ON markets.condition_id = fills.market_id
+                ORDER BY
+                    fills.market_id ASC,
+                    fill_payloads.payload->>'token_id' ASC,
+                    fill_payloads.payload->>'venue' ASC,
+                    fills.strategy_id ASC,
+                    fills.strategy_version_id ASC,
+                    fills.ts ASC,
+                    fills.fill_id ASC
                 """
             )
-        return [_position_from_row(row) for row in rows]
+        return _positions_from_fill_rows(rows)
 
     async def read_trades(self, *, limit: int) -> list["StoredTradeRow"]:
         async with self._pool().acquire() as connection:
@@ -243,6 +254,31 @@ class StoredTradeRow:
     strategy_version_id: str
 
 
+class _PositionAccumulator:
+    def __init__(
+        self,
+        *,
+        market_id: str,
+        token_id: str | None,
+        venue: str,
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> None:
+        self.market_id = market_id
+        self.token_id = token_id
+        self.venue = venue
+        self.strategy_id = strategy_id
+        self.strategy_version_id = strategy_version_id
+        self.side: str | None = None
+        self.shares_held = Decimal("0")
+        self.locked_usdc = Decimal("0")
+        self.opened_at: datetime | None = None
+        self.last_fill_at: datetime | None = None
+        self.current_price: float | None = None
+        self.mark_source: str | None = None
+        self.mark_age_seconds: float | None = None
+
+
 async def _ensure_fill_payloads_table(connection: asyncpg.Connection) -> None:
     # The current branch still uses shell rows in `fills`; the sidecar preserves
     # the full runtime object until a later schema checkpoint widens the table.
@@ -296,6 +332,140 @@ def _fill_from_row(row: asyncpg.Record) -> FillRecord:
     )
 
 
+def _positions_from_fill_rows(rows: Sequence[asyncpg.Record]) -> list[Position]:
+    accumulators: dict[
+        tuple[str, str | None, str, str, str],
+        _PositionAccumulator,
+    ] = {}
+    for row in rows:
+        key = (
+            cast(str, row["market_id"]),
+            cast(str | None, row["token_id"]),
+            cast(str, row["venue"]),
+            cast(str, row["strategy_id"]),
+            cast(str, row["strategy_version_id"]),
+        )
+        accumulator = accumulators.get(key)
+        if accumulator is None:
+            accumulator = _PositionAccumulator(
+                market_id=key[0],
+                token_id=key[1],
+                venue=key[2],
+                strategy_id=key[3],
+                strategy_version_id=key[4],
+            )
+            accumulators[key] = accumulator
+        _apply_fill_row(accumulator, row)
+    return [
+        _position_from_accumulator(accumulator)
+        for accumulator in accumulators.values()
+        if accumulator.shares_held > Decimal("1e-9") and accumulator.side is not None
+    ]
+
+
+def _apply_fill_row(accumulator: _PositionAccumulator, row: asyncpg.Record) -> None:
+    fill_quantity = _decimal_or_none(row["fill_quantity"])
+    if fill_quantity is None or fill_quantity <= 0:
+        return
+    fill_notional = _decimal_or_none(row["fill_notional_usdc"])
+    if fill_notional is None:
+        fill_notional = Decimal("0")
+    fill_price = _decimal_or_none(_optional_row_value(row, "fill_price"))
+    if fill_price is None:
+        fill_price = (
+            Decimal("0") if fill_quantity == 0 else fill_notional / fill_quantity
+        )
+    fill_side = str(row["side"])
+    filled_at = cast(datetime, row["ts"])
+    accumulator.current_price = _float_or_none(_optional_row_value(row, "current_price"))
+    accumulator.mark_source = cast(str | None, _optional_row_value(row, "mark_source"))
+    accumulator.mark_age_seconds = _float_or_none(
+        _optional_row_value(row, "mark_age_seconds")
+    )
+    accumulator.last_fill_at = filled_at
+
+    if accumulator.shares_held <= Decimal("1e-9") or accumulator.side is None:
+        _open_accumulator(
+            accumulator,
+            side=fill_side,
+            quantity=fill_quantity,
+            notional=fill_notional,
+            filled_at=filled_at,
+        )
+        return
+
+    if _same_fill_side(accumulator.side, fill_side):
+        accumulator.locked_usdc += fill_notional
+        accumulator.shares_held += fill_quantity
+        return
+
+    avg_entry_price = accumulator.locked_usdc / accumulator.shares_held
+    closing_quantity = min(accumulator.shares_held, fill_quantity)
+    accumulator.shares_held -= closing_quantity
+    accumulator.locked_usdc = max(
+        Decimal("0"),
+        accumulator.locked_usdc - (avg_entry_price * closing_quantity),
+    )
+    residual_quantity = fill_quantity - closing_quantity
+    if accumulator.shares_held <= Decimal("1e-9"):
+        accumulator.side = None
+        accumulator.shares_held = Decimal("0")
+        accumulator.locked_usdc = Decimal("0")
+        accumulator.opened_at = None
+    if residual_quantity > Decimal("1e-9"):
+        _open_accumulator(
+            accumulator,
+            side=fill_side,
+            quantity=residual_quantity,
+            notional=fill_price * residual_quantity,
+            filled_at=filled_at,
+        )
+
+
+def _open_accumulator(
+    accumulator: _PositionAccumulator,
+    *,
+    side: str,
+    quantity: Decimal,
+    notional: Decimal,
+    filled_at: datetime,
+) -> None:
+    accumulator.side = side
+    accumulator.shares_held += quantity
+    accumulator.locked_usdc += notional
+    if accumulator.opened_at is None:
+        accumulator.opened_at = filled_at
+
+
+def _same_fill_side(left: str, right: str) -> bool:
+    return left.upper() == right.upper()
+
+
+def _position_from_accumulator(accumulator: _PositionAccumulator) -> Position:
+    avg_entry_price = accumulator.locked_usdc / accumulator.shares_held
+    return Position(
+        market_id=accumulator.market_id,
+        token_id=accumulator.token_id,
+        venue=cast(Venue, accumulator.venue),
+        side=cast(str, accumulator.side),
+        shares_held=float(accumulator.shares_held),
+        avg_entry_price=float(avg_entry_price),
+        unrealized_pnl=_unrealized_pnl_from_values(
+            side=cast(str, accumulator.side),
+            shares_held=accumulator.shares_held,
+            avg_entry_price=avg_entry_price,
+            current_price=accumulator.current_price,
+        ),
+        locked_usdc=float(accumulator.locked_usdc),
+        mark_source=accumulator.mark_source,
+        mark_age_seconds=accumulator.mark_age_seconds,
+        current_price=accumulator.current_price,
+        opened_at=accumulator.opened_at,
+        strategy_id=accumulator.strategy_id,
+        strategy_version_id=accumulator.strategy_version_id,
+    )
+
+
 def _position_from_row(row: asyncpg.Record) -> Position:
     return Position(
         market_id=cast(str, row["market_id"]),
@@ -306,6 +476,15 @@ def _position_from_row(row: asyncpg.Record) -> Position:
         avg_entry_price=float(cast(float, row["avg_entry_price"])),
         unrealized_pnl=_unrealized_pnl_from_row(row),
         locked_usdc=float(cast(float, row["locked_usdc"])),
+        mark_source=cast(str | None, _optional_row_value(row, "mark_source")),
+        mark_age_seconds=_float_or_none(_optional_row_value(row, "mark_age_seconds")),
+        current_price=_float_or_none(_optional_row_value(row, "current_price")),
+        opened_at=cast(datetime | None, _optional_row_value(row, "opened_at")),
+        strategy_id=cast(str, _optional_row_value(row, "strategy_id") or "default"),
+        strategy_version_id=cast(
+            str,
+            _optional_row_value(row, "strategy_version_id") or "default-v1",
+        ),
     )
 
 
@@ -316,11 +495,27 @@ def _unrealized_pnl_from_row(row: asyncpg.Record) -> float:
 
     shares_held = Decimal(str(row["shares_held"]))
     avg_entry_price = Decimal(str(row["avg_entry_price"]))
-    if str(row["side"]).upper() == "SELL":
-        pnl = (avg_entry_price - current_price) * shares_held
-    else:
-        pnl = (current_price - avg_entry_price) * shares_held
-    return float(pnl)
+    return _unrealized_pnl_from_values(
+        side=str(row["side"]),
+        shares_held=shares_held,
+        avg_entry_price=avg_entry_price,
+        current_price=float(current_price),
+    )
+
+
+def _unrealized_pnl_from_values(
+    *,
+    side: str,
+    shares_held: Decimal,
+    avg_entry_price: Decimal,
+    current_price: float | None,
+) -> float:
+    if current_price is None:
+        return 0.0
+    current_price_dec = Decimal(str(current_price))
+    if side.upper() == "SELL":
+        return float((avg_entry_price - current_price_dec) * shares_held)
+    return float((current_price_dec - avg_entry_price) * shares_held)
 
 
 def _optional_row_value(row: asyncpg.Record, key: str) -> object | None:
@@ -334,6 +529,12 @@ def _decimal_or_none(value: object | None) -> Decimal | None:
     if value is None:
         return None
     return Decimal(str(value))
+
+
+def _float_or_none(value: object | None) -> float | None:
+    if value is None:
+        return None
+    return float(cast(float, value))
 
 
 def _trade_from_row(row: asyncpg.Record) -> StoredTradeRow:

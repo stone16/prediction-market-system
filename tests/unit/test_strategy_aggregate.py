@@ -26,6 +26,7 @@ def _build_projections() -> dict[str, Any]:
         "pms.strategies.projections",
         "MarketSelectionSpec",
     )
+    calibration_spec = _load_symbol("pms.strategies.projections", "CalibrationSpec")
 
     return {
         "config": strategy_config(
@@ -55,6 +56,7 @@ def _build_projections() -> dict[str, Any]:
             resolution_time_max_horizon_days=14,
             volume_min_usdc=250.0,
         ),
+        "calibration": calibration_spec(),
     }
 
 
@@ -68,10 +70,14 @@ def test_strategy_init_requires_keyword_only_projection_args() -> None:
         "eval_spec",
         "forecaster",
         "market_selection",
+        "calibration",
     ]
     for parameter in signature.parameters.values():
         assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
-        assert parameter.default is inspect.Parameter.empty
+        if parameter.name == "calibration":
+            assert parameter.default is None
+        else:
+            assert parameter.default is inspect.Parameter.empty
 
 
 def test_strategy_returns_cached_projection_references_and_fixed_snapshot_order() -> None:
@@ -85,12 +91,14 @@ def test_strategy_returns_cached_projection_references_and_fixed_snapshot_order(
     assert aggregate.eval_spec is projections["eval_spec"]
     assert aggregate.forecaster is projections["forecaster"]
     assert aggregate.market_selection is projections["market_selection"]
+    assert aggregate.calibration is projections["calibration"]
     assert aggregate.snapshot() == (
         projections["config"],
         projections["risk"],
         projections["eval_spec"],
         projections["forecaster"],
         projections["market_selection"],
+        projections["calibration"],
     )
 
 

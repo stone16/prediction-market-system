@@ -110,6 +110,39 @@ def _fill_record() -> FillRecord:
     )
 
 
+def _position_fill_row(
+    *,
+    fill_id: str,
+    side: str,
+    fill_price: float,
+    fill_quantity: float,
+    filled_at: datetime | None = None,
+    market_id: str = "market-unit-cp10-1",
+    token_id: str = "token-unit-cp10-1",
+    strategy_id: str = "default",
+    strategy_version_id: str = "default-v2",
+    current_price: float | None = 0.31,
+    mark_source: str | None = "clob",
+    mark_age_seconds: float | None = 12.5,
+) -> dict[str, object]:
+    return {
+        "fill_id": fill_id,
+        "market_id": market_id,
+        "ts": filled_at or datetime(2026, 4, 21, 10, 0, tzinfo=UTC),
+        "fill_notional_usdc": fill_price * fill_quantity,
+        "fill_quantity": fill_quantity,
+        "strategy_id": strategy_id,
+        "strategy_version_id": strategy_version_id,
+        "token_id": token_id,
+        "venue": "polymarket",
+        "side": side,
+        "fill_price": fill_price,
+        "current_price": current_price,
+        "mark_source": mark_source,
+        "mark_age_seconds": mark_age_seconds,
+    }
+
+
 def test_bind_pool_sets_store_pool_reference() -> None:
     pool = cast(asyncpg.Pool, object())
 
@@ -194,9 +227,79 @@ async def test_fill_store_read_positions_marks_with_latest_clob_best_bid() -> No
     assert "book_levels" in query
     assert "MAX(book_levels.price)" in query
     assert "book_levels.side = 'BUY'" in query
-    assert "book_snapshots.token_id = aggregated_positions.token_id" in query
+    assert "book_snapshots.token_id = fill_payloads.payload->>'token_id'" in query
+    assert "book_snapshots.ts > NOW() - INTERVAL '60 seconds'" in query
+    assert "book_snapshots.ts AS snapshot_ts" in query
+    assert "mark_source" in query
+    assert "mark_age_seconds" in query
+    assert "GREATEST(\n                            EXTRACT(EPOCH" in query
     assert "ORDER BY book_snapshots.ts DESC, book_snapshots.id DESC" in query
     assert query.index("clob_marks.best_bid") < query.index("markets.yes_price")
+
+
+@pytest.mark.real_fill_store
+@pytest.mark.asyncio
+async def test_fill_store_read_positions_nets_opposing_buy_sell_fills() -> None:
+    connection = _RecordingConnection()
+    connection.fetch_rows = [
+        _position_fill_row(
+            fill_id="fill-net-buy",
+            side="BUY",
+            fill_price=0.30,
+            fill_quantity=10.0,
+        ),
+        _position_fill_row(
+            fill_id="fill-net-sell",
+            side="SELL",
+            fill_price=0.40,
+            fill_quantity=10.0,
+        ),
+    ]
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    positions = await store.read_positions()
+
+    assert positions == []
+
+
+@pytest.mark.real_fill_store
+@pytest.mark.asyncio
+async def test_fill_store_read_positions_preserves_cost_basis_after_partial_exit() -> None:
+    connection = _RecordingConnection()
+    connection.fetch_rows = [
+        _position_fill_row(
+            fill_id="fill-lot-buy-1",
+            side="BUY",
+            fill_price=0.40,
+            fill_quantity=10.0,
+            filled_at=datetime(2026, 4, 21, 10, 0, tzinfo=UTC),
+            current_price=0.50,
+        ),
+        _position_fill_row(
+            fill_id="fill-lot-sell",
+            side="SELL",
+            fill_price=0.60,
+            fill_quantity=5.0,
+            filled_at=datetime(2026, 4, 21, 10, 1, tzinfo=UTC),
+            current_price=0.50,
+        ),
+        _position_fill_row(
+            fill_id="fill-lot-buy-2",
+            side="BUY",
+            fill_price=0.50,
+            fill_quantity=5.0,
+            filled_at=datetime(2026, 4, 21, 10, 2, tzinfo=UTC),
+            current_price=0.50,
+        ),
+    ]
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    positions = await store.read_positions()
+
+    assert len(positions) == 1
+    assert positions[0].shares_held == pytest.approx(10.0)
+    assert positions[0].avg_entry_price == pytest.approx(0.45)
+    assert positions[0].locked_usdc == pytest.approx(4.50)
 
 
 @pytest.mark.real_fill_store
@@ -204,16 +307,12 @@ async def test_fill_store_read_positions_marks_with_latest_clob_best_bid() -> No
 async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
     connection = _RecordingConnection()
     connection.fetch_rows = [
-        {
-            "market_id": "market-unit-cp10-1",
-            "token_id": "token-unit-cp10-1",
-            "venue": "polymarket",
-            "side": "yes",
-            "shares_held": 400.0,
-            "avg_entry_price": 0.25,
-            "current_price": 0.31,
-            "locked_usdc": 100.0,
-        }
+        _position_fill_row(
+            fill_id="fill-map",
+            side="yes",
+            fill_price=0.25,
+            fill_quantity=400.0,
+        )
     ]
     store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
 
@@ -229,9 +328,15 @@ async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
             avg_entry_price=0.25,
             unrealized_pnl=24.0,
             locked_usdc=100.0,
+            mark_source="clob",
+            mark_age_seconds=12.5,
+            current_price=0.31,
+            opened_at=datetime(2026, 4, 21, 10, 0, tzinfo=UTC),
+            strategy_id="default",
+            strategy_version_id="default-v2",
         )
     ]
-    assert "GROUP BY" in connection.fetch_calls[0][0]
+    assert "ORDER BY" in connection.fetch_calls[0][0]
     assert "LEFT JOIN tokens" in connection.fetch_calls[0][0]
     assert "LEFT JOIN markets" in connection.fetch_calls[0][0]
 
@@ -241,16 +346,17 @@ async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
 async def test_fill_store_read_positions_maps_missing_market_price_to_zero_pnl() -> None:
     connection = _RecordingConnection()
     connection.fetch_rows = [
-        {
-            "market_id": "market-unit-cp10-2",
-            "token_id": "token-unit-cp10-2",
-            "venue": "polymarket",
-            "side": "BUY",
-            "shares_held": 50.0,
-            "avg_entry_price": 0.42,
-            "current_price": None,
-            "locked_usdc": 21.0,
-        }
+        _position_fill_row(
+            fill_id="fill-missing-price",
+            market_id="market-unit-cp10-2",
+            token_id="token-unit-cp10-2",
+            side="BUY",
+            fill_price=0.42,
+            fill_quantity=50.0,
+            current_price=None,
+            mark_source="gamma",
+            mark_age_seconds=None,
+        )
     ]
     store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
 
@@ -266,6 +372,11 @@ async def test_fill_store_read_positions_maps_missing_market_price_to_zero_pnl()
             avg_entry_price=0.42,
             unrealized_pnl=0.0,
             locked_usdc=21.0,
+            mark_source="gamma",
+            mark_age_seconds=None,
+            opened_at=datetime(2026, 4, 21, 10, 0, tzinfo=UTC),
+            strategy_id="default",
+            strategy_version_id="default-v2",
         )
     ]
 

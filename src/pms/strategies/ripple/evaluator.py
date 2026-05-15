@@ -161,14 +161,6 @@ def entry_edge_threshold(
     return min_expected_edge / sqrt(max(remaining_days, 1.0 / 24.0))
 
 
-def _metadata_float(metadata: Mapping[str, Any], field_name: str) -> float:
-    value = metadata[field_name]
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        msg = f"{field_name} must be numeric"
-        raise TypeError(msg)
-    return float(value)
-
-
 def _metadata_tuple(metadata: Mapping[str, Any], field_name: str) -> tuple[str, ...]:
     value = metadata[field_name]
     if not isinstance(value, tuple):
@@ -189,6 +181,7 @@ def _posterior_from_candidate(
         candidate.metadata,
         "metaculus_prior",
     )
+    has_metaculus_prior = prior_probability is not None
     prior_strength = _optional_metadata_float(
         candidate.metadata,
         "prior_strength",
@@ -209,7 +202,7 @@ def _posterior_from_candidate(
         limit_price = candidate.probability_estimate - candidate.expected_edge
     if threshold is None:
         threshold = min_expected_edge
-    if yes_count == 0.0 and no_count == 0.0 and "metaculus_prior" not in candidate.metadata:
+    if yes_count == 0.0 and no_count == 0.0 and not has_metaculus_prior:
         posterior_probability = candidate.probability_estimate
     else:
         posterior_probability = beta_binomial_posterior_probability(
@@ -218,7 +211,12 @@ def _posterior_from_candidate(
             yes_count=yes_count,
             no_count=no_count,
         )
-    confidence = _metadata_float(candidate.metadata, "confidence")
+    confidence = posterior_confidence(
+        prior_strength=prior_strength,
+        yes_count=yes_count,
+        no_count=no_count,
+        degraded=not has_metaculus_prior,
+    )
     return RipplePosterior(
         posterior_probability=posterior_probability,
         expected_edge=posterior_probability - limit_price,

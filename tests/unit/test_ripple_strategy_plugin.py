@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 import tomllib
 
 import pytest
 
-from pms.config import RiskSettings
+from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import TimeInForce
 from pms.core.models import Portfolio
 from pms.controller.sizers.kelly import KellySizer
+from pms.runner import Runner
 from pms.strategies.base import (
     StrategyAgent,
     StrategyController,
@@ -27,13 +29,17 @@ from pms.strategies.intents import (
 )
 from pms.strategies.ripple.agent import RippleAgent
 from pms.strategies.ripple.controller import RippleController
-from pms.strategies.ripple.evaluator import RippleEvidenceEvaluator
+from pms.strategies.ripple.evaluator import (
+    RippleEvidenceEvaluator,
+    posterior_confidence,
+)
 from pms.strategies.ripple.source import (
     LiveRippleSource,
     RIPPLE_FACTOR_REQUIREMENTS,
     RippleMarketSnapshot,
     RippleObservationFixture,
     RippleObservationSource,
+    RipplePositionSizer,
 )
 from pms.strategies.ripple.strategy import RippleStrategyModule
 from pms.strategies.projections import FactorCompositionStep
@@ -67,6 +73,13 @@ def _fixture(**overrides: object) -> RippleObservationFixture:
         "max_slippage_bps": 40,
         "evidence_refs": ("doc://ripple/a", "doc://ripple/b"),
         "contradiction_refs": (),
+        "metadata": {
+            "metaculus_prior": 0.63,
+            "prior_strength": 2.0,
+            "yes_count": 8.0,
+            "no_count": 2.0,
+            "entry_edge_threshold": 0.02,
+        },
     }
     data.update(overrides)
     return RippleObservationFixture(**cast(Any, data))
@@ -214,6 +227,27 @@ async def _candidate_from_fixture(
     return candidates[0]
 
 
+def _live_candidate_with_metadata(
+    *,
+    probability_estimate: float = 0.76,
+    expected_edge: float = 0.26,
+    metadata: Mapping[str, object],
+) -> StrategyCandidate:
+    return StrategyCandidate(
+        candidate_id="candidate-ripple-live",
+        strategy_id="ripple",
+        strategy_version_id="ripple-v1",
+        market_id="market-ripple-1",
+        title="Will posterior math stay deterministic?",
+        thesis="Live evidence supports a posterior edge.",
+        probability_estimate=probability_estimate,
+        expected_edge=expected_edge,
+        evidence_refs=("factor_snapshot:hash", "market_snapshot:market-ripple-1"),
+        created_at=NOW,
+        metadata=metadata,
+    )
+
+
 def _portfolio(free_usdc: float = 100.0) -> Portfolio:
     return Portfolio(
         total_usdc=free_usdc,
@@ -335,18 +369,55 @@ def test_live_ripple_requires_beta_binomial_count_factors() -> None:
     assert required_flags["no_count"] is True
 
 
-def test_ripple_evaluator_emits_beta_binomial_posterior_edge_and_confidence() -> None:
-    candidate = StrategyCandidate(
-        candidate_id="candidate-ripple-live",
+def test_kelly_sizer_satisfies_ripple_position_sizer_protocol() -> None:
+    sizer = KellySizer(risk=RiskSettings(max_position_per_market=100.0))
+
+    assert isinstance(sizer, RipplePositionSizer)
+
+
+@pytest.mark.parametrize(
+    ("prob", "market_price", "expected_notional"),
+    [
+        (0.52, 0.50, 10.0),
+        (0.90, 0.50, 100.0),
+        (0.50, 0.50, 0.0),
+        (0.49, 0.50, 0.0),
+    ],
+)
+def test_kelly_sizer_scales_ripple_edges_and_respects_risk_cap(
+    prob: float,
+    market_price: float,
+    expected_notional: float,
+) -> None:
+    sizer = KellySizer(risk=RiskSettings(max_position_per_market=100.0))
+
+    assert sizer.size(
+        prob=prob,
+        market_price=market_price,
+        portfolio=_portfolio(free_usdc=1000.0),
+    ) == pytest.approx(expected_notional)
+
+
+def test_runner_builds_live_ripple_source_with_fractional_kelly_sizer() -> None:
+    risk = RiskSettings(max_position_per_market=100.0)
+    runner = Runner(config=PMSSettings(risk=risk))
+
+    module = runner.build_ripple_strategy_module(
         strategy_id="ripple",
         strategy_version_id="ripple-v1",
-        market_id="market-ripple-1",
-        title="Will posterior math stay deterministic?",
-        thesis="Live evidence supports a posterior edge.",
-        probability_estimate=0.76,
-        expected_edge=0.26,
-        evidence_refs=("factor_snapshot:hash", "market_snapshot:market-ripple-1"),
-        created_at=NOW,
+        market_ids=("market-ripple-1",),
+        factor_reader=_RecordingFactorReader(),
+        market_reader=_StaticMarketReader(),
+    )
+
+    assert isinstance(module.source, LiveRippleSource)
+    assert isinstance(module.source.position_sizer, KellySizer)
+    assert module.source.position_sizer.risk == risk
+    assert module.source.position_sizer.fraction == Decimal("0.25")
+
+
+def test_ripple_evaluator_emits_beta_binomial_posterior_edge_and_confidence() -> None:
+    candidate = _live_candidate_with_metadata(
         metadata={
             "source": "live_factor_service",
             "metaculus_prior": 0.6,
@@ -364,8 +435,74 @@ def test_ripple_evaluator_emits_beta_binomial_posterior_edge_and_confidence() ->
     assert assessment.approved is True
     assert assessment.posterior_probability == pytest.approx((0.6 * 2.0 + 8.0) / 12.0)
     assert assessment.expected_edge == pytest.approx(assessment.posterior_probability - 0.5)
-    assert assessment.confidence == pytest.approx(0.8)
+    assert assessment.confidence == pytest.approx(
+        posterior_confidence(prior_strength=2.0, yes_count=8.0, no_count=2.0)
+    )
     assert assessment.entry_edge_threshold == pytest.approx(0.02)
+
+
+def test_ripple_evaluator_derives_confidence_from_counts_not_candidate_metadata() -> None:
+    candidate = _live_candidate_with_metadata(
+        metadata={
+            "source": "live_factor_service",
+            "metaculus_prior": 0.6,
+            "prior_strength": 2.0,
+            "yes_count": 8.0,
+            "no_count": 2.0,
+            "limit_price": 0.5,
+            "confidence": 0.01,
+            "contradiction_refs": (),
+        },
+    )
+
+    assessment = RippleEvidenceEvaluator(min_confidence=0.6).assess(candidate)
+
+    assert assessment.approved is True
+    assert assessment.confidence == pytest.approx(
+        posterior_confidence(prior_strength=2.0, yes_count=8.0, no_count=2.0)
+    )
+    assert assessment.confidence > 0.5
+
+
+def test_ripple_evaluator_prior_only_confidence_stays_at_half() -> None:
+    candidate = _live_candidate_with_metadata(
+        metadata={
+            "source": "live_factor_service",
+            "metaculus_prior": 0.6,
+            "prior_strength": 2.0,
+            "limit_price": 0.5,
+            "confidence": 0.99,
+            "contradiction_refs": (),
+        },
+    )
+
+    assessment = RippleEvidenceEvaluator(min_confidence=0.6).assess(candidate)
+
+    assert assessment.approved is False
+    assert assessment.failure_reasons == ("low_confidence",)
+    assert assessment.confidence == pytest.approx(0.5)
+
+
+def test_ripple_evaluator_caps_confidence_without_metaculus_prior() -> None:
+    candidate = _live_candidate_with_metadata(
+        probability_estimate=0.7,
+        expected_edge=0.2,
+        metadata={
+            "source": "live_factor_service",
+            "prior_strength": 2.0,
+            "yes_count": 10.0,
+            "no_count": 0.0,
+            "limit_price": 0.5,
+            "confidence": 0.99,
+            "contradiction_refs": (),
+        },
+    )
+
+    assessment = RippleEvidenceEvaluator(min_confidence=0.6).assess(candidate)
+
+    assert assessment.approved is False
+    assert assessment.failure_reasons == ("low_confidence",)
+    assert assessment.confidence == pytest.approx(0.55)
 
 
 @pytest.mark.asyncio
@@ -499,7 +636,13 @@ async def test_live_ripple_raises_entry_threshold_near_resolution() -> None:
             "contradiction",
         ),
         (
-            _fixture(confidence=0.42),
+            _fixture(
+                metadata={
+                    "metaculus_prior": 0.63,
+                    "prior_strength": 2.0,
+                    "entry_edge_threshold": 0.02,
+                }
+            ),
             "low_confidence",
         ),
     ],

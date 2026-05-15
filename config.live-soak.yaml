@@ -16,6 +16,12 @@ risk:
   slippage_threshold_bps: 50.0
   max_quantity_shares: 500.0
 
+position_exit:
+  enabled: true
+  stop_loss_pct: 30.0
+  profit_take_pct: 50.0
+  max_holding_days: 7
+
 sensor:
   poll_interval_s: 5.0
   max_reconnect_interval_s: 60.0
@@ -35,13 +41,6 @@ controller:
   quote_source: postgres_snapshot
   direct_quote_min_notional_usdc: 100.0
   dual_quote_max_price_delta_bps: 25.0
-
-calibration:
-  shrinkage_factor: 0.35
-  bias: 0.0
-  extreme_clamp_low: 0.08
-  extreme_clamp_high: 0.92
-  min_resolved: 500
 
 polymarket:
   host: https://clob.polymarket.com

@@ -126,7 +126,9 @@ export function mockPositions(): PositionsResponse {
       shares_held: 50.0,
       avg_entry_price: 0.41,
       unrealized_pnl: 0.0,
-      locked_usdc: 20.5
+      locked_usdc: 20.5,
+      strategy_id: 'default',
+      strategy_version_id: 'default-v1'
     },
     {
       market_id: 'market-003',
@@ -136,7 +138,9 @@ export function mockPositions(): PositionsResponse {
       shares_held: 32.0,
       avg_entry_price: 0.53,
       unrealized_pnl: 0.0,
-      locked_usdc: 16.96
+      locked_usdc: 16.96,
+      strategy_id: 'default',
+      strategy_version_id: 'default-v1'
     }
   ];
 

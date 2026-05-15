@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Literal
 
 from pms.config import RiskSettings
-from pms.core.models import Portfolio, TradeDecision
+from pms.core.models import Portfolio, Position, TradeDecision
 
 
 class InsufficientLiquidityError(RuntimeError):
@@ -16,6 +17,12 @@ class InsufficientLiquidityError(RuntimeError):
 class RiskDecision:
     approved: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class ReductionSplit:
+    reducing_shares: float
+    residual_shares: float
 
 
 HaltTriggerKind = Literal[
@@ -82,13 +89,22 @@ class RiskManager:
         if notional < self.risk.min_order_usdc:
             return RiskDecision(False, "min_order_usdc")
 
-        market_exposure = _market_exposure(portfolio, decision.market_id) + notional
-        if market_exposure > self.risk.max_position_per_market:
-            return RiskDecision(False, "max_position_per_market")
+        reduction = _split_reduction_shares(portfolio, decision)
+        if reduction.reducing_shares > 0.0 and reduction.residual_shares > 1e-9:
+            return RiskDecision(False, "partial_reduction_unsupported")
+        reduces_position = reduction.reducing_shares > 0.0
+        residual_notional = 0.0 if reduces_position else notional
 
-        total_exposure = portfolio.locked_usdc + notional
-        if total_exposure > self.risk.max_total_exposure:
-            return RiskDecision(False, "max_total_exposure")
+        if residual_notional > 0.0:
+            market_exposure = (
+                _market_exposure(portfolio, decision.market_id) + residual_notional
+            )
+            if market_exposure > self.risk.max_position_per_market:
+                return RiskDecision(False, "max_position_per_market")
+
+            total_exposure = portfolio.locked_usdc + residual_notional
+            if total_exposure > self.risk.max_total_exposure:
+                return RiskDecision(False, "max_total_exposure")
 
         if (
             self.risk.max_drawdown_pct is not None
@@ -100,6 +116,7 @@ class RiskManager:
         if (
             self.risk.max_open_positions is not None
             and not _has_open_position(portfolio, decision)
+            and not reduces_position
             and len(portfolio.open_positions) >= self.risk.max_open_positions
         ):
             return RiskDecision(False, "max_open_positions")
@@ -107,11 +124,15 @@ class RiskManager:
         if decision.max_slippage_bps > self.risk.slippage_threshold_bps:
             return RiskDecision(False, "slippage_threshold_bps")
 
-        if notional > portfolio.free_usdc:
+        if residual_notional > portfolio.free_usdc:
             return RiskDecision(False, "insufficient_free_usdc")
 
-        if self.risk.max_quantity_shares is not None and decision.limit_price > 0.0:
-            estimated_quantity = notional / decision.limit_price
+        if (
+            residual_notional > 0.0
+            and self.risk.max_quantity_shares is not None
+            and decision.limit_price > 0.0
+        ):
+            estimated_quantity = residual_notional / decision.limit_price
             if estimated_quantity > self.risk.max_quantity_shares:
                 return RiskDecision(False, "max_quantity_shares")
 
@@ -270,11 +291,52 @@ def _market_exposure(portfolio: Portfolio, market_id: str) -> float:
 
 def _has_open_position(portfolio: Portfolio, decision: TradeDecision) -> bool:
     return any(
+        _same_contract(position, decision)
+        and _same_strategy_version(position, decision)
+        and position.side == decision.side
+        for position in portfolio.open_positions
+    )
+
+
+def _split_reduction_shares(
+    portfolio: Portfolio,
+    decision: TradeDecision,
+) -> ReductionSplit:
+    decision_shares = _decision_contracts(decision)
+    if decision_shares is None:
+        return ReductionSplit(0.0, 0.0)
+    closable_shares = sum(
+        position.shares_held
+        for position in portfolio.open_positions
+        if _same_contract(position, decision)
+        and _same_strategy_version(position, decision)
+        and position.side != decision.side
+    )
+    reducing_shares = min(decision_shares, closable_shares)
+    residual_shares = max(0.0, decision_shares - reducing_shares)
+    return ReductionSplit(reducing_shares, residual_shares)
+
+
+def _same_contract(position: Position, decision: TradeDecision) -> bool:
+    return (
         position.market_id == decision.market_id
         and position.token_id == decision.token_id
         and position.venue == decision.venue
-        and position.side == decision.side
-        for position in portfolio.open_positions
+    )
+
+
+def _same_strategy_version(position: Position, decision: TradeDecision) -> bool:
+    return (
+        position.strategy_id == decision.strategy_id
+        and position.strategy_version_id == decision.strategy_version_id
+    )
+
+
+def _decision_contracts(decision: TradeDecision) -> float | None:
+    if decision.limit_price <= 0.0:
+        return None
+    return float(
+        Decimal(str(decision.notional_usdc)) / Decimal(str(decision.limit_price))
     )
 
 

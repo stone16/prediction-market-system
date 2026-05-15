@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
+    CalibrationSpec,
     EvalSpec,
     FactorCompositionStep,
     ForecasterSpec,
@@ -38,6 +39,28 @@ def build_paper_multi_factor_strategy() -> Strategy:
                     required=False,
                     freshness_sla_s=_FACTOR_FRESHNESS_S,
                     allow_neutral_fallback=False,
+                ),
+                FactorCompositionStep(
+                    factor_id="metaculus_prior",
+                    role="rule_delta",
+                    param="",
+                    weight=0.3,
+                    threshold=None,
+                    required=False,
+                    freshness_sla_s=_FACTOR_FRESHNESS_S,
+                    allow_neutral_fallback=True,
+                    enabled=True,
+                ),
+                FactorCompositionStep(
+                    factor_id="favorite_longshot_bias",
+                    role="rule_delta",
+                    param="",
+                    weight=0.2,
+                    threshold=None,
+                    required=False,
+                    freshness_sla_s=_FACTOR_FRESHNESS_S,
+                    allow_neutral_fallback=True,
+                    enabled=True,
                 ),
                 FactorCompositionStep(
                     factor_id="rules",
@@ -81,5 +104,13 @@ def build_paper_multi_factor_strategy() -> Strategy:
             venue="polymarket",
             resolution_time_max_horizon_days=90,
             volume_min_usdc=100.0,
+        ),
+        calibration=CalibrationSpec(
+            enabled=True,
+            shrinkage_factor=0.35,
+            shrinkage_bias=0.0,
+            extreme_clamp_low=0.08,
+            extreme_clamp_high=0.92,
+            min_resolved_for_extreme=20,
         ),
     )

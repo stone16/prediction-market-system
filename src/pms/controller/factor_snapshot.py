@@ -21,6 +21,7 @@ RAW_FACTOR_ROLES = frozenset(
         "posterior_prior",
         "posterior_success",
         "posterior_failure",
+        "rule_delta",
     }
 )
 
@@ -58,6 +59,7 @@ class NullFactorSnapshotReader:
         strategy_id: str,
         strategy_version_id: str,
     ) -> FactorSnapshot:
+        snapshot_keys = snapshot_factor_keys(required)
         missing_factors = required_factor_keys(required)
         return FactorSnapshot(
             values={},
@@ -67,7 +69,7 @@ class NullFactorSnapshotReader:
                 as_of=as_of,
                 strategy_id=strategy_id,
                 strategy_version_id=strategy_version_id,
-                required_keys=missing_factors,
+                required_keys=snapshot_keys,
                 values={},
                 missing_factors=missing_factors,
                 stale_factors=(),
@@ -88,8 +90,9 @@ class PostgresFactorSnapshotReader:
         strategy_id: str,
         strategy_version_id: str,
     ) -> FactorSnapshot:
+        snapshot_keys = snapshot_factor_keys(required)
         required_keys = required_factor_keys(required)
-        if not required_keys:
+        if not snapshot_keys:
             return FactorSnapshot(
                 values={},
                 missing_factors=(),
@@ -105,8 +108,8 @@ class PostgresFactorSnapshotReader:
                 ),
             )
 
-        factor_ids = [factor_id for factor_id, _ in required_keys]
-        params = [param for _, param in required_keys]
+        factor_ids = [factor_id for factor_id, _ in snapshot_keys]
+        params = [param for _, param in snapshot_keys]
         async with self.pool.acquire() as connection:
             rows = await connection.fetch(
                 """
@@ -149,11 +152,13 @@ class PostgresFactorSnapshotReader:
         missing_factors: list[FactorKey] = []
         stale_factors: list[FactorKey] = []
         freshness_slas = _freshness_slas(required)
+        required_key_set = set(required_keys)
         for row in rows:
             key = (row["factor_id"], row["param"])
             value = row["value"]
             if value is None:
-                missing_factors.append(key)
+                if key in required_key_set:
+                    missing_factors.append(key)
                 continue
             values[key] = float(value)
             ts = row["ts"]
@@ -175,7 +180,7 @@ class PostgresFactorSnapshotReader:
                 as_of=as_of,
                 strategy_id=strategy_id,
                 strategy_version_id=strategy_version_id,
-                required_keys=required_keys,
+                required_keys=snapshot_keys,
                 values=values,
                 missing_factors=tuple(missing_factors),
                 stale_factors=tuple(stale_factors),
@@ -235,7 +240,27 @@ def required_factor_keys(
     )
 
 
+def snapshot_factor_keys(
+    steps: Sequence[FactorCompositionStep],
+) -> tuple[FactorKey, ...]:
+    return tuple(
+        dict.fromkeys(
+            (step.factor_id, step.param)
+            for step in steps
+            if _uses_raw_factor(step)
+        )
+    )
+
+
+def _uses_raw_factor(step: FactorCompositionStep) -> bool:
+    if not step.enabled:
+        return False
+    return step.role in RAW_FACTOR_ROLES
+
+
 def _requires_raw_factor(step: FactorCompositionStep) -> bool:
+    if not step.enabled:
+        return False
     if getattr(step, "required", True) is False:
         return False
     return step.role in RAW_FACTOR_ROLES

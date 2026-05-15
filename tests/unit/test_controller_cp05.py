@@ -758,7 +758,7 @@ def test_llm_response_parsing_helpers_cover_json_text_and_errors() -> None:
 async def test_controller_pipeline_suppresses_zero_size_decision_and_tracks_metric() -> None:
     llm_client = FakeClaudeClient()
     llm_client.messages = FakeMessages(
-        prob_estimate=0.4,
+        prob_estimate=0.401,
         confidence=0.0,
         rationale="neutral mocked LLM branch",
     )

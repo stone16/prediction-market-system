@@ -22,7 +22,7 @@ from pms.controller.pipeline import ControllerPipeline
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.interfaces import IForecaster
-from pms.strategies.projections import ActiveStrategy
+from pms.strategies.projections import ActiveStrategy, FactorCompositionStep
 
 
 @dataclass
@@ -74,6 +74,10 @@ class ControllerPipelineFactory:
                 raw_params=raw_params,
                 llm_settings=self.settings.llm,
                 mode=self.settings.mode,
+                factor_reader=self.factor_reader,
+                factor_composition=strategy.config.factor_composition,
+                strategy_id=strategy.strategy_id,
+                strategy_version_id=strategy.strategy_version_id,
             )
             for name, raw_params in strategy.forecaster.forecasters
         )
@@ -85,17 +89,29 @@ def _build_forecaster(
     raw_params: tuple[tuple[str, str], ...],
     llm_settings: LLMSettings,
     mode: RunMode,
+    factor_reader: FactorSnapshotReader,
+    factor_composition: tuple[FactorCompositionStep, ...],
+    strategy_id: str,
+    strategy_version_id: str,
 ) -> IForecaster:
     params = dict(raw_params)
     if name == "rules":
         threshold = params.get("threshold")
         return RulesForecaster(
+            factor_reader=factor_reader,
+            composition=factor_composition,
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
             min_edge=0.02 if threshold is None else float(threshold)
         )
     if name == "stats":
         prior_strength = params.get("prior_strength")
         return StatisticalForecaster(
-            prior_strength=2.0 if prior_strength is None else float(prior_strength)
+            factor_reader=factor_reader,
+            composition=factor_composition,
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+            prior_strength=2.0 if prior_strength is None else float(prior_strength),
         )
     if name == "llm":
         if raw_params:

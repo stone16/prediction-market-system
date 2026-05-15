@@ -176,6 +176,12 @@ class Position:
     avg_entry_price: float
     unrealized_pnl: float
     locked_usdc: float
+    mark_source: str | None = None
+    mark_age_seconds: float | None = None
+    current_price: float | None = None
+    opened_at: datetime | None = None
+    strategy_id: str = "default"
+    strategy_version_id: str = "default-v1"
 
 
 @dataclass(frozen=True)

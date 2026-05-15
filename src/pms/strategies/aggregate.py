@@ -6,6 +6,7 @@ from typing import TypeVar
 
 from .projections import (
     ActiveStrategy,
+    CalibrationSpec,
     EvalSpec,
     ForecasterSpec,
     MarketSelectionSpec,
@@ -24,6 +25,7 @@ class Strategy:
         "_eval_spec",
         "_forecaster",
         "_market_selection",
+        "_calibration",
     )
 
     def __init__(
@@ -34,6 +36,7 @@ class Strategy:
         eval_spec: EvalSpec,
         forecaster: ForecasterSpec,
         market_selection: MarketSelectionSpec,
+        calibration: CalibrationSpec | None = None,
     ) -> None:
         self._config = self._require_projection("config", config)
         self._risk = self._require_projection("risk", risk)
@@ -42,6 +45,11 @@ class Strategy:
         self._market_selection = self._require_projection(
             "market_selection",
             market_selection,
+        )
+        self._calibration = (
+            CalibrationSpec()
+            if calibration is None
+            else self._require_projection("calibration", calibration)
         )
 
     @staticmethod
@@ -73,6 +81,10 @@ class Strategy:
     def market_selection(self) -> MarketSelectionSpec:
         return self._market_selection
 
+    @property
+    def calibration(self) -> CalibrationSpec:
+        return self._calibration
+
     def snapshot(
         self,
     ) -> tuple[
@@ -81,6 +93,7 @@ class Strategy:
         EvalSpec,
         ForecasterSpec,
         MarketSelectionSpec,
+        CalibrationSpec,
     ]:
         return (
             self._config,
@@ -88,6 +101,7 @@ class Strategy:
             self._eval_spec,
             self._forecaster,
             self._market_selection,
+            self._calibration,
         )
 
     def to_active(self, *, strategy_version_id: str) -> ActiveStrategy:
@@ -99,6 +113,7 @@ class Strategy:
             eval_spec=self.eval_spec,
             forecaster=self.forecaster,
             market_selection=self.market_selection,
+            calibration=self.calibration,
         )
 
     def __eq__(self, other: object) -> bool:

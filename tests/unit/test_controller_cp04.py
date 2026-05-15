@@ -56,15 +56,15 @@ def _records(count: int) -> list[EvalRecord]:
     ]
 
 
-def test_rules_forecaster_detects_price_spread_opportunity() -> None:
+def test_rules_forecaster_requires_rule_composition_for_price_spread_opportunity() -> None:
     result = RulesForecaster(min_edge=0.05).predict(
         _signal(yes_price=0.4, external_signal={"fair_value": 0.55})
     )
 
-    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
+    assert result is None
 
 
-def test_rules_forecaster_detects_subset_pricing_violation() -> None:
+def test_rules_forecaster_requires_rule_composition_for_subset_pricing_violation() -> None:
     result = RulesForecaster().predict(
         _signal(
             external_signal={
@@ -76,29 +76,27 @@ def test_rules_forecaster_detects_subset_pricing_violation() -> None:
         )
     )
 
-    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
+    assert result is None
 
 
-def test_rules_forecaster_returns_neutral_without_opportunity() -> None:
-    assert RulesForecaster(min_edge=0.1).predict(_signal(yes_price=0.5)) == pytest.approx(
-        (0.5, 0.0, "pre-s5-neutral")
-    )
+def test_rules_forecaster_abstains_without_rule_composition() -> None:
+    assert RulesForecaster(min_edge=0.1).predict(_signal(yes_price=0.5)) is None
 
 
-def test_statistical_forecaster_uses_uniform_prior_without_metaculus() -> None:
+def test_statistical_forecaster_requires_factor_composition_without_metaculus() -> None:
     result = StatisticalForecaster().predict(
         _signal(external_signal={"yes_count": 3, "no_count": 1})
     )
 
-    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
+    assert result is None
 
 
-def test_statistical_forecaster_uses_metaculus_prior() -> None:
+def test_statistical_forecaster_requires_factor_composition_with_metaculus() -> None:
     result = StatisticalForecaster(prior_strength=10.0).predict(
         _signal(external_signal={"metaculus_prob": 0.7, "yes_count": 3, "no_count": 7})
     )
 
-    assert result == pytest.approx((0.4, 0.0, "pre-s5-neutral"))
+    assert result is None
 
 
 def test_statistical_forecaster_rejects_non_positive_prior_strength() -> None:

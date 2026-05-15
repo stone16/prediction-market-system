@@ -17,7 +17,9 @@ import json
 from typing import Any
 
 from .projections import (
+    CalibrationSpec,
     EvalSpec,
+    FactorCompositionStep,
     ForecasterSpec,
     MarketSelectionSpec,
     RiskParams,
@@ -38,13 +40,21 @@ def _payload_value(value: Any) -> Any:
     # back into the original projection tuple.
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, FactorCompositionStep):
+        payload = asdict(value, dict_factory=_sorted_dict_factory)
+        if payload.get("enabled") is True:
+            del payload["enabled"]
+        return _payload_value(payload)
     if is_dataclass(value) and not isinstance(value, type):
         return _payload_value(asdict(value, dict_factory=_sorted_dict_factory))
     if isinstance(value, dict):
-        return {
+        payload = {
             key: _payload_value(value[key])
             for key in sorted(value)
         }
+        if _is_factor_composition_step_record(payload) and payload.get("enabled") is True:
+            del payload["enabled"]
+        return payload
     if isinstance(value, tuple):
         return [_payload_value(item) for item in value]
     if isinstance(value, list):
@@ -102,14 +112,18 @@ def _strategy_payload(
     eval_spec: EvalSpec,
     forecaster: ForecasterSpec,
     market_selection: MarketSelectionSpec,
+    calibration: CalibrationSpec | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "config": _payload_value(config),
         "risk": _payload_value(risk),
         "eval_spec": _payload_value(eval_spec),
         "forecaster": _payload_value(forecaster),
         "market_selection": _payload_value(market_selection),
     }
+    if calibration is not None and calibration != CalibrationSpec():
+        payload["calibration"] = _payload_value(calibration)
+    return payload
 
 
 def serialize_strategy_config_json(
@@ -118,6 +132,7 @@ def serialize_strategy_config_json(
     eval_spec: EvalSpec,
     forecaster: ForecasterSpec,
     market_selection: MarketSelectionSpec,
+    calibration: CalibrationSpec | None = None,
 ) -> str:
     return json.dumps(
         _strategy_payload(
@@ -126,6 +141,7 @@ def serialize_strategy_config_json(
             eval_spec=eval_spec,
             forecaster=forecaster,
             market_selection=market_selection,
+            calibration=calibration,
         ),
         sort_keys=True,
         separators=(",", ":"),
@@ -139,6 +155,7 @@ def compute_strategy_version_id(
     eval_spec: EvalSpec,
     forecaster: ForecasterSpec,
     market_selection: MarketSelectionSpec,
+    calibration: CalibrationSpec | None = None,
 ) -> str:
     canonical_payload = _normalize_value(
         _strategy_payload(
@@ -147,6 +164,7 @@ def compute_strategy_version_id(
             eval_spec=eval_spec,
             forecaster=forecaster,
             market_selection=market_selection,
+            calibration=calibration,
         )
     )
     canonical_json = json.dumps(
