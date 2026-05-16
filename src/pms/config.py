@@ -151,6 +151,11 @@ class SensorSettings(BaseModel):
     poll_interval_s: float = 5.0
     max_reconnect_interval_s: float = 60.0
     max_subscription_asset_ids: int | None = Field(default=100, ge=1)
+    discovery_http_timeout_s: float = Field(default=10.0, gt=0.0)
+    discovery_http_pool_timeout_s: float = Field(default=10.0, gt=0.0)
+    discovery_http_max_connections: int = Field(default=10, ge=1)
+    discovery_http_max_keepalive_connections: int = Field(default=5, ge=0)
+    discovery_http_keepalive_expiry_s: float = Field(default=120.0, ge=0.0)
     persist_discovery_price_snapshots: bool = False
     persist_price_changes: bool = False
 

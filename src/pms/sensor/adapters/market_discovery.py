@@ -19,6 +19,7 @@ from pms.core.models import Venue as VenueValue
 from pms.core.venue_support import kalshi_stub_error, normalize_venue
 from pms.metrics import (
     MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC,
+    SENSOR_DISCOVERY_POOL_TIMEOUTS_TOTAL_METRIC,
     SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC,
     SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC,
     increment_metric,
@@ -64,6 +65,15 @@ class MarketDiscoverySensor:
             except httpx.HTTPStatusError as error:
                 if error.response.status_code != 429:
                     logger.warning("discovery poll HTTP error: %s", error)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)
+            except httpx.PoolTimeout as error:
+                increment_metric(SENSOR_DISCOVERY_POOL_TIMEOUTS_TOTAL_METRIC)
+                logger.warning(
+                    "discovery poll transient error (%s): %s",
+                    type(error).__name__,
+                    str(error) or "(no message)",
+                )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)
             except (

@@ -17,6 +17,7 @@ from pms.config import PMSSettings
 from pms.core.enums import RunMode
 from pms.metrics import (
     MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC,
+    SENSOR_DISCOVERY_POOL_TIMEOUTS_TOTAL_METRIC,
     SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC,
     SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC,
     get_metric,
@@ -649,6 +650,68 @@ async def test_market_discovery_sensor_recovers_from_transient_transport_errors(
 
     assert attempts >= 2
     assert sleeps[0] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_counts_pool_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_metric(SENSOR_DISCOVERY_POOL_TIMEOUTS_TOTAL_METRIC, 0.0)
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    attempts = 0
+    wrote_market = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.PoolTimeout("pool exhausted")
+        return httpx.Response(
+            200,
+            json=[
+                _gamma_market(
+                    "pm-live-after-pool-timeout",
+                    token_ids=["yes-token", "no-token"],
+                    outcomes=["Yes", "No"],
+                )
+            ],
+        )
+
+    async def fake_sleep(seconds: float) -> None:
+        del seconds
+        await real_sleep(0)
+
+    async def tracked_write_market(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        wrote_market.set()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    store_mock.write_market_mock.side_effect = tracked_write_market
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    async def consume() -> None:
+        async for _ in cast(AsyncGenerator[object, None], sensor.__aiter__()):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(wrote_market.wait(), timeout=2.0)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        await sensor.aclose()
+
+    assert get_metric(SENSOR_DISCOVERY_POOL_TIMEOUTS_TOTAL_METRIC) == 1.0
 
 
 @pytest.mark.asyncio

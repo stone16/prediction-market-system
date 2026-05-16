@@ -23,6 +23,7 @@ from pms.core.enums import RunMode
 from pms.core.models import (
     MarketSignal,
     Portfolio,
+    Position,
     ReconciliationReport,
     VenueAccountSnapshot,
     VenueCredentials,
@@ -765,6 +766,65 @@ async def test_refresh_subscription_caps_asset_ids() -> None:
     await runner._refresh_subscription_assets_locked()  # noqa: SLF001
 
     assert events == [["asset-a", "asset-b"]]
+
+
+@pytest.mark.asyncio
+async def test_refresh_subscription_protects_open_position_tokens_under_cap() -> None:
+    events: list[list[str]] = []
+
+    @dataclass
+    class RecordingSubscriptionController:
+        async def update(self, asset_ids: list[str]) -> bool:
+            events.append(list(asset_ids))
+            return True
+
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.LIVE,
+            secret_source="fly",
+            live_trading_enabled=True,
+            auto_migrate_default_v2=False,
+            database=DatabaseSettings(
+                dsn="postgresql://localhost/pms_test_runner",
+                pool_min_size=2,
+                pool_max_size=10,
+            ),
+            sensor=SensorSettings(max_subscription_asset_ids=2),
+            controller=ControllerSettings(time_in_force="IOC"),
+            polymarket=_live_polymarket_settings(),
+        ),
+        historical_data_path=FIXTURE_PATH,
+        portfolio=Portfolio(
+            total_usdc=1000.0,
+            free_usdc=995.0,
+            locked_usdc=5.0,
+            open_positions=[
+                Position(
+                    market_id="held-market",
+                    token_id="held-token",
+                    venue="polymarket",
+                    side="BUY",
+                    shares_held=10.0,
+                    avg_entry_price=0.5,
+                    unrealized_pnl=0.0,
+                    locked_usdc=5.0,
+                    strategy_id="alpha",
+                    strategy_version_id="alpha-v1",
+                )
+            ],
+        ),
+    )
+    runner._subscription_controller = cast(Any, RecordingSubscriptionController())  # noqa: SLF001
+    runner._controller_runtimes = {  # noqa: SLF001
+        "alpha": cast(
+            Any,
+            SimpleNamespace(asset_ids=frozenset({"asset-c", "asset-a", "asset-b"})),
+        )
+    }
+
+    await runner._refresh_subscription_assets_locked()  # noqa: SLF001
+
+    assert events == [["held-token", "asset-a"]]
 
 
 @pytest.mark.asyncio

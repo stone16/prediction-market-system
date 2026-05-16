@@ -863,9 +863,7 @@ class Runner:
         return (
             MarketDiscoverySensor(
                 store=PostgresMarketDataStore(self._pg_pool),
-                http_client=httpx.AsyncClient(
-                    base_url="https://gamma-api.polymarket.com"
-                ),
+                http_client=_build_discovery_http_client(self.config),
                 poll_interval_s=self.config.sensor.poll_interval_s,
                 persist_price_snapshots=(
                     self.config.sensor.persist_discovery_price_snapshots
@@ -1159,6 +1157,10 @@ class Runner:
                             signal,
                             portfolio=self.portfolio,
                         )
+                    if decision is not None and self._would_exceed_position_capacity(
+                        decision
+                    ):
+                        decision = None
                     if decision is not None:
                         created_at = _decision_created_at(signal, opportunity)
                         expires_at = _decision_expires_at(
@@ -1492,6 +1494,21 @@ class Runner:
             signal,
             external_signal={**signal.external_signal, **token_metadata},
         )
+
+    def _would_exceed_position_capacity(self, decision: TradeDecision) -> bool:
+        max_positions = self.config.risk.max_open_positions
+        if max_positions is None:
+            return False
+        portfolio = self.portfolio
+        if len(portfolio.open_positions) < max_positions:
+            return False
+        opens_new_slot = not any(
+            position.market_id == decision.market_id
+            and position.token_id == decision.token_id
+            and position.venue == decision.venue
+            for position in portfolio.open_positions
+        )
+        return opens_new_slot
 
     def _release_position_exit_key(self, decision_id: str) -> None:
         key = self._position_exit_keys_by_decision.pop(decision_id, None)
@@ -1858,7 +1875,11 @@ class Runner:
         async with self._reselection_lock:
             result = await selector.select()
             await subscription_controller.update(
-                _cap_subscription_asset_ids(list(result.asset_ids), self.config)
+                _cap_subscription_asset_ids(
+                    list(result.asset_ids),
+                    self.config,
+                    protected_asset_ids=_open_position_token_ids(self.portfolio),
+                )
             )
 
     async def _periodic_reselection_loop(self) -> None:
@@ -2060,7 +2081,11 @@ class Runner:
         )
         async with self._reselection_lock:
             await subscription_controller.update(
-                _cap_subscription_asset_ids(merged_asset_ids, self.config)
+                _cap_subscription_asset_ids(
+                    merged_asset_ids,
+                    self.config,
+                    protected_asset_ids=_open_position_token_ids(self.portfolio),
+                )
             )
 
     async def _maybe_inject_controller_release_cancel(
@@ -2501,16 +2526,55 @@ def _operational_default_market_selection(
 def _cap_subscription_asset_ids(
     asset_ids: list[str],
     settings: PMSSettings,
+    *,
+    protected_asset_ids: Sequence[str] = (),
 ) -> list[str]:
+    protected = list(dict.fromkeys(protected_asset_ids))
+    protected_set = set(protected)
+    selected = [
+        asset_id
+        for asset_id in dict.fromkeys(asset_ids)
+        if asset_id not in protected_set
+    ]
+    merged_asset_ids = [*protected, *selected]
     limit = settings.sensor.max_subscription_asset_ids
-    if limit is None or len(asset_ids) <= limit:
-        return asset_ids
+    if limit is None or len(merged_asset_ids) <= limit:
+        return merged_asset_ids
     logger.warning(
-        "subscription asset set capped at %d of %d selected assets",
+        "subscription asset set capped at %d of %d selected assets; "
+        "%d open-position assets protected",
         limit,
-        len(asset_ids),
+        len(merged_asset_ids),
+        len(protected),
     )
-    return asset_ids[:limit]
+    return merged_asset_ids[:limit]
+
+
+def _open_position_token_ids(portfolio: Portfolio) -> list[str]:
+    return list(
+        dict.fromkeys(
+            position.token_id
+            for position in portfolio.open_positions
+            if position.token_id is not None
+        )
+    )
+
+
+def _build_discovery_http_client(settings: PMSSettings) -> httpx.AsyncClient:
+    sensor = settings.sensor
+    return httpx.AsyncClient(
+        base_url="https://gamma-api.polymarket.com",
+        timeout=httpx.Timeout(
+            timeout=sensor.discovery_http_timeout_s,
+            pool=sensor.discovery_http_pool_timeout_s,
+        ),
+        limits=httpx.Limits(
+            max_connections=sensor.discovery_http_max_connections,
+            max_keepalive_connections=sensor.discovery_http_max_keepalive_connections,
+            keepalive_expiry=sensor.discovery_http_keepalive_expiry_s,
+        ),
+        trust_env=False,
+    )
 
 
 def _fill_from_order(
