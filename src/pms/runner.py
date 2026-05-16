@@ -2552,6 +2552,7 @@ def _build_discovery_http_client(settings: PMSSettings) -> httpx.AsyncClient:
         limits=httpx.Limits(
             max_connections=sensor.discovery_http_max_connections,
             max_keepalive_connections=sensor.discovery_http_max_keepalive_connections,
+            keepalive_expiry=sensor.discovery_http_keepalive_expiry_s,
         ),
         trust_env=False,
     )
