@@ -1157,6 +1157,10 @@ class Runner:
                             signal,
                             portfolio=self.portfolio,
                         )
+                    if decision is not None and self._would_exceed_position_capacity(
+                        decision
+                    ):
+                        decision = None
                     if decision is not None:
                         created_at = _decision_created_at(signal, opportunity)
                         expires_at = _decision_expires_at(
@@ -1490,6 +1494,21 @@ class Runner:
             signal,
             external_signal={**signal.external_signal, **token_metadata},
         )
+
+    def _would_exceed_position_capacity(self, decision: TradeDecision) -> bool:
+        max_positions = self.config.risk.max_open_positions
+        if max_positions is None:
+            return False
+        portfolio = self.portfolio
+        if len(portfolio.open_positions) < max_positions:
+            return False
+        opens_new_slot = not any(
+            position.market_id == decision.market_id
+            and position.token_id == decision.token_id
+            and position.venue == decision.venue
+            for position in portfolio.open_positions
+        )
+        return opens_new_slot
 
     def _release_position_exit_key(self, decision_id: str) -> None:
         key = self._position_exit_keys_by_decision.pop(decision_id, None)
