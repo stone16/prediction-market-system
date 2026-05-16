@@ -52,6 +52,15 @@ def test_live_soak_config_has_no_dead_top_level_calibration_section() -> None:
     assert settings.position_exit.max_holding_days == 7
 
 
+def test_live_soak_config_tunes_gamma_discovery_http_pool() -> None:
+    settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
+
+    assert settings.sensor.discovery_http_timeout_s == pytest.approx(10.0)
+    assert settings.sensor.discovery_http_pool_timeout_s == pytest.approx(15.0)
+    assert settings.sensor.discovery_http_max_connections == 50
+    assert settings.sensor.discovery_http_max_keepalive_connections == 20
+
+
 def test_live_soak_config_keeps_credentials_env_only() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 

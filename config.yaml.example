@@ -30,6 +30,10 @@ sensor:
   poll_interval_s: 5.0
   max_reconnect_interval_s: 60.0
   max_subscription_asset_ids: 100
+  discovery_http_timeout_s: 10.0
+  discovery_http_pool_timeout_s: 15.0
+  discovery_http_max_connections: 50
+  discovery_http_max_keepalive_connections: 20
   # Keep high-volume scan/delta history out of Postgres by default. Enable
   # these only for a bounded research-capture window.
   persist_discovery_price_snapshots: false
