@@ -35,6 +35,9 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("closed", "boolean"),
         ("accepting_orders", "boolean"),
         ("status_updated_at", "timestamp with time zone"),
+        ("risk_group_id", "text"),
+        ("category", "text"),
+        ("event_id", "text"),
     ],
     "market_price_snapshots": [
         ("condition_id", "text"),

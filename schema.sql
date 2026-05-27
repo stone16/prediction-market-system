@@ -19,11 +19,6 @@ ALTER TABLE markets
     ADD COLUMN IF NOT EXISTS volume_24h DOUBLE PRECISION;
 
 ALTER TABLE markets
-    ADD COLUMN IF NOT EXISTS risk_group_id TEXT,
-    ADD COLUMN IF NOT EXISTS category TEXT,
-    ADD COLUMN IF NOT EXISTS event_id TEXT;
-
-ALTER TABLE markets
     ADD COLUMN IF NOT EXISTS yes_price NUMERIC(6,4),
     ADD COLUMN IF NOT EXISTS no_price NUMERIC(6,4),
     ADD COLUMN IF NOT EXISTS best_bid NUMERIC(6,4),
@@ -36,6 +31,13 @@ ALTER TABLE markets
     ADD COLUMN IF NOT EXISTS closed BOOLEAN,
     ADD COLUMN IF NOT EXISTS accepting_orders BOOLEAN,
     ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ;
+
+-- Risk metadata (migration 0021) is applied last so the fresh-apply column
+-- order in this canonical schema matches a database migrated to head.
+ALTER TABLE markets
+    ADD COLUMN IF NOT EXISTS risk_group_id TEXT,
+    ADD COLUMN IF NOT EXISTS category TEXT,
+    ADD COLUMN IF NOT EXISTS event_id TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_markets_price_updated_at
     ON markets (price_updated_at DESC)
