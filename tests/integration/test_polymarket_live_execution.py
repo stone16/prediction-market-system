@@ -82,6 +82,10 @@ class AllowQuoteProvider:
 
 @dataclass
 class MockPolymarketClient:
+    # Signals validate_live_mode_ready that this injected client does not
+    # drive the real Polymarket SDK, so the py_clob_client_v2 runtime
+    # dependency is not required to exercise the order/fill persistence path.
+    requires_live_mode: bool = False
     submitted: list[object] = field(default_factory=list)
 
     async def submit_order(

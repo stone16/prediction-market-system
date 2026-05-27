@@ -569,7 +569,17 @@ def validate_live_mode_ready(
             allow_pending_operator_approval=allow_pending_operator_approval,
         )
         _require_distinct_live_launch_control_paths(settings)
-        _require_live_polymarket_runtime_dependency()
+        if require_live_mode:
+            # The Polymarket SDK is a *runtime* dependency of the real
+            # PolymarketSDKClient only. Callers that inject a non-SDK client
+            # (test doubles, replay harnesses) pass require_live_mode=False to
+            # signal the real venue SDK path will not execute — requiring
+            # py_clob_client_v2 then would be wrong. Every production caller
+            # (runner.start, live preflight, live CLI, /config) uses the
+            # default require_live_mode=True, and live preflight independently
+            # re-checks the import via find_spec, so the real-money path stays
+            # fully gated.
+            _require_live_polymarket_runtime_dependency()
         _require_live_llm_runtime_dependency(settings)
     if settings.mode == RunMode.LIVE and not settings.live_account_reconciliation_required:
         msg = (

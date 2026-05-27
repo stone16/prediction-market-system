@@ -1170,6 +1170,34 @@ def test_live_mode_rejects_missing_polymarket_live_sdk(
     assert "uv sync --extra live" in message
 
 
+def test_live_mode_skips_polymarket_sdk_check_for_injected_non_sdk_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # require_live_mode=False is the signal an injected client (a test double
+    # or replay harness) does not drive the real Polymarket SDK, so the
+    # py_clob_client_v2 runtime dependency must not be required. This keeps the
+    # actuator's mock-client integration paths runnable while every production
+    # caller (default require_live_mode=True) stays gated by the assertion
+    # above and by live preflight's independent find_spec check.
+    def fake_find_spec(
+        name: str,
+        package: str | None = None,
+    ) -> importlib.machinery.ModuleSpec | None:
+        del package
+        if name == "py_clob_client_v2":
+            return None
+        return importlib.machinery.ModuleSpec(name, loader=None)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+    credentials = validate_live_mode_ready(
+        _live_settings(),
+        require_live_mode=False,
+    )
+
+    assert credentials.api_key == "api-key"
+
+
 def test_live_mode_rejects_enabled_llm_when_provider_sdk_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
