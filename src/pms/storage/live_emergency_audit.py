@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pms.core.models import OrderState, TradeDecision
+
+
+EmergencyRestartMode = Literal["paper", "backtest"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,14 +28,115 @@ class LiveEmergencyAuditWriter:
         decision: TradeDecision,
         order_state: OrderState | None,
         error: BaseException,
+        error_detail: str | None = None,
     ) -> None:
         record = _audit_record(
             phase=phase,
             decision=decision,
             order_state=order_state,
             error=error,
+            error_detail=error_detail,
         )
         await asyncio.to_thread(_append_jsonl, self.path, record)
+
+    async def append_manual_stop(
+        self,
+        *,
+        stopped_by: str,
+        reason: str,
+        runner_stopped: bool,
+        credentials_rotated: bool,
+        runtime_secrets_removed: bool,
+        venue_open_orders_reviewed: bool,
+        database_reconciled: bool,
+        restart_mode: EmergencyRestartMode,
+    ) -> None:
+        record = _manual_stop_record(
+            stopped_by=stopped_by,
+            reason=reason,
+            runner_stopped=runner_stopped,
+            credentials_rotated=credentials_rotated,
+            runtime_secrets_removed=runtime_secrets_removed,
+            venue_open_orders_reviewed=venue_open_orders_reviewed,
+            database_reconciled=database_reconciled,
+            restart_mode=restart_mode,
+        )
+        await asyncio.to_thread(_append_jsonl, self.path, record)
+
+
+def _manual_stop_record(
+    *,
+    stopped_by: str,
+    reason: str,
+    runner_stopped: bool,
+    credentials_rotated: bool,
+    runtime_secrets_removed: bool,
+    venue_open_orders_reviewed: bool,
+    database_reconciled: bool,
+    restart_mode: EmergencyRestartMode,
+) -> dict[str, Any]:
+    stopped_by = _require_operator_id(stopped_by, "stopped_by")
+    reason = _require_operator_text(reason, "reason")
+    _require_true(runner_stopped, "runner_stopped")
+    _require_true(credentials_rotated, "credentials_rotated")
+    _require_true(runtime_secrets_removed, "runtime_secrets_removed")
+    _require_true(venue_open_orders_reviewed, "venue_open_orders_reviewed")
+    _require_true(database_reconciled, "database_reconciled")
+    if restart_mode not in ("paper", "backtest"):
+        msg = "restart_mode must be paper or backtest"
+        raise ValueError(msg)
+    return {
+        "timestamp": datetime.now(tz=UTC).isoformat(),
+        "phase": "manual_emergency_stop",
+        "event": "manual_emergency_stop",
+        "stopped_by": stopped_by,
+        "reason": reason,
+        "runner_stopped": runner_stopped,
+        "credentials_rotated": credentials_rotated,
+        "runtime_secrets_removed": runtime_secrets_removed,
+        "venue_open_orders_reviewed": venue_open_orders_reviewed,
+        "database_reconciled": database_reconciled,
+        "restart_mode": restart_mode,
+    }
+
+
+def _require_operator_text(value: str, field_name: str) -> str:
+    normalized = value.strip()
+    if normalized == "":
+        msg = f"{field_name} is required"
+        raise ValueError(msg)
+    if _looks_like_placeholder(normalized):
+        msg = f"{field_name} must not contain a placeholder"
+        raise ValueError(msg)
+    return normalized
+
+
+def _require_operator_id(value: str, field_name: str) -> str:
+    normalized = _require_operator_text(value, field_name)
+    if any(character in normalized for character in ("|", "\n", "\r")):
+        msg = f"{field_name} must not contain delimiters or newlines"
+        raise ValueError(msg)
+    return normalized
+
+
+def _require_true(value: bool, field_name: str) -> None:
+    if value is True:
+        return
+    msg = f"{field_name} must be confirmed"
+    raise ValueError(msg)
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    lowered = value.strip().lower()
+    return (
+        lowered == ""
+        or "fill_in" in lowered
+        or "placeholder" in lowered
+        or "todo" in lowered
+        or "replace" in lowered
+        or lowered.startswith("<")
+        or lowered.endswith(">")
+    )
 
 
 def _audit_record(
@@ -38,6 +145,7 @@ def _audit_record(
     decision: TradeDecision,
     order_state: OrderState | None,
     error: BaseException,
+    error_detail: str | None = None,
 ) -> dict[str, Any]:
     return {
         "timestamp": datetime.now(tz=UTC).isoformat(),
@@ -67,18 +175,122 @@ def _audit_record(
             None if order_state is None else order_state.remaining_notional_usdc
         ),
         "error_type": type(error).__name__,
-        "error": str(error),
+        "error": str(error) if error_detail is None else error_detail,
     }
 
 
 def _append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Single `write()` so the underlying `O_APPEND` write(2) is atomic
-    # with respect to other concurrent writers on the same path
-    # (e.g. `JsonlFirstOrderAuditWriter` sharing the same audit log).
-    # Splitting the JSON body and the trailing newline into two
-    # `file.write` calls risks two non-atomic write(2) flushes, which
-    # can interleave with another writer's record under contention.
-    line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-    with path.open("a", encoding="utf-8") as file:
-        file.write(line)
+    _prepare_private_parent_directory(path)
+    _require_strict_json_value(record, path="$")
+    line = (
+        json.dumps(
+            record,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    _append_line_no_follow(path, line)
+
+
+def _require_strict_json_value(value: object, *, path: str) -> None:
+    if value is None or isinstance(value, (bool, int, str)):
+        return
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return
+        msg = f"{path} must be finite for emergency audit JSONL"
+        raise ValueError(msg)
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            key_label = str(key)
+            child_path = key_label if path == "$" else f"{path}.{key_label}"
+            _require_strict_json_value(item, path=child_path)
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _require_strict_json_value(item, path=f"{path}[{index}]")
+        return
+    msg = f"{path} is not JSON-serializable for emergency audit JSONL"
+    raise TypeError(msg)
+
+
+def _append_line_no_follow(path: Path, line: str) -> None:
+    _require_regular_file_or_absent(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        _require_open_regular_single_link_file(fd, path)
+        os.fchmod(fd, 0o600)
+        _write_all(fd, line.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    _fsync_parent_directory(path)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        written = os.write(fd, data[offset:])
+        if written <= 0:
+            raise OSError("emergency audit write made no progress")
+        offset += written
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path.parent, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        return
+    finally:
+        os.close(fd)
+
+
+def _require_open_regular_single_link_file(fd: int, path: Path) -> None:
+    path_stat = os.fstat(fd)
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise OSError(f"emergency audit path is not a regular file: {path}")
+    if path_stat.st_nlink != 1:
+        raise OSError(f"emergency audit path is not a single-link file: {path}")
+
+
+def _prepare_private_parent_directory(path: Path) -> None:
+    parent = path.parent
+    try:
+        parent_stat = parent.lstat()
+    except FileNotFoundError:
+        parent.mkdir(mode=0o700, parents=True, exist_ok=False)
+        os.chmod(parent, 0o700)
+        return
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise OSError(f"emergency audit parent path is not a directory: {parent}")
+    mode = stat.S_IMODE(parent_stat.st_mode)
+    if mode & 0o077:
+        raise OSError(
+            f"emergency audit parent directory {parent} is too permissive; "
+            f"run `chmod 700 {parent}`."
+        )
+    if not mode & stat.S_IWUSR:
+        raise OSError(
+            f"emergency audit parent directory {parent} is not owner-writable; "
+            f"run `chmod 700 {parent}`."
+        )
+
+
+def _require_regular_file_or_absent(path: Path) -> None:
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        return
+    mode = path_stat.st_mode
+    if not stat.S_ISREG(mode):
+        raise OSError(f"emergency audit path is not a regular file: {path}")
+    if path_stat.st_nlink != 1:
+        raise OSError(f"emergency audit path is not a single-link file: {path}")

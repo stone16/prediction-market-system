@@ -4,9 +4,26 @@ export type StatusResponse = {
   runner_started_at: string | null;
   running?: boolean;
   sensors: Array<{ name: string; status: string; last_signal_at: string | null }>;
-  controller: { decisions_total: number };
-  actuator: { fills_total: number; mode: string };
-  evaluator: { eval_records_total: number; brier_overall: number | null };
+  controller: {
+    decisions_total: number;
+    diagnostics_total?: number;
+    diagnostic_counts?: Record<string, number>;
+  };
+  actuator: {
+    fills_total: number;
+    mode: string;
+    halt_recovery_cycles_7d?: number;
+  };
+  evaluator: {
+    eval_records_total: number;
+    brier_overall: number | null;
+    baseline_brier_overall?: number | null;
+    brier_improvement_overall?: number | null;
+    brier_14d?: number | null;
+    baseline_brier_14d?: number | null;
+    brier_improvement_14d?: number | null;
+  };
+  supervision?: { unresolved_feedback_total: number };
 };
 
 export type Feedback = {
@@ -74,6 +91,8 @@ export type EventLogEntry = {
 
 export type MetricsAggregate = {
   brier_overall: number | null;
+  baseline_brier_overall?: number | null;
+  brier_improvement_overall?: number | null;
   brier_by_category: Record<string, number>;
   pnl: number;
   slippage_bps: number;
@@ -90,6 +109,8 @@ export type MetricsPerStrategyRow = {
   record_count: number;
   insufficient_samples: boolean;
   brier_overall: number | null;
+  baseline_brier_overall?: number | null;
+  brier_improvement_overall?: number | null;
   pnl: number;
   fill_rate: number;
   slippage_bps: number;
@@ -202,6 +223,8 @@ export type TradeRow = {
   status: string;
   strategy_id: string;
   strategy_version_id: string;
+  fee_bps?: number | null;
+  fees?: number | null;
 };
 
 export type TradesResponse = {

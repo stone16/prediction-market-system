@@ -13,6 +13,7 @@ from pms.research.specs import (
     BacktestExecutionConfig,
     BacktestSpec,
     ExecutionModel,
+    ExecutionModelCalibrationSource,
     FillPolicy,
     RiskPolicy,
 )
@@ -54,6 +55,10 @@ def deserialize_execution_config(raw_value: object) -> BacktestExecutionConfig:
     )
 
 
+def deserialize_execution_model(raw_value: object) -> ExecutionModel:
+    return _deserialize_execution_model(raw_value)
+
+
 def serialize_backtest_spec(spec: BacktestSpec) -> dict[str, object]:
     return {
         "strategy_versions": [
@@ -77,9 +82,16 @@ def serialize_backtest_spec(spec: BacktestSpec) -> dict[str, object]:
             "latency_ms": _serialize_float(spec.execution_model.latency_ms),
             "staleness_ms": _serialize_float(spec.execution_model.staleness_ms),
             "fill_policy": spec.execution_model.fill_policy,
+            "displayed_depth_fill_ratio": _serialize_float(
+                spec.execution_model.displayed_depth_fill_ratio
+            ),
+            "adverse_selection_bps": _serialize_float(
+                spec.execution_model.adverse_selection_bps
+            ),
             "order_ttl_ms": spec.execution_model.order_ttl_ms,
             "price_invalidation_streak": spec.execution_model.price_invalidation_streak,
             "replay_window_ms": spec.execution_model.replay_window_ms,
+            "calibration_source": spec.execution_model.calibration_source,
         },
         "risk_policy": {
             "max_position_notional_usdc": _serialize_float(
@@ -160,6 +172,14 @@ def _deserialize_execution_model(raw_value: object) -> ExecutionModel:
             field_name="ExecutionModel.staleness_ms",
         ),
         fill_policy=_coerce_fill_policy(payload["fill_policy"]),
+        displayed_depth_fill_ratio=_coerce_float(
+            payload.get("displayed_depth_fill_ratio", 1.0),
+            field_name="ExecutionModel.displayed_depth_fill_ratio",
+        ),
+        adverse_selection_bps=_coerce_float(
+            payload.get("adverse_selection_bps", 0.0),
+            field_name="ExecutionModel.adverse_selection_bps",
+        ),
         order_ttl_ms=_coerce_int(
             payload.get("order_ttl_ms", 60_000),
             field_name="ExecutionModel.order_ttl_ms",
@@ -171,6 +191,9 @@ def _deserialize_execution_model(raw_value: object) -> ExecutionModel:
         replay_window_ms=_coerce_int(
             payload.get("replay_window_ms", 86_400_000),
             field_name="ExecutionModel.replay_window_ms",
+        ),
+        calibration_source=_coerce_calibration_source(
+            payload.get("calibration_source", "manual")
         ),
     )
 
@@ -236,6 +259,18 @@ def _coerce_fill_policy(raw_value: object) -> FillPolicy:
         msg = "ExecutionModel.fill_policy must decode to a supported fill policy"
         raise TypeError(msg)
     return cast(FillPolicy, str(raw_value))
+
+
+def _coerce_calibration_source(raw_value: object) -> ExecutionModelCalibrationSource:
+    if raw_value not in (
+        "manual",
+        "idealized_paper",
+        "static_live_estimate",
+        "telemetry_calibrated",
+    ):
+        msg = "ExecutionModel.calibration_source must decode to a supported source"
+        raise TypeError(msg)
+    return cast(ExecutionModelCalibrationSource, str(raw_value))
 
 
 def _json_object(raw_value: object) -> dict[str, object]:

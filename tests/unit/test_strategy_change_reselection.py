@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from pydantic import SecretStr
 
 from pms.config import (
     ControllerSettings,
     DatabaseSettings,
+    DiscordSettings,
     PMSSettings,
     PolymarketSettings,
     RiskSettings,
@@ -41,6 +43,11 @@ from pms.strategies.versioning import (
     compute_strategy_version_id,
     serialize_strategy_config_json,
 )
+from tests.support.live_paths import (
+    make_live_preflight_artifact_path,
+    make_live_report_paths,
+    make_private_live_paths,
+)
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -63,21 +70,41 @@ class FakeTransaction:
 @dataclass
 class FakeConnection:
     fetchval_results: list[object] = field(default_factory=list)
+    fetchrow_results: list[dict[str, object] | None] = field(default_factory=list)
+    latest_book_snapshot_age_s: float | None = 30.0
+    latest_usable_book_snapshot_age_s: float | None = 30.0
+    missing_market_risk_metadata_count: int = 0
+    execute_results: list[str] = field(default_factory=list)
     execute_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
     fetchval_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
+    fetchrow_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
     transaction_manager: FakeTransaction = field(default_factory=FakeTransaction)
     acquire_exit_calls: int = 0
 
     async def execute(self, query: str, *args: object) -> str:
         self.execute_calls.append((query, args))
-        return "EXECUTE"
+        if self.execute_results:
+            return self.execute_results.pop(0)
+        return "UPDATE 1"
 
     async def fetchval(self, query: str, *args: object) -> object:
         self.fetchval_calls.append((query, args))
+        if "missing_market_risk_metadata" in query:
+            return self.missing_market_risk_metadata_count
+        if "usable_book_snapshots" in query:
+            return self.latest_usable_book_snapshot_age_s
+        if "book_snapshots" in query:
+            return self.latest_book_snapshot_age_s
         if not self.fetchval_results:
             msg = "fetchval called without a configured result"
             raise AssertionError(msg)
         return self.fetchval_results.pop(0)
+
+    async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+        self.fetchrow_calls.append((query, args))
+        if not self.fetchrow_results:
+            return None
+        return self.fetchrow_results.pop(0)
 
     def transaction(self) -> FakeTransaction:
         return self.transaction_manager
@@ -122,6 +149,20 @@ def _stub_live_venue_reconciler(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "pms.runner.PolymarketVenueAccountReconciler",
         MatchingVenueReconciler,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_live_active_strategy_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _accept_active_strategy_preflight(
+        settings: PMSSettings,
+        registry: object,
+    ) -> None:
+        del settings, registry
+
+    monkeypatch.setattr(
+        "pms.runner.require_live_preflight_active_strategies_artifact",
+        _accept_active_strategy_preflight,
     )
 
 
@@ -227,7 +268,14 @@ def _strategy(strategy_id: str = "default") -> Strategy:
                     threshold=None,
                 ),
             ),
-            metadata=(("owner", "system"),),
+            metadata=(
+                ("owner", "system"),
+                ("live_allowed", "true"),
+                ("alpha_source", "warehouse_flb_decile_model_v1"),
+                ("edge_model_source", "paper_soak_net_edge_model_v1"),
+                ("calibration_source", "paper_soak_eval_records_v1"),
+                ("evidence_source", "paper_soak_go_report_v1"),
+            ),
         ),
         risk=RiskParams(
             max_position_notional_usdc=100.0,
@@ -261,10 +309,43 @@ def _signal() -> MarketSignal:
 
 
 def _settings(mode: RunMode) -> PMSSettings:
-    return PMSSettings(
+    approval_path: str | None = None
+    emergency_audit_path = ".data/live-emergency-audit.jsonl"
+    audit_path = ".data/first-order-audit.jsonl"
+    if mode == RunMode.LIVE:
+        approval_path, audit_path = make_private_live_paths(
+            prefix="pms-strategy-reselect-"
+        )
+        emergency_audit_path = str(
+            Path(approval_path).parent / "live-emergency-audit.jsonl"
+        )
+        paper_report_path, rehearsal_report_path = make_live_report_paths(
+            prefix="pms-strategy-reselect-reports-"
+        )
+    else:
+        paper_report_path = None
+        rehearsal_report_path = None
+    settings = PMSSettings(
         mode=mode,
         secret_source="fly" if mode == RunMode.LIVE else None,
         live_trading_enabled=mode == RunMode.LIVE,
+        live_exit_criteria_ratified_by=(
+            "test-operator" if mode == RunMode.LIVE else None
+        ),
+        live_exit_criteria_ratified_at=(
+            datetime(2026, 5, 25, tzinfo=UTC) if mode == RunMode.LIVE else None
+        ),
+        live_compliance_reviewed_by=(
+            "test-compliance" if mode == RunMode.LIVE else None
+        ),
+        live_compliance_reviewed_at=(
+            datetime(2026, 5, 25, tzinfo=UTC) if mode == RunMode.LIVE else None
+        ),
+        live_compliance_jurisdiction="US" if mode == RunMode.LIVE else None,
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+        live_emergency_audit_path=emergency_audit_path,
+        live_first_order_audit_path=audit_path,
         auto_migrate_default_v2=False,
         database=DatabaseSettings(
             dsn="postgresql://localhost/pms_test_runner",
@@ -274,20 +355,51 @@ def _settings(mode: RunMode) -> PMSSettings:
         risk=RiskSettings(
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+            max_exposure_per_risk_group=5_000.0,
+            max_quantity_shares=500.0,
         ),
-        controller=ControllerSettings(time_in_force="IOC"),
-        polymarket=_live_polymarket_settings() if mode == RunMode.LIVE else PolymarketSettings(),
+        controller=ControllerSettings(time_in_force="IOC", quote_source="dual"),
+        discord=(
+            DiscordSettings(
+                webhook_url=SecretStr(
+                    "https://discord.example/webhooks/strategy-reselect/unit"
+                ),
+                alert_dir=str(Path(cast(str, approval_path)).parent / "discord-alerts"),
+            )
+            if mode == RunMode.LIVE
+            else DiscordSettings()
+        ),
+        polymarket=(
+            _live_polymarket_settings(approval_path)
+            if mode == RunMode.LIVE
+            else PolymarketSettings()
+        ),
     )
+    if mode == RunMode.LIVE:
+        settings.live_preflight_artifact_path = make_live_preflight_artifact_path(
+            prefix="pms-strategy-reselect-preflight-",
+            settings=settings,
+        )
+    return settings
 
 
-def _live_polymarket_settings() -> PolymarketSettings:
+def _live_polymarket_settings(approval_path: str | None = None) -> PolymarketSettings:
+    if approval_path is None:
+        approval_path, _ = make_private_live_paths(
+            prefix="pms-strategy-reselect-polymarket-"
+        )
     return PolymarketSettings(
         private_key="private-key",
         api_key="api-key",
         api_secret="api-secret",
         api_passphrase="passphrase",
         signature_type=1,
-        funder_address="0xabc",
+        funder_address="0x1111111111111111111111111111111111111111",
+        operator_approval_mode="every_order",
+        first_live_order_approval_path=approval_path,
     )
 
 
@@ -340,7 +452,17 @@ async def test_create_version_fires_callback_after_write_context_exits() -> None
 
 @pytest.mark.asyncio
 async def test_set_active_fires_callback_after_acquire_exit() -> None:
-    connection = FakeConnection()
+    strategy = _strategy()
+    strategy_version_id = compute_strategy_version_id(*strategy.snapshot())
+    connection = FakeConnection(
+        fetchrow_results=[
+            {
+                "strategy_id": "default",
+                "strategy_version_id": strategy_version_id,
+                "config_json": serialize_strategy_config_json(*strategy.snapshot()),
+            }
+        ]
+    )
     observed: dict[str, int] = {}
 
     async def on_strategy_change() -> None:
@@ -349,7 +471,7 @@ async def test_set_active_fires_callback_after_acquire_exit() -> None:
     registry = PostgresStrategyRegistry(FakePool(connection))
     registry.register_change_callback(on_strategy_change)
 
-    await registry.set_active("default", "default-v2")
+    await registry.set_active("default", strategy_version_id)
 
     assert connection.execute_calls == [
         (
@@ -357,8 +479,14 @@ async def test_set_active_fires_callback_after_acquire_exit() -> None:
         UPDATE strategies
         SET active_version_id = $2
         WHERE strategy_id = $1
+          AND EXISTS (
+              SELECT 1
+              FROM strategy_versions
+              WHERE strategy_versions.strategy_id = $1
+                AND strategy_versions.strategy_version_id = $2
+          )
         """,
-            ("default", "default-v2"),
+            ("default", strategy_version_id),
         )
     ]
     assert observed == {"acquire_exited": 1}
@@ -403,11 +531,19 @@ async def test_register_and_unregister_change_callbacks_are_idempotent() -> None
     registry.register_change_callback(first_callback)
     registry.register_change_callback(second_callback)
 
-    await registry.create_version(_strategy())
+    strategy = _strategy()
+    version = await registry.create_version(strategy)
 
     registry.unregister_change_callback(first_callback)
     registry.unregister_change_callback(first_callback)
-    await registry.set_active("default", "default-v2")
+    connection.fetchrow_results.append(
+        {
+            "strategy_id": "default",
+            "strategy_version_id": version.strategy_version_id,
+            "config_json": serialize_strategy_config_json(*strategy.snapshot()),
+        }
+    )
+    await registry.set_active("default", version.strategy_version_id)
 
     assert observed == ["first", "second", "second"]
 
@@ -587,10 +723,27 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
         lambda sink: subscription_controller,
     )
 
+    approval_path, audit_path = make_private_live_paths(
+        prefix="pms-strategy-reselect-start-"
+    )
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix="pms-strategy-reselect-start-reports-"
+    )
     settings = PMSSettings(
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        live_exit_criteria_ratified_by="test-operator",
+        live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_reviewed_by="test-compliance",
+        live_compliance_reviewed_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_jurisdiction="US",
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+        live_emergency_audit_path=str(
+            Path(approval_path).parent / "live-emergency-audit.jsonl"
+        ),
+        live_first_order_audit_path=audit_path,
         auto_migrate_default_v2=True,
         database=DatabaseSettings(
             dsn="postgresql://localhost/pms_test_runner",
@@ -600,9 +753,24 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
         risk=RiskSettings(
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+            max_exposure_per_risk_group=5_000.0,
+            max_quantity_shares=500.0,
         ),
-        controller=ControllerSettings(time_in_force="IOC"),
-        polymarket=_live_polymarket_settings(),
+        controller=ControllerSettings(time_in_force="IOC", quote_source="dual"),
+        discord=DiscordSettings(
+            webhook_url=SecretStr(
+                "https://discord.example/webhooks/strategy-reselect/start"
+            ),
+            alert_dir=str(Path(approval_path).parent / "discord-alerts"),
+        ),
+        polymarket=_live_polymarket_settings(approval_path),
+    )
+    settings.live_preflight_artifact_path = make_live_preflight_artifact_path(
+        prefix="pms-strategy-reselect-start-preflight-",
+        settings=settings,
     )
 
     runner = Runner(config=settings, historical_data_path=FIXTURE_PATH)

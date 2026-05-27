@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
-from pms.config import PMSSettings, RiskSettings
+from pms.config import PMSSettings, RiskSettings, StrategyRuntimeSettings
 from pms.core.enums import RunMode
 from pms.runner import Runner
 from pms.strategies.flb import FlbAgent, FlbController, FlbStrategyModule, LiveFlbSource
@@ -83,6 +84,10 @@ def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.PAPER,
         risk=RiskSettings(max_position_per_market=5.0),
+        strategies=StrategyRuntimeSettings(
+            flb_entry_execution_cost_bps=0.0,
+            flb_fee_rate=0.0,
+        ),
     )
 
 
@@ -185,6 +190,81 @@ async def test_runner_calls_flb_module_without_live_capital() -> None:
 
     assert runner.state.decisions == []
     assert runner._decision_queue.empty()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_runner_wires_configured_flb_calibration_model(tmp_path: Path) -> None:
+    model_path = tmp_path / "flb-calibration.csv"
+    model_path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            )
+        ),
+        encoding="utf-8",
+    )
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            risk=RiskSettings(max_position_per_market=5.0),
+            strategies=StrategyRuntimeSettings(
+                flb_calibration_path=str(model_path),
+            ),
+        ),
+    )
+    reader = _StaticFlbMarketReader(_market())
+
+    results = await runner.run_flb_strategy_once(
+        strategy_id="h1_flb",
+        strategy_version_id="h1-flb-v1",
+        market_ids=("market-flb-1",),
+        as_of=NOW,
+        market_reader=reader,
+    )
+
+    assert len(results) == 1
+    intent = results[0].intents[0]
+    assert isinstance(intent, TradeIntent)
+    assert intent.expected_price == pytest.approx(0.99)
+
+
+@pytest.mark.asyncio
+async def test_runner_wires_configured_flb_entry_costs(tmp_path: Path) -> None:
+    model_path = tmp_path / "flb-calibration.csv"
+    model_path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                "longshot_yes_overpriced_buy_no,0.985,150,warehouse-flb-v1",
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            )
+        ),
+        encoding="utf-8",
+    )
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            risk=RiskSettings(max_position_per_market=5.0),
+            strategies=StrategyRuntimeSettings(
+                flb_calibration_path=str(model_path),
+                flb_entry_execution_cost_bps=50.0,
+                flb_fee_rate=0.04,
+            ),
+        ),
+    )
+    reader = _StaticFlbMarketReader(_market())
+
+    results = await runner.run_flb_strategy_once(
+        strategy_id="h1_flb",
+        strategy_version_id="h1-flb-v1",
+        market_ids=("market-flb-1",),
+        as_of=NOW,
+        market_reader=reader,
+    )
+
+    assert results == ()
 
 
 def test_runner_flb_module_requires_explicit_markets_without_pg_pool() -> None:

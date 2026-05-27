@@ -85,6 +85,7 @@ def _coerce_trigger_kind(value: str) -> HaltTriggerKind:
         "order_without_fill",
         "rate_limit_exceeded",
         "drawdown_circuit_breaker",
+        "daily_loss_limit",
     }
     if value not in allowed:
         return "none"

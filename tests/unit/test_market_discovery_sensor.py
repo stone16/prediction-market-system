@@ -125,6 +125,19 @@ def test_gamma_row_to_market_extracts_all_price_fields() -> None:
     assert market.price_updated_at == fetched_at
 
 
+def test_gamma_row_to_market_derives_risk_group_metadata() -> None:
+    fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+    row = _gamma_market("pm-election-risk")
+    row["eventId"] = "2028-us-presidential-election"
+    row["category"] = "Politics"
+
+    market = _gamma_market_to_market(row, fetched_at)
+
+    assert market.event_id == "2028-us-presidential-election"
+    assert market.category == "Politics"
+    assert market.risk_group_id == "event:2028-us-presidential-election"
+
+
 def test_gamma_row_missing_outcome_prices_falls_back_to_none() -> None:
     fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
     market = _gamma_market_to_market(

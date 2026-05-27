@@ -107,6 +107,7 @@ def _fill_record() -> FillRecord:
         anomaly_flags=["checked"],
         strategy_id="default",
         strategy_version_id="default-v2",
+        risk_group_id="event:unit-cp10",
     )
 
 
@@ -124,6 +125,7 @@ def _position_fill_row(
     current_price: float | None = 0.31,
     mark_source: str | None = "clob",
     mark_age_seconds: float | None = 12.5,
+    risk_group_id: str | None = None,
 ) -> dict[str, object]:
     return {
         "fill_id": fill_id,
@@ -136,6 +138,7 @@ def _position_fill_row(
         "token_id": token_id,
         "venue": "polymarket",
         "side": side,
+        "risk_group_id": risk_group_id,
         "fill_price": fill_price,
         "current_price": current_price,
         "mark_source": mark_source,
@@ -211,6 +214,8 @@ async def test_fill_store_insert_wraps_shell_and_payload_writes_in_transaction()
 
     assert connection.transaction_entries == 1
     assert connection.execute_flags == [False, True, True]
+    payload = str(connection.execute_calls[2][1][1])
+    assert '"risk_group_id": "event:unit-cp10"' in payload
 
 
 @pytest.mark.real_fill_store
@@ -312,6 +317,7 @@ async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
             side="yes",
             fill_price=0.25,
             fill_quantity=400.0,
+            risk_group_id="event:unit-cp10",
         )
     ]
     store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
@@ -334,6 +340,7 @@ async def test_fill_store_read_positions_maps_aggregated_rows() -> None:
             opened_at=datetime(2026, 4, 21, 10, 0, tzinfo=UTC),
             strategy_id="default",
             strategy_version_id="default-v2",
+            risk_group_id="event:unit-cp10",
         )
     ]
     assert "ORDER BY" in connection.fetch_calls[0][0]
@@ -404,6 +411,8 @@ async def test_fill_store_read_trades_maps_joined_market_rows_and_skips_missing_
                 "fill_price": 0.25,
                 "executed_at": "2026-04-21T10:00:00+00:00",
                 "status": "filled",
+                "fee_bps": 10,
+                "fees": 0.1,
             },
         },
         {
@@ -442,6 +451,8 @@ async def test_fill_store_read_trades_maps_joined_market_rows_and_skips_missing_
             status="filled",
             strategy_id="default",
             strategy_version_id="default-v2",
+            fee_bps=10,
+            fees=0.1,
         )
     ]
     assert connection.fetch_calls[0][1] == (10,)

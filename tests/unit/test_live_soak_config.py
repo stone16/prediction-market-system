@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from pms.config import PMSSettings
 
@@ -29,10 +31,14 @@ def test_live_soak_config_loads_tight_first_live_risk_caps() -> None:
     assert settings.risk.max_position_per_market == 5.0
     assert settings.risk.max_total_exposure == 50.0
     assert settings.risk.max_drawdown_pct == 20.0
+    assert settings.risk.max_daily_loss_usdc == 20.0
     assert settings.risk.max_open_positions == 5
+    assert settings.risk.max_exposure_per_risk_group == 15.0
     assert settings.risk.max_quantity_shares == 500.0
     assert settings.risk.min_order_usdc == 1.0
     assert settings.risk.slippage_threshold_bps == 50.0
+    assert settings.strategies.flb_entry_execution_cost_bps == 15.0
+    assert settings.strategies.flb_fee_rate == 0.04
 
 
 def test_live_soak_config_relaxes_paper_factor_gate_for_phase_a() -> None:
@@ -60,6 +66,14 @@ def test_live_soak_config_tunes_gamma_discovery_http_pool() -> None:
     assert settings.sensor.discovery_http_max_connections == 10
     assert settings.sensor.discovery_http_max_keepalive_connections == 5
     assert settings.sensor.discovery_http_keepalive_expiry_s == pytest.approx(120.0)
+
+
+def test_live_soak_config_uses_distinct_audit_sinks() -> None:
+    settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
+
+    assert settings.live_emergency_audit_path == ".data/live-emergency-audit.jsonl"
+    assert settings.live_first_order_audit_path == ".data/first-order-audit.jsonl"
+    assert settings.live_first_order_audit_path != settings.live_emergency_audit_path
 
 
 def test_live_soak_config_keeps_credentials_env_only() -> None:
@@ -99,3 +113,142 @@ def test_live_soak_config_yaml_does_not_pin_model_or_credentials() -> None:
             f"config.live-soak.yaml llm section must not pin '{keyword}'; "
             f"found one. Remove it so PMS_LLM__* env vars can fill the field."
         )
+
+
+def test_live_config_example_is_non_secret_and_uses_soak_risk_envelope() -> None:
+    template_path = ROOT / "config.live.yaml.example"
+    payload = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+
+    assert payload["mode"] == "live"
+    assert payload["secret_source"] == "local_file"
+    assert payload["live_trading_enabled"] is True
+    assert payload["live_account_reconciliation_required"] is True
+    assert payload["live_paper_soak_report_path"] == (
+        "/secure/pms/paper-soak-go-report.md"
+    )
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}\.md",
+        Path(payload["live_paper_soak_report_path"]).name,
+    ) is None, (
+        "The LIVE template must not bake in a dated paper-soak artifact path; "
+        "operators should regenerate the final GO report at the configured path."
+    )
+    assert payload["live_operator_rehearsal_report_path"] == (
+        "/secure/pms/operator-rehearsal-report.md"
+    )
+    assert payload["live_execution_model_path"] == (
+        "/secure/pms/execution-model.json"
+    )
+    assert payload["live_paper_backtest_diff_path"] == (
+        "/secure/pms/paper-backtest-execution-diff.json"
+    )
+    assert payload["live_preflight_artifact_path"] == (
+        "/secure/pms/credentialed-preflight.json"
+    )
+    assert payload["live_emergency_audit_path"] == (
+        "/secure/pms/live-emergency-audit.jsonl"
+    )
+    assert payload["live_first_order_audit_path"] == (
+        "/secure/pms/first-order-audit.jsonl"
+    )
+
+    assert payload["risk"] == {
+        "max_position_per_market": 5.0,
+        "max_total_exposure": 50.0,
+        "max_drawdown_pct": 20.0,
+        "max_daily_loss_usdc": 20.0,
+        "max_open_positions": 5,
+        "max_exposure_per_risk_group": 15.0,
+        "min_order_usdc": 1.0,
+        "slippage_threshold_bps": 50.0,
+        "max_quantity_shares": 500.0,
+    }
+    assert payload["controller"]["time_in_force"] == "IOC"
+    assert payload["controller"]["strict_factor_gates"] is True
+    assert payload["controller"]["quote_source"] == "dual"
+    assert payload["controller"]["category_prior_observations_path"] == (
+        "/secure/pms/category-prior-observations.csv"
+    )
+    assert payload["controller"]["category_prior_min_global_samples"] == 100
+    assert payload["strategies"] == {
+        "flb_calibration_path": "/secure/pms/flb-calibration.csv",
+        "flb_min_calibration_samples": 100,
+        "flb_entry_execution_cost_bps": 15.0,
+        "flb_fee_rate": 0.04,
+    }
+    assert payload["llm"] == {
+        "enabled": False,
+        "provider": "anthropic",
+        "max_daily_llm_cost_usdc": 25.0,
+    }
+    assert payload["polymarket"] == {
+        "operator_approval_mode": "every_order",
+        "first_live_order_approval_path": "/secure/pms/first-order.json",
+        "operator_approval_max_age_s": 300.0,
+    }
+
+    rendered = template_path.read_text(encoding="utf-8")
+    forbidden_secret_fields = (
+        "private_key:",
+        "api_key:",
+        "api_secret:",
+        "api_passphrase:",
+        "funder_address:",
+    )
+    for field_name in forbidden_secret_fields:
+        assert field_name not in rendered
+
+
+def test_live_config_example_loads_after_local_secret_file_is_staged(
+    tmp_path: Path,
+) -> None:
+    secret_path = tmp_path / "polymarket.local-secrets.yaml"
+    secret_path.write_text(
+        "\n".join(
+            [
+                "polymarket:",
+                "  private_key: private-key",
+                "  api_key: api-key",
+                "  api_secret: api-secret",
+                "  api_passphrase: passphrase",
+                "  signature_type: 1",
+                "  funder_address: '0x1111111111111111111111111111111111111111'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    secret_path.chmod(0o600)
+    template_text = (ROOT / "config.live.yaml.example").read_text(encoding="utf-8")
+    config_path = tmp_path / "config.live.yaml"
+    config_path.write_text(
+        template_text.replace(
+            "~/.config/pms/polymarket.local-secrets.yaml",
+            str(secret_path),
+        ),
+        encoding="utf-8",
+    )
+
+    settings = PMSSettings.load(config_path)
+
+    assert settings.polymarket.api_key == "api-key"
+    assert settings.controller.category_prior_observations_path == (
+        "/secure/pms/category-prior-observations.csv"
+    )
+    assert settings.strategies.flb_calibration_path == (
+        "/secure/pms/flb-calibration.csv"
+    )
+    assert settings.live_execution_model_path == (
+        "/secure/pms/execution-model.json"
+    )
+    assert settings.live_paper_backtest_diff_path == (
+        "/secure/pms/paper-backtest-execution-diff.json"
+    )
+    assert settings.live_exit_criteria_ratified_at is None
+    assert settings.live_compliance_reviewed_at is None
+
+
+def test_gitignore_excludes_operator_live_config_files() -> None:
+    ignore_text = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "config.live.yaml" in ignore_text
+    assert "config.local*.yaml" in ignore_text

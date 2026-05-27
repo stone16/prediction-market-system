@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -13,6 +16,23 @@ from pms.research.specs import (
     ExecutionModel,
     RiskPolicy,
 )
+
+
+def _write_replay_jsonl(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "event_type": "trade",
+                "market_id": "market-cancel",
+                "price": 0.42,
+                "sequence": 1,
+                "ts": "2026-03-01T00:00:00Z",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _spec(*, market_id: str = "market-cancel") -> BacktestSpec:
@@ -116,3 +136,82 @@ async def test_market_universe_replay_engine_rejects_empty_filter_match() -> Non
     with pytest.raises(ValueError, match="matched zero markets"):
         async for _ in engine.stream(_spec(), BacktestExecutionConfig(chunk_days=7)):
             pass
+
+
+def test_parse_jsonl_events_rejects_symlink_file(tmp_path: Path) -> None:
+    from pms.research.replay import _parse_jsonl_events
+
+    target_path = tmp_path / "target-replay.jsonl"
+    _write_replay_jsonl(target_path)
+    path = tmp_path / "replay.jsonl"
+    path.symlink_to(target_path)
+
+    with pytest.raises(ValueError, match="replay JSONL cannot be read safely"):
+        _parse_jsonl_events(path)
+
+
+def test_parse_jsonl_events_opens_file_with_no_follow_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pms.research.replay import _parse_jsonl_events
+
+    no_follow_flag = getattr(os, "O_NOFOLLOW", 0)
+    if no_follow_flag == 0:
+        pytest.skip("os.O_NOFOLLOW is unavailable on this platform")
+
+    path = tmp_path / "replay.jsonl"
+    _write_replay_jsonl(path)
+    observed: list[tuple[Path, int]] = []
+    real_open = os.open
+
+    def recording_open(
+        path_arg: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        observed.append((Path(os.fsdecode(os.fspath(path_arg))), flags))
+        return real_open(path_arg, flags, mode)
+
+    monkeypatch.setattr(os, "open", recording_open)
+
+    metadata, events = _parse_jsonl_events(path)
+
+    observed_by_path = {observed_path: flags for observed_path, flags in observed}
+    assert set(metadata) == {"market-cancel"}
+    assert len(events) == 1
+    assert observed_by_path[path] & no_follow_flag
+
+
+def test_parse_jsonl_events_rejects_hardlink_swap_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pms.research.replay import _parse_jsonl_events
+
+    path = tmp_path / "replay.jsonl"
+    _write_replay_jsonl(path)
+    replacement_source = tmp_path / "replacement-replay.jsonl"
+    _write_replay_jsonl(replacement_source)
+    real_open = os.open
+    swapped = False
+
+    def swapping_open(
+        path_arg: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        nonlocal swapped
+        observed_path = Path(os.fsdecode(os.fspath(path_arg)))
+        if observed_path == path and not swapped:
+            swapped = True
+            path.unlink()
+            os.link(replacement_source, path)
+        return real_open(path_arg, flags, mode)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+
+    with pytest.raises(ValueError, match="replay JSONL cannot be read safely"):
+        _parse_jsonl_events(path)
+
+    assert swapped is True

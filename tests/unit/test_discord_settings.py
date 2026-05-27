@@ -23,6 +23,16 @@ def test_discord_settings_loads_nested_secret_from_env(
     assert "**********" in repr(settings.discord)
 
 
+def test_discord_settings_loads_alert_dir_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PMS_DISCORD__ALERT_DIR", "/secure/pms/alerts")
+
+    settings = PMSSettings()
+
+    assert settings.discord.alert_dir == "/secure/pms/alerts"
+
+
 def test_discord_settings_missing_webhook_fails_when_required() -> None:
     settings = DiscordSettings()
 
@@ -46,3 +56,8 @@ def test_discord_settings_trims_blank_webhook_to_missing() -> None:
     settings = DiscordSettings.model_validate({"webhook_url": "   "})
 
     assert settings.webhook_url is None
+
+
+def test_discord_settings_rejects_blank_alert_dir() -> None:
+    with pytest.raises(ValidationError, match="alert_dir"):
+        DiscordSettings.model_validate({"alert_dir": "   "})

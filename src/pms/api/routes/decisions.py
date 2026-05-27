@@ -59,6 +59,7 @@ class DecisionRow(BaseModel):
     expires_at: str
     forecaster: str
     kelly_size: float
+    decision_evidence: dict[str, Any]
     opportunity: OpportunityRow | None = None
 
 
@@ -258,6 +259,7 @@ def _decision_row(row: StoredDecisionLike) -> DecisionRow:
         expires_at=row.expires_at.isoformat(),
         forecaster=row.decision.model_id or "rules",
         kelly_size=row.decision.notional_usdc,
+        decision_evidence=_decision_evidence(row),
         opportunity=(
             OpportunityRow(
                 opportunity_id=row.opportunity.opportunity_id,
@@ -284,3 +286,10 @@ def _decision_row(row: StoredDecisionLike) -> DecisionRow:
             else None
         ),
     )
+
+
+def _decision_evidence(row: StoredDecisionLike) -> dict[str, Any]:
+    raw_evidence = getattr(row, "decision_evidence", {})
+    if isinstance(raw_evidence, dict):
+        return dict(raw_evidence)
+    return {}

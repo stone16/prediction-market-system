@@ -8,7 +8,7 @@ calculation internals before values cross into these dataclasses.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal, cast
@@ -93,6 +93,7 @@ class TradeDecision:
     outcome: Outcome = "YES"
     model_id: str | None = None
     intent_key: str | None = None
+    risk_group_id: str | None = None
     spread_bps_at_decision: int | None = None
 
     def __post_init__(self) -> None:
@@ -138,6 +139,7 @@ class OrderState:
     outcome: Outcome | None = None
     time_in_force: str | None = None
     intent_key: str | None = None
+    risk_group_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +166,7 @@ class FillRecord:
     liquidity_side: str | None = None
     transaction_ref: str | None = None
     resolved_outcome: float | None = None
+    risk_group_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +185,7 @@ class Position:
     opened_at: datetime | None = None
     strategy_id: str = "default"
     strategy_version_id: str = "default-v1"
+    risk_group_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +236,9 @@ class Market:
     created_at: datetime
     last_seen_at: datetime
     volume_24h: float | None = None
+    risk_group_id: str | None = None
+    category: str | None = None
+    event_id: str | None = None
     yes_price: float | None = None
     no_price: float | None = None
     best_bid: float | None = None
@@ -327,6 +334,10 @@ class EvalRecord:
     fill_status: str
     recorded_at: datetime
     citations: list[str]
+    baseline_prob_estimate: float | None = None
+    baseline_brier_score: float | None = None
+    baseline_prob_estimates: Mapping[str, float] = field(default_factory=dict)
+    baseline_brier_scores: Mapping[str, float] = field(default_factory=dict)
     category: str | None = None
     model_id: str | None = None
     pnl: float = 0.0
@@ -334,6 +345,24 @@ class EvalRecord:
     filled: bool = True
     edge_at_decision: float = 0.0
     spread_bps_at_decision: int | None = None
+
+    @property
+    def brier_improvement(self) -> float | None:
+        if self.baseline_brier_score is None:
+            return None
+        return self.baseline_brier_score - self.brier_score
+
+    def with_secondary_baselines(
+        self,
+        *,
+        baseline_prob_estimates: Mapping[str, float],
+        baseline_brier_scores: Mapping[str, float],
+    ) -> EvalRecord:
+        return replace(
+            self,
+            baseline_prob_estimates=dict(baseline_prob_estimates),
+            baseline_brier_scores=dict(baseline_brier_scores),
+        )
 
 
 @dataclass(frozen=True)

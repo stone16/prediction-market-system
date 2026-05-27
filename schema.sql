@@ -32,6 +32,13 @@ ALTER TABLE markets
     ADD COLUMN IF NOT EXISTS accepting_orders BOOLEAN,
     ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ;
 
+-- Risk metadata (migration 0021) is applied last so the fresh-apply column
+-- order in this canonical schema matches a database migrated to head.
+ALTER TABLE markets
+    ADD COLUMN IF NOT EXISTS risk_group_id TEXT,
+    ADD COLUMN IF NOT EXISTS category TEXT,
+    ADD COLUMN IF NOT EXISTS event_id TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_markets_price_updated_at
     ON markets (price_updated_at DESC)
     WHERE price_updated_at IS NOT NULL;
@@ -267,6 +274,10 @@ CREATE TABLE IF NOT EXISTS eval_records (
     fill_status TEXT NOT NULL,
     recorded_at TIMESTAMPTZ NOT NULL,
     citations JSONB NOT NULL DEFAULT '[]'::jsonb,
+    baseline_prob_estimate DOUBLE PRECISION,
+    baseline_brier_score DOUBLE PRECISION,
+    baseline_prob_estimates JSONB NOT NULL DEFAULT '{}'::jsonb,
+    baseline_brier_scores JSONB NOT NULL DEFAULT '{}'::jsonb,
     category TEXT,
     model_id TEXT,
     pnl DOUBLE PRECISION NOT NULL DEFAULT 0.0,
@@ -279,6 +290,10 @@ CREATE TABLE IF NOT EXISTS eval_records (
 );
 
 ALTER TABLE eval_records
+    ADD COLUMN IF NOT EXISTS baseline_prob_estimate DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS baseline_brier_score DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS baseline_prob_estimates JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS baseline_brier_scores JSONB NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS edge_at_decision DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     ADD COLUMN IF NOT EXISTS spread_bps_at_decision INTEGER;
 
@@ -523,6 +538,57 @@ CREATE TABLE IF NOT EXISTS strategy_runs (
     CONSTRAINT strategy_runs_strategy_identity_check
         CHECK (strategy_id != '' AND strategy_version_id != '')
 );
+
+CREATE TABLE IF NOT EXISTS strategy_run_slices (
+    strategy_run_slice_id UUID PRIMARY KEY,
+    run_id UUID NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL,
+    slice_label TEXT NOT NULL,
+    slice_start TIMESTAMPTZ NOT NULL,
+    slice_end TIMESTAMPTZ NOT NULL,
+    slice_kind TEXT NOT NULL DEFAULT 'out_of_sample',
+    brier DOUBLE PRECISION,
+    pnl_cum DOUBLE PRECISION,
+    drawdown_max DOUBLE PRECISION,
+    fill_rate DOUBLE PRECISION,
+    slippage_bps DOUBLE PRECISION,
+    opportunity_count INTEGER NOT NULL DEFAULT 0,
+    decision_count INTEGER NOT NULL DEFAULT 0,
+    fill_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT strategy_run_slices_strategy_identity_check
+        CHECK (strategy_id != '' AND strategy_version_id != ''),
+    CONSTRAINT strategy_run_slices_label_check
+        CHECK (slice_label != ''),
+    CONSTRAINT strategy_run_slices_window_check
+        CHECK (slice_start < slice_end),
+    CONSTRAINT strategy_run_slices_kind_check
+        CHECK (slice_kind IN ('out_of_sample', 'walk_forward', 'category', 'liquidity')),
+    CONSTRAINT strategy_run_slices_counts_check
+        CHECK (opportunity_count >= 0 AND decision_count >= 0 AND fill_count >= 0),
+    CONSTRAINT strategy_run_slices_unique_label
+        UNIQUE (run_id, strategy_id, strategy_version_id, slice_label)
+);
+
+ALTER TABLE strategy_run_slices
+    ADD COLUMN IF NOT EXISTS opportunity_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS decision_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS fill_count INTEGER NOT NULL DEFAULT 0;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'strategy_run_slices_counts_check'
+    ) THEN
+        ALTER TABLE strategy_run_slices
+            ADD CONSTRAINT strategy_run_slices_counts_check
+            CHECK (opportunity_count >= 0 AND decision_count >= 0 AND fill_count >= 0);
+    END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS evaluation_reports (
     report_id UUID PRIMARY KEY,
@@ -858,6 +924,9 @@ CREATE INDEX IF NOT EXISTS idx_backtest_runs_queued_at_desc
 
 CREATE INDEX IF NOT EXISTS idx_strategy_runs_run_id
     ON strategy_runs(run_id);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_run_slices_run_strategy_identity
+    ON strategy_run_slices(run_id, strategy_id, strategy_version_id, slice_start);
 
 CREATE INDEX IF NOT EXISTS idx_backtest_live_comparisons_run_strategy_identity
     ON backtest_live_comparisons(run_id, strategy_id, strategy_version_id);

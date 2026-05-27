@@ -190,6 +190,31 @@ def _gamma_market_to_market(row: dict[str, Any], fetched_at: datetime) -> Market
 
     created_at = _optional_datetime(row.get("createdAt")) or fetched_at
     prices = _gamma_market_price_fields(row, fetched_at, condition_id)
+    event_id = _optional_text(
+        _first_non_empty_value(
+            row.get("eventId"),
+            row.get("event_id"),
+        )
+    )
+    category = _optional_text(
+        _first_non_empty_value(
+            row.get("category"),
+            row.get("marketCategory"),
+            row.get("market_category"),
+        )
+    )
+    risk_group_id = _market_risk_group_id(
+        explicit=_optional_text(
+            _first_non_empty_value(
+                row.get("riskGroupId"),
+                row.get("risk_group_id"),
+                row.get("riskGroup"),
+                row.get("risk_group"),
+            )
+        ),
+        event_id=event_id,
+        category=category,
+    )
     return Market(
         condition_id=condition_id,
         slug=str(row.get("slug") or condition_id),
@@ -201,6 +226,9 @@ def _gamma_market_to_market(row: dict[str, Any], fetched_at: datetime) -> Market
         volume_24h=_optional_float(
             _first_non_empty_value(row.get("volume24hr"), row.get("volume_24h"))
         ),
+        risk_group_id=risk_group_id,
+        category=category,
+        event_id=event_id,
         yes_price=prices.yes_price,
         no_price=prices.no_price,
         best_bid=prices.best_bid,
@@ -465,6 +493,28 @@ def _first_non_empty_value(*values: object) -> object | None:
     for value in values:
         if value is not None and value != "":
             return value
+    return None
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _market_risk_group_id(
+    *,
+    explicit: str | None,
+    event_id: str | None,
+    category: str | None,
+) -> str | None:
+    if explicit is not None:
+        return explicit
+    if event_id is not None:
+        return f"event:{event_id}"
+    if category is not None:
+        return f"category:{category}"
     return None
 
 

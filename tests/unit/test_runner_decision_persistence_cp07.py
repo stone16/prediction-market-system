@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from math import inf, nan
 from pathlib import Path
 from typing import Any, cast
 
@@ -10,7 +13,12 @@ import pytest
 from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode, Side, TimeInForce
 from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
-from pms.runner import Runner, StrategyControllerRuntime, _decision_expires_at
+from pms.runner import (
+    Runner,
+    StrategyControllerRuntime,
+    _decision_evidence_from_signal,
+    _decision_expires_at,
+)
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -43,8 +51,11 @@ def _signal() -> MarketSignal:
         yes_price=0.41,
         volume_24h=1200.0,
         resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
-        orderbook={"bids": [], "asks": []},
-        external_signal={"resolved_outcome": 1.0},
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.42, "size": 25.0}],
+        },
+        external_signal={"resolved_outcome": 1.0, "book_age_ms": 75.0},
         fetched_at=datetime(2026, 4, 23, 10, 0, tzinfo=UTC),
         market_status=MarketStatus.OPEN.value,
     )
@@ -103,7 +114,13 @@ class _OpportunityAwareControllerDouble:
     ) -> tuple[Opportunity, TradeDecision] | None:
         del portfolio
         self.calls.append(signal.market_id)
-        return _opportunity(), _decision()
+        return (
+            replace(
+                _opportunity(),
+                created_at=datetime(2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC),
+            ),
+            _decision(),
+        )
 
 
 class _RecordingOpportunityStore:
@@ -120,6 +137,7 @@ class _RecordingDecisionStore:
     def __init__(self, runner: Runner) -> None:
         self.runner = runner
         self.calls: list[tuple[str, str | None, str]] = []
+        self.decision_evidence: dict[str, object] | None = None
         self.transitions: list[tuple[str, str, str, datetime]] = []
         self.created_at: datetime | None = None
         self.expires_at: datetime | None = None
@@ -132,10 +150,12 @@ class _RecordingDecisionStore:
         created_at: datetime,
         expires_at: datetime,
         status: str = "pending",
+        decision_evidence: dict[str, object] | None = None,
     ) -> None:
         assert self.runner.state.decisions == []
         assert self.runner._decision_queue.empty()  # noqa: SLF001
         self.calls.append((decision.decision_id, factor_snapshot_hash, status))
+        self.decision_evidence = decision_evidence
         self.created_at = created_at
         self.expires_at = expires_at
 
@@ -201,21 +221,33 @@ async def test_controller_pipeline_persists_decision_before_enqueuing_it() -> No
 
     decision_store = cast(_RecordingDecisionStore, runner.decision_store)
     assert decision_store.calls == [("decision-cp07", "snapshot-cp07", "pending")]
+    assert decision_store.decision_evidence is not None
+    assert decision_store.decision_evidence["factor_snapshot_hash"] == "snapshot-cp07"
+    assert decision_store.decision_evidence["book_age_ms"] == 75.0
+    assert decision_store.decision_evidence["decision_latency_ms"] == 1250.0
+    assert decision_store.decision_evidence["quote_source"] == "postgres_snapshot"
+    assert decision_store.decision_evidence["book_hash"]
+    assert decision_store.decision_evidence["book_top_levels"] == {
+        "bids": [{"price": 0.4, "size": 20.0}],
+        "asks": [{"price": 0.42, "size": 25.0}],
+    }
     assert decision_store.transitions == [
         (
             "decision-cp07",
             "pending",
             "accepted",
-            datetime(2026, 4, 23, 10, 0, tzinfo=UTC),
+            datetime(2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC),
         ),
         (
             "decision-cp07",
             "accepted",
             "queued",
-            datetime(2026, 4, 23, 10, 0, tzinfo=UTC),
+            datetime(2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC),
         ),
     ]
-    assert decision_store.created_at == datetime(2026, 4, 23, 10, 0, tzinfo=UTC)
+    assert decision_store.created_at == datetime(
+        2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC
+    )
     assert decision_store.expires_at == datetime(2026, 4, 23, 10, 15, tzinfo=UTC)
 
 
@@ -243,3 +275,93 @@ def test_decision_expiry_uses_signal_resolution_when_opportunity_has_no_expiry()
     expires_at = _decision_expires_at(signal, opportunity, created_at=created_at)
 
     assert expires_at == datetime(2026, 4, 23, 10, 5, tzinfo=UTC)
+
+
+def test_decision_evidence_drops_non_finite_orderbook_values() -> None:
+    signal = replace(
+        _signal(),
+        orderbook={
+            "bids": [
+                {"price": nan, "size": 10.0},
+                {"price": 0.39, "size": inf},
+                {"price": 0.38, "size": 7.0},
+            ],
+            "asks": [
+                {"price": "Inf", "size": 8.0},
+                {"price": 0.42, "size": "-Infinity"},
+                {"price": 0.43, "size": 9.0},
+            ],
+        },
+        external_signal={"book_age_ms": "NaN"},
+    )
+
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=_decision(),
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at,
+    )
+
+    assert evidence["book_age_ms"] is None
+    assert evidence["book_top_levels"] == {
+        "bids": [{"price": 0.38, "size": 7.0}],
+        "asks": [{"price": 0.43, "size": 9.0}],
+    }
+    json.dumps(evidence, allow_nan=False)
+
+
+def test_decision_evidence_records_submitted_token_when_buy_no_uses_yes_book() -> None:
+    signal = replace(_signal(), token_id="token-cp07-yes")
+    decision = replace(
+        _decision(),
+        token_id="token-cp07-no",
+        outcome="NO",
+        spread_bps_at_decision=500,
+    )
+
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at,
+    )
+
+    assert evidence["book_token_id"] == "token-cp07-yes"
+    assert evidence["decision_token_id"] == "token-cp07-no"
+    assert evidence["decision_outcome"] == "NO"
+    assert evidence["decision_side"] == "BUY"
+    assert evidence["spread_bps_at_decision"] == 500
+    assert evidence["book_hash"]
+
+
+def test_decision_evidence_records_secondary_baseline_probabilities() -> None:
+    signal = replace(
+        _signal(),
+        external_signal={
+            "resolved_outcome": 1.0,
+            "book_age_ms": 75.0,
+            "last_trade_price": 0.43,
+            "category_prior_baseline_prob_estimate": 0.52,
+        },
+    )
+    decision = replace(
+        _decision(),
+        token_id="token-cp07-no",
+        outcome="NO",
+        limit_price=0.39,
+    )
+
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at,
+    )
+
+    assert evidence["market_implied_baseline_prob_estimate"] == pytest.approx(0.61)
+    assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
+    assert evidence["last_trade_baseline_prob_estimate"] == pytest.approx(0.43)
+    assert evidence["category_prior_baseline_prob_estimate"] == pytest.approx(0.52)

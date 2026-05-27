@@ -10,10 +10,12 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pydantic import SecretStr
 
 from pms.config import (
     ControllerSettings,
     DatabaseSettings,
+    DiscordSettings,
     PMSSettings,
     PolymarketSettings,
     RiskSettings,
@@ -31,6 +33,11 @@ from pms.core.models import (
 from pms.market_selection.merge import StrategyMarketSet
 from pms.runner import Runner, _default_active_strategy
 from tests.support.default_strategy_seed import build_default_v1_strategy
+from tests.support.live_paths import (
+    make_live_preflight_artifact_path,
+    make_live_report_paths,
+    make_private_live_paths,
+)
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -178,10 +185,43 @@ class MatchingVenueReconciler:
 
 
 def _settings(mode: RunMode) -> PMSSettings:
-    return PMSSettings(
+    approval_path: str | None = None
+    emergency_audit_path = ".data/live-emergency-audit.jsonl"
+    audit_path = ".data/first-order-audit.jsonl"
+    if mode == RunMode.LIVE:
+        approval_path, audit_path = make_private_live_paths(
+            prefix="pms-runner-active-"
+        )
+        emergency_audit_path = str(
+            Path(approval_path).parent / "live-emergency-audit.jsonl"
+        )
+        paper_report_path, rehearsal_report_path = make_live_report_paths(
+            prefix="pms-runner-active-reports-"
+        )
+    else:
+        paper_report_path = None
+        rehearsal_report_path = None
+    settings = PMSSettings(
         mode=mode,
         secret_source="fly" if mode == RunMode.LIVE else None,
         live_trading_enabled=mode == RunMode.LIVE,
+        live_exit_criteria_ratified_by=(
+            "test-operator" if mode == RunMode.LIVE else None
+        ),
+        live_exit_criteria_ratified_at=(
+            datetime(2026, 5, 25, tzinfo=UTC) if mode == RunMode.LIVE else None
+        ),
+        live_compliance_reviewed_by=(
+            "test-compliance" if mode == RunMode.LIVE else None
+        ),
+        live_compliance_reviewed_at=(
+            datetime(2026, 5, 25, tzinfo=UTC) if mode == RunMode.LIVE else None
+        ),
+        live_compliance_jurisdiction="US" if mode == RunMode.LIVE else None,
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+        live_emergency_audit_path=emergency_audit_path,
+        live_first_order_audit_path=audit_path,
         auto_migrate_default_v2=False,
         database=DatabaseSettings(
             dsn="postgresql://localhost/pms_test_runner",
@@ -191,22 +231,54 @@ def _settings(mode: RunMode) -> PMSSettings:
         risk=RiskSettings(
             max_position_per_market=1000.0,
             max_total_exposure=10_000.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+            max_exposure_per_risk_group=5_000.0,
+            max_quantity_shares=500.0,
         ),
         controller=ControllerSettings(
-            time_in_force="IOC" if mode == RunMode.LIVE else "GTC"
+            time_in_force="IOC" if mode == RunMode.LIVE else "GTC",
+            quote_source="dual" if mode == RunMode.LIVE else "postgres_snapshot",
         ),
-        polymarket=_live_polymarket_settings() if mode == RunMode.LIVE else PolymarketSettings(),
+        discord=(
+            DiscordSettings(
+                webhook_url=SecretStr(
+                    "https://discord.example/webhooks/runner-active/unit"
+                ),
+                alert_dir=str(Path(cast(str, approval_path)).parent / "discord-alerts"),
+            )
+            if mode == RunMode.LIVE
+            else DiscordSettings()
+        ),
+        polymarket=(
+            _live_polymarket_settings(approval_path)
+            if mode == RunMode.LIVE
+            else PolymarketSettings()
+        ),
     )
+    if mode == RunMode.LIVE:
+        settings.live_preflight_artifact_path = make_live_preflight_artifact_path(
+            prefix="pms-runner-active-preflight-",
+            settings=settings,
+        )
+    return settings
 
 
-def _live_polymarket_settings() -> PolymarketSettings:
+def _live_polymarket_settings(approval_path: str | None = None) -> PolymarketSettings:
+    if approval_path is None:
+        approval_path, _ = make_private_live_paths(
+            prefix="pms-runner-active-polymarket-"
+        )
     return PolymarketSettings(
         private_key="private-key",
         api_key="api-key",
         api_secret="api-secret",
         api_passphrase="passphrase",
         signature_type=1,
-        funder_address="0xabc",
+        funder_address="0x1111111111111111111111111111111111111111",
+        operator_approval_mode="every_order",
+        first_live_order_approval_path=approval_path,
     )
 
 
@@ -315,6 +387,20 @@ def _stub_live_venue_reconciler(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "pms.runner.PolymarketVenueAccountReconciler",
         MatchingVenueReconciler,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_live_active_strategy_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _accept_active_strategy_preflight(
+        settings: PMSSettings,
+        registry: object,
+    ) -> None:
+        del settings, registry
+
+    monkeypatch.setattr(
+        "pms.runner.require_live_preflight_active_strategies_artifact",
+        _accept_active_strategy_preflight,
     )
 
 
@@ -631,22 +717,57 @@ async def test_reselection_caps_subscription_asset_ids(
         events=events,
         returned_asset_ids=["asset-a", "asset-b", "asset-c"],
     )
+    approval_path, audit_path = make_private_live_paths(
+        prefix="pms-runner-active-capped-"
+    )
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix="pms-runner-active-capped-reports-"
+    )
 
-    runner = Runner(
-        config=PMSSettings(
-            mode=RunMode.LIVE,
-            secret_source="fly",
-            live_trading_enabled=True,
-            auto_migrate_default_v2=False,
-            database=DatabaseSettings(
-                dsn="postgresql://localhost/pms_test_runner",
-                pool_min_size=2,
-                pool_max_size=10,
-            ),
-            sensor=SensorSettings(max_subscription_asset_ids=2),
-            controller=ControllerSettings(time_in_force="IOC"),
-            polymarket=_live_polymarket_settings(),
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        secret_source="fly",
+        live_trading_enabled=True,
+        live_exit_criteria_ratified_by="test-operator",
+        live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_reviewed_by="test-compliance",
+        live_compliance_reviewed_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_jurisdiction="US",
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+        live_emergency_audit_path=str(
+            Path(approval_path).parent / "live-emergency-audit.jsonl"
         ),
+        live_first_order_audit_path=audit_path,
+        auto_migrate_default_v2=False,
+        database=DatabaseSettings(
+            dsn="postgresql://localhost/pms_test_runner",
+            pool_min_size=2,
+            pool_max_size=10,
+        ),
+        sensor=SensorSettings(max_subscription_asset_ids=2),
+        discord=DiscordSettings(
+            webhook_url=SecretStr(
+                "https://discord.example/webhooks/runner-active/capped"
+            ),
+            alert_dir=str(Path(approval_path).parent / "discord-alerts"),
+        ),
+        risk=RiskSettings(
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+            max_exposure_per_risk_group=250.0,
+            max_quantity_shares=500.0,
+        ),
+        controller=ControllerSettings(time_in_force="IOC", quote_source="dual"),
+        polymarket=_live_polymarket_settings(approval_path),
+    )
+    settings.live_preflight_artifact_path = make_live_preflight_artifact_path(
+        prefix="pms-runner-active-capped-preflight-",
+        settings=settings,
+    )
+    runner = Runner(
+        config=settings,
         historical_data_path=FIXTURE_PATH,
     )
     await runner.start()
@@ -731,6 +852,12 @@ async def test_refresh_subscription_updates_wait_for_reselection_lock() -> None:
 @pytest.mark.asyncio
 async def test_refresh_subscription_caps_asset_ids() -> None:
     events: list[list[str]] = []
+    approval_path, audit_path = make_private_live_paths(
+        prefix="pms-runner-active-refresh-"
+    )
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix="pms-runner-active-refresh-reports-"
+    )
 
     @dataclass
     class RecordingSubscriptionController:
@@ -738,21 +865,50 @@ async def test_refresh_subscription_caps_asset_ids() -> None:
             events.append(list(asset_ids))
             return True
 
-    runner = Runner(
-        config=PMSSettings(
-            mode=RunMode.LIVE,
-            secret_source="fly",
-            live_trading_enabled=True,
-            auto_migrate_default_v2=False,
-            database=DatabaseSettings(
-                dsn="postgresql://localhost/pms_test_runner",
-                pool_min_size=2,
-                pool_max_size=10,
-            ),
-            sensor=SensorSettings(max_subscription_asset_ids=2),
-            controller=ControllerSettings(time_in_force="IOC"),
-            polymarket=_live_polymarket_settings(),
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        secret_source="fly",
+        live_trading_enabled=True,
+        live_exit_criteria_ratified_by="test-operator",
+        live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_reviewed_by="test-compliance",
+        live_compliance_reviewed_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_jurisdiction="US",
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+        live_emergency_audit_path=str(
+            Path(approval_path).parent / "live-emergency-audit.jsonl"
         ),
+        live_first_order_audit_path=audit_path,
+        auto_migrate_default_v2=False,
+        database=DatabaseSettings(
+            dsn="postgresql://localhost/pms_test_runner",
+            pool_min_size=2,
+            pool_max_size=10,
+        ),
+        sensor=SensorSettings(max_subscription_asset_ids=2),
+        discord=DiscordSettings(
+            webhook_url=SecretStr(
+                "https://discord.example/webhooks/runner-active/refresh"
+            ),
+            alert_dir=str(Path(approval_path).parent / "discord-alerts"),
+        ),
+        risk=RiskSettings(
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+            max_exposure_per_risk_group=250.0,
+            max_quantity_shares=500.0,
+        ),
+        controller=ControllerSettings(time_in_force="IOC", quote_source="dual"),
+        polymarket=_live_polymarket_settings(approval_path),
+    )
+    settings.live_preflight_artifact_path = make_live_preflight_artifact_path(
+        prefix="pms-runner-active-refresh-preflight-",
+        settings=settings,
+    )
+    runner = Runner(
+        config=settings,
         historical_data_path=FIXTURE_PATH,
     )
     runner._subscription_controller = cast(Any, RecordingSubscriptionController())  # noqa: SLF001

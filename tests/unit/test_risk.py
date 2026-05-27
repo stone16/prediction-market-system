@@ -20,6 +20,7 @@ def _decision(
     side: Literal["BUY", "SELL"] = "BUY",
     notional_usdc: float = 10.0,
     max_slippage_bps: int = 25,
+    risk_group_id: str | None = None,
 ) -> TradeDecision:
     construction_notional = notional_usdc if notional_usdc > 0.0 else 1.0
     decision = TradeDecision(
@@ -39,6 +40,7 @@ def _decision(
         strategy_id="strategy-risk",
         strategy_version_id="strategy-risk-v1",
         limit_price=0.5,
+        risk_group_id=risk_group_id,
     )
     if notional_usdc != construction_notional:
         object.__setattr__(decision, "notional_usdc", notional_usdc)
@@ -50,7 +52,9 @@ def _risk(
     max_position_per_market: float = 100.0,
     max_total_exposure: float = 1000.0,
     max_drawdown_pct: float | None = None,
+    max_daily_loss_usdc: float | None = None,
     max_open_positions: int | None = None,
+    max_exposure_per_risk_group: float | None = None,
     min_order_usdc: float = 1.0,
     slippage_threshold_bps: float = 50.0,
 ) -> RiskSettings:
@@ -58,7 +62,9 @@ def _risk(
         max_position_per_market=max_position_per_market,
         max_total_exposure=max_total_exposure,
         max_drawdown_pct=max_drawdown_pct,
+        max_daily_loss_usdc=max_daily_loss_usdc,
         max_open_positions=max_open_positions,
+        max_exposure_per_risk_group=max_exposure_per_risk_group,
         min_order_usdc=min_order_usdc,
         slippage_threshold_bps=slippage_threshold_bps,
     )
@@ -104,12 +110,34 @@ def _open_positions(count: int) -> list[Position]:
     ]
 
 
+def _position(
+    *,
+    market_id: str = "market-existing",
+    token_id: str = "token-existing",
+    locked_usdc: float = 1.0,
+    risk_group_id: str | None = None,
+) -> Position:
+    return Position(
+        market_id=market_id,
+        token_id=token_id,
+        venue="polymarket",
+        side="BUY",
+        shares_held=1.0,
+        avg_entry_price=0.5,
+        unrealized_pnl=0.0,
+        locked_usdc=locked_usdc,
+        risk_group_id=risk_group_id,
+    )
+
+
 def test_risk_settings_have_exact_live_fields() -> None:
     assert set(RiskSettings.model_fields) == {
         "max_position_per_market",
         "max_total_exposure",
         "max_drawdown_pct",
+        "max_daily_loss_usdc",
         "max_open_positions",
+        "max_exposure_per_risk_group",
         "min_order_usdc",
         "slippage_threshold_bps",
         "max_quantity_shares",
@@ -440,3 +468,53 @@ def test_risk_manager_rejects_slippage_above_threshold() -> None:
         approved=False,
         reason="slippage_threshold_bps",
     )
+
+
+def test_risk_manager_rejects_correlated_group_exposure_above_cap() -> None:
+    portfolio = _portfolio(
+        free_usdc=980.0,
+        locked_usdc=20.0,
+        open_positions=[
+            _position(
+                market_id="market-election-a",
+                locked_usdc=20.0,
+                risk_group_id="event:2028-us-presidential-election",
+            )
+        ],
+    )
+    decision = _decision(
+        market_id="market-election-b",
+        notional_usdc=10.0,
+        risk_group_id="event:2028-us-presidential-election",
+    )
+
+    result = RiskManager(_risk(max_exposure_per_risk_group=25.0)).check(
+        decision,
+        portfolio,
+    )
+
+    assert result == RiskDecision(
+        approved=False,
+        reason="max_exposure_per_risk_group",
+    )
+
+
+def test_risk_manager_rejects_missing_decision_group_when_group_cap_is_configured() -> None:
+    portfolio = _portfolio(
+        free_usdc=980.0,
+        locked_usdc=20.0,
+        open_positions=[
+            _position(
+                market_id="market-election-a",
+                locked_usdc=20.0,
+                risk_group_id="event:2028-us-presidential-election",
+            )
+        ],
+    )
+
+    result = RiskManager(_risk(max_exposure_per_risk_group=25.0)).check(
+        _decision(market_id="market-election-b", notional_usdc=10.0),
+        portfolio,
+    )
+
+    assert result == RiskDecision(approved=False, reason="missing_risk_group_id")

@@ -288,6 +288,60 @@ async def test_decision_store_round_trips_spread_bps_in_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_decision_store_round_trips_decision_time_evidence_payload() -> None:
+    connection = _RecordingConnection()
+    store = DecisionStore(cast(asyncpg.Pool, _Pool(connection)))
+    created_at = datetime(2026, 5, 6, tzinfo=UTC)
+
+    decision_evidence = {
+        "book_hash": "book-hash-unit",
+        "book_top_levels": {
+            "bids": [{"price": 0.39, "size": 10.0}],
+            "asks": [{"price": 0.41, "size": 11.0}],
+        },
+        "book_age_ms": 42.0,
+        "quote_source": "postgres_snapshot",
+        "factor_snapshot_hash": "snapshot",
+    }
+
+    await store.insert(
+        _decision(spread_bps_at_decision=456),
+        factor_snapshot_hash="snapshot",
+        created_at=created_at,
+        expires_at=created_at + timedelta(minutes=15),
+        decision_evidence=decision_evidence,
+    )
+
+    payload_args = next(
+        args
+        for query, args, _ in connection.execute_calls
+        if "INSERT INTO decision_payloads" in query
+    )
+    payload = json.loads(cast(str, payload_args[1]))
+    assert payload["decision_evidence"] == decision_evidence
+
+    connection.fetch_rows = [
+        {
+            "decision_id": "decision-meta-capture",
+            "opportunity_id": "opportunity-meta-capture",
+            "strategy_id": "default",
+            "strategy_version_id": "default-v1",
+            "status": "pending",
+            "factor_snapshot_hash": "snapshot",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "expires_at": created_at + timedelta(minutes=15),
+            "payload": json.dumps(payload),
+            "opportunity_row_id": None,
+        }
+    ]
+
+    rows = await store.read_decisions(limit=1)
+
+    assert rows[0].decision_evidence == decision_evidence
+
+
+@pytest.mark.asyncio
 async def test_decision_store_tolerates_float_string_and_malformed_spread_payload() -> None:
     connection = _RecordingConnection()
     store = DecisionStore(cast(asyncpg.Pool, _Pool(connection)))

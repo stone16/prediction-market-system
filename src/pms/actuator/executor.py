@@ -193,6 +193,7 @@ def _rejected_order_state(decision: TradeDecision, reason: str) -> OrderState:
         strategy_id=decision.strategy_id,
         strategy_version_id=decision.strategy_version_id,
         filled_quantity=0.0,
+        risk_group_id=decision.risk_group_id,
     )
 
 

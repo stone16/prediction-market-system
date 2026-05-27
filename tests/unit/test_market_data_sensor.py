@@ -66,6 +66,9 @@ class StoreMock:
     write_book_snapshot_mock: AsyncMock = field(default_factory=AsyncMock)
     write_price_change_mock: AsyncMock = field(default_factory=AsyncMock)
     write_trade_mock: AsyncMock = field(default_factory=AsyncMock)
+    read_market_signal_metadata_mock: AsyncMock = field(
+        default_factory=lambda: AsyncMock(return_value={})
+    )
 
     async def write_book_snapshot(self, snapshot: Any, levels: list[Any]) -> int:
         result = await self.write_book_snapshot_mock(snapshot, levels)
@@ -76,6 +79,12 @@ class StoreMock:
 
     async def write_trade(self, trade: Any) -> None:
         await self.write_trade_mock(trade)
+
+    async def read_market_signal_metadata(self, market_id: str) -> dict[str, str]:
+        return cast(
+            dict[str, str],
+            await self.read_market_signal_metadata_mock(market_id),
+        )
 
 
 class FakeWebSocket:
@@ -235,6 +244,66 @@ async def test_market_data_sensor_default_keeps_price_change_in_memory_without_r
     assert len(signals) == 1
     assert signals[0].orderbook["bids"] == [{"price": 0.49, "size": 12.0}]
     assert store_mock.write_price_change_mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_enriches_signals_with_market_risk_metadata() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.read_market_signal_metadata_mock.return_value = {
+        "risk_group_id": "event:2028-us-presidential-election",
+        "event_id": "2028-us-presidential-election",
+        "category": "Politics",
+    }
+    sensor = MarketDataSensor(store=store)
+
+    signal = await sensor._handle_book(
+        {
+            "event_type": "book",
+            "market": "m-election-risk",
+            "asset_id": "asset-election-risk",
+            "timestamp": "1757908892352",
+            "bids": [{"price": "0.48", "size": "12"}],
+            "asks": [{"price": "0.51", "size": "10"}],
+        }
+    )
+    await sensor.aclose()
+
+    assert signal.external_signal["risk_group_id"] == (
+        "event:2028-us-presidential-election"
+    )
+    assert signal.external_signal["event_id"] == "2028-us-presidential-election"
+    assert signal.external_signal["category"] == "Politics"
+    store_mock.read_market_signal_metadata_mock.assert_awaited_once_with(
+        "m-election-risk"
+    )
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_retries_empty_market_risk_metadata_lookup() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.read_market_signal_metadata_mock.side_effect = [
+        {},
+        {"risk_group_id": "category:Politics", "category": "Politics"},
+    ]
+    sensor = MarketDataSensor(store=store)
+    message = {
+        "event_type": "book",
+        "market": "m-late-metadata",
+        "asset_id": "asset-late-metadata",
+        "timestamp": "1757908892352",
+        "bids": [{"price": "0.48", "size": "12"}],
+        "asks": [{"price": "0.51", "size": "10"}],
+    }
+
+    first = await sensor._handle_book(message)
+    second = await sensor._handle_book(message)
+    await sensor.aclose()
+
+    assert "risk_group_id" not in first.external_signal
+    assert second.external_signal["risk_group_id"] == "category:Politics"
+    assert store_mock.read_market_signal_metadata_mock.await_count == 2
 
 
 @pytest.mark.asyncio

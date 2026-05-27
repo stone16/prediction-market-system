@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import isfinite
+from typing import cast
 
 from pms.core.enums import OrderStatus, Side
 from pms.core.models import EvalRecord, FillRecord, TradeDecision
@@ -9,7 +12,13 @@ from pms.core.models import EvalRecord, FillRecord, TradeDecision
 
 @dataclass(frozen=True)
 class Scorer:
-    def score(self, fill: FillRecord, decision: TradeDecision) -> EvalRecord:
+    def score(
+        self,
+        fill: FillRecord,
+        decision: TradeDecision,
+        *,
+        baseline_prob_estimates: Mapping[str, object] | None = None,
+    ) -> EvalRecord:
         if fill.resolved_outcome is None:
             raise ValueError("FillRecord.resolved_outcome is required for scoring")
         if (
@@ -22,7 +31,17 @@ class Scorer:
             raise ValueError(msg)
 
         yes_prob_estimate = _yes_probability(decision)
+        baseline_prob_estimate = _baseline_yes_probability(decision)
         brier_score = (yes_prob_estimate - fill.resolved_outcome) ** 2
+        secondary_baseline_prob_estimates = _secondary_baseline_prob_estimates(
+            primary_baseline=baseline_prob_estimate,
+            raw_values=baseline_prob_estimates,
+        )
+        secondary_baseline_brier_scores = {
+            source: (probability - fill.resolved_outcome) ** 2
+            for source, probability in secondary_baseline_prob_estimates.items()
+        }
+        baseline_brier_score = secondary_baseline_brier_scores["market_implied"]
         model_id = _model_id(decision)
         return EvalRecord(
             market_id=fill.market_id,
@@ -32,6 +51,10 @@ class Scorer:
             prob_estimate=yes_prob_estimate,
             resolved_outcome=fill.resolved_outcome,
             brier_score=brier_score,
+            baseline_prob_estimate=baseline_prob_estimate,
+            baseline_brier_score=baseline_brier_score,
+            baseline_prob_estimates=secondary_baseline_prob_estimates,
+            baseline_brier_scores=secondary_baseline_brier_scores,
             fill_status=fill.status,
             recorded_at=datetime.now(tz=UTC),
             citations=[fill.trade_id],
@@ -53,6 +76,41 @@ def _yes_probability(decision: TradeDecision) -> float:
     if decision.outcome == "NO":
         return 1.0 - decision.prob_estimate
     return decision.prob_estimate
+
+
+def _baseline_yes_probability(decision: TradeDecision) -> float:
+    if decision.outcome == "NO":
+        return 1.0 - decision.limit_price
+    return decision.limit_price
+
+
+def _secondary_baseline_prob_estimates(
+    *,
+    primary_baseline: float,
+    raw_values: Mapping[str, object] | None,
+) -> dict[str, float]:
+    baselines = {"market_implied": primary_baseline}
+    if raw_values is None:
+        return baselines
+    for source, raw_value in raw_values.items():
+        probability = _probability_or_none(raw_value)
+        if probability is None:
+            continue
+        baselines[str(source)] = probability
+    baselines["market_implied"] = primary_baseline
+    return baselines
+
+
+def _probability_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        probability = float(cast(int | float | str, value))
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(probability) or probability < 0.0 or probability > 1.0:
+        return None
+    return probability
 
 
 def _pnl(fill: FillRecord, decision: TradeDecision) -> float:

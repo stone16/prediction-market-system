@@ -147,10 +147,14 @@ class _MatchingVenueReconciler:
 
 
 def _settings() -> PMSSettings:
+    # Subscription persistence and active-perception reselection are strategy-
+    # and mode-agnostic (Invariants 5-7), so these tests run in PAPER. That
+    # exercises the identical sensor/selector/subscription wiring while
+    # skipping the LIVE-start preflight gauntlet (credentialed preflight
+    # artifact, py_clob_client_v2 import, venue account reconciliation) that is
+    # covered by the dedicated live-execution and live-preflight suites.
     return PMSSettings(
-        mode=RunMode.LIVE,
-        secret_source="fly",
-        live_trading_enabled=True,
+        mode=RunMode.PAPER,
         auto_migrate_default_v2=False,
         controller=ControllerSettings(time_in_force="IOC"),
         polymarket=PolymarketSettings(
@@ -159,7 +163,7 @@ def _settings() -> PMSSettings:
             api_secret="api-secret",
             api_passphrase="passphrase",
             signature_type=1,
-            funder_address="0xabc",
+            funder_address="0x1111111111111111111111111111111111111111",
         ),
         database=DatabaseSettings(
             dsn=cast(str, PMS_TEST_DATABASE_URL),

@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+import math
+import os
+import re
+import stat
+import sys
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
+from uuid import uuid4
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from pms.config import PMSSettings, RiskSettings
@@ -15,7 +22,25 @@ from pms.core.models import EvalRecord, TradeDecision
 
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
+REPORT_GENERATOR_ID = "scripts/paper_report.py"
 _API_TIMEOUT_S = 5.0
+_SECONDARY_BASELINE_ORDER = (
+    "market_implied",
+    "mid_quote",
+    "last_trade",
+    "category_prior",
+)
+_BASELINE_SOURCE_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+
+
+@dataclass(frozen=True)
+class PaperReportProvenance:
+    artifact_mode: str
+    output_path: str
+    generated_by: str = REPORT_GENERATOR_ID
+    generated_at: str = field(
+        default_factory=lambda: datetime.now(tz=UTC).isoformat()
+    )
 
 
 @dataclass(frozen=True)
@@ -32,6 +57,15 @@ class TradeCostBreakdown:
     gross_edge: float
     spread_cost: float
     net_edge: float
+
+
+@dataclass(frozen=True)
+class BaselineEvidenceCoverage:
+    decisions: int
+    market_implied_count: int
+    mid_quote_count: int
+    last_trade_count: int
+    category_prior_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -60,6 +94,7 @@ class PaperReportMetrics:
     decisions_accepted: int = 0
     decisions_rejected: int = 0
     fills: int = 0
+    fill_rate: float | None = None
     average_slippage_bps: float | None = None
     todays_pnl: float = 0.0
     cumulative_pnl: float = 0.0
@@ -67,12 +102,21 @@ class PaperReportMetrics:
     open_positions: int = 0
     total_exposure: float = 0.0
     brier_score_7d: float | None = None
+    baseline_brier_score_7d: float | None = None
+    brier_improvement_7d: float | None = None
+    baseline_brier_by_source: dict[str, float] = field(default_factory=dict)
+    brier_improvement_by_source: dict[str, float] = field(default_factory=dict)
     hit_rate: float | None = None
     average_edge_bps: float | None = None
+    average_fee_bps: float | None = None
+    average_net_edge_bps: float | None = None
     sharpe_ratio: float | None = None
+    unresolved_incidents: int = 0
+    rejection_reasons: tuple[tuple[str, int], ...] = ()
     risk_events: tuple[tuple[str, str, str], ...] = ()
     reliability_bins: tuple[ReliabilityBin, ...] = ()
     trade_costs: tuple[TradeCostBreakdown, ...] = ()
+    baseline_evidence: BaselineEvidenceCoverage | None = None
     clamp_rejections: tuple[tuple[str, int], ...] = ()
     selection_funnel: SelectionFunnel | None = None
 
@@ -81,17 +125,127 @@ class PaperReportMetrics:
         return cls(report_date=report_date)
 
 
+@dataclass(frozen=True)
+class PaperSoakGateConfig:
+    min_soak_days: int = 30
+    min_fills: int = 10
+    max_slippage_bps: float = 50.0
+    max_brier_score: float = 0.20
+    min_brier_improvement: float = 0.0
+    min_hit_rate: float = 0.45
+    min_average_edge_bps: float = 5.0
+    min_average_net_edge_bps: float = 0.0
+
+
+@dataclass(frozen=True)
+class PaperSoakGateCheck:
+    name: str
+    ok: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class PaperSoakGateResult:
+    checks: tuple[PaperSoakGateCheck, ...]
+
+    @property
+    def ok(self) -> bool:
+        return all(check.ok for check in self.checks)
+
+    def require_check(self, name: str) -> PaperSoakGateCheck:
+        for check in self.checks:
+            if check.name == name:
+                return check
+        msg = f"paper soak gate check not found: {name}"
+        raise KeyError(msg)
+
+
+def evaluate_paper_soak_gate(
+    metrics: PaperReportMetrics,
+    *,
+    risk: RiskSettings,
+    config: PaperSoakGateConfig = PaperSoakGateConfig(),
+) -> PaperSoakGateResult:
+    checks = [
+        _check_min_int("soak_days", metrics.day_of_soak, config.min_soak_days),
+        _check_min_int("fills", metrics.fills, config.min_fills),
+        _check_optional_gt("fill_rate", metrics.fill_rate, 0.0),
+        _check_optional_lte(
+            "average_slippage_bps",
+            metrics.average_slippage_bps,
+            config.max_slippage_bps,
+        ),
+        _check_daily_pnl(metrics, risk=risk),
+        _check_optional_gt("cumulative_pnl", metrics.cumulative_pnl, 0.0),
+        _check_drawdown(metrics, risk=risk),
+        _check_open_positions(metrics, risk=risk),
+        _check_optional_lte("total_exposure", metrics.total_exposure, risk.max_total_exposure),
+        _check_optional_lt("brier_score", metrics.brier_score_7d, config.max_brier_score),
+        _check_optional_gt(
+            "brier_improvement",
+            metrics.brier_improvement_7d,
+            config.min_brier_improvement,
+        ),
+        *_secondary_brier_improvement_checks(metrics.brier_improvement_by_source),
+        _check_optional_gt("hit_rate", metrics.hit_rate, config.min_hit_rate),
+        _check_optional_gt(
+            "average_edge_bps",
+            metrics.average_edge_bps,
+            config.min_average_edge_bps,
+        ),
+        _check_optional_gt(
+            "average_net_edge_bps",
+            metrics.average_net_edge_bps,
+            config.min_average_net_edge_bps,
+        ),
+        _check_optional_gt("sharpe_ratio", metrics.sharpe_ratio, 0.0),
+        _check_strategy_evidence(metrics.strategy),
+        _check_zero("unresolved_incidents", metrics.unresolved_incidents, "unresolved"),
+        _check_zero("risk_events", len(metrics.risk_events), "risk event(s)"),
+    ]
+    return PaperSoakGateResult(tuple(checks))
+
+
 def metrics_from_api_payloads(
     *,
     report_date: date,
     status: dict[str, Any],
     trades: dict[str, Any],
     positions: dict[str, Any],
+    metrics: dict[str, Any] | None = None,
+    decisions: object | None = None,
     strategies: dict[str, Any] | None = None,
     risk_events: tuple[tuple[str, str, str], ...] = (),
 ) -> PaperReportMetrics:
     events = list(risk_events)
+    events.extend(_strategy_evidence_risk_events(strategies))
+    events.extend(_run_mode_risk_events(status))
     events.extend(_sensor_risk_events(status))
+    events.extend(_actuator_risk_events(status))
+    events.extend(_unresolved_incident_evidence_risk_events(status))
+    metric_rows = metrics or {}
+    events.extend(_non_finite_metric_risk_events(metric_rows))
+    events.extend(_non_finite_metric_mapping_risk_events(metric_rows))
+    events.extend(_invalid_metric_mapping_source_risk_events(metric_rows))
+    todays_pnl, daily_pnl_events = _daily_pnl_from_metrics(
+        metric_rows,
+        report_date=report_date,
+    )
+    events.extend(daily_pnl_events)
+    baseline_brier_by_source = _float_mapping_from_dict(
+        metric_rows,
+        "baseline_brier_by_source",
+    )
+    brier_improvement_by_source = _float_mapping_from_dict(
+        metric_rows,
+        "brier_improvement_by_source",
+    )
+    events.extend(
+        _secondary_baseline_score_risk_events(
+            baseline_brier_by_source=baseline_brier_by_source,
+            brier_improvement_by_source=brier_improvement_by_source,
+        )
+    )
     started_at = _parse_datetime(status.get("runner_started_at"))
     if started_at is None:
         events.append(("report generation", "runner_started_at missing", "check /status"))
@@ -102,8 +256,40 @@ def metrics_from_api_payloads(
     controller = _dict_value(status, "controller")
     actuator = _dict_value(status, "actuator")
     evaluator = _dict_value(status, "evaluator")
-    trade_rows = _list_value(trades, "trades")
+    supervision = _dict_value(status, "supervision")
+    rejection_reasons = _diagnostic_counts(controller)
+    events.extend(_diagnostic_evidence_risk_events(controller, rejection_reasons))
+    decision_rows = _rows_in_soak_window(
+        _rows_from_payload(decisions, "decisions"),
+        timestamp_key="created_at",
+        started_at=started_at,
+        report_date=report_date,
+    )
+    decisions_made = _int_from_dict(controller, "decisions_total")
+    events.extend(
+        _decision_payload_completeness_risk_events(
+            decision_rows,
+            decisions_made=decisions_made,
+        )
+    )
+    events.extend(_non_finite_decision_risk_events(decision_rows))
+    baseline_evidence = _baseline_evidence_coverage(decision_rows)
+    events.extend(_baseline_evidence_risk_events(decision_rows))
+    events.extend(
+        _baseline_evidence_score_risk_events(
+            baseline_evidence,
+            baseline_brier_by_source=baseline_brier_by_source,
+            brier_improvement_by_source=brier_improvement_by_source,
+        )
+    )
+    trade_rows = _trade_rows_in_soak_window(
+        _list_value(trades, "trades"),
+        started_at=started_at,
+        report_date=report_date,
+    )
+    events.extend(_non_finite_trade_risk_events(trade_rows))
     position_rows = _list_value(positions, "positions")
+    events.extend(_non_finite_position_risk_events(position_rows))
 
     total_exposure = sum(_float_from_dict(row, "locked_usdc") for row in position_rows)
     cumulative_pnl = sum(_float_from_dict(row, "unrealized_pnl") for row in position_rows)
@@ -112,13 +298,48 @@ def metrics_from_api_payloads(
         report_date=report_date,
         strategy=_strategy_label(status=status, strategies=strategies or {}),
         day_of_soak=day_of_soak,
-        decisions_made=_int_from_dict(controller, "decisions_total"),
+        decisions_made=decisions_made,
         decisions_rejected=_int_from_dict(controller, "diagnostics_total"),
-        fills=_int_from_dict(actuator, "fills_total", fallback=len(trade_rows)),
+        fills=len(trade_rows),
+        fill_rate=_optional_float_from_dict(metric_rows, "fill_rate"),
+        average_slippage_bps=_optional_float_from_dict(metric_rows, "slippage_bps"),
+        todays_pnl=todays_pnl,
         cumulative_pnl=cumulative_pnl,
+        max_drawdown_pct=_optional_float_from_dict(metric_rows, "max_drawdown_pct"),
         open_positions=len(position_rows),
         total_exposure=total_exposure,
-        brier_score_7d=_optional_float_from_dict(evaluator, "brier_overall"),
+        brier_score_7d=_optional_float_from_dict_first(
+            evaluator,
+            ("brier_14d", "brier_overall"),
+        ),
+        baseline_brier_score_7d=_optional_float_from_dict_first(
+            evaluator,
+            ("baseline_brier_14d", "baseline_brier_overall"),
+        ),
+        brier_improvement_7d=_optional_float_from_dict_first(
+            evaluator,
+            ("brier_improvement_14d", "brier_improvement_overall"),
+        ),
+        baseline_brier_by_source=baseline_brier_by_source,
+        brier_improvement_by_source=brier_improvement_by_source,
+        hit_rate=_optional_float_from_dict(metric_rows, "win_rate"),
+        average_edge_bps=_average_edge_bps(decision_rows),
+        average_fee_bps=_average_fee_bps(trade_rows),
+        average_net_edge_bps=_average_net_edge_bps(
+            decision_rows,
+            trade_rows=trade_rows,
+            average_slippage_bps=_optional_float_from_dict(
+                metric_rows,
+                "slippage_bps",
+            ),
+        ),
+        sharpe_ratio=_optional_float_from_dict(metric_rows, "sharpe_ratio"),
+        unresolved_incidents=_int_from_dict(
+            supervision,
+            "unresolved_feedback_total",
+        ),
+        rejection_reasons=rejection_reasons,
+        baseline_evidence=baseline_evidence,
         risk_events=tuple(events),
     )
 
@@ -175,59 +396,115 @@ def load_live_metrics(
         events.append(("report generation", "/positions unavailable", positions_error))
         positions = {}
 
+    decisions, decisions_error = _fetch_api_payload(
+        api_base_url=api_base_url,
+        path="/decisions?limit=200",
+        api_token=api_token,
+    )
+    if decisions_error is not None:
+        events.append(("report generation", "/decisions unavailable", decisions_error))
+        decisions = []
+
+    metric_path, expected_metrics_window = _metrics_path_for_soak_window(
+        status=status,
+        report_date=report_date,
+    )
+    metric_payload, metric_error = _fetch_api_json(
+        api_base_url=api_base_url,
+        path=metric_path,
+        api_token=api_token,
+    )
+    if metric_error is not None:
+        events.append(("report generation", "/metrics unavailable", metric_error))
+        metric_payload = {}
+    elif expected_metrics_window is not None:
+        events.extend(
+            _metrics_window_risk_events(
+                metric_payload,
+                expected_since=expected_metrics_window[0],
+                expected_until=expected_metrics_window[1],
+            )
+        )
+
     strategies, strategies_error = _fetch_api_json(
         api_base_url=api_base_url,
         path="/strategies",
         api_token=api_token,
     )
+    strategies_payload: dict[str, Any] | None = strategies
     if strategies_error is not None:
         events.append(("report generation", "/strategies unavailable", strategies_error))
-        strategies = {}
+        strategies_payload = None
 
     return metrics_from_api_payloads(
         report_date=report_date,
         status=status,
+        decisions=decisions,
         trades=trades,
         positions=positions,
-        strategies=strategies,
+        metrics=metric_payload,
+        strategies=strategies_payload,
         risk_events=tuple(events),
     )
 
 
-def render_report(metrics: PaperReportMetrics, *, risk: RiskSettings) -> str:
+def render_report(
+    metrics: PaperReportMetrics,
+    *,
+    risk: RiskSettings,
+    provenance: PaperReportProvenance | None = None,
+) -> str:
     lines = [
         f"# Paper Daily Report - {metrics.report_date.isoformat()}",
         "",
-        "## Summary",
-        "",
-        "| Metric | Value | Gate |",
-        "|---|---:|---|",
-        f"| Strategy | {metrics.strategy} | - |",
-        f"| Day of soak | {metrics.day_of_soak} | 30 required |",
-        f"| Decisions made | {metrics.decisions_made} | - |",
-        f"| Decisions accepted | {metrics.decisions_accepted} | - |",
-        f"| Decisions rejected | {metrics.decisions_rejected} | - |",
-        f"| Fills | {metrics.fills} | - |",
-        f"| Average slippage (bps) | {_fmt_optional(metrics.average_slippage_bps, 1)} | <= 50 |",
-        f"| Today's P&L | {_fmt_money_signed(metrics.todays_pnl)} | >= -daily limit |",
-        f"| Cumulative P&L | {_fmt_money_signed(metrics.cumulative_pnl)} | > 0 by soak end |",
-        f"| Max drawdown | {_fmt_percent(metrics.max_drawdown_pct)} | <= {_fmt_percent(risk.max_drawdown_pct)} |",
-        f"| Open positions | {metrics.open_positions} | <= {risk.max_open_positions or 'N/A'} |",
-        f"| Total exposure | {_fmt_money(metrics.total_exposure)} | <= {_fmt_money(risk.max_total_exposure)} |",
-        f"| Max exposure | {_fmt_money(risk.max_total_exposure)} | - |",
-        f"| Brier score (7d rolling) | {_fmt_optional(metrics.brier_score_7d, 2)} | < 0.20 |",
-        f"| Hit rate (all trades) | {_fmt_ratio_percent(metrics.hit_rate)} | > 45% |",
-        f"| Average edge (bps) | {_fmt_optional(metrics.average_edge_bps, 1)} | > 5 |",
-        f"| Sharpe ratio (cumulative) | {_fmt_optional(metrics.sharpe_ratio, 2)} | > 0 |",
-        "",
-        "## Risk Events",
-        "",
-        "| Time | Trigger | Status |",
-        "|---|---|---|",
     ]
+    if provenance is not None:
+        lines.extend(_render_report_provenance_section(provenance))
+    lines.extend(
+        [
+            "## Summary",
+            "",
+            "| Metric | Value | Gate |",
+            "|---|---:|---|",
+            f"| Strategy | {_escape_table_value(metrics.strategy)} | - |",
+            f"| Day of soak | {metrics.day_of_soak} | 30 required |",
+            f"| Decisions made | {metrics.decisions_made} | - |",
+            f"| Decisions accepted | {metrics.decisions_accepted} | - |",
+            f"| Decisions rejected | {metrics.decisions_rejected} | - |",
+            f"| Fills | {metrics.fills} | - |",
+            f"| Fill rate | {_fmt_ratio_percent(metrics.fill_rate)} | > 0 |",
+            f"| Average slippage (bps) | {_fmt_optional(metrics.average_slippage_bps, 1)} | <= 50 |",
+            f"| Today's P&L | {_fmt_money_signed(metrics.todays_pnl)} | >= -daily limit |",
+            f"| Cumulative P&L | {_fmt_money_signed(metrics.cumulative_pnl)} | > 0 by soak end |",
+            f"| Max drawdown | {_fmt_percent(metrics.max_drawdown_pct)} | <= {_fmt_percent(risk.max_drawdown_pct)} |",
+            f"| Open positions | {metrics.open_positions} | <= {risk.max_open_positions or 'N/A'} |",
+            f"| Total exposure | {_fmt_money(metrics.total_exposure)} | <= {_fmt_money(risk.max_total_exposure)} |",
+            f"| Max exposure | {_fmt_money(risk.max_total_exposure)} | - |",
+            f"| Brier score (14d rolling) | {_fmt_optional(metrics.brier_score_7d, 2)} | < 0.20 |",
+            f"| Market baseline Brier (14d rolling) | {_fmt_optional(metrics.baseline_brier_score_7d, 2)} | - |",
+            f"| Brier improvement vs baseline | {_fmt_optional(metrics.brier_improvement_7d, 2)} | > 0 |",
+            f"| Hit rate (all trades) | {_fmt_ratio_percent(metrics.hit_rate)} | > 45% |",
+            f"| Average edge (bps) | {_fmt_optional(metrics.average_edge_bps, 1)} | > 5 |",
+            f"| Average fee (bps) | {_fmt_optional(metrics.average_fee_bps, 1)} | - |",
+            f"| Average net edge after costs (bps) | {_fmt_optional(metrics.average_net_edge_bps, 1)} | > 0 |",
+            f"| Sharpe ratio (cumulative) | {_fmt_optional(metrics.sharpe_ratio, 2)} | > 0 |",
+            f"| Unresolved incidents | {metrics.unresolved_incidents} | 0 required |",
+        ]
+    )
+    lines.extend(_render_go_no_go_section(metrics, risk=risk))
+    lines.extend(
+        [
+            "",
+            "## Risk Events",
+            "",
+            "| Time | Trigger | Status |",
+            "|---|---|---|",
+        ]
+    )
     if metrics.risk_events:
         lines.extend(
-            f"| {event_time} | {trigger} | {status} |"
+            f"| {_escape_table_value(event_time)} | "
+            f"{_escape_table_value(trigger)} | {_escape_table_value(status)} |"
             for event_time, trigger, status in metrics.risk_events
         )
     else:
@@ -242,7 +519,15 @@ def render_report(metrics: PaperReportMetrics, *, risk: RiskSettings) -> str:
             f"{_fmt_optional(metrics.average_slippage_bps, 1)} bps."
         )
     lines.extend(_render_reliability_section(metrics.reliability_bins))
+    lines.extend(_render_baseline_evidence_section(metrics.baseline_evidence))
+    lines.extend(
+        _render_secondary_baseline_score_section(
+            baseline_brier_by_source=metrics.baseline_brier_by_source,
+            brier_improvement_by_source=metrics.brier_improvement_by_source,
+        )
+    )
     lines.extend(_render_trade_cost_section(metrics.trade_costs))
+    lines.extend(_render_rejection_reason_section(metrics.rejection_reasons))
     lines.extend(_render_clamp_rejection_section(metrics.clamp_rejections))
     lines.extend(_render_selection_funnel_section(metrics.selection_funnel))
     lines.append("")
@@ -261,10 +546,20 @@ def main(argv: list[str] | None = None) -> int:
         default="config.live-soak.yaml",
         help="PMS config path used for risk gates.",
     )
-    parser.add_argument(
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
         "--output-dir",
         default="docs/paper-reports",
         help="Directory for the generated Markdown report.",
+    )
+    output_group.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "Exact path for the generated Markdown report. Use this for the "
+            "final LIVE GO artifact so provenance output_path matches "
+            "live_paper_soak_report_path."
+        ),
     )
     parser.add_argument(
         "--api-base-url",
@@ -281,33 +576,327 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the report instead of writing it to disk.",
     )
+    parser.add_argument(
+        "--require-go",
+        action="store_true",
+        help="Return exit code 1 when the paper soak go/no-go gate fails.",
+    )
     args = parser.parse_args(argv)
 
-    report_date = date.fromisoformat(args.date)
-    settings = PMSSettings.load(args.config)
-    metrics = (
-        PaperReportMetrics.empty(report_date=report_date)
-        if args.offline
-        else load_live_metrics(
-            report_date=report_date,
-            api_base_url=args.api_base_url,
-            api_token=settings.api_token,
+    try:
+        report_date = date.fromisoformat(args.date)
+    except ValueError:
+        print(
+            f"ERROR: --date must be YYYY-MM-DD, got {args.date!r}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.require_go and report_date > datetime.now(tz=UTC).date():
+        print(
+            "paper report --require-go date must not be in the future",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        settings = PMSSettings.load(args.config)
+        metrics = (
+            PaperReportMetrics.empty(report_date=report_date)
+            if args.offline
+            else load_live_metrics(
+                report_date=report_date,
+                api_base_url=args.api_base_url,
+                api_token=settings.api_token,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    gate = evaluate_paper_soak_gate(metrics, risk=settings.risk)
+    if args.dry_run:
+        report = render_report(
+            metrics,
+            risk=settings.risk,
+            provenance=PaperReportProvenance(
+                artifact_mode="dry_run",
+                output_path="stdout",
+            ),
+        )
+        print(report)
+        return 0 if not args.require_go or gate.ok else 1
+
+    try:
+        if args.output is not None:
+            output_path = Path(args.output).expanduser().resolve(strict=False)
+        else:
+            output_dir = Path(args.output_dir).expanduser().resolve(strict=False)
+            output_path = output_dir / f"{report_date.isoformat()}.md"
+        if args.require_go:
+            _require_output_outside_working_tree(output_path)
+            _require_go_output_distinct_from_live_inputs(
+                output_path,
+                settings=settings,
+                config_path=Path(args.config),
+            )
+        _prepare_private_output_dir(output_path.parent)
+        report = render_report(
+            metrics,
+            risk=settings.risk,
+            provenance=PaperReportProvenance(
+                artifact_mode="persisted",
+                output_path=str(output_path),
+            ),
+        )
+        _write_text_no_follow(output_path, report)
+        print(output_path)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    return 0 if not args.require_go or gate.ok else 1
+
+
+def _require_output_outside_working_tree(path: Path) -> None:
+    configured_path = _absolute_path_without_symlink_resolution(path)
+    resolved_path = path.expanduser().resolve(strict=False)
+    working_tree = _working_tree_root(Path.cwd().resolve(strict=False))
+    working_trees = [working_tree]
+    for candidate in (configured_path, resolved_path):
+        candidate_working_tree = _containing_working_tree_root(candidate)
+        if candidate_working_tree is not None:
+            working_trees.append(candidate_working_tree)
+
+    for working_tree_candidate in dict.fromkeys(working_trees):
+        if working_tree_candidate.parent == working_tree_candidate:
+            continue
+        for candidate in (configured_path, resolved_path):
+            try:
+                candidate.relative_to(working_tree_candidate)
+            except ValueError:
+                continue
+            raise OSError(
+                "paper report --require-go output must live outside the "
+                f"working tree: {candidate}"
+            )
+
+
+def _absolute_path_without_symlink_resolution(path: Path) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
+    return Path(os.path.abspath(expanded))
+
+
+def _require_go_output_distinct_from_live_inputs(
+    output_path: Path,
+    *,
+    settings: PMSSettings,
+    config_path: Path,
+) -> None:
+    output_identities = _path_identities(output_path)
+    approval_path = settings.polymarket.first_live_order_approval_path
+    protected_paths: list[tuple[str, str | None]] = [
+        ("LIVE config file", str(config_path)),
+        (
+            "LIVE credentialed preflight artifact",
+            settings.live_preflight_artifact_path,
+        ),
+        ("LIVE first-order audit path", settings.live_first_order_audit_path),
+        ("LIVE emergency audit path", settings.live_emergency_audit_path),
+        ("LIVE operator approval path", approval_path),
+        ("LIVE local secret file", settings.local_secret_file),
+        (
+            "LIVE operator rehearsal report",
+            settings.live_operator_rehearsal_report_path,
+        ),
+        ("LIVE execution-model artifact", settings.live_execution_model_path),
+        (
+            "LIVE paper-vs-backtest execution diff artifact",
+            settings.live_paper_backtest_diff_path,
+        ),
+        (
+            "LIVE category-prior artifact",
+            settings.controller.category_prior_observations_path,
+        ),
+        ("LIVE FLB calibration artifact", settings.strategies.flb_calibration_path),
+        ("LIVE discord alert directory", settings.discord.alert_dir),
+    ]
+    if approval_path is not None and approval_path.strip() != "":
+        protected_paths.append(
+            ("LIVE operator approval sidecar path", f"{approval_path}.meta.json")
+        )
+
+    for label, raw_path in protected_paths:
+        if raw_path is None or raw_path.strip() == "":
+            continue
+        if not _path_identities_overlap(
+            output_identities,
+            _path_identities(Path(raw_path)),
+        ):
+            continue
+        msg = (
+            "paper report output path must be distinct from "
+            f"{label}: {output_path}"
+        )
+        raise ValueError(msg)
+
+
+def _path_identities(path: Path) -> frozenset[Path]:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
+    return frozenset(
+        (
+            Path(os.path.abspath(expanded)),
+            expanded.resolve(strict=False),
         )
     )
-    report = render_report(
-        metrics,
-        risk=settings.risk,
-    )
-    if args.dry_run:
-        print(report)
-        return 0
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{report_date.isoformat()}.md"
-    output_path.write_text(report, encoding="utf-8")
-    print(output_path)
-    return 0
+
+def _path_identities_overlap(left: frozenset[Path], right: frozenset[Path]) -> bool:
+    return any(
+        _paths_overlap(left_path, right_path)
+        for left_path in left
+        for right_path in right
+    )
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    if left == right:
+        return True
+    try:
+        right.relative_to(left)
+    except ValueError:
+        pass
+    else:
+        return True
+    try:
+        left.relative_to(right)
+    except ValueError:
+        return False
+    return True
+
+
+def _working_tree_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return start
+
+
+def _containing_working_tree_root(path: Path) -> Path | None:
+    start = path if path.is_dir() else path.parent
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _prepare_private_output_dir(output_dir: Path) -> None:
+    try:
+        mode = output_dir.lstat().st_mode
+    except FileNotFoundError:
+        output_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+        os.chmod(output_dir, 0o700)
+        return
+    if not stat.S_ISDIR(mode):
+        raise OSError(f"paper report output directory is not a directory: {output_dir}")
+    permissions = stat.S_IMODE(mode)
+    if permissions & 0o077:
+        raise OSError(
+            f"paper report output directory {output_dir} is too permissive; "
+            f"run `chmod 700 {output_dir}`."
+        )
+    if not permissions & stat.S_IWUSR:
+        raise OSError(
+            f"paper report output directory {output_dir} is not owner-writable; "
+            f"run `chmod 700 {output_dir}`."
+        )
+
+
+def _write_text_no_follow(path: Path, content: str) -> None:
+    _require_regular_file_or_absent(path)
+    fd, temp_path = _open_output_temp_file(path)
+    published = False
+    try:
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            fd = -1
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        _require_regular_file_or_absent(path)
+        os.replace(temp_path, path)
+        published = True
+        _fsync_parent_directory(path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if not published:
+            _unlink_regular_single_link_file_if_present(temp_path)
+
+
+def _open_output_temp_file(path: Path) -> tuple[int, Path]:
+    _require_regular_file_or_absent(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    for _ in range(16):
+        temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            fd = os.open(temp_path, flags, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            _require_open_regular_single_link_file(fd, temp_path)
+            os.fchmod(fd, 0o600)
+        except BaseException:
+            os.close(fd)
+            _unlink_regular_single_link_file_if_present(temp_path)
+            raise
+        return fd, temp_path
+    raise FileExistsError(f"could not create temporary paper report for {path}")
+
+
+def _unlink_regular_single_link_file_if_present(path: Path) -> None:
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1:
+        return
+    path.unlink()
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path.parent, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        return
+    finally:
+        os.close(fd)
+
+
+def _require_open_regular_single_link_file(fd: int, path: Path) -> None:
+    path_stat = os.fstat(fd)
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise OSError(f"paper report output path is not a regular file: {path}")
+    if path_stat.st_nlink != 1:
+        raise OSError(f"paper report output path is not a single-link file: {path}")
+
+
+def _require_regular_file_or_absent(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(mode):
+        raise OSError(f"paper report output path is not a regular file: {path}")
+    if path.lstat().st_nlink != 1:
+        raise OSError(f"paper report output path is not a single-link file: {path}")
 
 
 def _fmt_money(value: float) -> str:
@@ -339,6 +928,208 @@ def _fmt_ratio_percent(value: float | None) -> str:
 
 def _fmt_probability_percent(value: float) -> str:
     return f"{value * 100.0:.1f}%"
+
+
+def _render_go_no_go_section(
+    metrics: PaperReportMetrics,
+    *,
+    risk: RiskSettings,
+) -> list[str]:
+    gate = evaluate_paper_soak_gate(metrics, risk=risk)
+    lines = [
+        "",
+        "## Go/No-Go Gate",
+        "",
+        f"**Decision:** {'GO' if gate.ok else 'NO-GO'}",
+        "",
+        "| Check | Status | Detail |",
+        "|---|---|---|",
+    ]
+    for check in gate.checks:
+        status = "PASS" if check.ok else "FAIL"
+        lines.append(f"| {check.name} | {status} | {_escape_table_value(check.detail)} |")
+    return lines
+
+
+def _render_report_provenance_section(
+    provenance: PaperReportProvenance,
+) -> list[str]:
+    return [
+        "## Report Provenance",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| generated_by | {_escape_table_value(provenance.generated_by)} |",
+        f"| generated_at | {_escape_table_value(provenance.generated_at)} |",
+        f"| artifact_mode | {_escape_table_value(provenance.artifact_mode)} |",
+        f"| output_path | {_escape_table_value(provenance.output_path)} |",
+        "",
+    ]
+
+
+def _escape_table_value(value: str) -> str:
+    return " ".join(value.replace("|", "\\|").splitlines())
+
+
+def _check_min_int(name: str, actual: int, minimum: int) -> PaperSoakGateCheck:
+    if actual >= minimum:
+        return PaperSoakGateCheck(name, True, f"{actual} >= {minimum}")
+    return PaperSoakGateCheck(name, False, f"{actual} < {minimum}")
+
+
+def _check_zero(name: str, actual: int, noun: str) -> PaperSoakGateCheck:
+    if actual == 0:
+        return PaperSoakGateCheck(name, True, f"0 {noun}")
+    return PaperSoakGateCheck(name, False, f"{actual} {noun}")
+
+
+def _check_strategy_evidence(strategy: str) -> PaperSoakGateCheck:
+    labels = tuple(label.strip() for label in strategy.split(",") if label.strip())
+    if not labels or any(
+        label.lower() == "unknown"
+        or "@" not in label
+        or _looks_like_placeholder(label)
+        for label in labels
+    ):
+        return PaperSoakGateCheck(
+            "strategy_evidence",
+            False,
+            "missing concrete strategy_id@strategy_version_id",
+        )
+    return PaperSoakGateCheck(
+        "strategy_evidence",
+        True,
+        ", ".join(labels),
+    )
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "":
+        return False
+    placeholder_markers = (
+        "fill_in",
+        "__fill",
+        "todo",
+        "replace",
+        "placeholder",
+    )
+    return any(marker in normalized for marker in placeholder_markers)
+
+
+def _check_optional_lt(
+    name: str,
+    actual: float | None,
+    threshold: float,
+) -> PaperSoakGateCheck:
+    if actual is None:
+        return PaperSoakGateCheck(name, False, "missing")
+    if actual < threshold:
+        return PaperSoakGateCheck(name, True, f"{actual:.4f} < {threshold:.4f}")
+    return PaperSoakGateCheck(name, False, f"{actual:.4f} >= {threshold:.4f}")
+
+
+def _check_optional_lte(
+    name: str,
+    actual: float | None,
+    threshold: float,
+) -> PaperSoakGateCheck:
+    if actual is None:
+        return PaperSoakGateCheck(name, False, "missing")
+    if actual <= threshold:
+        return PaperSoakGateCheck(name, True, f"{actual:.4f} <= {threshold:.4f}")
+    return PaperSoakGateCheck(name, False, f"{actual:.4f} > {threshold:.4f}")
+
+
+def _check_optional_gt(
+    name: str,
+    actual: float | None,
+    threshold: float,
+) -> PaperSoakGateCheck:
+    if actual is None:
+        return PaperSoakGateCheck(name, False, "missing")
+    if actual > threshold:
+        return PaperSoakGateCheck(name, True, f"{actual:.4f} > {threshold:.4f}")
+    return PaperSoakGateCheck(name, False, f"{actual:.4f} <= {threshold:.4f}")
+
+
+def _secondary_brier_improvement_checks(
+    improvements: Mapping[str, float],
+) -> list[PaperSoakGateCheck]:
+    return [
+        _check_optional_gt(
+            f"secondary_brier_improvement:{source}",
+            improvement,
+            0.0,
+        )
+        for source, improvement in _ordered_baseline_items(improvements)
+    ]
+
+
+def _check_daily_pnl(
+    metrics: PaperReportMetrics,
+    *,
+    risk: RiskSettings,
+) -> PaperSoakGateCheck:
+    limit = risk.max_daily_loss_usdc
+    if limit is None:
+        return PaperSoakGateCheck(
+            "todays_pnl",
+            False,
+            "risk.max_daily_loss_usdc missing",
+        )
+    threshold = -limit
+    if metrics.todays_pnl >= threshold:
+        return PaperSoakGateCheck(
+            "todays_pnl",
+            True,
+            f"{metrics.todays_pnl:.4f} >= {threshold:.4f}",
+        )
+    return PaperSoakGateCheck(
+        "todays_pnl",
+        False,
+        f"{metrics.todays_pnl:.4f} < {threshold:.4f}",
+    )
+
+
+def _check_drawdown(
+    metrics: PaperReportMetrics,
+    *,
+    risk: RiskSettings,
+) -> PaperSoakGateCheck:
+    limit = risk.max_drawdown_pct
+    if limit is None:
+        return PaperSoakGateCheck(
+            "max_drawdown_pct",
+            False,
+            "risk.max_drawdown_pct missing",
+        )
+    return _check_optional_lte("max_drawdown_pct", metrics.max_drawdown_pct, limit)
+
+
+def _check_open_positions(
+    metrics: PaperReportMetrics,
+    *,
+    risk: RiskSettings,
+) -> PaperSoakGateCheck:
+    limit = risk.max_open_positions
+    if limit is None:
+        return PaperSoakGateCheck(
+            "open_positions",
+            False,
+            "risk.max_open_positions missing",
+        )
+    if metrics.open_positions <= limit:
+        return PaperSoakGateCheck(
+            "open_positions",
+            True,
+            f"{metrics.open_positions} <= {limit}",
+        )
+    return PaperSoakGateCheck(
+        "open_positions",
+        False,
+        f"{metrics.open_positions} > {limit}",
+    )
 
 
 def _reliability_bins(records: Sequence[EvalRecord]) -> tuple[ReliabilityBin, ...]:
@@ -465,6 +1256,55 @@ def _render_reliability_section(bins: Sequence[ReliabilityBin]) -> list[str]:
     return lines
 
 
+def _render_baseline_evidence_section(
+    coverage: BaselineEvidenceCoverage | None,
+) -> list[str]:
+    lines = ["", "## Baseline Evidence Coverage", ""]
+    if coverage is None or coverage.decisions == 0:
+        lines.append("No decision-time baseline evidence recorded.")
+        return lines
+    lines.extend(["| Baseline | Decisions | Coverage |", "|---|---:|---:|"])
+    for label, count in (
+        ("market_implied", coverage.market_implied_count),
+        ("mid_quote", coverage.mid_quote_count),
+        ("last_trade", coverage.last_trade_count),
+        ("category_prior", coverage.category_prior_count),
+    ):
+        lines.append(
+            f"| {label} | {count} / {coverage.decisions} | "
+            f"{_fmt_ratio_percent(count / coverage.decisions)} |"
+        )
+    return lines
+
+
+def _render_secondary_baseline_score_section(
+    *,
+    baseline_brier_by_source: Mapping[str, float],
+    brier_improvement_by_source: Mapping[str, float],
+) -> list[str]:
+    lines = ["", "## Secondary Baseline Brier", ""]
+    sources = _ordered_baseline_sources(
+        set(baseline_brier_by_source) | set(brier_improvement_by_source)
+    )
+    if not sources:
+        lines.append("No secondary baseline score metrics recorded.")
+        return lines
+
+    lines.extend(
+        [
+            "| Baseline | Baseline Brier | Brier improvement |",
+            "|---|---:|---:|",
+        ]
+    )
+    for source in sources:
+        lines.append(
+            f"| {_escape_table_value(source)} | "
+            f"{_fmt_optional(baseline_brier_by_source.get(source), 4)} | "
+            f"{_fmt_optional(brier_improvement_by_source.get(source), 4)} |"
+        )
+    return lines
+
+
 def _render_trade_cost_section(costs: Sequence[TradeCostBreakdown]) -> list[str]:
     lines = ["", "## Spread Cost Decomposition", ""]
     if not costs:
@@ -478,11 +1318,23 @@ def _render_trade_cost_section(costs: Sequence[TradeCostBreakdown]) -> list[str]
     )
     for cost in costs:
         lines.append(
-            f"| {cost.decision_id} | {cost.market_id} | "
+            f"| {_escape_table_value(cost.decision_id)} | "
+            f"{_escape_table_value(cost.market_id)} | "
             f"{_fmt_probability_percent(cost.gross_edge)} | "
             f"{_fmt_probability_percent(cost.spread_cost)} | "
             f"{_fmt_probability_percent(cost.net_edge)} |"
         )
+    return lines
+
+
+def _render_rejection_reason_section(rejections: Sequence[tuple[str, int]]) -> list[str]:
+    lines = ["", "## Controller Rejection Reasons", ""]
+    if not rejections:
+        lines.append("No controller rejection reasons recorded.")
+        return lines
+    lines.extend(["| Reason | Count |", "|---|---:|"])
+    for reason, count in rejections:
+        lines.append(f"| {_escape_table_value(reason)} | {count} |")
     return lines
 
 
@@ -493,7 +1345,7 @@ def _render_clamp_rejection_section(rejections: Sequence[tuple[str, int]]) -> li
         return lines
     lines.extend(["| Market | Rejections |", "|---|---:|"])
     for market_id, count in rejections:
-        lines.append(f"| {market_id} | {count} |")
+        lines.append(f"| {_escape_table_value(market_id)} | {count} |")
     return lines
 
 
@@ -511,11 +1363,21 @@ def _render_selection_funnel_section(funnel: SelectionFunnel | None) -> list[str
     return lines
 
 
-def _strategy_label(*, status: dict[str, Any], strategies: dict[str, Any]) -> str:
-    status_strategy = status.get("strategy")
-    if isinstance(status_strategy, str) and status_strategy:
-        return status_strategy
+def _strategy_evidence_risk_events(
+    strategies: dict[str, Any] | None,
+) -> list[tuple[str, str, str]]:
+    if strategies is None or _active_strategy_version_labels(strategies):
+        return []
+    return [
+        (
+            "report generation",
+            "/strategies active version evidence missing",
+            "paper-soak GO reports require active strategy_id@strategy_version_id rows",
+        )
+    ]
 
+
+def _active_strategy_version_labels(strategies: dict[str, Any]) -> tuple[str, ...]:
     rows = _list_value(strategies, "strategies")
     labels: list[str] = []
     for row in rows:
@@ -525,9 +1387,43 @@ def _strategy_label(*, status: dict[str, Any], strategies: dict[str, Any]) -> st
         active_version_id = row.get("active_version_id")
         if isinstance(active_version_id, str) and active_version_id:
             labels.append(f"{strategy_id}@{active_version_id}")
+    return tuple(labels)
+
+
+def _strategy_label(
+    *,
+    status: dict[str, Any],
+    strategies: dict[str, Any] | None,
+) -> str:
+    labels: list[str] = []
+    for row in _list_value(strategies or {}, "strategies"):
+        strategy_id = row.get("strategy_id")
+        if not isinstance(strategy_id, str) or not strategy_id:
+            continue
+        active_version_id = row.get("active_version_id")
+        if isinstance(active_version_id, str) and active_version_id:
+            labels.append(f"{strategy_id}@{active_version_id}")
         else:
             labels.append(strategy_id)
-    return ", ".join(labels) if labels else "unknown"
+    if labels:
+        return ", ".join(labels)
+
+    status_strategy = status.get("strategy")
+    if isinstance(status_strategy, str) and status_strategy:
+        return status_strategy
+    return "unknown"
+
+
+def _run_mode_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
+    if status.get("mode") == "paper":
+        return []
+    return [
+        (
+            "report generation",
+            "paper mode evidence missing",
+            "status.mode must be paper for paper-soak GO reports",
+        )
+    ]
 
 
 def _sensor_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
@@ -547,12 +1443,425 @@ def _sensor_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
     return events
 
 
-def _fetch_api_json(
+def _actuator_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
+    actuator = _dict_value(status, "actuator")
+    halt_recovery_cycles_7d = _int_from_dict(
+        actuator,
+        "halt_recovery_cycles_7d",
+    )
+    if halt_recovery_cycles_7d <= 0:
+        return []
+    detail = (
+        f"{halt_recovery_cycles_7d} recovered halt cycle(s) in trailing 7d"
+    )
+    return [("actuator", "halt_recovery_cycles_7d", detail)]
+
+
+def _unresolved_incident_evidence_risk_events(
+    status: dict[str, Any],
+) -> list[tuple[str, str, str]]:
+    supervision = status.get("supervision")
+    if not isinstance(supervision, dict):
+        return [
+            (
+                "report generation",
+                "unresolved incident evidence missing",
+                "status.supervision.unresolved_feedback_total is required",
+            )
+        ]
+
+    count = _int_value(supervision.get("unresolved_feedback_total"))
+    if count is None or count < 0:
+        return [
+            (
+                "report generation",
+                "unresolved incident evidence invalid",
+                "status.supervision.unresolved_feedback_total must be a non-negative integer",
+            )
+        ]
+    return []
+
+
+def _non_finite_metric_risk_events(
+    metrics: dict[str, Any],
+) -> list[tuple[str, str, str]]:
+    events: list[tuple[str, str, str]] = []
+    for key in (
+        "fill_rate",
+        "win_rate",
+        "slippage_bps",
+        "max_drawdown_pct",
+        "sharpe_ratio",
+    ):
+        if _raw_numeric_is_non_finite(metrics.get(key)):
+            events.append(
+                (
+                    "report generation",
+                    "non-finite numeric evidence",
+                    f"metrics.{key} must be finite",
+                )
+            )
+    return events
+
+
+def _non_finite_metric_mapping_risk_events(
+    metrics: dict[str, Any],
+) -> list[tuple[str, str, str]]:
+    events: list[tuple[str, str, str]] = []
+    for key in ("baseline_brier_by_source", "brier_improvement_by_source"):
+        value = metrics.get(key)
+        if not isinstance(value, Mapping):
+            continue
+        for source, raw_value in value.items():
+            if not isinstance(source, str) or not source:
+                continue
+            if not _raw_numeric_is_non_finite(raw_value):
+                continue
+            events.append(
+                (
+                    "report generation",
+                    "non-finite numeric evidence",
+                    f"metrics.{key}.{source} must be finite",
+                )
+            )
+    return events
+
+
+def _invalid_metric_mapping_source_risk_events(
+    metrics: dict[str, Any],
+) -> list[tuple[str, str, str]]:
+    events: list[tuple[str, str, str]] = []
+    for key in ("baseline_brier_by_source", "brier_improvement_by_source"):
+        value = metrics.get(key)
+        if not isinstance(value, Mapping):
+            continue
+        for source in value:
+            if _valid_baseline_source_label(source):
+                continue
+            events.append(
+                (
+                    "report generation",
+                    "secondary baseline source invalid",
+                    f"metrics.{key} source must be concrete lowercase snake_case: {source}",
+                )
+            )
+    return events
+
+
+def _secondary_baseline_score_risk_events(
+    *,
+    baseline_brier_by_source: Mapping[str, float],
+    brier_improvement_by_source: Mapping[str, float],
+) -> list[tuple[str, str, str]]:
+    events: list[tuple[str, str, str]] = []
+    missing_improvement = set(baseline_brier_by_source) - set(
+        brier_improvement_by_source
+    )
+    for source in _ordered_baseline_sources(missing_improvement):
+        events.append(
+            (
+                "report generation",
+                "secondary baseline score incomplete",
+                f"{source} baseline_brier_by_source lacks brier_improvement_by_source",
+            )
+        )
+
+    missing_brier = set(brier_improvement_by_source) - set(baseline_brier_by_source)
+    for source in _ordered_baseline_sources(missing_brier):
+        events.append(
+            (
+                "report generation",
+                "secondary baseline score incomplete",
+                f"{source} brier_improvement_by_source lacks baseline_brier_by_source",
+            )
+        )
+    return events
+
+
+def _daily_pnl_from_metrics(
+    metrics: dict[str, Any],
+    *,
+    report_date: date,
+) -> tuple[float, list[tuple[str, str, str]]]:
+    raw_series = metrics.get("pnl_series")
+    if not isinstance(raw_series, Sequence) or isinstance(raw_series, (str, bytes)):
+        return 0.0, [
+            (
+                "report generation",
+                "daily P&L evidence missing",
+                "metrics.pnl_series is required",
+            )
+        ]
+
+    parsed_rows: list[tuple[datetime, float]] = []
+    for raw_row in raw_series:
+        if not isinstance(raw_row, Mapping):
+            return 0.0, [_invalid_daily_pnl_evidence_event()]
+        recorded_at = _parse_datetime(raw_row.get("recorded_at"))
+        pnl = _optional_float_from_mapping(raw_row, "pnl")
+        if recorded_at is None or pnl is None:
+            return 0.0, [_invalid_daily_pnl_evidence_event()]
+        parsed_rows.append((recorded_at, pnl))
+
+    if not parsed_rows:
+        return 0.0, [
+            (
+                "report generation",
+                "daily P&L evidence missing",
+                "metrics.pnl_series is empty",
+            )
+        ]
+
+    parsed_rows.sort(key=lambda row: row[0])
+    day_start = datetime(report_date.year, report_date.month, report_date.day, tzinfo=UTC)
+    day_end = day_start + timedelta(days=1)
+    start_pnl = 0.0
+    end_pnl: float | None = None
+    for recorded_at, pnl in parsed_rows:
+        if recorded_at < day_start:
+            start_pnl = pnl
+        if recorded_at < day_end:
+            end_pnl = pnl
+
+    if end_pnl is None:
+        return 0.0, [
+            (
+                "report generation",
+                "daily P&L evidence missing",
+                "metrics.pnl_series has no records before report day end",
+            )
+        ]
+    return end_pnl - start_pnl, []
+
+
+def _invalid_daily_pnl_evidence_event() -> tuple[str, str, str]:
+    return (
+        "report generation",
+        "daily P&L evidence invalid",
+        "metrics.pnl_series entries require recorded_at and finite pnl",
+    )
+
+
+def _non_finite_position_risk_events(
+    positions: Sequence[Mapping[str, object]],
+) -> list[tuple[str, str, str]]:
+    events: list[tuple[str, str, str]] = []
+    seen_fields: set[str] = set()
+    for row in positions:
+        for key in ("locked_usdc", "unrealized_pnl"):
+            if key in seen_fields:
+                continue
+            if not _raw_numeric_is_non_finite(row.get(key)):
+                continue
+            seen_fields.add(key)
+            events.append(
+                (
+                    "report generation",
+                    "non-finite numeric evidence",
+                    f"positions.{key} must be finite",
+                )
+            )
+    return events
+
+
+def _non_finite_trade_risk_events(
+    trades: Sequence[Mapping[str, object]],
+) -> list[tuple[str, str, str]]:
+    events: list[tuple[str, str, str]] = []
+    seen_fields: set[str] = set()
+    for row in trades:
+        for key in ("fill_notional_usdc", "fees", "fee_bps"):
+            if key in seen_fields:
+                continue
+            if not _raw_numeric_is_non_finite(row.get(key)):
+                continue
+            seen_fields.add(key)
+            events.append(
+                (
+                    "report generation",
+                    "non-finite numeric evidence",
+                    f"trades.{key} must be finite",
+                )
+            )
+    return events
+
+
+def _non_finite_decision_risk_events(
+    decisions: Sequence[Mapping[str, object]],
+) -> list[tuple[str, str, str]]:
+    events: list[tuple[str, str, str]] = []
+    seen_fields: set[str] = set()
+    for row in decisions:
+        for key in (
+            "expected_edge",
+            "prob_estimate",
+            "limit_price",
+            "spread_bps_at_decision",
+        ):
+            if key in seen_fields:
+                continue
+            if not _raw_numeric_is_non_finite(row.get(key)):
+                continue
+            seen_fields.add(key)
+            events.append(
+                (
+                    "report generation",
+                    "non-finite numeric evidence",
+                    f"decisions.{key} must be finite",
+                )
+            )
+    return events
+
+
+def _decision_payload_completeness_risk_events(
+    decision_rows: Sequence[Mapping[str, object]],
+    *,
+    decisions_made: int,
+) -> list[tuple[str, str, str]]:
+    if decisions_made <= len(decision_rows):
+        return []
+    return [
+        (
+            "report generation",
+            "decision payload incomplete",
+            f"/decisions returned {len(decision_rows)} row(s), "
+            f"but /status.controller.decisions_total reports {decisions_made}",
+        )
+    ]
+
+
+def _baseline_evidence_coverage(
+    decisions: Sequence[Mapping[str, object]],
+) -> BaselineEvidenceCoverage | None:
+    if not decisions:
+        return None
+    evidence_rows = _decision_evidence_rows(decisions)
+    return BaselineEvidenceCoverage(
+        decisions=len(decisions),
+        market_implied_count=_baseline_evidence_count(
+            evidence_rows,
+            "market_implied_baseline_prob_estimate",
+        ),
+        mid_quote_count=_baseline_evidence_count(
+            evidence_rows,
+            "mid_quote_baseline_prob_estimate",
+        ),
+        last_trade_count=_baseline_evidence_count(
+            evidence_rows,
+            "last_trade_baseline_prob_estimate",
+        ),
+        category_prior_count=_baseline_evidence_count(
+            evidence_rows,
+            "category_prior_baseline_prob_estimate",
+        ),
+    )
+
+
+def _baseline_evidence_count(
+    evidence_rows: Sequence[Mapping[str, object]],
+    key: str,
+) -> int:
+    return sum(
+        1 for row in evidence_rows if _optional_float_from_mapping(row, key) is not None
+    )
+
+
+def _baseline_evidence_risk_events(
+    decisions: Sequence[Mapping[str, object]],
+) -> list[tuple[str, str, str]]:
+    if not decisions:
+        return []
+
+    evidence_rows = _decision_evidence_rows(decisions)
+
+    events: list[tuple[str, str, str]] = []
+    missing_rows = len(decisions) - len(evidence_rows)
+    if missing_rows > 0:
+        events.append(
+            (
+                "report generation",
+                "secondary baseline evidence incomplete",
+                f"{missing_rows} reported decision(s) lack decision_evidence",
+            )
+        )
+
+    for key in (
+        "market_implied_baseline_prob_estimate",
+        "mid_quote_baseline_prob_estimate",
+    ):
+        missing = len(evidence_rows) - _baseline_evidence_count(evidence_rows, key)
+        if missing <= 0:
+            continue
+        events.append(
+            (
+                "report generation",
+                "secondary baseline evidence incomplete",
+                f"{missing} decision(s) with decision_evidence lack {key}",
+            )
+        )
+    return events
+
+
+def _baseline_evidence_score_risk_events(
+    coverage: BaselineEvidenceCoverage | None,
+    *,
+    baseline_brier_by_source: Mapping[str, float],
+    brier_improvement_by_source: Mapping[str, float],
+) -> list[tuple[str, str, str]]:
+    if coverage is None:
+        return []
+
+    events: list[tuple[str, str, str]] = []
+    for source, count in _baseline_evidence_source_counts(coverage):
+        if count <= 0:
+            continue
+        if source not in baseline_brier_by_source:
+            events.append(
+                (
+                    "report generation",
+                    "secondary baseline score incomplete",
+                    f"{source} decision-time evidence lacks baseline_brier_by_source",
+                )
+            )
+        if source not in brier_improvement_by_source:
+            events.append(
+                (
+                    "report generation",
+                    "secondary baseline score incomplete",
+                    f"{source} decision-time evidence lacks brier_improvement_by_source",
+                )
+            )
+    return events
+
+
+def _baseline_evidence_source_counts(
+    coverage: BaselineEvidenceCoverage,
+) -> tuple[tuple[str, int], ...]:
+    return (
+        ("market_implied", coverage.market_implied_count),
+        ("mid_quote", coverage.mid_quote_count),
+        ("last_trade", coverage.last_trade_count),
+        ("category_prior", coverage.category_prior_count),
+    )
+
+
+def _decision_evidence_rows(
+    decisions: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    rows: list[Mapping[str, object]] = []
+    for decision in decisions:
+        evidence = decision.get("decision_evidence")
+        if isinstance(evidence, Mapping):
+            rows.append(evidence)
+    return tuple(rows)
+
+
+def _fetch_api_payload(
     *,
     api_base_url: str,
     path: str,
     api_token: str | None,
-) -> tuple[dict[str, Any], str | None]:
+) -> tuple[object, str | None]:
     url = f"{api_base_url.rstrip('/')}{path}"
     headers = {"Accept": "application/json"}
     if api_token:
@@ -561,11 +1870,47 @@ def _fetch_api_json(
     request = Request(url, headers=headers)
     try:
         with urlopen(request, timeout=_API_TIMEOUT_S) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            return _loads_json_rejecting_duplicate_keys(
+                response.read().decode("utf-8")
+            ), None
     except HTTPError as exc:
         return {}, f"HTTP {exc.code}"
-    except (TimeoutError, URLError, OSError, json.JSONDecodeError) as exc:
+    except json.JSONDecodeError as exc:
         return {}, exc.__class__.__name__
+    except (TimeoutError, URLError, OSError, ValueError) as exc:
+        if isinstance(exc, ValueError):
+            return {}, str(exc)
+        return {}, exc.__class__.__name__
+
+
+def _loads_json_rejecting_duplicate_keys(text: str) -> object:
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        seen: set[str] = set()
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in seen:
+                msg = f"duplicate JSON key: {key}"
+                raise ValueError(msg)
+            seen.add(key)
+            result[key] = value
+        return result
+
+    return json.loads(text, object_pairs_hook=reject_duplicate_keys)
+
+
+def _fetch_api_json(
+    *,
+    api_base_url: str,
+    path: str,
+    api_token: str | None,
+) -> tuple[dict[str, Any], str | None]:
+    payload, error = _fetch_api_payload(
+        api_base_url=api_base_url,
+        path=path,
+        api_token=api_token,
+    )
+    if error is not None:
+        return {}, error
 
     if not isinstance(payload, dict):
         return {}, "invalid JSON payload"
@@ -585,6 +1930,86 @@ def _parse_datetime(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _metrics_path_for_soak_window(
+    *,
+    status: dict[str, Any],
+    report_date: date,
+) -> tuple[str, tuple[str, str] | None]:
+    started_at = _parse_datetime(status.get("runner_started_at"))
+    if started_at is None:
+        return "/metrics", None
+    window_end = _paper_report_window_end(report_date)
+    query = urlencode(
+        {
+            "since": started_at.isoformat(),
+            "until": window_end.isoformat(),
+        }
+    )
+    return f"/metrics?{query}", (started_at.isoformat(), window_end.isoformat())
+
+
+def _metrics_window_risk_events(
+    payload: dict[str, Any],
+    *,
+    expected_since: str,
+    expected_until: str,
+) -> list[tuple[str, str, str]]:
+    if (
+        payload.get("window_started_at") == expected_since
+        and payload.get("window_ended_at") == expected_until
+    ):
+        return []
+    return [
+        (
+            "report generation",
+            "metrics window evidence mismatch",
+            "/metrics window must match paper-soak interval",
+        )
+    ]
+
+
+def _trade_rows_in_soak_window(
+    rows: Sequence[dict[str, Any]],
+    *,
+    started_at: datetime | None,
+    report_date: date,
+) -> list[dict[str, Any]]:
+    return _rows_in_soak_window(
+        rows,
+        timestamp_key="filled_at",
+        started_at=started_at,
+        report_date=report_date,
+    )
+
+
+def _rows_in_soak_window(
+    rows: Sequence[dict[str, Any]],
+    *,
+    timestamp_key: str,
+    started_at: datetime | None,
+    report_date: date,
+) -> list[dict[str, Any]]:
+    if started_at is None:
+        return []
+
+    window_end = _paper_report_window_end(report_date)
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        timestamp = _parse_datetime(row.get(timestamp_key))
+        if timestamp is None:
+            continue
+        if started_at <= timestamp < window_end:
+            filtered.append(row)
+    return filtered
+
+
+def _paper_report_window_end(report_date: date) -> datetime:
+    return (
+        datetime(report_date.year, report_date.month, report_date.day, tzinfo=UTC)
+        + timedelta(days=1)
+    )
+
+
 def _dict_value(payload: dict[str, Any], key: str) -> dict[str, Any]:
     value = payload.get(key)
     if isinstance(value, dict):
@@ -599,10 +2024,163 @@ def _list_value(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)]
 
 
+def _rows_from_payload(payload: object | None, key: str) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        return _list_value(payload, key)
+    return []
+
+
+def _diagnostic_counts(controller: dict[str, Any]) -> tuple[tuple[str, int], ...]:
+    raw_counts = controller.get("diagnostic_counts")
+    if not isinstance(raw_counts, dict):
+        return ()
+    counts: list[tuple[str, int]] = []
+    for reason, value in raw_counts.items():
+        if not isinstance(reason, str) or not reason.strip():
+            continue
+        count = _int_value(value)
+        if count is None or count <= 0:
+            continue
+        counts.append((reason, count))
+    return tuple(sorted(counts))
+
+
+def _diagnostic_evidence_risk_events(
+    controller: dict[str, Any],
+    diagnostic_counts: Sequence[tuple[str, int]],
+) -> list[tuple[str, str, str]]:
+    diagnostics_total = _int_from_dict(controller, "diagnostics_total")
+    if diagnostics_total <= 0:
+        return []
+
+    raw_counts = controller.get("diagnostic_counts")
+    if not isinstance(raw_counts, dict):
+        return [
+            (
+                "report generation",
+                "controller rejection evidence missing",
+                "status.controller.diagnostic_counts is required when diagnostics_total > 0",
+            )
+        ]
+
+    if any(not isinstance(reason, str) or not reason.strip() for reason in raw_counts):
+        return [
+            (
+                "report generation",
+                "controller rejection evidence malformed",
+                "status.controller.diagnostic_counts keys must be non-empty strings",
+            )
+        ]
+
+    counted = sum(count for _reason, count in diagnostic_counts)
+    if counted < diagnostics_total:
+        return [
+            (
+                "report generation",
+                "controller rejection evidence incomplete",
+                "status.controller.diagnostic_counts sum "
+                f"{counted} is less than diagnostics_total {diagnostics_total}",
+            )
+        ]
+    if counted > diagnostics_total:
+        return [
+            (
+                "report generation",
+                "controller rejection evidence inconsistent",
+                "status.controller.diagnostic_counts sum "
+                f"{counted} does not match diagnostics_total {diagnostics_total}",
+            )
+        ]
+    return []
+
+
+def _average_edge_bps(decisions: Sequence[Mapping[str, object]]) -> float | None:
+    edges = [
+        edge
+        for row in decisions
+        if (edge := _decision_edge(row)) is not None
+    ]
+    if not edges:
+        return None
+    return sum(edges) / len(edges) * 10_000.0
+
+
+def _average_fee_bps(trades: Sequence[Mapping[str, object]]) -> float | None:
+    total_fees = sum(
+        _optional_float_from_mapping(row, "fees") or 0.0
+        for row in trades
+    )
+    total_notional = sum(
+        _optional_float_from_mapping(row, "fill_notional_usdc") or 0.0
+        for row in trades
+    )
+    if total_notional > 0.0 and total_fees > 0.0:
+        return total_fees / total_notional * 10_000.0
+
+    fee_bps_values = [
+        fee_bps
+        for row in trades
+        if (fee_bps := _optional_float_from_mapping(row, "fee_bps")) is not None
+    ]
+    if not fee_bps_values:
+        return None
+    return sum(fee_bps_values) / len(fee_bps_values)
+
+
+def _average_spread_cost_bps(
+    decisions: Sequence[Mapping[str, object]],
+) -> float | None:
+    spreads = [
+        spread_bps
+        for row in decisions
+        if (spread_bps := _optional_float_from_mapping(row, "spread_bps_at_decision"))
+        is not None
+    ]
+    if not spreads:
+        return None
+    return sum(spreads) / len(spreads)
+
+
+def _average_net_edge_bps(
+    decisions: Sequence[Mapping[str, object]],
+    *,
+    trade_rows: Sequence[Mapping[str, object]],
+    average_slippage_bps: float | None,
+) -> float | None:
+    average_edge = _average_edge_bps(decisions)
+    average_spread_cost = _average_spread_cost_bps(decisions)
+    average_fee = _average_fee_bps(trade_rows)
+    if (
+        average_edge is None
+        or average_spread_cost is None
+        or average_slippage_bps is None
+        or average_fee is None
+    ):
+        return None
+    return average_edge - average_spread_cost - average_slippage_bps - average_fee
+
+def _decision_edge(row: Mapping[str, object]) -> float | None:
+    expected_edge = _optional_float_from_mapping(row, "expected_edge")
+    if expected_edge is not None:
+        return abs(expected_edge)
+    prob_estimate = _optional_float_from_mapping(row, "prob_estimate")
+    limit_price = _optional_float_from_mapping(row, "limit_price")
+    if prob_estimate is None or limit_price is None:
+        return None
+    return abs(prob_estimate - limit_price)
+
+
 def _int_from_dict(payload: dict[str, Any], key: str, *, fallback: int = 0) -> int:
     value = payload.get(key)
+    parsed = _int_value(value)
+    return fallback if parsed is None else parsed
+
+
+def _int_value(value: object) -> int | None:
     if isinstance(value, bool):
-        return fallback
+        return None
     if isinstance(value, int):
         return value
     if isinstance(value, float):
@@ -611,8 +2189,8 @@ def _int_from_dict(payload: dict[str, Any], key: str, *, fallback: int = 0) -> i
         try:
             return int(value)
         except ValueError:
-            return fallback
-    return fallback
+            return None
+    return None
 
 
 def _float_from_dict(payload: dict[str, Any], key: str) -> float:
@@ -621,17 +2199,101 @@ def _float_from_dict(payload: dict[str, Any], key: str) -> float:
 
 
 def _optional_float_from_dict(payload: dict[str, Any], key: str) -> float | None:
+    return _optional_float_from_mapping(payload, key)
+
+
+def _optional_float_from_dict_first(
+    payload: dict[str, Any],
+    keys: Sequence[str],
+) -> float | None:
+    for key in keys:
+        value = _optional_float_from_dict(payload, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _float_mapping_from_dict(payload: dict[str, Any], key: str) -> dict[str, float]:
     value = payload.get(key)
+    if not isinstance(value, Mapping):
+        return {}
+
+    parsed: dict[str, float] = {}
+    for source, raw_value in value.items():
+        if not _valid_baseline_source_label(source):
+            continue
+        score = _optional_float_value(raw_value)
+        if score is None:
+            continue
+        parsed[source] = score
+    return parsed
+
+
+def _valid_baseline_source_label(source: object) -> bool:
+    if not isinstance(source, str):
+        return False
+    normalized = source.strip()
+    return (
+        normalized == source
+        and _BASELINE_SOURCE_PATTERN.fullmatch(normalized) is not None
+        and not _looks_like_placeholder(normalized)
+    )
+
+
+def _optional_float_from_mapping(
+    payload: Mapping[str, object],
+    key: str,
+) -> float | None:
+    return _optional_float_value(payload.get(key))
+
+
+def _optional_float_value(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int | float):
-        return float(value)
+        return _finite_float_or_none(float(value))
     if isinstance(value, str):
         try:
-            return float(value)
+            return _finite_float_or_none(float(value))
         except ValueError:
             return None
     return None
+
+
+def _ordered_baseline_items(
+    values: Mapping[str, float],
+) -> tuple[tuple[str, float], ...]:
+    return tuple((source, values[source]) for source in _ordered_baseline_sources(values))
+
+
+def _ordered_baseline_sources(sources: Iterable[str]) -> tuple[str, ...]:
+    return tuple(sorted(sources, key=_baseline_source_sort_key))
+
+
+def _baseline_source_sort_key(source: str) -> tuple[int, str]:
+    try:
+        index = _SECONDARY_BASELINE_ORDER.index(source)
+    except ValueError:
+        index = len(_SECONDARY_BASELINE_ORDER)
+    return index, source
+
+
+def _raw_numeric_is_non_finite(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int | float):
+        return not math.isfinite(float(value))
+    if isinstance(value, str):
+        try:
+            parsed = float(value)
+        except ValueError:
+            return False
+        return not math.isfinite(parsed)
+    return False
+
+
+def _finite_float_or_none(value: float) -> float | None:
+    return value if math.isfinite(value) else None
 
 
 if __name__ == "__main__":

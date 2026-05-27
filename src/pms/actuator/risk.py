@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
@@ -33,6 +33,7 @@ HaltTriggerKind = Literal[
     "order_without_fill",
     "rate_limit_exceeded",
     "drawdown_circuit_breaker",
+    "daily_loss_limit",
 ]
 
 
@@ -51,6 +52,12 @@ class HaltEvent:
 
 
 @dataclass(frozen=True)
+class HaltRecoveryCycle:
+    halt_event: HaltEvent
+    cleared_at: datetime
+
+
+@dataclass(frozen=True)
 class RiskTradeResult:
     pnl: float
     slippage_bps: float
@@ -62,8 +69,14 @@ class RiskTradeResult:
 class RiskManager:
     risk: RiskSettings = field(default_factory=RiskSettings)
     _halt_state: HaltState | None = field(default=None, init=False)
+    _active_halt_event: HaltEvent | None = field(default=None, init=False)
     _halt_events: list[HaltEvent] = field(default_factory=list, init=False)
+    _halt_recovery_cycles: list[HaltRecoveryCycle] = field(
+        default_factory=list,
+        init=False,
+    )
     _recent_trades: list[RiskTradeResult] = field(default_factory=list, init=False)
+    _daily_trades: list[RiskTradeResult] = field(default_factory=list, init=False)
     _recent_rate_limits: list[tuple[datetime, str | None]] = field(
         default_factory=list,
         init=False,
@@ -80,6 +93,18 @@ class RiskManager:
     @property
     def halt_events(self) -> tuple[HaltEvent, ...]:
         return tuple(self._halt_events)
+
+    @property
+    def halt_recovery_cycles(self) -> tuple[HaltRecoveryCycle, ...]:
+        return tuple(self._halt_recovery_cycles)
+
+    def halt_recovery_cycles_since(self, since: datetime) -> tuple[HaltRecoveryCycle, ...]:
+        cutoff = _coerce_aware(since)
+        return tuple(
+            cycle
+            for cycle in self._halt_recovery_cycles
+            if cycle.cleared_at >= cutoff
+        )
 
     def check(self, decision: TradeDecision, portfolio: Portfolio) -> RiskDecision:
         notional = decision.notional_usdc
@@ -105,6 +130,15 @@ class RiskManager:
             total_exposure = portfolio.locked_usdc + residual_notional
             if total_exposure > self.risk.max_total_exposure:
                 return RiskDecision(False, "max_total_exposure")
+
+        if self.risk.max_exposure_per_risk_group is not None:
+            if decision.risk_group_id is None:
+                return RiskDecision(False, "missing_risk_group_id")
+            if (
+                _risk_group_exposure(portfolio, decision.risk_group_id) + notional
+                > self.risk.max_exposure_per_risk_group
+            ):
+                return RiskDecision(False, "max_exposure_per_risk_group")
 
         if (
             self.risk.max_drawdown_pct is not None
@@ -170,6 +204,15 @@ class RiskManager:
                 trace_id=trace_id,
             )
 
+        daily_loss_trade = self._daily_loss_trigger_trade(checked_at)
+        if daily_loss_trade is not None:
+            return self._halt(
+                trigger_kind="daily_loss_limit",
+                reason="daily_loss_limit",
+                triggered_at=checked_at,
+                trace_id=daily_loss_trade.trace_id or trace_id,
+            )
+
         if len(self._recent_trades) >= 5 and all(
             trade.pnl < 0.0 for trade in self._recent_trades[-5:]
         ):
@@ -218,9 +261,11 @@ class RiskManager:
         )
 
     def record_trade_result(self, result: RiskTradeResult) -> None:
-        self._recent_trades.append(result)
+        normalized = replace(result, filled_at=_coerce_aware(result.filled_at))
+        self._recent_trades.append(normalized)
         if len(self._recent_trades) > 100:
             del self._recent_trades[:-100]
+        self._daily_trades.append(normalized)
 
     def record_api_error(
         self,
@@ -242,8 +287,16 @@ class RiskManager:
     def record_order_filled(self, order_id: str) -> None:
         self._open_order_submitted_at.pop(order_id, None)
 
-    def clear_halt(self) -> None:
+    def clear_halt(self, *, at: datetime | None = None) -> None:
+        if self._halt_state is not None and self._active_halt_event is not None:
+            self._halt_recovery_cycles.append(
+                HaltRecoveryCycle(
+                    halt_event=self._active_halt_event,
+                    cleared_at=_coerce_aware(at),
+                )
+            )
         self._halt_state = None
+        self._active_halt_event = None
         self._credential_failure = None
         self._recent_trades.clear()
         self._recent_rate_limits.clear()
@@ -263,8 +316,10 @@ class RiskManager:
             triggered_at=triggered_at,
             trigger_kind=trigger_kind,
         )
+        event = HaltEvent(state=state, trace_id=trace_id)
         self._halt_state = state
-        self._halt_events.append(HaltEvent(state=state, trace_id=trace_id))
+        self._active_halt_event = event
+        self._halt_events.append(event)
         return state
 
     def _prune_rate_limits(self, now: datetime) -> None:
@@ -280,12 +335,41 @@ class RiskManager:
                 return order_id
         return None
 
+    def _daily_loss_trigger_trade(self, now: datetime) -> RiskTradeResult | None:
+        if self.risk.max_daily_loss_usdc is None:
+            return None
+
+        start_of_day = _start_of_utc_day(now)
+        checked_at_utc = now.astimezone(UTC)
+        self._daily_trades = [
+            trade
+            for trade in self._daily_trades
+            if trade.filled_at.astimezone(UTC) >= start_of_day
+        ]
+        current_day_trades = [
+            trade
+            for trade in self._daily_trades
+            if trade.filled_at.astimezone(UTC) <= checked_at_utc
+        ]
+        daily_pnl = sum(trade.pnl for trade in current_day_trades)
+        if daily_pnl > -self.risk.max_daily_loss_usdc:
+            return None
+        return max(current_day_trades, key=lambda trade: trade.filled_at)
+
 
 def _market_exposure(portfolio: Portfolio, market_id: str) -> float:
     return sum(
         position.locked_usdc
         for position in portfolio.open_positions
         if position.market_id == market_id
+    )
+
+
+def _risk_group_exposure(portfolio: Portfolio, risk_group_id: str) -> float:
+    return sum(
+        position.locked_usdc
+        for position in portfolio.open_positions
+        if position.risk_group_id == risk_group_id
     )
 
 
@@ -346,3 +430,7 @@ def _coerce_aware(value: datetime | None) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value
+
+
+def _start_of_utc_day(value: datetime) -> datetime:
+    return value.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)

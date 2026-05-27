@@ -56,6 +56,25 @@ EXPECTED_NULLABILITY: dict[str, list[tuple[str, str]]] = {
         ("next_action", "YES"),
         ("generated_at", "NO"),
     ],
+    "strategy_run_slices": [
+        ("strategy_run_slice_id", "NO"),
+        ("run_id", "NO"),
+        ("strategy_id", "NO"),
+        ("strategy_version_id", "NO"),
+        ("slice_label", "NO"),
+        ("slice_start", "NO"),
+        ("slice_end", "NO"),
+        ("slice_kind", "NO"),
+        ("brier", "YES"),
+        ("pnl_cum", "YES"),
+        ("drawdown_max", "YES"),
+        ("fill_rate", "YES"),
+        ("slippage_bps", "YES"),
+        ("opportunity_count", "NO"),
+        ("decision_count", "NO"),
+        ("fill_count", "NO"),
+        ("created_at", "NO"),
+    ],
     "strategy_runs": [
         ("strategy_run_id", "NO"),
         ("run_id", "NO"),
@@ -79,6 +98,7 @@ EXPECTED_INDEXES = [
     "idx_backtest_live_comparisons_run_strategy_identity",
     "idx_backtest_runs_queued_at_desc",
     "idx_backtest_runs_status",
+    "idx_strategy_run_slices_run_strategy_identity",
     "idx_strategy_runs_run_id",
 ]
 
@@ -149,6 +169,7 @@ def test_schema_sql_applies_research_backtest_tables() -> None:
               AND table_name IN (
                 'backtest_runs',
                 'strategy_runs',
+                'strategy_run_slices',
                 'evaluation_reports',
                 'backtest_live_comparisons'
               )
@@ -170,6 +191,7 @@ def test_schema_sql_applies_research_backtest_tables() -> None:
               AND table_name IN (
                 'backtest_runs',
                 'strategy_runs',
+                'strategy_run_slices',
                 'evaluation_reports',
                 'backtest_live_comparisons'
               )
@@ -193,6 +215,9 @@ def test_schema_sql_applies_research_backtest_tables() -> None:
             FROM pg_constraint
             WHERE conname IN (
                 'strategy_runs_strategy_identity_check',
+                'strategy_run_slices_strategy_identity_check',
+                'strategy_run_slices_window_check',
+                'strategy_run_slices_counts_check',
                 'backtest_live_comparisons_strategy_identity_check'
             )
             ORDER BY conname
@@ -200,6 +225,9 @@ def test_schema_sql_applies_research_backtest_tables() -> None:
         )
         assert check_constraints_result.stdout.splitlines() == [
             "backtest_live_comparisons_strategy_identity_check",
+            "strategy_run_slices_counts_check",
+            "strategy_run_slices_strategy_identity_check",
+            "strategy_run_slices_window_check",
             "strategy_runs_strategy_identity_check",
         ]
 
@@ -233,6 +261,7 @@ def test_schema_sql_applies_research_backtest_tables() -> None:
                 'idx_backtest_runs_status',
                 'idx_backtest_runs_queued_at_desc',
                 'idx_strategy_runs_run_id',
+                'idx_strategy_run_slices_run_strategy_identity',
                 'idx_backtest_live_comparisons_run_strategy_identity'
               )
             ORDER BY indexname

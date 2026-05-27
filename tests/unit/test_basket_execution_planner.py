@@ -39,6 +39,7 @@ def _intent(intent_id: str, **overrides: object) -> TradeIntent:
         "limit_price": 0.60,
         "notional_usdc": 20.0,
         "expected_price": 0.70,
+        "probability_estimate": 0.70,
         "expected_edge": 0.16,
         "max_slippage_bps": 50,
         "time_in_force": TimeInForce.GTC,

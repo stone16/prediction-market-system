@@ -8,7 +8,9 @@ type RouteContext = {
 
 export async function GET(_request: Request, context: RouteContext) {
   const { runId } = await context.params;
-  const upstream = await upstreamResponse(`/research/backtest/${runId}/strategies`);
+  const upstream = await upstreamResponse(
+    `/research/backtest/${encodeURIComponent(runId)}/strategies`
+  );
   if (upstream) return upstream;
   return NextResponse.json(mockBacktestStrategyRuns(runId));
 }

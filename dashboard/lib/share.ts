@@ -26,9 +26,12 @@ async function fetchShareProjection(strategyId: string): Promise<ShareProjection
     throw new Error('PMS_API_BASE_URL is not configured');
   }
 
-  const response = await fetch(new URL(`/share/${strategyId}`, baseUrl), {
-    cache: 'no-store'
-  });
+  const response = await fetch(
+    new URL(`/share/${encodeURIComponent(strategyId)}`, baseUrl),
+    {
+      cache: 'no-store'
+    }
+  );
 
   if (response.status === 404) {
     throw new ShareProjectionNotFoundError();

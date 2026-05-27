@@ -1,22 +1,39 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from pms.api.app import create_app
-from pms.config import ControllerSettings, PMSSettings, RiskSettings
-from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, RunMode, Side, TimeInForce
+from pms.actuator.risk import RiskTradeResult
+from pms.config import (
+    ControllerSettings,
+    DiscordSettings,
+    PMSSettings,
+    PolymarketSettings,
+    RiskSettings,
+)
+from pms.core.enums import (
+    FeedbackSource,
+    FeedbackTarget,
+    OrderStatus,
+    RunMode,
+    Side,
+    TimeInForce,
+)
 from pms.core.models import (
     EvalRecord,
     Feedback,
     FillRecord,
+    LiveTradingDisabledError,
     MarketSignal,
     Position,
     QuoteEvalRecord,
@@ -35,6 +52,7 @@ from pms.storage.fill_store import FillStore
 from pms.storage.quote_eval_store import QuoteEvalStore
 from pms.storage.schema_check import SchemaVersionMismatchError
 from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
+from tests.support.live_paths import make_live_report_paths, make_private_live_paths
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -85,6 +103,78 @@ def _runner_with_state() -> Runner:
     runner.state.decisions.append(_decision())
     runner.state.fills.append(_fill())
     return runner
+
+
+def _live_transition_settings(
+    *,
+    include_operator_readiness: bool,
+) -> PMSSettings:
+    approval_path, first_order_audit_path = make_private_live_paths(
+        prefix="pms-api-live-transition-"
+    )
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix="pms-api-live-transition-reports-"
+    )
+    attested_at = datetime(2026, 5, 25, 12, 0, tzinfo=UTC)
+    return PMSSettings(
+        mode=RunMode.PAPER,
+        live_trading_enabled=True,
+        secret_source="fly",
+        auto_migrate_default_v2=False,
+        live_emergency_audit_path=str(
+            Path(approval_path).parent / "live-emergency-audit.jsonl"
+        ),
+        live_first_order_audit_path=first_order_audit_path,
+        live_paper_soak_report_path=(
+            paper_report_path if include_operator_readiness else None
+        ),
+        live_operator_rehearsal_report_path=(
+            rehearsal_report_path if include_operator_readiness else None
+        ),
+        live_preflight_artifact_path=str(
+            Path(approval_path).parent / "credentialed-preflight.json"
+        ),
+        live_exit_criteria_ratified_by=(
+            "operator" if include_operator_readiness else None
+        ),
+        live_exit_criteria_ratified_at=(
+            attested_at if include_operator_readiness else None
+        ),
+        live_compliance_reviewed_by=(
+            "counsel" if include_operator_readiness else None
+        ),
+        live_compliance_reviewed_at=(
+            attested_at if include_operator_readiness else None
+        ),
+        live_compliance_jurisdiction=(
+            "US-operator-approved" if include_operator_readiness else None
+        ),
+        risk=RiskSettings(
+            max_position_per_market=50.0,
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+            max_exposure_per_risk_group=15.0,
+            max_quantity_shares=500.0,
+            min_order_usdc=1.0,
+        ),
+        controller=ControllerSettings(time_in_force="IOC", quote_source="dual"),
+        discord=DiscordSettings(
+            webhook_url=SecretStr("https://discord.example/webhooks/api/unit"),
+            alert_dir=str(Path(approval_path).parent / "discord-alerts"),
+        ),
+        polymarket=PolymarketSettings(
+            private_key="private-key",
+            api_key="api-key",
+            api_secret="api-secret",
+            api_passphrase="passphrase",
+            signature_type=1,
+            funder_address="0x1111111111111111111111111111111111111111",
+            operator_approval_mode="every_order",
+            first_live_order_approval_path=approval_path,
+        ),
+    )
 
 
 def _signal() -> MarketSignal:
@@ -162,8 +252,10 @@ def _eval_record() -> EvalRecord:
         strategy_id="default",
         strategy_version_id="default-v1",
         prob_estimate=0.7,
+        baseline_prob_estimate=0.4,
         resolved_outcome=1.0,
         brier_score=0.09,
+        baseline_brier_score=0.36,
         fill_status=OrderStatus.MATCHED.value,
         recorded_at=datetime(2026, 4, 14, tzinfo=UTC),
         citations=["trade-api"],
@@ -285,9 +377,26 @@ async def test_api_routes_expose_mock_runner_state() -> None:
         "stale_after_seconds",
         "task_done",
     }
-    assert status["controller"] == {"decisions_total": 1, "diagnostics_total": 0}
-    assert status["actuator"] == {"fills_total": 1, "mode": "backtest"}
-    assert status["evaluator"] == {"eval_records_total": 1, "brier_overall": 0.09}
+    assert status["controller"] == {
+        "decisions_total": 1,
+        "diagnostics_total": 0,
+        "diagnostic_counts": {},
+    }
+    assert status["supervision"] == {"unresolved_feedback_total": 1}
+    assert status["actuator"] == {
+        "fills_total": 1,
+        "mode": "backtest",
+        "halt_recovery_cycles_7d": 0,
+    }
+    assert status["evaluator"] == {
+        "eval_records_total": 1,
+        "brier_overall": 0.09,
+        "baseline_brier_overall": 0.36,
+        "brier_improvement_overall": 0.27,
+        "brier_14d": None,
+        "baseline_brier_14d": None,
+        "brier_improvement_14d": None,
+    }
     assert signals[0]["market_id"] == "api-market"
     assert decisions[0]["forecaster"] == "model-a"
     assert decisions[0]["prob_estimate"] == 0.7
@@ -296,6 +405,8 @@ async def test_api_routes_expose_mock_runner_state() -> None:
     assert decisions[0]["limit_price"] == 0.4
     assert decisions[0]["kelly_size"] == 12.5
     assert metrics["brier_overall"] == 0.09
+    assert metrics["baseline_brier_overall"] == 0.36
+    assert metrics["brier_improvement_overall"] == 0.27
     assert metrics[SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC] == 0.625
     assert metrics[SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC] == 3.0
     assert metrics[MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC] == 12.5
@@ -308,6 +419,8 @@ async def test_api_routes_expose_mock_runner_state() -> None:
             "record_count": 1,
             "insufficient_samples": False,
             "brier_overall": 0.09,
+            "baseline_brier_overall": 0.36,
+            "brier_improvement_overall": 0.27,
             "pnl": 1.0,
             "fill_rate": 1.0,
             "slippage_bps": 10.0,
@@ -315,6 +428,200 @@ async def test_api_routes_expose_mock_runner_state() -> None:
         }
     ]
     assert [item["feedback_id"] for item in feedback] == ["fb-pending"]
+
+
+@pytest.mark.asyncio
+async def test_status_exposes_live_exit_health_rolling_windows() -> None:
+    now = datetime.now(tz=UTC)
+    recent_eval = replace(
+        _eval_record(),
+        decision_id="decision-recent",
+        recorded_at=now - timedelta(days=1),
+        brier_score=0.09,
+        baseline_brier_score=0.36,
+    )
+    old_eval = replace(
+        _eval_record(),
+        decision_id="decision-old",
+        recorded_at=now - timedelta(days=30),
+        brier_score=0.81,
+        baseline_brier_score=0.04,
+    )
+    runner = Runner(
+        config=_settings(),
+        eval_store=cast(EvalStore, InMemoryEvalStore([old_eval, recent_eval])),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    risk = runner.actuator_executor.risk
+    risk.record_api_error(401, at=now - timedelta(days=8), trace_id="trace-old")
+    risk.check_auto_halt(runner.portfolio, now=now - timedelta(days=8))
+    risk.clear_halt(at=now - timedelta(days=8) + timedelta(minutes=1))
+    risk.record_api_error(401, at=now - timedelta(days=1), trace_id="trace-recent")
+    risk.check_auto_halt(runner.portfolio, now=now - timedelta(days=1))
+    risk.clear_halt(at=now - timedelta(days=1) + timedelta(minutes=1))
+    risk.record_trade_result(
+        RiskTradeResult(
+            pnl=1.0,
+            slippage_bps=5.0,
+            filled_at=now,
+        )
+    )
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        status = (await client.get("/status")).json()
+
+    assert status["actuator"]["halt_recovery_cycles_7d"] == 1
+    assert status["evaluator"]["brier_improvement_14d"] == 0.27
+    assert status["evaluator"]["baseline_brier_14d"] == 0.36
+
+
+@pytest.mark.asyncio
+async def test_metrics_route_filters_eval_records_by_recorded_at_window() -> None:
+    old_eval = replace(
+        _eval_record(),
+        decision_id="decision-before-window",
+        recorded_at=datetime(2026, 4, 29, 23, 59, 59, tzinfo=UTC),
+        brier_score=0.81,
+        baseline_brier_score=0.04,
+        pnl=-25.0,
+        slippage_bps=200.0,
+        filled=False,
+    )
+    window_eval = replace(
+        _eval_record(),
+        decision_id="decision-inside-window",
+        recorded_at=datetime(2026, 5, 30, tzinfo=UTC),
+        brier_score=0.09,
+        baseline_brier_score=0.36,
+        pnl=2.0,
+        slippage_bps=10.0,
+        filled=True,
+    )
+    runner = Runner(
+        config=_settings(),
+        eval_store=cast(EvalStore, InMemoryEvalStore([old_eval, window_eval])),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/metrics",
+            params={
+                "since": "2026-04-30T00:00:00+00:00",
+                "until": "2026-05-31T00:00:00+00:00",
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["record_count"] == 1
+    assert payload["brier_overall"] == 0.09
+    assert payload["baseline_brier_overall"] == 0.36
+    assert payload["brier_improvement_overall"] == 0.27
+    assert payload["pnl"] == 2.0
+    assert payload["fill_rate"] == 1.0
+    assert payload["win_rate"] == 1.0
+    assert payload["slippage_bps"] == 10.0
+    assert payload["window_started_at"] == "2026-04-30T00:00:00+00:00"
+    assert payload["window_ended_at"] == "2026-05-31T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_metrics_route_exposes_max_drawdown_pct_from_windowed_pnl() -> None:
+    records = [
+        replace(
+            _eval_record(),
+            decision_id="decision-peak",
+            recorded_at=datetime(2026, 5, 30, 0, 0, tzinfo=UTC),
+            pnl=5.0,
+        ),
+        replace(
+            _eval_record(),
+            decision_id="decision-trough",
+            recorded_at=datetime(2026, 5, 30, 1, 0, tzinfo=UTC),
+            pnl=-15.0,
+        ),
+        replace(
+            _eval_record(),
+            decision_id="decision-recovery",
+            recorded_at=datetime(2026, 5, 30, 2, 0, tzinfo=UTC),
+            pnl=10.0,
+        ),
+    ]
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.BACKTEST,
+            auto_migrate_default_v2=False,
+            risk=RiskSettings(max_total_exposure=50.0),
+        ),
+        eval_store=cast(EvalStore, InMemoryEvalStore(records)),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/metrics",
+            params={
+                "since": "2026-05-30T00:00:00+00:00",
+                "until": "2026-05-31T00:00:00+00:00",
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["max_drawdown_pct"] == pytest.approx(30.0)
+    assert payload["ops_view"]["max_drawdown_pct"] == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+async def test_metrics_route_exposes_sharpe_ratio_from_windowed_daily_pnl() -> None:
+    records = [
+        replace(
+            _eval_record(),
+            decision_id="decision-day-1",
+            recorded_at=datetime(2026, 5, 28, 12, 0, tzinfo=UTC),
+            pnl=1.0,
+        ),
+        replace(
+            _eval_record(),
+            decision_id="decision-day-2",
+            recorded_at=datetime(2026, 5, 29, 12, 0, tzinfo=UTC),
+            pnl=3.0,
+        ),
+        replace(
+            _eval_record(),
+            decision_id="decision-day-3",
+            recorded_at=datetime(2026, 5, 30, 12, 0, tzinfo=UTC),
+            pnl=5.0,
+        ),
+    ]
+    runner = Runner(
+        config=_settings(),
+        eval_store=cast(EvalStore, InMemoryEvalStore(records)),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/metrics",
+            params={
+                "since": "2026-05-28T00:00:00+00:00",
+                "until": "2026-05-31T00:00:00+00:00",
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["sharpe_ratio"] == pytest.approx(1.5)
+    assert payload["ops_view"]["sharpe_ratio"] == pytest.approx(1.5)
 
 
 @pytest.mark.asyncio
@@ -428,6 +735,141 @@ async def test_api_config_rejects_live_mode_when_credentials_are_missing() -> No
 
 
 @pytest.mark.asyncio
+async def test_api_config_validates_candidate_live_mode_readiness() -> None:
+    runner = Runner(
+        config=_live_transition_settings(include_operator_readiness=False),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/config", json={"mode": "live"})
+
+    assert response.status_code == 400
+    assert "operator readiness" in response.json()["detail"]
+    assert runner.config.mode == RunMode.PAPER
+    assert runner.state.mode == RunMode.PAPER
+
+
+@pytest.mark.asyncio
+async def test_api_config_rejects_live_mode_without_credentialed_preflight_artifact() -> None:
+    runner = Runner(
+        config=_live_transition_settings(include_operator_readiness=True),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/config", json={"mode": "live"})
+
+    assert response.status_code == 400
+    assert "preflight artifact" in response.json()["detail"]
+    assert runner.config.mode == RunMode.PAPER
+    assert runner.state.mode == RunMode.PAPER
+
+
+@pytest.mark.asyncio
+async def test_api_config_redacts_live_transition_refusal_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential_values = (
+        "private-key-secret",
+        "api-key-secret",
+        "api-secret-secret",
+        "passphrase-secret",
+        "0xfundersecret",
+    )
+    secret_dsn = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+    base_settings = _live_transition_settings(include_operator_readiness=True)
+    runner = Runner(
+        config=base_settings.model_copy(
+            update={
+                "polymarket": PolymarketSettings(
+                    private_key=credential_values[0],
+                    api_key=credential_values[1],
+                    api_secret=credential_values[2],
+                    api_passphrase=credential_values[3],
+                    signature_type=1,
+                    funder_address=credential_values[4],
+                    operator_approval_mode="every_order",
+                    first_live_order_approval_path=(
+                        base_settings.polymarket.first_live_order_approval_path
+                    ),
+                )
+            }
+        ),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+
+    def _refuse_live_transition(settings: PMSSettings) -> None:
+        assert settings.mode == RunMode.LIVE
+        raise LiveTradingDisabledError(
+            "LIVE transition refused "
+            f"{credential_values[0]} {credential_values[1]} "
+            f"{credential_values[2]} {credential_values[3]} {credential_values[4]} "
+            f"{secret_dsn} password=keyword-secret"
+        )
+
+    monkeypatch.setattr("pms.api.app.validate_live_mode_ready", _refuse_live_transition)
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/config", json={"mode": "live"})
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail.startswith("LIVE transition refused")
+    assert "<redacted-polymarket-credential>" in detail
+    assert "<redacted-database-url>" in detail
+    assert "password=<redacted>" in detail
+    for credential in credential_values:
+        assert credential not in detail
+    assert "supersecret" not in detail
+    assert "keyword-secret" not in detail
+    assert "admin" not in detail
+
+
+@pytest.mark.asyncio
+async def test_api_config_rejects_live_mode_switch_while_runner_is_active() -> None:
+    runner = Runner(
+        config=_live_transition_settings(include_operator_readiness=False),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    stop_pending = asyncio.Event()
+
+    async def _pending() -> None:
+        await stop_pending.wait()
+
+    task = asyncio.create_task(_pending())
+    runner.sensor_stream._tasks = (task,)  # noqa: SLF001
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post("/config", json={"mode": "live"})
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Stop the runner before changing mode."
+        assert runner.config.mode == RunMode.PAPER
+        assert runner.state.mode == RunMode.PAPER
+    finally:
+        stop_pending.set()
+        await task
+        runner.sensor_stream._tasks = ()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_api_run_start_rejects_live_mode_when_credentials_are_missing() -> None:
     runner = Runner(
         config=PMSSettings(
@@ -446,6 +888,162 @@ async def test_api_run_start_rejects_live_mode_when_credentials_are_missing() ->
 
     assert response.status_code == 400
     assert response.json()["detail"].startswith("Missing Polymarket credential fields:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exception_type", [RuntimeError, ConnectionError])
+async def test_api_run_start_redacts_live_runtime_startup_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    exception_type: type[Exception],
+) -> None:
+    secret_dsn = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.LIVE,
+            live_trading_enabled=True,
+            auto_migrate_default_v2=False,
+        ),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+
+    async def _failing_start() -> None:
+        raise exception_type(
+            "LIVE start refused: database "
+            f"{secret_dsn} is unavailable password=keyword-secret"
+        )
+
+    monkeypatch.setattr(runner, "start", _failing_start)
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/run/start")
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail.startswith("LIVE start refused")
+    assert "<redacted-database-url>" in detail
+    assert "password=<redacted>" in detail
+    assert "supersecret" not in detail
+    assert "keyword-secret" not in detail
+    assert "admin" not in detail
+
+
+@pytest.mark.asyncio
+async def test_api_run_start_redacts_polymarket_credentials_from_live_startup_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential_values = (
+        "private-key-secret",
+        "api-key-secret",
+        "api-secret-secret",
+        "passphrase-secret",
+        "0xfundersecret",
+    )
+    secret_dsn = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.LIVE,
+            live_trading_enabled=True,
+            auto_migrate_default_v2=False,
+            polymarket=PolymarketSettings(
+                private_key=credential_values[0],
+                api_key=credential_values[1],
+                api_secret=credential_values[2],
+                api_passphrase=credential_values[3],
+                signature_type=1,
+                funder_address=credential_values[4],
+            ),
+        ),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+
+    async def _failing_start() -> None:
+        raise ConnectionError(
+            "venue auth failed "
+            f"{credential_values[0]} {credential_values[1]} "
+            f"{credential_values[2]} {credential_values[3]} {credential_values[4]} "
+            f"{secret_dsn} password=keyword-secret"
+        )
+
+    monkeypatch.setattr(runner, "start", _failing_start)
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/run/start")
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail.startswith("venue auth failed")
+    assert "<redacted-polymarket-credential>" in detail
+    assert "<redacted-database-url>" in detail
+    assert "password=<redacted>" in detail
+    for credential in credential_values:
+        assert credential not in detail
+    assert "supersecret" not in detail
+    assert "keyword-secret" not in detail
+    assert "admin" not in detail
+
+
+@pytest.mark.asyncio
+async def test_api_run_start_redacts_live_trading_disabled_error_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential_values = (
+        "private-key-secret",
+        "api-key-secret",
+        "api-secret-secret",
+        "passphrase-secret",
+        "0xfundersecret",
+    )
+    secret_dsn = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.LIVE,
+            live_trading_enabled=True,
+            auto_migrate_default_v2=False,
+            polymarket=PolymarketSettings(
+                private_key=credential_values[0],
+                api_key=credential_values[1],
+                api_secret=credential_values[2],
+                api_passphrase=credential_values[3],
+                signature_type=1,
+                funder_address=credential_values[4],
+            ),
+        ),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+
+    async def _failing_start() -> None:
+        raise LiveTradingDisabledError(
+            "LIVE guard refused "
+            f"{credential_values[0]} {credential_values[1]} "
+            f"{credential_values[2]} {credential_values[3]} {credential_values[4]} "
+            f"{secret_dsn} password=keyword-secret"
+        )
+
+    monkeypatch.setattr(runner, "start", _failing_start)
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/run/start")
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail.startswith("LIVE guard refused")
+    assert "<redacted-polymarket-credential>" in detail
+    assert "<redacted-database-url>" in detail
+    assert "password=<redacted>" in detail
+    for credential in credential_values:
+        assert credential not in detail
+    assert "supersecret" not in detail
+    assert "keyword-secret" not in detail
+    assert "admin" not in detail
 
 
 @pytest.mark.asyncio
@@ -677,8 +1275,8 @@ async def test_api_status_redacts_autostart_error_to_class_name(
     DSNs, hostnames, file paths, and user info to anyone who can hit
     the endpoint.
 
-    The fix exposes only `type(exc).__name__`. Full detail stays in the
-    server-side log so an operator can still diagnose.
+    The fix exposes only `type(exc).__name__`; server logs keep redacted
+    diagnostic detail so an operator can still diagnose without leaking secrets.
     """
     _stub_schema_check(monkeypatch)
     _stub_orphan_scan(monkeypatch)
@@ -725,3 +1323,70 @@ async def test_api_status_redacts_autostart_error_to_class_name(
         assert forbidden not in body_text, (
             f"sensitive token {forbidden!r} must not appear in /status payload"
         )
+
+
+@pytest.mark.asyncio
+async def test_api_autostart_failure_log_redacts_live_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _stub_schema_check(monkeypatch)
+    _stub_orphan_scan(monkeypatch)
+    credential_values = (
+        "private-key-secret",
+        "api-key-secret",
+        "api-secret-secret",
+        "passphrase-secret",
+        "0x2222222222222222222222222222222222222222",
+    )
+    secret_dsn = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+
+    class _BoundPool:
+        async def close(self) -> None:
+            return None
+
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.LIVE,
+            live_trading_enabled=True,
+            auto_migrate_default_v2=False,
+            polymarket=PolymarketSettings(
+                private_key=credential_values[0],
+                api_key=credential_values[1],
+                api_secret=credential_values[2],
+                api_passphrase=credential_values[3],
+                signature_type=1,
+                funder_address=credential_values[4],
+            ),
+        ),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    runner.bind_pg_pool(cast(Any, _BoundPool()))
+
+    async def _failing_start() -> None:
+        raise ConnectionError(
+            "LIVE autostart failed "
+            f"{credential_values[0]} {credential_values[1]} "
+            f"{credential_values[2]} {credential_values[3]} {credential_values[4]} "
+            f"{secret_dsn} password=keyword-secret"
+        )
+
+    monkeypatch.setattr(runner, "start", _failing_start)
+    app = create_app(runner, auto_start=True)
+
+    with caplog.at_level(logging.CRITICAL, logger="pms.api.app"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    log_text = caplog.text
+    assert "PMS_AUTO_START failed" in log_text
+    assert "ConnectionError" in log_text
+    assert "<redacted-polymarket-credential>" in log_text
+    assert "<redacted-database-url>" in log_text
+    assert "password=<redacted>" in log_text
+    for credential in credential_values:
+        assert credential not in log_text
+    assert "supersecret" not in log_text
+    assert "keyword-secret" not in log_text
+    assert "admin" not in log_text

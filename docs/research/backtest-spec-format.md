@@ -67,6 +67,9 @@ base_spec:
     latency_ms: 250.0
     staleness_ms: 120000.0
     fill_policy: "immediate_or_cancel"
+    displayed_depth_fill_ratio: 0.75
+    adverse_selection_bps: 5.0
+    calibration_source: "static_live_estimate"
   risk_policy:
     max_position_notional_usdc: 100.0
     max_daily_drawdown_pct: 2.5
@@ -97,6 +100,9 @@ Field notes:
 | `base_spec.execution_model.latency_ms` | number | yes | End-to-end order latency assumption. |
 | `base_spec.execution_model.staleness_ms` | number | yes | Data freshness ceiling. |
 | `base_spec.execution_model.fill_policy` | string | yes | `immediate_or_cancel` or `limit_if_touched`. |
+| `base_spec.execution_model.displayed_depth_fill_ratio` | number | no | Fraction of displayed book size assumed reachable after queue position/cancel/adverse-selection effects; defaults to `1.0`. |
+| `base_spec.execution_model.adverse_selection_bps` | number | no | Deterministic quote-drift haircut applied against the order before limit eligibility and slippage; defaults to `0.0`. |
+| `base_spec.execution_model.calibration_source` | string | no | `idealized_paper`, `static_live_estimate`, `telemetry_calibrated`, or `manual`; reports warn on `static_live_estimate`. |
 | `base_spec.risk_policy.*` | numbers | yes | Matches `RiskParams`. |
 | `base_spec.date_range_start` | ISO-8601 datetime with offset | yes | Must be timezone-aware. |
 | `base_spec.date_range_end` | ISO-8601 datetime with offset | yes | Must be timezone-aware. |
@@ -178,7 +184,7 @@ Important behavior:
 
 ## Choosing an `ExecutionModel`
 
-Two built-in profiles exist today:
+Two built-in profiles plus one telemetry-calibrated builder exist today:
 
 - `ExecutionModel.polymarket_paper()`
   - `fee_rate=0.0`
@@ -186,12 +192,25 @@ Two built-in profiles exist today:
   - `latency_ms=0.0`
   - `staleness_ms=inf`
   - `fill_policy="immediate_or_cancel"`
+  - `displayed_depth_fill_ratio=1.0`
+  - `adverse_selection_bps=0.0`
+  - `calibration_source="idealized_paper"`
 - `ExecutionModel.polymarket_live_estimate()`
   - `fee_rate=0.04`
   - `slippage_bps=10.0`
   - `latency_ms=250.0`
   - `staleness_ms=120000.0`
   - `fill_policy="immediate_or_cancel"`
+  - `displayed_depth_fill_ratio=1.0`
+  - `adverse_selection_bps=5.0`
+  - `calibration_source="static_live_estimate"`
+- `ExecutionModel.from_observed_telemetry(...)`
+  - validates non-empty finite slippage and latency samples
+  - uses median observed `slippage_bps`
+  - uses nearest-rank p95 observed `latency_ms`
+  - accepts an explicit `displayed_depth_fill_ratio` from inspected fill-rate or queue-position evidence
+  - accepts optional `adverse_selection_bps_samples` and uses nearest-rank p95 quote drift against the order
+  - sets `calibration_source="telemetry_calibrated"`
 
 Use `polymarket_paper()` when you are checking strategy logic, factor
 composition, or replay correctness and want market-friction assumptions out of
@@ -200,7 +219,10 @@ the way.
 Use `polymarket_live_estimate()` when you want backtests to reflect the current
 production execution envelope. Its defaults are sourced from live operational
 inputs noted in the code comments: venue fee schedule, recent slippage
-telemetry, watchdog latency, and the local staleness ceiling.
+telemetry, watchdog latency, and the local staleness ceiling. Because this
+profile is still a static estimate, evaluation reports carry a warning until
+the run uses an explicit `telemetry_calibrated` profile with a positive
+`adverse_selection_bps` value.
 
 Override the defaults when any of these are true:
 
@@ -212,8 +234,49 @@ Override the defaults when any of these are true:
   tolerance than the default watchdog ceiling,
 - you need `limit_if_touched` to model a different execution style.
 
-When you override, create a new `ExecutionModel(...)` explicitly instead of
-patching serialized YAML ad hoc. That keeps the assumption set reviewable.
+When you override from observed paper/live data, prefer
+`ExecutionModel.from_observed_telemetry(...)` over patching serialized YAML
+ad hoc. That keeps the assumption set reviewable and makes the report warning
+disappear only when the execution profile was rebuilt from inspected telemetry.
+For operator-owned artifacts, use the CLI wrapper instead of hand-editing JSON:
+
+```bash
+uv run python scripts/execution_model_from_telemetry.py \
+  --input /secure/pms/paper-execution-telemetry.csv \
+  --output /secure/pms/execution-model.json \
+  --fee-rate 0.04 \
+  --staleness-ms 120000 \
+  --displayed-depth-fill-ratio 0.75 \
+  --require-adverse-selection \
+  --min-samples 30
+```
+
+The output file is a direct `execution_model` JSON object with telemetry sample
+metadata. Copy that object into the backtest spec, and leave
+`--require-adverse-selection` enabled for live-promotion evidence so the
+promotion warning cannot be cleared by a profile that only calibrated slippage
+and latency. For true LIVE, stage this file at `live_execution_model_path`;
+validation rejects non-`telemetry_calibrated` profiles, profiles without
+positive `adverse_selection_bps`, missing telemetry sample metadata, or sample
+contracts below the LIVE floor of 10 observations.
+
+After running the same strategy window in PAPER and research replay, produce an
+execution-alignment artifact before promoting from the backtest:
+
+```bash
+uv run python scripts/paper_backtest_execution_diff.py \
+  --paper /secure/pms/paper-execution-export.csv \
+  --backtest /secure/pms/backtest-execution-export.csv \
+  --output /secure/pms/paper-backtest-execution-diff.json \
+  --min-matched-decisions 10 \
+  --require-pass
+```
+
+The input CSV schema is `decision_id`, `market_id`, `status`, `slippage_bps`,
+`pnl`, and `rejection_reason`. The command compares matched decision ids,
+fill/rejection rates, average slippage, and total PnL. A nonzero exit with
+`--require-pass` means the sample is too thin or the execution model and paper
+fills are not aligned enough for promotion.
 
 ## Recalibrating from Live `/metrics`
 
@@ -227,22 +290,32 @@ Use this loop:
    record count behind them.
 2. Compare the live values against the `ExecutionModel` currently baked into the
    sweep spec.
-3. If the difference is persistent, rebuild the profile and re-run the same
-   sweep window before widening scope.
+3. If the difference is persistent, rebuild the profile with
+   `ExecutionModel.from_observed_telemetry(...)` and re-run the same sweep
+   window before widening scope.
 
 Practical mapping from telemetry to fields:
 
 - `slippage_bps`: move this first. It is directly surfaced in `/metrics`.
 - `latency_ms`: update from order round-trip or watchdog latency telemetry.
-  **Current limitation:** this field is recorded on the profile but the
-  replay engine does not yet consume it, so it does not influence backtest
-  output or `config_hash`. Revisit once the runner applies it.
 - `staleness_ms`: update from the point where live data is no longer trusted.
-  **Current limitation:** same as `latency_ms` — declared but unconsumed, and
-  therefore excluded from `config_hash` to prevent cache-dedup misfires.
 - `fee_rate`: update only when the venue fee schedule or account tier changes.
 - `fill_policy`: update only when the execution style changed; it is not a
   tuning knob for making reports look better.
+- `displayed_depth_fill_ratio`: lower from `1.0` when paper/live evidence shows
+  only part of displayed depth is realistically reachable after queue position,
+  cancellation, or adverse-selection effects.
+- `adverse_selection_bps`: increase from `0.0` when fills or replay evidence
+  show the book moving against submitted orders between decision and execution;
+  the simulator applies this before checking whether a limit is fillable.
+- `calibration_source`: set to `telemetry_calibrated` only when the profile was
+  rebuilt from an inspected paper/live sample window; leave static profiles as
+  `static_live_estimate` so reports keep the promotion warning.
+- `min_samples`, `telemetry_sample_count`, `adverse_selection_sample_count`,
+  `require_adverse_selection`: generated by
+  `scripts/execution_model_from_telemetry.py`; true LIVE requires
+  `require_adverse_selection=true`, at least 10 declared minimum samples, and
+  both sample counts meeting that declared floor.
 
 ## Brier and P&L availability
 
@@ -261,6 +334,52 @@ Recommended calibration discipline:
 - keep the old and new profile names in the experiment notes,
 - change one major assumption at a time,
 - re-run the same date range before switching to a new market universe.
+
+## Walk-forward / out-of-sample slice metrics
+
+Evaluation reports now read optional per-slice rows from
+`strategy_run_slices`. Each row is tagged with
+`(strategy_id, strategy_version_id)` and carries:
+
+- `slice_label`
+- `slice_start`
+- `slice_end`
+- `slice_kind`
+- `brier`
+- `pnl_cum`
+- `drawdown_max`
+- `fill_rate`
+- `slippage_bps`
+- `opportunity_count`
+- `decision_count`
+- `fill_count`
+
+When slice rows are present, the report serializes them into
+`evaluation_reports.benchmark_rows` with `metric_type="walk_forward_slice"` and
+mentions the slice count in the attribution commentary. When no slice rows are
+present, the report records a warning:
+
+```text
+no walk-forward/out-of-sample slice metrics were recorded; do not promote from an in-sample-only report
+```
+
+The worker writes both aggregate `strategy_runs` rows and deterministic
+`strategy_run_slices` rows in the same database transaction. Time slices use
+`exec_config.chunk_days`; for example, `chunk_days=7` emits one slice per
+seven-day interval over the backtest range. Category slices use
+`signal.external_signal["category"]` or `["market_category"]` when present and
+write labels like `category:politics`. Liquidity slices use `signal.volume_24h`
+and write one of:
+
+- `liquidity:volume_24h:lt1000`
+- `liquidity:volume_24h:1000-10000`
+- `liquidity:volume_24h:gte10000`
+
+Promotion reviews should still inspect the slice populations before treating
+them as proof; a category or liquidity row with a tiny sample is evidence of a
+coverage gap, not a stable edge. Reports now warn when any slice has fewer than
+20 decision samples, matching the minimum sample discipline used by evaluation
+feedback before surfacing category-level Brier findings.
 
 ## Running `pms-research worker` as a Service
 

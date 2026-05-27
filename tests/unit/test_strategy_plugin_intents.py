@@ -49,6 +49,7 @@ def _trade_intent(**overrides: object) -> TradeIntent:
         "limit_price": 0.54,
         "notional_usdc": 25.0,
         "expected_price": 0.62,
+        "probability_estimate": 0.62,
         "expected_edge": 0.08,
         "max_slippage_bps": 50,
         "time_in_force": TimeInForce.GTC,
@@ -106,6 +107,7 @@ def test_strategy_plugin_value_objects_are_frozen_and_float_at_boundary() -> Non
     assert hints["limit_price"] is float
     assert hints["notional_usdc"] is float
     assert hints["expected_price"] is float
+    assert hints["probability_estimate"] is float
     assert hints["expected_edge"] is float
 
     with pytest.raises(FrozenInstanceError):

@@ -141,8 +141,10 @@ class _DecisionStoreDouble:
         created_at: datetime,
         expires_at: datetime,
         status: str = "pending",
+        decision_evidence: dict[str, object] | None = None,
     ) -> None:
         del decision, factor_snapshot_hash, created_at, expires_at, status
+        del decision_evidence
 
 
 class _ExecutorDouble:
@@ -170,8 +172,14 @@ class _FailingExecutorDouble:
 
 
 class _EvaluatorSpoolDouble:
-    def enqueue(self, fill: Any, decision: TradeDecision) -> None:
-        del fill, decision
+    def enqueue(
+        self,
+        fill: Any,
+        decision: TradeDecision,
+        *,
+        decision_evidence: dict[str, object] | None = None,
+    ) -> None:
+        del fill, decision, decision_evidence
 
 
 @pytest.mark.asyncio

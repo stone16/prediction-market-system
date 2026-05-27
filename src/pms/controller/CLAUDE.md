@@ -59,6 +59,10 @@ that governs this layer:
   explicit typed fields, not in `stop_conditions`.
 - `forecasters/rules.py`, `forecasters/statistical.py`,
   `forecasters/llm.py` — the three forecasters.
+- `baselines.py` — decision-time baseline helpers, including the
+  strict historical resolution CSV loader and category-prior
+  estimator used to enrich `MarketSignal.external_signal` before a
+  decision is persisted.
 - `calibrators/netcal.py` — isotonic calibration per model_id.
 - `sizers/kelly.py` — fractional Kelly with fee-aware formula.
 

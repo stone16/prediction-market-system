@@ -7,9 +7,10 @@ from collections import defaultdict
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, is_dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
+from math import sqrt
 from typing import Any, Literal, TypeVar, cast
 
 import asyncpg
@@ -63,12 +64,12 @@ from pms.api.routes.strategies import list_strategy_metrics as list_strategy_met
 from pms.api.routes.strategies import list_strategies as list_strategies_items
 from pms.api.routes.trades import list_trades as list_trades_items
 from pms.config import (
-    MissingPolymarketCredentialsError,
     PMSSettings,
     load_settings,
     normalize_webhook_url,
     validate_live_mode_ready,
 )
+from pms.live_preflight import redact_live_error, require_live_preflight_artifact
 from pms.alerting.discord import DiscordWebhookClient
 from pms.alerting.scheduler import EODScheduler
 from pms.alerting.subscriber import run_alerting_subscription
@@ -89,7 +90,12 @@ from pms.storage.schema_check import ensure_schema_current
 from pms.storage.decision_store import DecisionStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.market_subscription_store import PostgresMarketSubscriptionStore
-from pms.storage.live_reconciliation import SubmissionUnknownReconciliationStore
+from pms.storage.live_reconciliation import (
+    SubmissionUnknownReconciliationStore,
+    normalize_submission_unknown_decision_id,
+    normalize_submission_unknown_reconciled_by,
+    normalize_submission_unknown_venue_order_id,
+)
 
 
 T = TypeVar("T")
@@ -97,6 +103,7 @@ LIVE_DISABLED_DETAIL = (
     "Live trading is disabled. Set live_trading_enabled=true in config."
 )
 RUNNER_ALREADY_RUNNING_DETAIL = "Runner is already running."
+MODE_CHANGE_WHILE_RUNNING_DETAIL = "Stop the runner before changing mode."
 FIRST_TRADE_TIME_SECONDS_METRIC = "pms.ui.first_trade_time_seconds"
 logger = logging.getLogger(__name__)
 
@@ -171,13 +178,15 @@ def create_app(
                     # restricted to the exception class name. Connection
                     # errors / schema failures / OSError can otherwise leak
                     # DSNs, hostnames, paths, and user info via the raw
-                    # str(exc). Full detail stays in the server-side log
-                    # below so the operator can still diagnose.
+                    # str(exc). Server-side logs keep the exception class and
+                    # a redacted diagnostic string so operators can still
+                    # diagnose without leaking credentials into production
+                    # logs.
                     app_inst.state.autostart_error = type(exc).__name__
                     logger.critical(
                         "PMS_AUTO_START failed: %s: %s",
                         type(exc).__name__,
-                        exc,
+                        redact_live_error(str(exc), active_runner.config),
                     )
             if active_runner.pg_pool is not None:
                 await scan_orphaned_backtest_runs(active_runner.pg_pool)
@@ -205,10 +214,18 @@ def create_app(
     @app.get("/status")
     async def status(request: Request) -> dict[str, Any]:
         records = await active_runner.eval_store.all()
+        unresolved_feedback = await list_feedback_items(
+            active_runner.feedback_store,
+            resolved=False,
+        )
+        status_now = datetime.now(tz=UTC)
         metrics_snapshot = MetricsCollector(records).global_ops_snapshot()
         quote_records = await _quote_eval_records(active_runner)
         quote_snapshot = QuoteMetricsCollector(quote_records).global_ops_snapshot()
         mark_to_market = await _mark_to_market_payload(active_runner)
+        metrics_14d = MetricsCollector(
+            _eval_records_since(records, since=status_now - timedelta(days=14))
+        ).global_ops_snapshot()
         return {
             "mode": active_runner.state.mode.value,
             "runner_started_at": _jsonable(active_runner.state.runner_started_at),
@@ -221,14 +238,30 @@ def create_app(
             "controller": {
                 "decisions_total": len(active_runner.state.decisions),
                 "diagnostics_total": len(active_runner.state.controller_diagnostics),
+                "diagnostic_counts": _controller_diagnostic_counts(
+                    active_runner.state.controller_diagnostics,
+                ),
             },
             "actuator": {
                 "fills_total": len(active_runner.state.fills),
                 "mode": active_runner.state.mode.value,
+                "halt_recovery_cycles_7d": len(
+                    active_runner.actuator_executor.risk.halt_recovery_cycles_since(
+                        status_now - timedelta(days=7)
+                    )
+                ),
             },
             "evaluator": {
                 "eval_records_total": len(records),
                 "brier_overall": metrics_snapshot.brier_overall,
+                "baseline_brier_overall": metrics_snapshot.baseline_brier_overall,
+                "brier_improvement_overall": metrics_snapshot.brier_improvement_overall,
+                "brier_14d": metrics_14d.brier_overall,
+                "baseline_brier_14d": metrics_14d.baseline_brier_overall,
+                "brier_improvement_14d": metrics_14d.brier_improvement_overall,
+            },
+            "supervision": {
+                "unresolved_feedback_total": len(unresolved_feedback),
             },
             "quality": _quality_payload(
                 records=records,
@@ -478,7 +511,10 @@ def create_app(
         return payload.model_dump(mode="json")
 
     @app.get("/metrics")
-    async def metrics() -> dict[str, Any]:
+    async def metrics(
+        since: datetime | None = Query(default=None),
+        until: datetime | None = Query(default=None),
+    ) -> dict[str, Any]:
         records = sorted(
             await active_runner.eval_store.all(),
             key=lambda record: (record.recorded_at, record.decision_id),
@@ -488,12 +524,16 @@ def create_app(
             key=lambda record: (record.recorded_at, record.fill_id),
         )
         mark_to_market = await _mark_to_market_payload(active_runner)
+        records = _eval_records_in_window(records, since=since, until=until)
         first_trade_time_seconds = await _first_trade_time_seconds(active_runner.pg_pool)
         return _metrics_payload(
             records,
             quote_records=quote_records,
             mark_to_market=mark_to_market,
             first_trade_time_seconds=first_trade_time_seconds,
+            window_started_at=since,
+            window_ended_at=until,
+            capital_base_usdc=active_runner.config.risk.max_total_exposure,
         )
 
     @app.get("/feedback")
@@ -683,15 +723,35 @@ def create_app(
     ) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
-        updated = await SubmissionUnknownReconciliationStore(
-            active_runner.pg_pool
-        ).reconcile_submission_unknown(
-            decision_id=payload.decision_id,
-            venue_order_id=payload.venue_order_id,
-            status=payload.status,
-            reconciled_by=payload.reconciled_by,
-            note=payload.note,
-        )
+        try:
+            venue_order_id = normalize_submission_unknown_venue_order_id(
+                status=payload.status,
+                venue_order_id=payload.venue_order_id,
+            )
+            decision_id = normalize_submission_unknown_decision_id(
+                payload.decision_id
+            )
+            reconciled_by = normalize_submission_unknown_reconciled_by(
+                payload.reconciled_by
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            await ensure_schema_current(active_runner.pg_pool)
+            updated = await SubmissionUnknownReconciliationStore(
+                active_runner.pg_pool
+            ).reconcile_submission_unknown(
+                decision_id=decision_id,
+                venue_order_id=venue_order_id,
+                status=payload.status,
+                reconciled_by=reconciled_by,
+                note=payload.note,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=503,
+                detail=redact_live_error(str(exc), active_runner.config),
+            ) from exc
         if not updated:
             raise HTTPException(
                 status_code=404,
@@ -699,19 +759,34 @@ def create_app(
             )
         return {
             "status": "reconciled",
-            "decision_id": payload.decision_id,
+            "decision_id": decision_id,
             "resolution": payload.status,
         }
 
     @app.post("/config", dependencies=[Depends(require_api_token)])
     async def update_config(update: ConfigUpdate) -> dict[str, str]:
+        if (
+            update.mode != active_runner.config.mode
+            and _is_runner_running(active_runner)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=MODE_CHANGE_WHILE_RUNNING_DETAIL,
+            )
         if update.mode == RunMode.LIVE and not active_runner.config.live_trading_enabled:
             raise HTTPException(status_code=400, detail=LIVE_DISABLED_DETAIL)
         if update.mode == RunMode.LIVE:
+            live_candidate = active_runner.config.model_copy(
+                update={"mode": RunMode.LIVE}
+            )
             try:
-                validate_live_mode_ready(active_runner.config)
-            except MissingPolymarketCredentialsError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+                validate_live_mode_ready(live_candidate)
+                require_live_preflight_artifact(live_candidate)
+            except LiveTradingDisabledError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=redact_live_error(str(exc), live_candidate),
+                ) from exc
         active_runner.switch_mode(update.mode)
         return {"mode": active_runner.state.mode.value}
 
@@ -722,7 +797,17 @@ def create_app(
         try:
             await active_runner.start()
         except LiveTradingDisabledError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=400,
+                detail=redact_live_error(str(exc), active_runner.config),
+            ) from exc
+        except Exception as exc:
+            if active_runner.config.mode == RunMode.LIVE:
+                raise HTTPException(
+                    status_code=400,
+                    detail=redact_live_error(str(exc), active_runner.config),
+                ) from exc
+            raise
         return {
             "status": "started",
             "mode": active_runner.state.mode.value,
@@ -805,17 +890,62 @@ def _quote_calibration_payload(snapshot: QuoteMetricsSnapshot) -> dict[str, Any]
     }
 
 
+def _eval_records_since(
+    records: Sequence[EvalRecord],
+    *,
+    since: datetime,
+) -> list[EvalRecord]:
+    cutoff = _coerce_aware_datetime(since)
+    return [
+        record
+        for record in records
+        if _coerce_aware_datetime(record.recorded_at) >= cutoff
+    ]
+
+
+def _eval_records_in_window(
+    records: Sequence[EvalRecord],
+    *,
+    since: datetime | None,
+    until: datetime | None,
+) -> list[EvalRecord]:
+    lower = _coerce_aware_datetime(since) if since is not None else None
+    upper = _coerce_aware_datetime(until) if until is not None else None
+    filtered: list[EvalRecord] = []
+    for record in records:
+        recorded_at = _coerce_aware_datetime(record.recorded_at)
+        if lower is not None and recorded_at < lower:
+            continue
+        if upper is not None and recorded_at >= upper:
+            continue
+        filtered.append(record)
+    return filtered
+
+
+def _coerce_aware_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
 def _metrics_payload(
     records: list[EvalRecord],
     *,
     quote_records: list[QuoteEvalRecord] | None = None,
     mark_to_market: dict[str, float | int] | None = None,
     first_trade_time_seconds: float | None = None,
+    window_started_at: datetime | None = None,
+    window_ended_at: datetime | None = None,
+    capital_base_usdc: float | None = None,
 ) -> dict[str, Any]:
     collector = MetricsCollector(records)
-    ops_view = _metrics_aggregate_payload(records, collector.global_ops_snapshot())
     quote_records = [] if quote_records is None else quote_records
     quote_snapshot = QuoteMetricsCollector(quote_records).global_ops_snapshot()
+    ops_view = _metrics_aggregate_payload(
+        records,
+        collector.global_ops_snapshot(),
+        capital_base_usdc=capital_base_usdc,
+    )
     strategy_snapshots = collector.snapshot_by_strategy()
     grouped_records: dict[tuple[str, str], list[EvalRecord]] = defaultdict(list)
     for record in records:
@@ -832,6 +962,8 @@ def _metrics_payload(
                 "record_count": len(strategy_records),
                 "insufficient_samples": len(strategy_records) == 0,
                 "brier_overall": snapshot.brier_overall,
+                "baseline_brier_overall": snapshot.baseline_brier_overall,
+                "brier_improvement_overall": snapshot.brier_improvement_overall,
                 "pnl": snapshot.pnl,
                 "fill_rate": snapshot.fill_rate,
                 "slippage_bps": snapshot.slippage_bps,
@@ -840,6 +972,16 @@ def _metrics_payload(
         )
 
     payload = dict(ops_view)
+    payload["window_started_at"] = (
+        None
+        if window_started_at is None
+        else _coerce_aware_datetime(window_started_at).isoformat()
+    )
+    payload["window_ended_at"] = (
+        None
+        if window_ended_at is None
+        else _coerce_aware_datetime(window_ended_at).isoformat()
+    )
     payload[FIRST_TRADE_TIME_SECONDS_METRIC] = first_trade_time_seconds
     payload.update(metrics_snapshot())
     payload["per_strategy"] = per_strategy
@@ -897,6 +1039,8 @@ async def _first_trade_time_seconds(pg_pool: asyncpg.Pool | None) -> float | Non
 def _metrics_aggregate_payload(
     records: list[EvalRecord],
     snapshot: MetricsSnapshot,
+    *,
+    capital_base_usdc: float | None = None,
 ) -> dict[str, Any]:
     payload = cast(dict[str, Any], _jsonable(snapshot))
     payload["brier_series"] = [
@@ -924,6 +1068,11 @@ def _metrics_aggregate_payload(
             }
         )
     payload["pnl_series"] = pnl_series
+    payload["max_drawdown_pct"] = _max_drawdown_pct(
+        records,
+        capital_base_usdc=capital_base_usdc,
+    )
+    payload["sharpe_ratio"] = _sharpe_ratio(_daily_pnl_values(records))
     return payload
 
 
@@ -936,6 +1085,36 @@ def _max_drawdown(records: list[EvalRecord]) -> float:
         peak_equity = max(peak_equity, cumulative_pnl)
         max_drawdown = max(max_drawdown, peak_equity - cumulative_pnl)
     return float(max_drawdown)
+
+
+def _max_drawdown_pct(
+    records: list[EvalRecord],
+    *,
+    capital_base_usdc: float | None,
+) -> float | None:
+    if capital_base_usdc is None or capital_base_usdc <= 0.0:
+        return None
+    return _max_drawdown(records) / capital_base_usdc * 100.0
+
+
+def _daily_pnl_values(records: list[EvalRecord]) -> list[float]:
+    daily_pnl: defaultdict[date, Decimal] = defaultdict(lambda: Decimal("0"))
+    for record in records:
+        recorded_day = _coerce_aware_datetime(record.recorded_at).astimezone(UTC).date()
+        daily_pnl[recorded_day] += Decimal(str(record.pnl))
+    return [float(daily_pnl[day]) for day in sorted(daily_pnl)]
+
+
+def _sharpe_ratio(values: list[float]) -> float | None:
+    if not values:
+        return None
+    mean = sum(values) / len(values)
+    if len(values) < 2:
+        return mean
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    if variance == 0.0:
+        return mean if mean >= 0.0 else -abs(mean)
+    return mean / sqrt(variance)
 
 
 def _should_use_durable_decisions(runner: Runner) -> bool:
@@ -1030,6 +1209,18 @@ def _sensor_statuses(
     ]
 
 
+def _controller_diagnostic_counts(
+    diagnostics: Sequence[Any],
+) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for diagnostic in diagnostics:
+        code = getattr(diagnostic, "code", None)
+        if not isinstance(code, str) or not code:
+            continue
+        counts[code] += 1
+    return dict(sorted(counts.items()))
+
+
 def _last_signal_at(signals: Sequence[MarketSignal]) -> str | None:
     if not signals:
         return None
@@ -1086,7 +1277,7 @@ def _start_alerting_if_configured(app_inst: FastAPI, runner: Runner) -> None:
     webhook = normalize_webhook_url(runner.config.discord.webhook_url)
     if webhook is None:
         return
-    client = DiscordWebhookClient(webhook)
+    client = DiscordWebhookClient(webhook, alert_dir=runner.config.discord.alert_dir)
     stop_event = asyncio.Event()
     task = asyncio.create_task(
         run_alerting_subscription(runner.event_bus, client, stop_event=stop_event)

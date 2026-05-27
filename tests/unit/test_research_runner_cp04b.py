@@ -382,6 +382,8 @@ class _InsertTrackingConnection:
         del args
         if "INSERT INTO strategy_runs" in query:
             self._journal.append("INSERT strategy_runs")
+        if "INSERT INTO strategy_run_slices" in query:
+            self._journal.append("INSERT strategy_run_slices")
         return "INSERT 1"
 
 
@@ -444,6 +446,170 @@ async def test_insert_strategy_runs_atomically_rolls_back_on_mid_batch_failure(
     assert journal[0] == "BEGIN"
     assert journal[-1] == "ROLLBACK"
     assert "COMMIT" not in journal
+
+
+@pytest.mark.asyncio
+async def test_backtest_runner_records_chunk_day_slice_metrics() -> None:
+    pipeline = _PortfolioRecordingPipeline()
+    runner = BacktestRunner(
+        writable_pool=cast(Any, object()),
+        readonly_pool=cast(Any, object()),
+        replay_engine=_ReplayEngine(
+            [
+                _signal(datetime(2026, 4, 1, 12, 0, tzinfo=UTC)),
+                _signal(datetime(2026, 4, 8, 12, 0, tzinfo=UTC)),
+            ]
+        ),
+        controller_factory=_PipelineFactory(pipeline),
+    )
+
+    accumulator = await runner._run_strategy(
+        strategy=_active_strategy(),
+        spec=_spec(),
+        exec_config=BacktestExecutionConfig(chunk_days=7),
+    )
+
+    slice_args = getattr(accumulator, "slice_insert_args", None)
+    assert callable(slice_args)
+    rows = slice_args(run_id="11111111-1111-1111-1111-111111111111")
+    walk_forward_rows = [row for row in rows if row[7] == "walk_forward"]
+
+    assert len(walk_forward_rows) == 2
+    assert walk_forward_rows[0][4] == "2026-04-01/2026-04-08"
+    assert walk_forward_rows[0][5] == datetime(2026, 4, 1, tzinfo=UTC)
+    assert walk_forward_rows[0][6] == datetime(2026, 4, 8, tzinfo=UTC)
+    assert walk_forward_rows[0][8] == pytest.approx(0.09)
+    assert walk_forward_rows[0][9] is not None
+    assert walk_forward_rows[0][10] is not None
+    assert walk_forward_rows[0][11] == pytest.approx(1.0)
+    assert walk_forward_rows[0][12] == pytest.approx(0.0)
+    assert walk_forward_rows[0][13] == 1
+    assert walk_forward_rows[0][14] == 1
+    assert walk_forward_rows[0][15] == 1
+    assert walk_forward_rows[1][4] == "2026-04-08/2026-04-15"
+    assert walk_forward_rows[1][5] == datetime(2026, 4, 8, tzinfo=UTC)
+    assert walk_forward_rows[1][6] == datetime(2026, 4, 15, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_backtest_runner_records_category_and_liquidity_slice_metrics() -> None:
+    pipeline = _PortfolioRecordingPipeline()
+    categorized_signal = replace(
+        _signal(datetime(2026, 4, 1, 12, 0, tzinfo=UTC)),
+        volume_24h=2_500.0,
+        external_signal={"resolved_outcome": 1.0, "category": "Politics"},
+    )
+    runner = BacktestRunner(
+        writable_pool=cast(Any, object()),
+        readonly_pool=cast(Any, object()),
+        replay_engine=_ReplayEngine([categorized_signal]),
+        controller_factory=_PipelineFactory(pipeline),
+    )
+
+    accumulator = await runner._run_strategy(
+        strategy=_active_strategy(),
+        spec=_spec(),
+        exec_config=BacktestExecutionConfig(chunk_days=7),
+    )
+
+    rows = accumulator.slice_insert_args(
+        run_id="11111111-1111-1111-1111-111111111111"
+    )
+    rows_by_label = {cast(str, row[4]): row for row in rows}
+
+    assert "category:politics" in rows_by_label
+    assert rows_by_label["category:politics"][5] == _spec().date_range_start
+    assert rows_by_label["category:politics"][6] == _spec().date_range_end
+    assert rows_by_label["category:politics"][7] == "category"
+    assert rows_by_label["category:politics"][8] == pytest.approx(0.09)
+    assert rows_by_label["category:politics"][11] == pytest.approx(1.0)
+    assert rows_by_label["category:politics"][13] == 1
+    assert rows_by_label["category:politics"][14] == 1
+    assert rows_by_label["category:politics"][15] == 1
+
+    assert "liquidity:volume_24h:1000-10000" in rows_by_label
+    assert rows_by_label["liquidity:volume_24h:1000-10000"][5] == _spec().date_range_start
+    assert rows_by_label["liquidity:volume_24h:1000-10000"][6] == _spec().date_range_end
+    assert rows_by_label["liquidity:volume_24h:1000-10000"][7] == "liquidity"
+    assert rows_by_label["liquidity:volume_24h:1000-10000"][8] == pytest.approx(0.09)
+    assert rows_by_label["liquidity:volume_24h:1000-10000"][11] == pytest.approx(1.0)
+    assert rows_by_label["liquidity:volume_24h:1000-10000"][13] == 1
+    assert rows_by_label["liquidity:volume_24h:1000-10000"][14] == 1
+    assert rows_by_label["liquidity:volume_24h:1000-10000"][15] == 1
+
+
+@pytest.mark.asyncio
+async def test_insert_strategy_runs_atomically_persists_slice_rows() -> None:
+    from pms.research.runner import _SliceDescriptor, _StrategyAccumulator
+
+    journal: list[str] = []
+    pool = _InsertTrackingPool(journal)
+    runner = BacktestRunner(
+        writable_pool=cast(Any, pool),
+        readonly_pool=cast(Any, object()),
+    )
+    accumulator = _StrategyAccumulator(
+        strategy_id="alpha",
+        strategy_version_id="v1",
+        execution_model=ExecutionModel.polymarket_paper(),
+    )
+    record_slice = getattr(accumulator, "record_slice_decision", None)
+    assert callable(record_slice)
+    record_slice(
+        signal=_signal(datetime(2026, 4, 1, 12, 0, tzinfo=UTC)),
+        opportunity=Opportunity(
+            opportunity_id="opp-slice",
+            market_id="research-runner-market",
+            token_id="yes-token",
+            side="yes",
+            selected_factor_values={},
+            expected_edge=0.1,
+            rationale="slice-persist-check",
+            target_size_usdc=10.0,
+            expiry=datetime(2026, 4, 30, tzinfo=UTC),
+            staleness_policy="research",
+            strategy_id="alpha",
+            strategy_version_id="v1",
+            created_at=datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+        ),
+        decision=TradeDecision(
+            decision_id="decision-slice",
+            market_id="research-runner-market",
+            token_id="yes-token",
+            venue="polymarket",
+            side="BUY",
+            limit_price=0.41,
+            notional_usdc=10.0,
+            order_type="limit",
+            max_slippage_bps=50,
+            stop_conditions=[],
+            prob_estimate=0.7,
+            expected_edge=0.2,
+            time_in_force=TimeInForce.IOC,
+            opportunity_id="opp-slice",
+            strategy_id="alpha",
+            strategy_version_id="v1",
+            model_id="rules",
+        ),
+        slice_descriptor=_SliceDescriptor(
+            label="2026-04-01/2026-04-08",
+            start=datetime(2026, 4, 1, tzinfo=UTC),
+            end=datetime(2026, 4, 8, tzinfo=UTC),
+            kind="walk_forward",
+        ),
+    )
+
+    await runner._insert_strategy_runs_atomically(
+        run_id="11111111-1111-1111-1111-111111111111",
+        accumulators=[accumulator],
+    )
+
+    assert journal == [
+        "BEGIN",
+        "INSERT strategy_runs",
+        "INSERT strategy_run_slices",
+        "COMMIT",
+    ]
 
 
 def _signal_without_resolution(ts: datetime) -> MarketSignal:

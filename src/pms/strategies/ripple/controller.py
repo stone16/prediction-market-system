@@ -38,6 +38,7 @@ def _candidate_from_observation(observation: StrategyObservation) -> StrategyCan
         "limit_price": _required_float(payload, "limit_price"),
         "notional_usdc": _required_float(payload, "notional_usdc"),
         "expected_price": _required_float(payload, "expected_price"),
+        "probability_estimate": _required_float(payload, "probability_estimate"),
         "max_slippage_bps": _required_int(payload, "max_slippage_bps"),
         "time_in_force": _required_str(payload, "time_in_force"),
         "contradiction_refs": _string_tuple(payload.get("contradiction_refs", ())),

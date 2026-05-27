@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import json
 
-from pms.storage.strategy_registry import _strategy_from_config_json, _strategy_to_config_json
+import pytest
+
+from pms.storage.strategy_registry import (
+    _strategy_from_config_json,
+    _strategy_from_versioned_config_json,
+    _strategy_to_config_json,
+)
 from pms.strategies.aggregate import Strategy
+from pms.strategies.versioning import compute_strategy_version_id
 from pms.strategies.projections import (
     EvalSpec,
     FactorCompositionStep,
@@ -110,6 +117,52 @@ def test_strategy_registry_round_trips_new_factor_composition_shape() -> None:
     strategy = _strategy_from_config_json(json.loads(serialized))
 
     assert strategy == _strategy()
+
+
+def test_versioned_reader_accepts_legacy_default_v1_bootstrap_id() -> None:
+    # The schema.sql bootstrap row labels the default strategy 'default-v1',
+    # a load-bearing legacy sentinel that predates content-addressed version
+    # ids. The reader must accept it so a runner can boot against a freshly
+    # bootstrapped database when auto_migrate_default_v2 is disabled.
+    strategy = _strategy()
+    config_json = json.loads(_strategy_to_config_json(strategy))
+
+    loaded = _strategy_from_versioned_config_json(
+        config_json,
+        strategy_id="default",
+        strategy_version_id="default-v1",
+    )
+
+    assert loaded == strategy
+
+
+def test_versioned_reader_accepts_matching_content_hash_id() -> None:
+    strategy = _strategy()
+    config_json = json.loads(_strategy_to_config_json(strategy))
+    version_id = compute_strategy_version_id(*strategy.snapshot())
+
+    loaded = _strategy_from_versioned_config_json(
+        config_json,
+        strategy_id="default",
+        strategy_version_id=version_id,
+    )
+
+    assert loaded == strategy
+
+
+def test_versioned_reader_rejects_non_legacy_id_that_mismatches_config_hash() -> None:
+    # Every non-legacy version id must equal its config hash (Invariant 3:
+    # immutable, content-addressed versions). A drifted id signals tampering
+    # or corruption and must fail closed.
+    strategy = _strategy()
+    config_json = json.loads(_strategy_to_config_json(strategy))
+
+    with pytest.raises(ValueError, match="strategy_version_id does not match"):
+        _strategy_from_versioned_config_json(
+            config_json,
+            strategy_id="default",
+            strategy_version_id="not-the-content-hash",
+        )
 
 
 def test_strategy_registry_rehydrates_step_factor_composition_without_threshold_field() -> None:

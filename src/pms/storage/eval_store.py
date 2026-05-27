@@ -67,6 +67,10 @@ async def insert_eval_record_row(
             fill_status,
             recorded_at,
             citations,
+            baseline_prob_estimate,
+            baseline_brier_score,
+            baseline_prob_estimates,
+            baseline_brier_scores,
             category,
             model_id,
             pnl,
@@ -77,8 +81,8 @@ async def insert_eval_record_row(
             edge_at_decision,
             spread_bps_at_decision
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15,
-            $16, $17
+            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12::jsonb,
+            $13, $14, $15, $16, $17, $18, $19, $20, $21
         )
         """,
         record.decision_id,
@@ -89,6 +93,10 @@ async def insert_eval_record_row(
         record.fill_status,
         record.recorded_at,
         json.dumps(record.citations),
+        record.baseline_prob_estimate,
+        record.baseline_brier_score,
+        json.dumps(dict(record.baseline_prob_estimates), allow_nan=False),
+        json.dumps(dict(record.baseline_brier_scores), allow_nan=False),
         record.category,
         record.model_id,
         record.pnl,
@@ -111,6 +119,10 @@ SELECT
     fill_status,
     recorded_at,
     citations,
+    baseline_prob_estimate,
+    baseline_brier_score,
+    baseline_prob_estimates,
+    baseline_brier_scores,
     strategy_id,
     strategy_version_id,
     category,
@@ -135,6 +147,10 @@ SELECT
     fill_status,
     recorded_at,
     citations,
+    baseline_prob_estimate,
+    baseline_brier_score,
+    baseline_prob_estimates,
+    baseline_brier_scores,
     strategy_id,
     strategy_version_id,
     category,
@@ -169,6 +185,20 @@ def _eval_record_from_row(row: asyncpg.Record) -> EvalRecord:
         prob_estimate=cast(float, row["prob_estimate"]),
         resolved_outcome=cast(float, row["resolved_outcome"]),
         brier_score=cast(float, row["brier_score"]),
+        baseline_prob_estimate=cast(
+            float | None,
+            _row_value(row, "baseline_prob_estimate", None),
+        ),
+        baseline_brier_score=cast(
+            float | None,
+            _row_value(row, "baseline_brier_score", None),
+        ),
+        baseline_prob_estimates=_json_numeric_mapping(
+            _row_value(row, "baseline_prob_estimates", {}),
+        ),
+        baseline_brier_scores=_json_numeric_mapping(
+            _row_value(row, "baseline_brier_scores", {}),
+        ),
         fill_status=cast(str, row["fill_status"]),
         recorded_at=cast(datetime, row["recorded_at"]),
         citations=citations,
@@ -193,3 +223,21 @@ def _row_value(row: asyncpg.Record, key: str, default: object) -> object:
     except (KeyError, IndexError):
         return default
     return default if value is None and default is not None else value
+
+
+def _json_numeric_mapping(value: object) -> dict[str, float]:
+    payload: object = value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(payload, dict):
+        return {}
+    mapping: dict[str, float] = {}
+    for key, raw_value in payload.items():
+        try:
+            mapping[str(key)] = float(cast(SupportsFloat, raw_value))
+        except (TypeError, ValueError):
+            continue
+    return mapping

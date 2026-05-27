@@ -15,7 +15,7 @@ FILES_TO_SCAN = [
     ROOT / "src" / "pms" / "sensor" / "CLAUDE.md",
     ROOT / "src" / "pms" / "evaluation" / "CLAUDE.md",
 ]
-KEYWORDS = ("live mode", "live trading", "live execution", "Kalshi")
+KALSHI_KEYWORD = "Kalshi"
 STUB_MARKERS = ("not implemented", "reserved", "stub", "NotImplementedError")
 
 
@@ -25,9 +25,11 @@ def test_readme_and_claude_explicitly_document_gated_polymarket_live_mode() -> N
 
     assert "gated Polymarket `live`" in readme_text
     assert "live_trading_enabled=true" in readme_text
+    assert "operator_approval_mode=every_order" in readme_text
     assert "operator gate" in readme_text
     assert "gated Polymarket `live`" in claude_text
     assert "live_trading_enabled=true" in claude_text
+    assert "operator_approval_mode=every_order" in claude_text
     assert "operator gate" in claude_text
 
 
@@ -38,20 +40,160 @@ def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_ga
 
     assert '"outcome": "NO"' in runbook_text
     assert "live_account_reconciliation_required: true" in runbook_text
+    assert "live_exit_criteria_ratified_by" in runbook_text
+    assert "live_compliance_jurisdiction" in runbook_text
+    assert "live_paper_soak_report_path" in runbook_text
+    assert "live_operator_rehearsal_report_path" in runbook_text
+    assert "live_first_order_audit_path" in runbook_text
+    assert "polymarket.first_live_order_approval_path" in runbook_text
+    assert "permanently-denying operator gate" in runbook_text
+    assert "PMS_LIVE_FIRST_ORDER_AUDIT_PATH" in runbook_text
+    assert "reject shared paths" in runbook_text
+    assert "reject repo-local approval and" in runbook_text
+    assert "audit paths, unusable approval and audit path parents" in runbook_text
+    assert "permissive approval" in runbook_text
+    assert "private and owner-writable" in runbook_text
+    assert "max_exposure_per_risk_group" in runbook_text
+    assert "risk_group_id" in runbook_text
+    assert "decisions without a risk group are rejected" in runbook_text
+    assert "market_data_freshness" in runbook_text
+    assert "book_snapshots" in runbook_text
+    assert "book_levels" in runbook_text
+    assert "two-sided snapshot" in runbook_text
+    assert "venue pUSD balance and allowance must cover `risk.max_total_exposure`" in runbook_text
+    assert "balance/allowance sync endpoint for collateral" in runbook_text
+    assert "`3` (`POLY_1271`) for new API deposit-wallet credentials" in runbook_text
+    assert "average_net_edge_bps" in runbook_text
+    assert "unresolved_incidents" in runbook_text
+    assert "risk_events" in runbook_text
+    assert "operator_approval_mode: every_order" in runbook_text
+    assert "Direct `PolymarketActuator` use in true `mode: live`" in runbook_text
+    assert "cannot bypass the\nstartup artifact gate" in runbook_text
+    assert "PAPER_SOAK_REPORT_DATE" in runbook_text
+    assert "--output /secure/pms/paper-soak-go-report.md" in runbook_text
+    assert "`artifact_mode` set to `persisted`" in runbook_text
+    assert "`generated_at` timestamp" in runbook_text
+    assert "Dry-run output is marked `dry_run`" in runbook_text
+    assert "persisted provenance `output_path` must match" in runbook_text
+    assert "compliance review timestamps to be at or after" in runbook_text
+    assert "--output /secure/pms/credentialed-preflight.json" in runbook_text
+    assert "`artifact_mode: credentialed_preflight`" in runbook_text
+    assert "`final_go_no_go_valid: true`" in runbook_text
+    assert "`database_url_override_used`" in runbook_text
+    assert "`settings_fingerprint`" in runbook_text
+    assert "`database_url_override_used: false`" in runbook_text
+    assert "artifacts generated with `--database-url`" in runbook_text
+    assert "are marked `artifact_mode: incomplete_preflight`" in runbook_text
+    assert "not final go/no-go valid exits nonzero" in runbook_text.replace("\n", " ")
+    assert "`live_preflight_artifact_max_age_s`" in runbook_text
+    assert "older than `live_preflight_artifact_max_age_s`" in runbook_text.replace(
+        "\n", " "
+    )
+    assert "credentialed preflight artifact parent directory must be private" in runbook_text
+    assert "`artifact_mode: incomplete_preflight`" in runbook_text
+    assert "`final_go_no_go_valid: false`" in runbook_text
+    assert "database connection" in runbook_text
+    assert "`password=` fragments" in runbook_text
+    assert "redacted" in runbook_text
+    assert "pms-live reconcile-submission-unknown" in runbook_text
+    assert "--config config.live.yaml" in runbook_text
+    assert "--database-url` only as an explicit override" in runbook_text
+    assert "`--venue-order-id` is required when status is `filled` or `open`" in runbook_text
+    assert "checks the Alembic schema head before writing" in runbook_text
+    assert "`updated: false`" in runbook_text
+    assert "redacted `error` field" in runbook_text
+    assert "pms-live reconcile-live-order" in runbook_text
+    assert "--output /secure/pms/first-live-order-reconciliation.json" in runbook_text
+    assert "`artifact_mode:\npost_live_order_reconciliation`" in runbook_text
+    assert "`final_post_live_valid: true`" in runbook_text
+    assert "`credentialed_preflight_artifact`" in runbook_text
+    assert "generated before the live order's\npersisted `submitted_at`" in runbook_text
+    assert "persisted\nfill plus pre-submit quote hash/source" in runbook_text
+    assert "incomplete_post_live_order_reconciliation" in runbook_text
     assert "time_in_force: IOC" in runbook_text
+    assert "permits only `IOC` or `FOK`" in runbook_text
     assert "secret_source: local_file" in runbook_text
     assert "chmod 600" in runbook_text
+    assert "placeholder markers" in runbook_text
+    assert "future-dated" in runbook_text
+    assert "operator-rehearsal-report.md" in runbook_text
+    assert "`scripts/rehearse_first_order.py`" in runbook_text
+    assert "`artifact_mode` set to `persisted`" in runbook_text
+    assert "a parseable `generated_at`" in runbook_text
+    assert "`output_path` matching" in runbook_text
+    assert "`live_operator_rehearsal_report_path`" in runbook_text
+    assert "`fresh_approval_required`" in runbook_text
+    assert "`<approval-path>.meta.json`" in runbook_text
+    assert "`polymarket.operator_approval_max_age_s`" in runbook_text
+    assert "`approval_sha256`" in runbook_text
+    assert "canonical SHA-256 hash" in runbook_text
+    assert "bare approval JSON" in runbook_text
+    assert "decision_evidence" in runbook_text
+    assert "book hash" in runbook_text
+    assert "fails if an approval JSON already exists" in runbook_text
+    assert "`alpha_source`, `edge_model_source`" in runbook_text
+    assert "`calibration_source`, and `evidence_source`" in runbook_text
+    assert "Authorization: Bearer $PMS_API_TOKEN" in runbook_text
+    assert "http://127.0.0.1:8000/run/stop" in runbook_text
+    assert "protected by `PMS_API_TOKEN`" in runbook_text
 
 
-def test_live_and_kalshi_mentions_are_stubbed_not_capability_claims() -> None:
+def test_live_exit_criteria_are_machine_observable_and_no_longer_todo_decisions() -> None:
+    exit_criteria_text = (
+        ROOT / "docs" / "operations" / "live-exit-criteria.md"
+    ).read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "TODO_DECISION" not in exit_criteria_text
+    assert "TODO_DECISION" not in runbook_text
+    assert "halt_recovery_cycles_7d" in exit_criteria_text
+    assert "brier_improvement_14d" in exit_criteria_text
+
+
+def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> None:
     offending_lines: list[str] = []
 
     for path in FILES_TO_SCAN:
         if not path.exists():
             continue
         for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            if any(keyword in line for keyword in KEYWORDS):
+            if KALSHI_KEYWORD in line:
                 if not any(marker in line for marker in STUB_MARKERS):
                     offending_lines.append(f"{path.relative_to(ROOT)}:{line_number}:{line}")
 
     assert offending_lines == []
+
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    stale_live_markers = (
+        "stub-gated",
+        "not implemented until paper soak",
+    )
+    for marker in stale_live_markers:
+        assert marker not in readme_text
+        assert marker not in runbook_text
+    assert "Do not create the approval JSON before preflight" in readme_text
+    assert "--output /secure/pms/credentialed-preflight.json" in readme_text
+    assert "pms-live reconcile-live-order" in readme_text
+    assert "--output /secure/pms/first-live-order-reconciliation.json" in readme_text
+    assert "credentialed preflight artifact to still validate" in readme_text
+    assert "PAPER_SOAK_REPORT_DATE" in readme_text
+    assert "--output /secure/pms/paper-soak-go-report.md" in readme_text
+    assert "credentialed preflight artifact is missing/invalid" in readme_text
+    assert "Create the approval JSON only after preview review" in readme_text
+    assert "true LIVE template leaves LLM disabled by default" in readme_text
+    assert "The true LIVE template keeps `llm.enabled=false`" in runbook_text
+    assert "PMS_LLM__API_KEY is required only if you explicitly enable LLM" in runbook_text
+    assert "PMS_RUN_LIVE_PREFLIGHT=1" in runbook_text
+    assert "tests/integration/test_live_credentialed_preflight.py" in runbook_text
+    assert "test fixture reports are rejected" in runbook_text
+    fly_runbook_text = (
+        ROOT / "docs" / "operations" / "fly-deploy-runbook.md"
+    ).read_text(encoding="utf-8")
+    assert "fly.live.toml.example" in fly_runbook_text
+    assert "fly deploy -c fly.live.toml" in fly_runbook_text
+    assert "DATABASE_URL" in fly_runbook_text

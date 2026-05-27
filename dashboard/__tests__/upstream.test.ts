@@ -3,6 +3,16 @@ import { upstreamResponse } from '@/lib/upstream';
 
 const originalApiBaseUrl = process.env.PMS_API_BASE_URL;
 const originalApiToken = process.env.PMS_API_TOKEN;
+const originalNodeEnv = process.env.NODE_ENV;
+
+function setNodeEnv(value: string | undefined) {
+  const env = process.env as Record<string, string | undefined>;
+  if (value === undefined) {
+    delete env.NODE_ENV;
+  } else {
+    env.NODE_ENV = value;
+  }
+}
 
 afterEach(() => {
   if (originalApiBaseUrl === undefined) {
@@ -16,6 +26,8 @@ afterEach(() => {
   } else {
     process.env.PMS_API_TOKEN = originalApiToken;
   }
+
+  setNodeEnv(originalNodeEnv);
 });
 
 describe('upstreamResponse', () => {
@@ -29,6 +41,22 @@ describe('upstreamResponse', () => {
 
     expect(response).toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('returns 503 when PMS_API_BASE_URL is unset in production', async () => {
+    setNodeEnv('production');
+    delete process.env.PMS_API_BASE_URL;
+    delete process.env.PMS_API_TOKEN;
+
+    const fetchSpy = vi.spyOn(global, 'fetch');
+
+    const response = await upstreamResponse('/status');
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(response?.status).toBe(503);
+    await expect(response?.json()).resolves.toEqual({
+      detail: 'PMS_API_BASE_URL is not configured; production dashboard requires a live backend'
+    });
   });
 
   test('injects Authorization when PMS_API_TOKEN is configured', async () => {

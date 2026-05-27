@@ -6,7 +6,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 import json
+import os
 from pathlib import Path
+import stat
 from typing import Any, TypeAlias, cast
 
 import asyncpg
@@ -398,7 +400,10 @@ def _parse_jsonl_events(path: Path) -> tuple[dict[str, _MarketMetadata], list[_R
     last_ts: datetime | None = None
     last_sequence_by_market: dict[str, int] = {}
 
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(
+        _read_jsonl_text_no_follow(path).splitlines(),
+        start=1,
+    ):
         if not line.strip():
             continue
         row = json.loads(line)
@@ -487,6 +492,27 @@ def _parse_jsonl_events(path: Path) -> tuple[dict[str, _MarketMetadata], list[_R
         )
 
     return market_metadata, events
+
+
+def _read_jsonl_text_no_follow(path: Path) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(path, flags)
+        path_stat = os.fstat(fd)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError("not a regular file")
+        if path_stat.st_nlink != 1:
+            raise OSError("multiple hardlinks")
+        with os.fdopen(fd, "r", encoding="utf-8") as file:
+            fd = -1
+            return file.read()
+    except OSError as exc:
+        msg = f"replay JSONL cannot be read safely: {path}"
+        raise ValueError(msg) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _filter_market_metadata(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +20,7 @@ class OrderbookSnapshot:
 
 def load_orderbook_snapshots(path: Path) -> dict[tuple[str, str], OrderbookSnapshot]:
     snapshots: dict[tuple[str, str], OrderbookSnapshot] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _read_fixture_text_no_follow(path).splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
@@ -35,6 +37,27 @@ def load_orderbook_snapshots(path: Path) -> dict[tuple[str, str], OrderbookSnaps
             fetched_at=_fixture_timestamp(row),
         )
     return snapshots
+
+
+def _read_fixture_text_no_follow(path: Path) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(path, flags)
+        path_stat = os.fstat(fd)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError("not a regular file")
+        if path_stat.st_nlink != 1:
+            raise OSError("multiple hardlinks")
+        with os.fdopen(fd, "r", encoding="utf-8") as file:
+            fd = -1
+            return file.read()
+    except OSError as exc:
+        msg = f"backtest fixture cannot be read safely: {path}"
+        raise ValueError(msg) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _fixture_timestamp(row: dict[str, Any]) -> datetime:

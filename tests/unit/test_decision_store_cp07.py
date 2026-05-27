@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import json
+from math import inf, nan
 from typing import cast
 
 import asyncpg
@@ -215,6 +216,39 @@ async def test_decision_store_insert_wraps_shell_and_payload_writes_in_transacti
     assert payload["opportunity_id"] == "opportunity-cp07"
     assert payload["strategy_version_id"] == "default-v1"
     assert payload["max_slippage_bps"] == 50
+
+
+@pytest.mark.asyncio
+async def test_decision_store_insert_sanitizes_non_finite_payload_values() -> None:
+    connection = _RecordingConnection()
+    store = DecisionStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+    created_at = datetime(2026, 4, 23, 10, 0, tzinfo=UTC)
+
+    await store.insert(
+        _decision(),
+        factor_snapshot_hash="snapshot-cp07",
+        created_at=created_at,
+        expires_at=created_at + timedelta(minutes=15),
+        decision_evidence={
+            "book_age_ms": nan,
+            "book_top_levels": {
+                "bids": [{"price": 0.39, "size": inf}],
+                "asks": [{"price": -inf, "size": 11.0}],
+            },
+        },
+    )
+
+    payload_query, payload_args, _ = connection.execute_calls[2]
+    assert "INSERT INTO decision_payloads" in payload_query
+    payload = json.loads(cast(str, payload_args[1]))
+    assert payload["decision_evidence"] == {
+        "book_age_ms": None,
+        "book_top_levels": {
+            "bids": [{"price": 0.39, "size": None}],
+            "asks": [{"price": None, "size": 11.0}],
+        },
+    }
+    json.dumps(payload, allow_nan=False)
 
 
 @pytest.mark.asyncio

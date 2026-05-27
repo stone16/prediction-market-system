@@ -9,7 +9,7 @@ type RouteContext = {
 export async function GET(request: NextRequest, context: RouteContext) {
   const { marketId } = await context.params;
   const upstream = await upstreamResponse(
-    `/signals/${marketId}/depth${request.nextUrl.search}`
+    `/signals/${encodeURIComponent(marketId)}/depth${request.nextUrl.search}`
   );
   if (upstream) return upstream;
   return NextResponse.json(mockSignalDepth(marketId));

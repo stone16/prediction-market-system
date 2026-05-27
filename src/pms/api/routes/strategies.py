@@ -41,6 +41,8 @@ class StrategyMetricsRowResponse(BaseModel):
     record_count: int
     insufficient_samples: bool
     brier_overall: float | None
+    baseline_brier_overall: float | None
+    brier_improvement_overall: float | None
     pnl: float
     fill_rate: float
     slippage_bps: float
@@ -133,6 +135,12 @@ def _strategy_metrics_row(
         record_count=len(records),
         insufficient_samples=len(records) == 0,
         brier_overall=None if snapshot is None else snapshot.brier_overall,
+        baseline_brier_overall=(
+            None if snapshot is None else snapshot.baseline_brier_overall
+        ),
+        brier_improvement_overall=(
+            None if snapshot is None else snapshot.brier_improvement_overall
+        ),
         pnl=0.0 if snapshot is None else snapshot.pnl,
         fill_rate=0.0 if snapshot is None else snapshot.fill_rate,
         slippage_bps=0.0 if snapshot is None else snapshot.slippage_bps,

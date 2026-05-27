@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from pms.core.models import EvalRecord
@@ -14,6 +14,8 @@ StrategyVersionKey = tuple[str, str]
 @dataclass(frozen=True)
 class MetricsSnapshot:
     brier_overall: float | None
+    baseline_brier_overall: float | None
+    brier_improvement_overall: float | None
     brier_by_category: dict[str, float]
     brier_samples: dict[str, int]
     record_count: int
@@ -22,6 +24,8 @@ class MetricsSnapshot:
     fill_rate: float
     win_rate: float
     calibration_samples: dict[str, int]
+    baseline_brier_by_source: dict[str, float] = field(default_factory=dict)
+    brier_improvement_by_source: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,8 @@ class StrategyMetricsSnapshot:
     strategy_id: str
     strategy_version_id: str
     brier_overall: float | None
+    baseline_brier_overall: float | None
+    brier_improvement_overall: float | None
     brier_by_category: dict[str, float]
     brier_samples: dict[str, int]
     record_count: int
@@ -37,6 +43,8 @@ class StrategyMetricsSnapshot:
     fill_rate: float
     win_rate: float
     calibration_samples: dict[str, int]
+    baseline_brier_by_source: dict[str, float] = field(default_factory=dict)
+    brier_improvement_by_source: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, init=False)
@@ -63,6 +71,8 @@ def _build_metrics_snapshot(records: tuple[EvalRecord, ...] | list[EvalRecord]) 
     if not records:
         return MetricsSnapshot(
             brier_overall=None,
+            baseline_brier_overall=None,
+            brier_improvement_overall=None,
             brier_by_category={},
             brier_samples={},
             record_count=0,
@@ -71,6 +81,8 @@ def _build_metrics_snapshot(records: tuple[EvalRecord, ...] | list[EvalRecord]) 
             fill_rate=0.0,
             win_rate=0.0,
             calibration_samples={},
+            baseline_brier_by_source={},
+            brier_improvement_by_source={},
         )
 
     brier_by_category: dict[str, list[Decimal]] = defaultdict(list)
@@ -86,6 +98,33 @@ def _build_metrics_snapshot(records: tuple[EvalRecord, ...] | list[EvalRecord]) 
         Decimal(str(record.brier_score))
         for record in records
     )
+    baseline_records: list[EvalRecord] = []
+    baseline_brier_score = Decimal("0")
+    paired_strategy_brier_score = Decimal("0")
+    baseline_brier_by_source: dict[str, list[Decimal]] = defaultdict(list)
+    strategy_brier_by_source: dict[str, list[Decimal]] = defaultdict(list)
+    for record in records:
+        if record.baseline_brier_score is None:
+            continue
+        baseline_records.append(record)
+        baseline_brier_score += Decimal(str(record.baseline_brier_score))
+        paired_strategy_brier_score += Decimal(str(record.brier_score))
+        for source, score in record.baseline_brier_scores.items():
+            baseline_brier_by_source[source].append(Decimal(str(score)))
+            strategy_brier_by_source[source].append(Decimal(str(record.brier_score)))
+    baseline_brier_overall = (
+        None
+        if not baseline_records
+        else float(baseline_brier_score / Decimal(len(baseline_records)))
+    )
+    brier_improvement_overall = (
+        None
+        if not baseline_records
+        else float(
+            (baseline_brier_score - paired_strategy_brier_score)
+            / Decimal(len(baseline_records))
+        )
+    )
     total_pnl = sum(Decimal(str(record.pnl)) for record in records)
     total_slippage_bps = sum(
         Decimal(str(record.slippage_bps))
@@ -93,6 +132,8 @@ def _build_metrics_snapshot(records: tuple[EvalRecord, ...] | list[EvalRecord]) 
     )
     return MetricsSnapshot(
         brier_overall=float(total_brier_score / Decimal(len(records))),
+        baseline_brier_overall=baseline_brier_overall,
+        brier_improvement_overall=brier_improvement_overall,
         brier_by_category={
             category: float(sum(scores) / Decimal(len(scores)))
             for category, scores in brier_by_category.items()
@@ -106,6 +147,20 @@ def _build_metrics_snapshot(records: tuple[EvalRecord, ...] | list[EvalRecord]) 
         fill_rate=filled_count / len(records),
         win_rate=winning_count / len(records),
         calibration_samples=dict(calibration_samples),
+        baseline_brier_by_source={
+            source: float(sum(scores) / Decimal(len(scores)))
+            for source, scores in baseline_brier_by_source.items()
+        },
+        brier_improvement_by_source={
+            source: float(
+                (
+                    sum(scores)
+                    - sum(strategy_brier_by_source[source])
+                )
+                / Decimal(len(scores))
+            )
+            for source, scores in baseline_brier_by_source.items()
+        },
     )
 
 
@@ -118,6 +173,8 @@ def _build_strategy_metrics_snapshot(
         strategy_id=key[0],
         strategy_version_id=key[1],
         brier_overall=metrics.brier_overall,
+        baseline_brier_overall=metrics.baseline_brier_overall,
+        brier_improvement_overall=metrics.brier_improvement_overall,
         brier_by_category=dict(metrics.brier_by_category),
         brier_samples=dict(metrics.brier_samples),
         record_count=metrics.record_count,
@@ -126,4 +183,6 @@ def _build_strategy_metrics_snapshot(
         fill_rate=metrics.fill_rate,
         win_rate=metrics.win_rate,
         calibration_samples=dict(metrics.calibration_samples),
+        baseline_brier_by_source=dict(metrics.baseline_brier_by_source),
+        brier_improvement_by_source=dict(metrics.brier_improvement_by_source),
     )

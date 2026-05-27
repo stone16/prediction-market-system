@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -8,6 +9,7 @@ import pytest
 from pydantic import SecretStr
 
 from pms.api.app import _stop_alerting_if_started, create_app
+from pms.alerting.discord import DiscordWebhookClient
 from pms.config import DiscordSettings, PMSSettings
 from pms.runner import Runner
 
@@ -30,6 +32,28 @@ async def test_alerting_lifespan_spawns_and_cancels_subscription_task() -> None:
         assert not task.done()
 
     assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_alerting_lifespan_uses_configured_fallback_alert_dir(
+    tmp_path: Path,
+) -> None:
+    alert_dir = tmp_path / "discord-alerts"
+    runner = Runner(
+        config=PMSSettings(
+            auto_migrate_default_v2=False,
+            discord=DiscordSettings(
+                webhook_url=SecretStr("https://discord.example/webhooks/a/b"),
+                alert_dir=str(alert_dir),
+            ),
+        )
+    )
+    app = create_app(runner, auto_start=False)
+
+    async with app.router.lifespan_context(app):
+        client = app.state.discord_client
+        assert isinstance(client, DiscordWebhookClient)
+        assert client._alert_dir == alert_dir
 
 
 class _ClosableClient:

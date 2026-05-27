@@ -8,7 +8,9 @@ type RouteContext = {
 
 export async function GET(request: NextRequest, context: RouteContext) {
   const { id } = await context.params;
-  const upstream = await upstreamResponse(`/decisions/${id}${request.nextUrl.search}`);
+  const upstream = await upstreamResponse(
+    `/decisions/${encodeURIComponent(id)}${request.nextUrl.search}`
+  );
   if (upstream) return upstream;
   const decision = mockDecisions().find((item) => item.decision_id === id);
   if (!decision) {

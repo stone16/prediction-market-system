@@ -89,6 +89,7 @@ def _eval_record(
     strategy_id: str = "default",
     strategy_version_id: str = "default-v1",
     brier_score: float = 0.09,
+    baseline_brier_score: float | None = None,
     category: str = "model-a",
     model_id: str = "model-a",
     pnl: float = 1.0,
@@ -103,6 +104,10 @@ def _eval_record(
         prob_estimate=0.7,
         resolved_outcome=1.0,
         brier_score=brier_score,
+        baseline_prob_estimate=(
+            None if baseline_brier_score is None else 0.4
+        ),
+        baseline_brier_score=baseline_brier_score,
         fill_status=OrderStatus.MATCHED.value if filled else OrderStatus.INVALID.value,
         recorded_at=datetime(2026, 4, 14, tzinfo=UTC),
         citations=["unit-test"],
@@ -127,6 +132,8 @@ def _strategy_snapshot(
         strategy_id=strategy_id,
         strategy_version_id=strategy_version_id,
         brier_overall=brier_score,
+        baseline_brier_overall=None,
+        brier_improvement_overall=None,
         brier_by_category={"model-a": brier_score},
         brier_samples={"model-a": sample_count},
         record_count=sample_count,
@@ -157,6 +164,9 @@ def test_scorer_brier_known_values() -> None:
     second = scorer.score(_fill(resolved_outcome=0.0), _decision(prob=0.5))
 
     assert first.brier_score == pytest.approx(0.09)
+    assert first.baseline_prob_estimate == pytest.approx(0.4)
+    assert first.baseline_brier_score == pytest.approx(0.36)
+    assert first.brier_improvement == pytest.approx(0.27)
     assert second.brier_score == pytest.approx(0.25)
 
 
@@ -184,6 +194,58 @@ def test_quote_scorer_uses_midpoint_for_calibration_and_bid_for_buy_mtm() -> Non
     assert record.quote_score == pytest.approx((0.70 - 0.64) ** 2)
     assert record.mtm_pnl == pytest.approx((0.62 - 0.50) * 10.0)
     assert record.category == "model-a"
+
+
+def test_scorer_scores_secondary_baselines_from_decision_evidence() -> None:
+    record = Scorer().score(
+        _fill(resolved_outcome=1.0),
+        _decision(prob=0.7, price=0.4),
+        baseline_prob_estimates={
+            "market_implied": 0.4,
+            "mid_quote": 0.42,
+            "last_trade": 0.43,
+            "category_prior": 0.52,
+            "invalid": 1.2,
+        },
+    )
+
+    assert record.baseline_prob_estimates == {
+        "market_implied": pytest.approx(0.4),
+        "mid_quote": pytest.approx(0.42),
+        "last_trade": pytest.approx(0.43),
+        "category_prior": pytest.approx(0.52),
+    }
+    assert record.baseline_brier_scores == {
+        "market_implied": pytest.approx(0.36),
+        "mid_quote": pytest.approx(0.3364),
+        "last_trade": pytest.approx(0.3249),
+        "category_prior": pytest.approx(0.2304),
+    }
+    assert record.baseline_prob_estimate == pytest.approx(0.4)
+    assert record.baseline_brier_score == pytest.approx(0.36)
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_scores_category_prior_from_decision_evidence() -> None:
+    store = cast(EvalStore, InMemoryEvalStore())
+    spool = EvalSpool(store=store, scorer=Scorer())
+    await spool.start()
+    try:
+        spool.enqueue(
+            _fill(decision_id="d-category-prior", resolved_outcome=1.0),
+            _decision(decision_id="d-category-prior", prob=0.7, price=0.4),
+            decision_evidence={
+                "category_prior_baseline_prob_estimate": 0.52,
+            },
+        )
+
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    records = await cast(InMemoryEvalStore, store).all()
+    assert records[0].baseline_prob_estimates["category_prior"] == pytest.approx(0.52)
+    assert records[0].baseline_brier_scores["category_prior"] == pytest.approx(0.2304)
 
 
 def test_scorer_pnl_for_buy_no_uses_complementary_contract_outcome() -> None:
@@ -250,7 +312,44 @@ def test_scorer_brier_for_buy_no_uses_yes_probability_basis() -> None:
     )
 
     assert record.prob_estimate == pytest.approx(0.3)
+    assert record.baseline_prob_estimate == pytest.approx(0.62)
+    assert record.baseline_brier_score == pytest.approx(0.3844)
+    assert record.brier_improvement == pytest.approx(0.2944)
     assert record.brier_score == pytest.approx(0.09)
+
+
+def test_metrics_collector_rolls_up_secondary_baseline_improvement() -> None:
+    records = [
+        _eval_record(
+            decision_id="d-secondary-1",
+            brier_score=0.09,
+            baseline_brier_score=0.36,
+        ),
+        _eval_record(
+            decision_id="d-secondary-2",
+            brier_score=0.16,
+            baseline_brier_score=0.25,
+        ),
+    ]
+    records[0] = records[0].with_secondary_baselines(
+        baseline_prob_estimates={"market_implied": 0.4, "mid_quote": 0.42},
+        baseline_brier_scores={"market_implied": 0.36, "mid_quote": 0.3364},
+    )
+    records[1] = records[1].with_secondary_baselines(
+        baseline_prob_estimates={"market_implied": 0.5, "mid_quote": 0.55},
+        baseline_brier_scores={"market_implied": 0.25, "mid_quote": 0.2025},
+    )
+
+    snapshot = MetricsCollector(records).global_ops_snapshot()
+
+    assert snapshot.baseline_brier_by_source == {
+        "market_implied": pytest.approx(0.305),
+        "mid_quote": pytest.approx(0.26945),
+    }
+    assert snapshot.brier_improvement_by_source == {
+        "market_implied": pytest.approx(0.18),
+        "mid_quote": pytest.approx(0.14445),
+    }
 
 
 def test_scorer_rejects_fill_and_decision_strategy_identity_mismatch() -> None:
@@ -313,13 +412,22 @@ def test_metrics_snapshot_empty_and_aggregated_records() -> None:
     empty = MetricsCollector([]).global_ops_snapshot()
 
     assert empty.brier_overall is None
+    assert empty.baseline_brier_overall is None
+    assert empty.brier_improvement_overall is None
 
     snapshot = MetricsCollector(
         [
-            _eval_record(decision_id="d1", brier_score=0.09, pnl=2.0, slippage_bps=10.0),
+            _eval_record(
+                decision_id="d1",
+                brier_score=0.09,
+                baseline_brier_score=0.36,
+                pnl=2.0,
+                slippage_bps=10.0,
+            ),
             _eval_record(
                 decision_id="d2",
                 brier_score=0.25,
+                baseline_brier_score=0.16,
                 category="model-b",
                 model_id="model-b",
                 pnl=-1.0,
@@ -330,6 +438,8 @@ def test_metrics_snapshot_empty_and_aggregated_records() -> None:
     ).global_ops_snapshot()
 
     assert snapshot.brier_overall == pytest.approx(0.17)
+    assert snapshot.baseline_brier_overall == pytest.approx(0.26)
+    assert snapshot.brier_improvement_overall == pytest.approx(0.09)
     assert snapshot.brier_by_category == {"model-a": 0.09, "model-b": 0.25}
     assert snapshot.pnl == 1.0
     assert snapshot.slippage_bps == pytest.approx(15.0)

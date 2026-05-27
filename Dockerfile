@@ -21,8 +21,8 @@ COPY src ./src
 COPY scripts ./scripts
 COPY config.live-soak.yaml ./config.live-soak.yaml
 
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra live --extra llm
 
 EXPOSE 8000
 
-CMD ["uv", "run", "--no-dev", "pms-api", "--config", "/app/config.live-soak.yaml", "--port", "8000"]
+CMD ["uv", "run", "--no-sync", "--no-dev", "pms-api", "--port", "8000"]

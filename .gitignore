@@ -47,3 +47,11 @@ target/
 .env.local
 .env.*.local
 .envrc
+
+# Operator-local runtime configs. Commit the corresponding *.example files only.
+config.live.yaml
+config.local*.yaml
+fly.live.toml
+
+# Local API run archives.
+pms-api.log.*.archive

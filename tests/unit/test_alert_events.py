@@ -18,3 +18,18 @@ def test_halt_event_reason_preserves_inner_colons() -> None:
 
     assert halt is not None
     assert halt.reason == "drawdown 15%: above 10% limit"
+
+
+def test_halt_event_from_runtime_preserves_daily_loss_trigger() -> None:
+    event = RuntimeEvent(
+        event_id=2,
+        event_type="pms.halt.daily_loss_limit",
+        created_at=datetime(2026, 5, 6, 8, 0, tzinfo=UTC),
+        summary="Auto-halt daily_loss_limit: daily_loss_limit",
+    )
+
+    halt = halt_event_from_runtime(event)
+
+    assert halt is not None
+    assert halt.trigger_kind == "daily_loss_limit"
+    assert halt.reason == "daily_loss_limit"

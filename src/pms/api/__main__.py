@@ -8,6 +8,7 @@ from collections.abc import Sequence
 import uvicorn
 
 from pms.config import load_settings, normalize_webhook_url
+from pms.redaction import redact_database_error
 
 
 LOOPBACK_API_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -49,7 +50,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     if args.config is not None:
         os.environ["PMS_CONFIG_PATH"] = args.config
-    settings = load_settings(args.config)
+    try:
+        settings = load_settings(args.config)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"config load failed: {redact_database_error(str(exc))}",
+            file=sys.stderr,
+        )
+        return 1
     host = settings.api_host
 
     if not settings.api_token and host not in LOOPBACK_API_HOSTS:
