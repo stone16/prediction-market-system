@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 
 StrategyChangeCallback = Callable[[], Awaitable[None]]
 
+# The load-bearing legacy bootstrap version id seeded by schema.sql
+# (`INSERT INTO strategy_versions ... 'default-v1'`). It predates
+# content-addressed version ids, so its label is not the config hash. It is
+# exempt from the content-address check below; `runner._ensure_default_v2_version`
+# uses this same sentinel to detect and migrate the legacy default to v2.
+_LEGACY_BOOTSTRAP_STRATEGY_VERSION_ID = "default-v1"
+
 
 class PostgresStrategyRegistry:
     def __init__(self, pool: asyncpg.Pool) -> None:
@@ -506,7 +513,10 @@ def _strategy_from_versioned_config_json(
         )
         raise ValueError(msg)
     expected_version_id = compute_strategy_version_id(*strategy.snapshot())
-    if expected_version_id != strategy_version_id:
+    if (
+        strategy_version_id != _LEGACY_BOOTSTRAP_STRATEGY_VERSION_ID
+        and expected_version_id != strategy_version_id
+    ):
         msg = (
             "strategy_version_id does not match strategy config payload: "
             f"row={strategy_version_id!r}, expected={expected_version_id!r}"
