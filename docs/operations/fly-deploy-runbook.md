@@ -109,6 +109,40 @@ volume-backed `/secure/pms/first-order.json` path.
 The Fly health check targets `/readiness`, not `/health`. A process that is
 alive but has not started the runner and halt subscriber should stay unready.
 
+## Paper soak: seed initial subscriptions
+
+A freshly deployed paper soak idles at zero decisions until at least one market
+is subscribed. This is by design, not a fault: active-perception auto-selection
+only subscribes to markets that already have a streamed two-sided book
+(`MarketSelector._market_passes_filters` filters out any market whose
+`get_latest_book_summary` is `None`; the `missing-book` case in
+`tests/unit/test_market_selector.py` pins this). A cold database has no streamed
+books, so auto-selection has nothing to expand from.
+
+Bootstrap it once per soak by seeding user subscriptions, which merge unfiltered
+(`UnionMergePolicy`) and start the book stream; auto-selection expands from
+there. Subscribe each token you want to soak (authenticate with `PMS_API_TOKEN`
+because the soak binds `PMS_API_HOST=0.0.0.0`):
+
+```bash
+curl -fsS -X POST \
+  -H "Authorization: Bearer $PMS_API_TOKEN" \
+  "https://pms-paper-soak.fly.dev/markets/<token_id>/subscribe"
+```
+
+Then confirm the stream and decision flow are live before walking away:
+
+```bash
+# book_snapshots should climb; decisions_total should move off zero once the
+# strategy factors warm up against the streamed book.
+curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+  https://pms-paper-soak.fly.dev/status | jq '.controller, .actuator'
+```
+
+Pick the seed markets to match the strategy's edge (e.g. the H1 FLB longshot/
+favorite price extremes), not arbitrarily — a soak of markets the strategy never
+trades produces no usable Go/No-Go evidence.
+
 ## Logs
 
 ```bash
