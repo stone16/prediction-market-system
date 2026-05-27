@@ -159,7 +159,7 @@ def _settings() -> PMSSettings:
             api_secret="api-secret",
             api_passphrase="passphrase",
             signature_type=1,
-            funder_address="0xabc",
+            funder_address="0x1111111111111111111111111111111111111111",
         ),
         database=DatabaseSettings(
             dsn=cast(str, PMS_TEST_DATABASE_URL),

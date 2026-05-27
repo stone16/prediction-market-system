@@ -110,6 +110,8 @@ async def get_strategy_decay_status(
                 prob_estimate,
                 resolved_outcome,
                 brier_score,
+                baseline_prob_estimate,
+                baseline_brier_score,
                 fill_status,
                 recorded_at,
                 citations,
@@ -169,6 +171,14 @@ def _eval_record_from_row(row: asyncpg.Record) -> EvalRecord:
         prob_estimate=float(cast(float, row["prob_estimate"])),
         resolved_outcome=float(cast(float, row["resolved_outcome"])),
         brier_score=float(cast(float, row["brier_score"])),
+        baseline_prob_estimate=cast(
+            float | None,
+            _row_value(row, "baseline_prob_estimate", None),
+        ),
+        baseline_brier_score=cast(
+            float | None,
+            _row_value(row, "baseline_brier_score", None),
+        ),
         fill_status=cast(str, row["fill_status"]),
         recorded_at=cast(datetime, row["recorded_at"]),
         citations=_citations(row["citations"]),
@@ -190,6 +200,13 @@ def _citations(value: object) -> list[str]:
         if isinstance(loaded, list):
             return [str(item) for item in loaded]
     return []
+
+
+def _row_value(row: asyncpg.Record, key: str, default: object) -> object:
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
 
 
 def _competition_payload(snapshot: CompetitionSnapshot) -> dict[str, Any]:

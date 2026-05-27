@@ -85,6 +85,7 @@ def test_inner_ring_product_tables_continue_to_carry_strategy_tags() -> None:
         "fills",
         "opportunities",
         "strategy_runs",
+        "strategy_run_slices",
         "backtest_live_comparisons",
     }
     assert expected_per_row_tables.issubset(tables.keys())

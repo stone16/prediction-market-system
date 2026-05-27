@@ -16,6 +16,7 @@ depends_on = None
 _CREATED_TABLES: Final[tuple[str, ...]] = (
     "backtest_live_comparisons",
     "evaluation_reports",
+    "strategy_run_slices",
     "strategy_runs",
     "backtest_runs",
     "alpha_competition_snapshots",

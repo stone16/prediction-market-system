@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import cast
 
 import asyncpg
@@ -54,6 +54,7 @@ class _Connection:
         assert "FROM eval_records" in query
         assert "recorded_at >= $3" in query
         assert len(args) == 3
+        base = datetime.now(tz=UTC) - timedelta(days=9)
         return [
             {
                 "market_id": "market-meta",
@@ -64,7 +65,7 @@ class _Connection:
                 "resolved_outcome": 1.0,
                 "brier_score": 0.09,
                 "fill_status": OrderStatus.MATCHED.value,
-                "recorded_at": datetime(2026, 5, 1 + index, tzinfo=UTC),
+                "recorded_at": base + timedelta(days=index),
                 "citations": ["unit"],
                 "category": None,
                 "model_id": None,

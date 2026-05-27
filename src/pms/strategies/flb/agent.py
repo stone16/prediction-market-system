@@ -83,6 +83,7 @@ class FlbAgent:
             limit_price=_metadata_float(metadata, "limit_price"),
             notional_usdc=_metadata_float(metadata, "notional_usdc"),
             expected_price=_metadata_float(metadata, "expected_price"),
+            probability_estimate=_metadata_float(metadata, "probability_estimate"),
             expected_edge=candidate.expected_edge,
             max_slippage_bps=_metadata_int(metadata, "max_slippage_bps"),
             time_in_force=_metadata_time_in_force(metadata),

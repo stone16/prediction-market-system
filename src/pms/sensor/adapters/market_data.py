@@ -81,6 +81,7 @@ class MarketDataSensor:
         self._pong_timeout_s = self._PONG_TIMEOUT_S
         self._connection_book_source: BookSource | None = None
         self._pending_reconnect_assets: set[str] = set()
+        self._market_signal_metadata: dict[str, dict[str, str]] = {}
         self._connected_once = False
         self._watchdog_timeout_count = 0
         self._malformed_messages_total = 0
@@ -297,11 +298,13 @@ class MarketDataSensor:
             source=source,
         )
         await self.store.write_book_snapshot(snapshot, _book_levels_from_state(state))
+        metadata = await self._market_metadata_for_signal(market_id)
         return _signal_from_state(
             state=state,
             timestamp=timestamp,
             price=state.last_trade_price,
             event_type="book",
+            extra=metadata,
         )
 
     async def _handle_price_change(self, message: dict[str, Any]) -> list[MarketSignal]:
@@ -341,6 +344,7 @@ class MarketDataSensor:
                         hash=state.last_hash,
                     )
                 )
+            metadata = await self._market_metadata_for_signal(market_id)
             signals.append(
                 _signal_from_state(
                     state=state,
@@ -348,6 +352,7 @@ class MarketDataSensor:
                     price=_signal_price(price=price, best_bid=best_bid, best_ask=best_ask),
                     event_type="price_change",
                     extra={
+                        **metadata,
                         "best_bid": best_bid,
                         "best_ask": best_ask,
                         "side": side,
@@ -372,12 +377,14 @@ class MarketDataSensor:
                 price=price,
             )
         )
+        metadata = await self._market_metadata_for_signal(market_id)
         return _signal_from_state(
             state=state,
             timestamp=timestamp,
             price=price,
             event_type="last_trade_price",
             extra={
+                **metadata,
                 "side": _optional_str(message.get("side")),
                 "size": _optional_float(message.get("size")),
                 "fee_rate_bps": _optional_float(message.get("fee_rate_bps")),
@@ -392,6 +399,22 @@ class MarketDataSensor:
         else:
             state.market_id = market_id
         return state
+
+    async def _market_metadata_for_signal(self, market_id: str) -> dict[str, str]:
+        cached = self._market_signal_metadata.get(market_id)
+        if cached is not None:
+            return cached
+        metadata = await self.store.read_market_signal_metadata(market_id)
+        normalized = {
+            key: value
+            for key, value in metadata.items()
+            if key in {"risk_group_id", "category", "event_id"}
+            and isinstance(value, str)
+            and value.strip() != ""
+        }
+        if normalized:
+            self._market_signal_metadata[market_id] = normalized
+        return normalized
 
     async def _send_subscription(self) -> None:
         websocket = self._websocket

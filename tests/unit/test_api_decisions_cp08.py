@@ -25,6 +25,7 @@ class _StoredDecisionRow:
     created_at: datetime
     updated_at: datetime
     expires_at: datetime
+    decision_evidence: dict[str, Any] | None = None
     opportunity: Opportunity | None = None
 
 
@@ -164,6 +165,10 @@ def _stored_decision_row(
         created_at=created_at,
         updated_at=created_at,
         expires_at=created_at + timedelta(minutes=15),
+        decision_evidence={
+            "book_hash": "book-hash-cp08",
+            "quote_source": "postgres_snapshot",
+        },
         opportunity=_opportunity(),
     )
 
@@ -347,6 +352,10 @@ async def test_get_decisions_include_opportunity_embeds_factor_payload() -> None
             "expires_at": "2026-04-23T10:15:00+00:00",
             "forecaster": "model-cp08",
             "kelly_size": 25.0,
+            "decision_evidence": {
+                "book_hash": "book-hash-cp08",
+                "quote_source": "postgres_snapshot",
+            },
             "opportunity": {
                 "opportunity_id": "opportunity-cp08",
                 "market_id": "market-cp08",

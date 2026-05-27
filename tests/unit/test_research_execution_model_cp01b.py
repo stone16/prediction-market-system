@@ -15,6 +15,7 @@ SOURCE_COMMENT_PATTERN = re.compile(r"^\s*#\s*source:\s+", re.MULTILINE)
 LIVE_PROFILE_FIELDS = (
     "fee_rate",
     "slippage_bps",
+    "adverse_selection_bps",
     "latency_ms",
     "staleness_ms",
     "fill_policy",
@@ -73,6 +74,43 @@ def test_execution_model_compute_fee_returns_expected_boundary_values() -> None:
     assert execution_model.compute_fee(notional_usdc=100.0, fill_price=1.0) == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"fee_rate": -0.01}, "fee_rate"),
+        ({"fee_rate": float("nan")}, "fee_rate"),
+        ({"slippage_bps": -1.0}, "slippage_bps"),
+        ({"latency_ms": float("inf")}, "latency_ms"),
+        ({"staleness_ms": 0.0}, "staleness_ms"),
+        ({"displayed_depth_fill_ratio": 0.0}, "displayed_depth_fill_ratio"),
+        ({"displayed_depth_fill_ratio": 1.01}, "displayed_depth_fill_ratio"),
+        ({"adverse_selection_bps": -1.0}, "adverse_selection_bps"),
+        ({"adverse_selection_bps": float("nan")}, "adverse_selection_bps"),
+        ({"fill_policy": "market_if_touched"}, "fill_policy"),
+        ({"order_ttl_ms": 0}, "order_ttl_ms"),
+        ({"price_invalidation_streak": 0}, "price_invalidation_streak"),
+        ({"replay_window_ms": 0}, "replay_window_ms"),
+        ({"calibration_source": "spreadsheet_guess"}, "calibration_source"),
+    ],
+)
+def test_execution_model_rejects_invalid_runtime_assumptions(
+    overrides: Mapping[str, object],
+    message: str,
+) -> None:
+    execution_model_cls = _load_execution_model()
+    data: dict[str, object] = {
+        "fee_rate": 0.04,
+        "slippage_bps": 1.0,
+        "latency_ms": 1.0,
+        "staleness_ms": 1.0,
+        "fill_policy": "immediate_or_cancel",
+    }
+    data.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        execution_model_cls(**data)
+
+
 def test_execution_model_is_frozen_dataclass() -> None:
     execution_model_cls = _load_execution_model()
 
@@ -90,6 +128,7 @@ def test_polymarket_paper_profile_is_idealized() -> None:
     assert paper.latency_ms == pytest.approx(0.0)
     assert math.isinf(paper.staleness_ms)
     assert paper.fill_policy == "immediate_or_cancel"
+    assert paper.calibration_source == "idealized_paper"
 
 
 def test_polymarket_live_estimate_uses_representative_costs() -> None:
@@ -102,6 +141,55 @@ def test_polymarket_live_estimate_uses_representative_costs() -> None:
     assert live_estimate.latency_ms > 0.0
     assert live_estimate.staleness_ms > 0.0
     assert live_estimate.fill_policy == "immediate_or_cancel"
+    assert live_estimate.calibration_source == "static_live_estimate"
+
+
+def test_execution_model_can_be_calibrated_from_observed_telemetry() -> None:
+    execution_model_cls = _load_execution_model()
+
+    calibrated = execution_model_cls.from_observed_telemetry(
+        fee_rate=0.04,
+        slippage_bps_samples=(2.0, 12.0, 8.0, 4.0, 6.0),
+        latency_ms_samples=(101.0, 160.0, 240.0, 360.0, 500.0),
+        staleness_ms=120_000.0,
+        displayed_depth_fill_ratio=0.75,
+        adverse_selection_bps_samples=(1.0, 4.0, 2.0, 9.0, 6.0),
+    )
+
+    assert calibrated.fee_rate == pytest.approx(0.04)
+    assert calibrated.slippage_bps == pytest.approx(6.0)
+    assert calibrated.latency_ms == pytest.approx(500.0)
+    assert calibrated.staleness_ms == pytest.approx(120_000.0)
+    assert calibrated.displayed_depth_fill_ratio == pytest.approx(0.75)
+    assert calibrated.adverse_selection_bps == pytest.approx(9.0)
+    assert calibrated.fill_policy == "immediate_or_cancel"
+    assert calibrated.calibration_source == "telemetry_calibrated"
+
+
+@pytest.mark.parametrize(
+    ("slippage_samples", "latency_samples", "message"),
+    [
+        ((), (100.0,), "slippage_bps_samples"),
+        ((1.0,), (), "latency_ms_samples"),
+        ((1.0, float("nan")), (100.0,), "slippage_bps_samples"),
+        ((1.0,), (100.0, float("inf")), "latency_ms_samples"),
+        ((-1.0,), (100.0,), "slippage_bps_samples"),
+    ],
+)
+def test_execution_model_rejects_unusable_telemetry_samples(
+    slippage_samples: tuple[float, ...],
+    latency_samples: tuple[float, ...],
+    message: str,
+) -> None:
+    execution_model_cls = _load_execution_model()
+
+    with pytest.raises(ValueError, match=message):
+        execution_model_cls.from_observed_telemetry(
+            fee_rate=0.04,
+            slippage_bps_samples=slippage_samples,
+            latency_ms_samples=latency_samples,
+            staleness_ms=120_000.0,
+        )
 
 
 def test_polymarket_live_estimate_assignments_have_source_comments() -> None:
@@ -154,6 +242,9 @@ def test_paper_profile_round_trips_through_spec_codec_with_new_fields() -> None:
     assert execution_model_payload["order_ttl_ms"] == 60_000
     assert execution_model_payload["price_invalidation_streak"] == 10
     assert execution_model_payload["replay_window_ms"] == 86_400_000
+    assert execution_model_payload["displayed_depth_fill_ratio"] == 1.0
+    assert execution_model_payload["adverse_selection_bps"] == 0.0
+    assert execution_model_payload["calibration_source"] == "idealized_paper"
     assert len(spec.config_hash) == 64
 
     decoded = deserialize_backtest_spec(payload)
@@ -162,3 +253,6 @@ def test_paper_profile_round_trips_through_spec_codec_with_new_fields() -> None:
     assert decoded.execution_model.order_ttl_ms == 60_000
     assert decoded.execution_model.price_invalidation_streak == 10
     assert decoded.execution_model.replay_window_ms == 86_400_000
+    assert decoded.execution_model.displayed_depth_fill_ratio == pytest.approx(1.0)
+    assert decoded.execution_model.adverse_selection_bps == pytest.approx(0.0)
+    assert decoded.execution_model.calibration_source == "idealized_paper"

@@ -103,6 +103,34 @@ def test_main_auto_start_rejects_blank_discord_webhook(
     assert "PMS_DISCORD__WEBHOOK_URL" in captured.err
 
 
+def test_main_redacts_invalid_discord_webhook_config_error(
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    calls: dict[str, Any] = {}
+    webhook_secret = "super-secret-webhook-token"
+
+    def fake_run(app: str, **kwargs: Any) -> None:
+        calls["app"] = app
+        calls.update(kwargs)
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+    monkeypatch.setenv(
+        "PMS_DISCORD__WEBHOOK_URL",
+        f"http://discord.com/api/webhooks/{webhook_secret}",
+    )
+
+    exit_code = api_main.main([])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert calls == {}
+    assert "config load failed" in captured.err
+    assert "<redacted-discord-webhook-url>" in captured.err
+    assert webhook_secret not in captured.err
+    assert "discord.com/api/webhooks" not in captured.err
+
+
 def test_main_uses_settings_host_even_when_host_flag_is_passed(
     monkeypatch: Any,
 ) -> None:

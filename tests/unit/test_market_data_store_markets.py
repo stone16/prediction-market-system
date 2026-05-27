@@ -12,7 +12,9 @@ from pms.storage.market_data_store import MarketFilters, PostgresMarketDataStore
 @dataclass
 class FakeConnection:
     fetch_results: list[list[dict[str, object]]] = field(default_factory=list)
+    fetchrow_results: list[dict[str, object] | None] = field(default_factory=list)
     fetch_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
+    fetchrow_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
     execute_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
@@ -20,6 +22,12 @@ class FakeConnection:
         if not self.fetch_results:
             return []
         return self.fetch_results.pop(0)
+
+    async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+        self.fetchrow_calls.append((query, args))
+        if not self.fetchrow_results:
+            return None
+        return self.fetchrow_results.pop(0)
 
     async def execute(self, query: str, *args: object) -> str:
         self.execute_calls.append((query, args))
@@ -383,6 +391,9 @@ async def test_write_market_upserts_current_price_fields() -> None:
             created_at=created_at,
             last_seen_at=price_updated_at,
             volume_24h=500.0,
+            risk_group_id="event:market-priced",
+            category="Politics",
+            event_id="market-priced",
             yes_price=0.52,
             no_price=0.48,
             best_bid=0.51,
@@ -399,6 +410,9 @@ async def test_write_market_upserts_current_price_fields() -> None:
     assert "no_price" in query
     assert "price_updated_at = EXCLUDED.price_updated_at" in query
     assert args[8:] == (
+        "event:market-priced",
+        "Politics",
+        "market-priced",
         0.52,
         0.48,
         0.51,
@@ -412,6 +426,28 @@ async def test_write_market_upserts_current_price_fields() -> None:
         None,
         None,
     )
+
+
+@pytest.mark.asyncio
+async def test_read_market_signal_metadata_returns_nonblank_fields() -> None:
+    connection = FakeConnection(
+        fetchrow_results=[
+            {
+                "risk_group_id": "event:2028-us-presidential-election",
+                "category": "Politics",
+                "event_id": "",
+            }
+        ]
+    )
+    store = PostgresMarketDataStore(FakePool(connection))
+
+    metadata = await store.read_market_signal_metadata("m-election-risk")
+
+    assert metadata == {
+        "risk_group_id": "event:2028-us-presidential-election",
+        "category": "Politics",
+    }
+    assert connection.fetchrow_calls[0][1] == ("m-election-risk",)
 
 
 @pytest.mark.asyncio

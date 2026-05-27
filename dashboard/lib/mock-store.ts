@@ -35,8 +35,16 @@ export function mockStatus(): StatusResponse {
     running: false,
     sensors: [{ name: 'Historical feed', status: 'idle', last_signal_at: '2026-04-07T22:39:00+00:00' }],
     controller: { decisions_total: mockDecisions().length },
-    actuator: { fills_total: 18, mode: 'backtest' },
-    evaluator: { eval_records_total: 18, brier_overall: 0.18 }
+    actuator: { fills_total: 18, mode: 'backtest', halt_recovery_cycles_7d: 0 },
+    evaluator: {
+      eval_records_total: 18,
+      brier_overall: 0.18,
+      baseline_brier_overall: 0.2,
+      brier_improvement_overall: 0.02,
+      brier_14d: 0.18,
+      baseline_brier_14d: 0.2,
+      brier_improvement_14d: 0.02
+    }
   };
 }
 

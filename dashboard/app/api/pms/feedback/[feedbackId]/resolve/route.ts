@@ -6,9 +6,12 @@ type Context = { params: Promise<{ feedbackId: string }> };
 
 export async function POST(_request: Request, context: Context) {
   const { feedbackId } = await context.params;
-  const upstream = await upstreamResponse(`/feedback/${feedbackId}/resolve`, {
-    method: 'POST'
-  });
+  const upstream = await upstreamResponse(
+    `/feedback/${encodeURIComponent(feedbackId)}/resolve`,
+    {
+      method: 'POST'
+    }
+  );
   if (upstream) return upstream;
   const feedback = resolveFeedback(feedbackId);
   if (!feedback) {

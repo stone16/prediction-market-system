@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -13,6 +15,29 @@ from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stub_optional_runtime_dependency_specs(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    if (
+        request.node.get_closest_marker("integration") is not None
+        and os.environ.get("PMS_RUN_INTEGRATION") == "1"
+    ):
+        return
+    original_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(
+        name: str,
+        package: str | None = None,
+    ) -> importlib.machinery.ModuleSpec | None:
+        if name in {"py_clob_client_v2", "anthropic", "openai"}:
+            return importlib.machinery.ModuleSpec(name, loader=None)
+        return original_find_spec(name, package)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
 
 
 class _TestAsyncpgConnection:

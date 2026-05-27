@@ -12,6 +12,10 @@ Usage:
     uv run python scripts/flb_data_feasibility.py [--limit N] [--output PATH]
     uv run python scripts/flb_data_feasibility.py \
         --source warehouse-csv --input exports/polymarket_resolved_binary.csv
+    uv run python scripts/flb_data_feasibility.py \
+        --source warehouse-csv \
+        --input exports/polymarket_resolved_binary.csv \
+        --calibration-csv exports/flb_calibration.csv
 
 Exit codes:
     0 — H1 viable (sample gate passed)
@@ -38,14 +42,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import math
+import os
 import statistics
+import stat
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -54,6 +63,8 @@ SAMPLE_GATE_MIN = 100  # minimum resolved contracts per target bucket
 DECILE_BOUNDARIES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 TARGET_BUCKETS = [0, 9]  # decile 0 = [0%, 10%), decile 9 = [90%, 100%]
 WILSON_Z = 1.96  # 95% confidence
+LONGSHOT_SIGNAL_NAME = "longshot_yes_overpriced_buy_no"
+FAVORITE_SIGNAL_NAME = "favorite_yes_underpriced_buy_yes"
 WAREHOUSE_REQUIRED_COLUMNS = frozenset({
     "market_id",
     "question",
@@ -122,6 +133,16 @@ class DecileStats:
     wilson_lower: float  # Wilson lower bound on actual_rate
     wilson_upper: float  # Wilson upper bound on actual_rate
     recommended_side: str  # "buy_yes", "buy_no", or "no_edge"
+
+
+@dataclass(frozen=True, slots=True)
+class FlbCalibrationArtifactRow:
+    """Runtime FLB calibration row generated from strict warehouse history."""
+
+    signal_name: str
+    probability_estimate: float
+    sample_count: int
+    source_label: str
 
 
 # ── Data Fetching ────────────────────────────────────────────────────────────
@@ -318,8 +339,12 @@ def load_warehouse_markets(path: Path) -> tuple[list[ResolvedMarket], int]:
         (markets, skipped_50_50_count) — parsed markets and count of skipped
         50/50 resolution rows.
     """
-    with path.open(newline="", encoding="utf-8") as f:
+    with io.StringIO(
+        _read_text_no_follow(path, label="warehouse CSV input path"),
+        newline="",
+    ) as f:
         reader = csv.DictReader(f)
+        _require_unique_csv_fieldnames(reader.fieldnames)
         fieldnames = set(reader.fieldnames or [])
         missing = WAREHOUSE_REQUIRED_COLUMNS - fieldnames
         if missing:
@@ -824,20 +849,290 @@ def save_decile_csv(
     output_path: Path,
 ) -> None:
     """Save decile statistics to CSV for downstream analysis."""
-    with output_path.open("w", newline="") as f:
-        writer = csv.writer(f)
+    _prepare_private_output_parent(
+        output_path,
+        label="FLB decile CSV output parent",
+    )
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "decile", "lower", "upper", "n", "n_yes",
+        "implied_prob", "actual_rate", "flb_gap",
+        "wilson_lower", "wilson_upper", "recommended_side",
+    ])
+    for s in decile_stats:
         writer.writerow([
-            "decile", "lower", "upper", "n", "n_yes",
-            "implied_prob", "actual_rate", "flb_gap",
-            "wilson_lower", "wilson_upper", "recommended_side",
+            s.decile, s.lower, s.upper, s.n, s.n_yes,
+            f"{s.implied_prob:.6f}", f"{s.actual_rate:.6f}",
+            f"{s.flb_gap:.6f}", f"{s.wilson_lower:.6f}",
+            f"{s.wilson_upper:.6f}", s.recommended_side,
         ])
-        for s in decile_stats:
-            writer.writerow([
-                s.decile, s.lower, s.upper, s.n, s.n_yes,
-                f"{s.implied_prob:.6f}", f"{s.actual_rate:.6f}",
-                f"{s.flb_gap:.6f}", f"{s.wilson_lower:.6f}",
-                f"{s.wilson_upper:.6f}", s.recommended_side,
-            ])
+    _write_text_no_follow(
+        output_path,
+        output.getvalue(),
+        label="FLB decile CSV output path",
+    )
+
+
+def build_flb_calibration_rows(
+    markets: list[ResolvedMarket],
+    *,
+    source_label: str,
+    min_sample_count: int = SAMPLE_GATE_MIN,
+    smoothing_alpha: float = 1.0,
+    smoothing_beta: float = 1.0,
+) -> list[FlbCalibrationArtifactRow]:
+    """Build runtime FLB signal probabilities from strict warehouse history.
+
+    Longshot and favorite signals are estimated separately from original YES
+    price buckets, not from the mixed contract-level decile table:
+
+    - ``longshot_yes_overpriced_buy_no``: markets with YES price < 10%, using
+      the smoothed probability that the NO contract pays out.
+    - ``favorite_yes_underpriced_buy_yes``: markets with YES price > 90%, using
+      the smoothed probability that the YES contract pays out.
+    """
+    if min_sample_count <= 0:
+        msg = "min_sample_count must be positive"
+        raise ValueError(msg)
+    if smoothing_alpha <= 0.0 or smoothing_beta <= 0.0:
+        msg = "smoothing_alpha and smoothing_beta must be positive"
+        raise ValueError(msg)
+
+    longshot_markets = [
+        market
+        for market in markets
+        if market.yes_price < DECILE_BOUNDARIES[1]
+    ]
+    favorite_markets = [
+        market
+        for market in markets
+        if market.yes_price > DECILE_BOUNDARIES[9]
+    ]
+
+    longshot_successes = sum(1 for market in longshot_markets if not market.resolved_yes)
+    favorite_successes = sum(1 for market in favorite_markets if market.resolved_yes)
+    return [
+        _flb_calibration_row(
+            signal_name=LONGSHOT_SIGNAL_NAME,
+            successes=longshot_successes,
+            sample_count=len(longshot_markets),
+            source_label=source_label,
+            min_sample_count=min_sample_count,
+            smoothing_alpha=smoothing_alpha,
+            smoothing_beta=smoothing_beta,
+        ),
+        _flb_calibration_row(
+            signal_name=FAVORITE_SIGNAL_NAME,
+            successes=favorite_successes,
+            sample_count=len(favorite_markets),
+            source_label=source_label,
+            min_sample_count=min_sample_count,
+            smoothing_alpha=smoothing_alpha,
+            smoothing_beta=smoothing_beta,
+        ),
+    ]
+
+
+def save_flb_calibration_csv(
+    rows: list[FlbCalibrationArtifactRow],
+    output_path: Path,
+) -> None:
+    """Save the runtime FLB calibration artifact CSV."""
+    _prepare_private_output_parent(
+        output_path,
+        label="FLB calibration CSV output parent",
+    )
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "signal_name",
+        "probability_estimate",
+        "sample_count",
+        "source_label",
+    ])
+    for row in rows:
+        writer.writerow([
+            row.signal_name,
+            f"{row.probability_estimate:.12f}",
+            row.sample_count,
+            row.source_label,
+        ])
+    _write_text_no_follow(
+        output_path,
+        output.getvalue(),
+        label="FLB calibration CSV output path",
+    )
+
+
+def _write_text_no_follow(path: Path, content: str, *, label: str) -> None:
+    _require_regular_file_or_absent(path, label=label)
+    fd, temp_path = _open_output_temp_file(path, label=label)
+    published = False
+    try:
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            fd = -1
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        _require_regular_file_or_absent(path, label=label)
+        os.replace(temp_path, path)
+        published = True
+        _fsync_parent_directory(path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if not published:
+            _unlink_regular_single_link_file_if_present(temp_path)
+
+
+def _require_unique_csv_fieldnames(fieldnames: Sequence[str] | None) -> None:
+    if fieldnames is None:
+        return
+    seen: set[str] = set()
+    for fieldname in fieldnames:
+        if fieldname in seen:
+            msg = f"duplicate CSV column: {fieldname}"
+            raise ValueError(msg)
+        seen.add(fieldname)
+
+
+def _open_output_temp_file(path: Path, *, label: str) -> tuple[int, Path]:
+    _require_regular_file_or_absent(path, label=label)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    for _ in range(16):
+        temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            fd = os.open(temp_path, flags, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            _require_open_regular_single_link_file(fd, temp_path, label=label)
+            os.fchmod(fd, 0o600)
+        except BaseException:
+            os.close(fd)
+            _unlink_regular_single_link_file_if_present(temp_path)
+            raise
+        return fd, temp_path
+    raise FileExistsError(f"could not create temporary {label} for {path}")
+
+
+def _unlink_regular_single_link_file_if_present(path: Path) -> None:
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1:
+        return
+    path.unlink()
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path.parent, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        return
+    finally:
+        os.close(fd)
+
+
+def _prepare_private_output_parent(path: Path, *, label: str) -> None:
+    parent = path.parent
+    try:
+        mode = parent.lstat().st_mode
+    except FileNotFoundError:
+        parent.mkdir(parents=True, mode=0o700, exist_ok=False)
+        os.chmod(parent, 0o700)
+        return
+    if not stat.S_ISDIR(mode):
+        raise OSError(f"{label} is not a directory: {parent}")
+    permissions = stat.S_IMODE(mode)
+    if permissions & 0o077:
+        raise OSError(
+            f"{label} {parent} is too permissive; "
+            f"run `chmod 700 {parent}`."
+        )
+    if not permissions & stat.S_IWUSR:
+        raise OSError(
+            f"{label} {parent} is not owner-writable; "
+            f"run `chmod 700 {parent}`."
+        )
+
+
+def _read_text_no_follow(path: Path, *, label: str) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(path, flags, 0o777)
+        path_stat = os.fstat(fd)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError(f"{label} cannot be read safely: {path}")
+        if path_stat.st_nlink != 1:
+            raise OSError(f"{label} cannot be read safely: {path}")
+        with os.fdopen(fd, "r", encoding="utf-8") as file:
+            fd = -1
+            return file.read()
+    except OSError as exc:
+        msg = f"{label} cannot be read safely: {path}"
+        raise ValueError(msg) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _require_open_regular_single_link_file(fd: int, path: Path, *, label: str) -> None:
+    path_stat = os.fstat(fd)
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise OSError(f"{label} is not a regular file: {path}")
+    if path_stat.st_nlink != 1:
+        raise OSError(f"{label} is not a single-link file: {path}")
+
+
+def _require_regular_file_or_absent(path: Path, *, label: str) -> None:
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise OSError(f"{label} is not a regular file: {path}")
+    if path_stat.st_nlink != 1:
+        raise OSError(f"{label} is not a single-link file: {path}")
+
+
+def _flb_calibration_row(
+    *,
+    signal_name: str,
+    successes: int,
+    sample_count: int,
+    source_label: str,
+    min_sample_count: int,
+    smoothing_alpha: float,
+    smoothing_beta: float,
+) -> FlbCalibrationArtifactRow:
+    if sample_count < min_sample_count:
+        msg = (
+            f"insufficient FLB calibration samples for {signal_name}: "
+            f"{sample_count} < {min_sample_count}"
+        )
+        raise ValueError(msg)
+    probability = (
+        (successes + smoothing_alpha)
+        / (sample_count + smoothing_alpha + smoothing_beta)
+    )
+    return FlbCalibrationArtifactRow(
+        signal_name=signal_name,
+        probability_estimate=probability,
+        sample_count=sample_count,
+        source_label=source_label,
+    )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -881,7 +1176,30 @@ def main() -> int:
         default=None,
         help="Output path for decile CSV data",
     )
+    parser.add_argument(
+        "--calibration-csv",
+        type=Path,
+        default=None,
+        help=(
+            "Output runtime FLB calibration CSV; requires --source=warehouse-csv"
+        ),
+    )
     args = parser.parse_args()
+    if args.calibration_csv is not None and args.source != "warehouse-csv":
+        parser.error("--calibration-csv requires --source=warehouse-csv")
+    if args.source == "warehouse-csv" and args.input is None:
+        parser.error("--input is required when --source=warehouse-csv")
+    _require_distinct_cli_artifact_paths(
+        parser,
+        input_paths=[
+            ("warehouse CSV input path", args.input),
+        ],
+        output_paths=[
+            ("FLB report output path", args.output),
+            ("FLB decile CSV output path", args.csv),
+            ("FLB calibration CSV output path", args.calibration_csv),
+        ],
+    )
 
     fetched_at = datetime.now(tz=UTC)
 
@@ -893,14 +1211,20 @@ def main() -> int:
             f"(limit={args.limit}, max_pages={args.max_pages})...",
             file=sys.stderr,
         )
-        markets = fetch_resolved_markets(limit=args.limit, max_pages=args.max_pages)
+        try:
+            markets = fetch_resolved_markets(limit=args.limit, max_pages=args.max_pages)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
         print(f"Fetched {len(markets)} resolved binary markets.", file=sys.stderr)
     else:
-        if args.input is None:
-            parser.error("--input is required when --source=warehouse-csv")
         source_label = f"warehouse CSV: {args.input}"
         print(f"Loading resolved binary markets from {args.input}...", file=sys.stderr)
-        markets, skipped_50_50 = load_warehouse_markets(args.input)
+        try:
+            markets, skipped_50_50 = load_warehouse_markets(args.input)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
         print(f"Loaded {len(markets)} resolved binary markets.", file=sys.stderr)
         if skipped_50_50:
             print(
@@ -935,18 +1259,126 @@ def main() -> int:
     )
 
     if args.output:
-        args.output.write_text(report)
+        try:
+            _prepare_private_output_parent(
+                args.output,
+                label="FLB report output parent",
+            )
+            _write_text_no_follow(
+                args.output,
+                report,
+                label="FLB report output path",
+            )
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
         print(f"Report written to {args.output}", file=sys.stderr)
     else:
         print(report)
 
     # Step 6: Save CSV if requested.
     if args.csv:
-        save_decile_csv(decile_stats, args.csv)
+        try:
+            save_decile_csv(decile_stats, args.csv)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
         print(f"CSV written to {args.csv}", file=sys.stderr)
+
+    if args.calibration_csv:
+        try:
+            calibration_rows = build_flb_calibration_rows(
+                markets,
+                source_label=source_label,
+            )
+            save_flb_calibration_csv(calibration_rows, args.calibration_csv)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        print(f"FLB calibration CSV written to {args.calibration_csv}", file=sys.stderr)
 
     # Return exit code based on gate.
     return 0 if gate.passed else 1
+
+
+def _require_distinct_cli_artifact_paths(
+    parser: argparse.ArgumentParser,
+    *,
+    input_paths: list[tuple[str, Path | None]],
+    output_paths: list[tuple[str, Path | None]],
+) -> None:
+    concrete_inputs = [
+        (label, path)
+        for label, path in input_paths
+        if path is not None
+    ]
+    concrete_outputs = [
+        (label, path)
+        for label, path in output_paths
+        if path is not None
+    ]
+
+    for output_label, output_path in concrete_outputs:
+        output_identities = _path_identities(output_path)
+        for input_label, input_path in concrete_inputs:
+            if not _path_identities_overlap(
+                output_identities,
+                _path_identities(input_path),
+            ):
+                continue
+            parser.error(
+                f"{output_label} must be distinct from "
+                f"{input_label}: {output_path}"
+            )
+
+    for index, (left_label, left_path) in enumerate(concrete_outputs):
+        left_identities = _path_identities(left_path)
+        for right_label, right_path in concrete_outputs[index + 1 :]:
+            if not _path_identities_overlap(
+                left_identities,
+                _path_identities(right_path),
+            ):
+                continue
+            parser.error(
+                f"{left_label} must be distinct from "
+                f"{right_label}: {left_path}"
+            )
+
+
+def _path_identities(path: Path) -> frozenset[Path]:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
+    return frozenset(
+        (
+            Path(os.path.abspath(expanded)),
+            expanded.resolve(strict=False),
+        )
+    )
+
+
+def _path_identities_overlap(left: frozenset[Path], right: frozenset[Path]) -> bool:
+    return any(
+        _paths_overlap(left_path, right_path)
+        for left_path in left
+        for right_path in right
+    )
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    if left == right:
+        return True
+    try:
+        right.relative_to(left)
+    except ValueError:
+        pass
+    else:
+        return True
+    try:
+        left.relative_to(right)
+    except ValueError:
+        return False
+    return True
 
 
 if __name__ == "__main__":

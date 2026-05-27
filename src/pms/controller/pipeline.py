@@ -435,6 +435,7 @@ class ControllerPipeline:
             outcome=decision_outcome,
             model_id=_decision_model_id(model_ids),
             intent_key=intent_key,
+            risk_group_id=_risk_group_id(signal),
             spread_bps_at_decision=spread_bps_at_decision(
                 signal,
                 token_id=decision_token_id,
@@ -602,6 +603,30 @@ def _predict_method_overridden(forecaster: IForecaster) -> bool:
 
 def _signal_factor_values(signal: MarketSignal) -> dict[tuple[str, str], float]:
     return {("yes_price", ""): signal.yes_price}
+
+
+def _risk_group_id(signal: MarketSignal) -> str | None:
+    explicit = _external_text(signal, "risk_group_id")
+    if explicit is not None:
+        return explicit
+    legacy = _external_text(signal, "risk_group")
+    if legacy is not None:
+        return legacy
+    event_id = _external_text(signal, "event_id")
+    if event_id is not None:
+        return f"event:{event_id}"
+    category = _external_text(signal, "category")
+    if category is not None:
+        return f"category:{category}"
+    return None
+
+
+def _external_text(signal: MarketSignal, key: str) -> str | None:
+    raw_value = signal.external_signal.get(key)
+    if raw_value is None:
+        return None
+    value = str(raw_value).strip()
+    return value or None
 
 
 def _strict_factor_gates(settings: PMSSettings) -> bool:

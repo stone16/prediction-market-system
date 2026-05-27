@@ -48,7 +48,7 @@ def _live_settings(tmp_path: Path) -> PMSSettings:
             api_secret="api-secret",
             api_passphrase="passphrase",
             signature_type=1,
-            funder_address="0xabc",
+            funder_address="0x1111111111111111111111111111111111111111",
         ),
     )
 
@@ -206,9 +206,17 @@ class _LegacyExecutorDouble:
 class _EvaluatorSpoolDouble:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.decision_evidence: dict[str, object] | None = None
 
-    def enqueue(self, fill: Any, decision: TradeDecision) -> None:
+    def enqueue(
+        self,
+        fill: Any,
+        decision: TradeDecision,
+        *,
+        decision_evidence: dict[str, object] | None = None,
+    ) -> None:
         self.calls.append((fill.market_id, decision.decision_id))
+        self.decision_evidence = decision_evidence
 
 
 class _RecordingOrderStore:
@@ -239,6 +247,17 @@ class _AlwaysFailOrderStore(_RecordingOrderStore):
         assert self.runner.state.orders[-1] == order
         self.calls.append(order.market_id)
         raise RuntimeError("order store down")
+
+
+class _SecretFailOrderStore(_RecordingOrderStore):
+    def __init__(self, runner: Runner, message: str) -> None:
+        super().__init__(runner)
+        self.message = message
+
+    async def insert(self, order: OrderState) -> None:
+        assert self.runner.state.orders[-1] == order
+        self.calls.append(order.market_id)
+        raise RuntimeError(self.message)
 
 
 class _RecordingFillStore:
@@ -324,6 +343,23 @@ class _RejectingExecutorDouble:
         )
 
 
+class _FailingExecutorDouble:
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.calls: list[str] = []
+
+    async def execute(
+        self,
+        decision: TradeDecision,
+        portfolio: Portfolio,
+        *,
+        dedup_acquired: bool = False,
+    ) -> OrderState:
+        del portfolio, dedup_acquired
+        self.calls.append(decision.market_id)
+        raise ConnectionError(self.message)
+
+
 class _DecisionStatusStore:
     def __init__(self) -> None:
         self.transitions: list[tuple[str, str, str]] = []
@@ -373,6 +409,9 @@ async def test_actuator_loop_persists_fill_after_appending_runner_state() -> Non
     assert cast(_EvaluatorSpoolDouble, runner._evaluator_spool).calls == [
         ("market-cp06-a", "decision-market-cp06-a")
     ]
+    evidence = cast(_EvaluatorSpoolDouble, runner._evaluator_spool).decision_evidence
+    assert evidence is not None
+    assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.405)
 
 
 @pytest.mark.asyncio
@@ -557,6 +596,82 @@ async def test_live_order_persistence_failure_suspends_trading(
 
 
 @pytest.mark.asyncio
+async def test_live_persistence_failure_redacts_credentials_in_exception_event_and_audit(
+    tmp_path: Path,
+) -> None:
+    credential_values = (
+        "private-key-secret",
+        "api-key-secret",
+        "api-secret-secret",
+        "passphrase-secret",
+        "0x2222222222222222222222222222222222222222",
+    )
+    secret_dsn = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+    settings = _live_settings(tmp_path).model_copy(
+        update={
+            "polymarket": PolymarketSettings(
+                private_key=credential_values[0],
+                api_key=credential_values[1],
+                api_secret=credential_values[2],
+                api_passphrase=credential_values[3],
+                signature_type=1,
+                funder_address=credential_values[4],
+            )
+        }
+    )
+    runner = Runner(config=settings)
+    runner.actuator_executor = cast(Any, _ExecutorDouble())
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(
+        Any,
+        _SecretFailOrderStore(
+            runner,
+            "order store failed "
+            f"{credential_values[0]} {credential_values[1]} "
+            f"{credential_values[2]} {credential_values[3]} {credential_values[4]} "
+            f"{secret_dsn} password=keyword-secret",
+        ),
+    )
+    runner.fill_store = cast(Any, _RecordingFillStore(runner))
+    _mark_controller_done(runner)
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(
+            _decision(market_id="market-live-secret-persistence-fail"),
+            _signal(market_id="market-live-secret-persistence-fail"),
+        )
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await _run_actuator_loop(runner)
+
+    replay, subscriber = await runner.event_bus.subscribe(last_event_id=0)
+    await runner.event_bus.unsubscribe(subscriber)
+    audit_rows = [
+        json.loads(line)
+        for line in (tmp_path / "live-emergency-audit.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+
+    rendered = (
+        str(exc_info.value)
+        + "\n"
+        + "\n".join(event.summary for event in replay)
+        + "\n"
+        + json.dumps(audit_rows, sort_keys=True)
+    )
+    assert "LIVE persistence failure during order_state" in rendered
+    assert "<redacted-polymarket-credential>" in rendered
+    assert "<redacted-database-url>" in rendered
+    assert "password=<redacted>" in rendered
+    for credential in credential_values:
+        assert credential not in rendered
+    assert "supersecret" not in rendered
+    assert "keyword-secret" not in rendered
+    assert "admin" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_live_fill_persistence_failure_suspends_trading(
     tmp_path: Path,
 ) -> None:
@@ -624,6 +739,67 @@ async def test_submission_unknown_persistence_failure_hard_halts(
     assert audit_rows[0]["decision_id"] == (
         "decision-market-submission-unknown-store-fail"
     )
+
+
+@pytest.mark.asyncio
+async def test_live_actuator_execution_failure_redacts_credentials_in_logs_and_events(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    credential_values = (
+        "private-key-secret",
+        "api-key-secret",
+        "api-secret-secret",
+        "passphrase-secret",
+        "0x2222222222222222222222222222222222222222",
+    )
+    secret_dsn = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+    settings = _live_settings(tmp_path).model_copy(
+        update={
+            "polymarket": PolymarketSettings(
+                private_key=credential_values[0],
+                api_key=credential_values[1],
+                api_secret=credential_values[2],
+                api_passphrase=credential_values[3],
+                signature_type=1,
+                funder_address=credential_values[4],
+            )
+        }
+    )
+    runner = Runner(config=settings)
+    runner.actuator_executor = cast(
+        Any,
+        _FailingExecutorDouble(
+            "venue submit failed "
+            f"{credential_values[0]} {credential_values[1]} "
+            f"{credential_values[2]} {credential_values[3]} {credential_values[4]} "
+            f"{secret_dsn} password=keyword-secret"
+        ),
+    )
+    _mark_controller_done(runner)
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(
+            _decision(market_id="market-live-actuator-fail"),
+            _signal(market_id="market-live-actuator-fail"),
+        )
+    )
+
+    caplog.set_level(logging.WARNING, logger="pms.runner")
+
+    await _run_actuator_loop(runner)
+    replay, subscriber = await runner.event_bus.subscribe(last_event_id=0)
+    await runner.event_bus.unsubscribe(subscriber)
+
+    rendered = caplog.text + "\n".join(event.summary for event in replay)
+    assert "actuator execution failed" in rendered
+    assert "<redacted-polymarket-credential>" in rendered
+    assert "<redacted-database-url>" in rendered
+    assert "password=<redacted>" in rendered
+    for credential in credential_values:
+        assert credential not in rendered
+    assert "supersecret" not in rendered
+    assert "keyword-secret" not in rendered
+    assert "admin" not in rendered
 
 
 @pytest.mark.asyncio

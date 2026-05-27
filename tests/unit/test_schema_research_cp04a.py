@@ -8,6 +8,7 @@ SCHEMA_PATH = Path("schema.sql")
 RESEARCH_TABLES = [
     "backtest_runs",
     "strategy_runs",
+    "strategy_run_slices",
     "evaluation_reports",
     "backtest_live_comparisons",
 ]
@@ -30,6 +31,9 @@ def test_schema_declares_research_backtest_tables() -> None:
 
     assert "strategy_ids TEXT[] NOT NULL" in schema_text
     assert "CONSTRAINT strategy_runs_strategy_identity_check" in schema_text
+    assert "CONSTRAINT strategy_run_slices_strategy_identity_check" in schema_text
+    assert "CONSTRAINT strategy_run_slices_counts_check" in schema_text
+    assert "CONSTRAINT strategy_run_slices_window_check" in schema_text
     assert "CONSTRAINT backtest_live_comparisons_strategy_identity_check" in schema_text
     assert "CONSTRAINT evaluation_reports_run_id_ranking_metric_key" in schema_text
 

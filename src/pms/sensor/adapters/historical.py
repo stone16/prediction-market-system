@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
-from collections.abc import AsyncIterator, Iterable
+import os
+import stat
+from collections.abc import AsyncIterator, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TextIO, cast
 
 from pms.core.enums import Venue
 from pms.core.exceptions import KalshiStubError  # noqa: F401
@@ -47,12 +50,12 @@ class HistoricalSensor:
 
 def _read_rows(path: Path) -> Iterable[dict[str, Any]]:
     if path.suffix == ".csv":
-        with path.open(newline="", encoding="utf-8") as csv_file:
+        with _open_text_no_follow(path, newline="") as csv_file:
             yield from csv.DictReader(csv_file)
         return
 
     if path.suffix in {".jsonl", ".ndjson"}:
-        with path.open(encoding="utf-8") as jsonl_file:
+        with _open_text_no_follow(path) as jsonl_file:
             for line in jsonl_file:
                 if line.strip():
                     loaded = json.loads(line)
@@ -64,6 +67,32 @@ def _read_rows(path: Path) -> Iterable[dict[str, Any]]:
 
     msg = f"Unsupported historical data file type: {path.suffix}"
     raise ValueError(msg)
+
+
+@contextmanager
+def _open_text_no_follow(
+    path: Path,
+    *,
+    newline: str | None = None,
+) -> Iterator[TextIO]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(path, flags)
+        path_stat = os.fstat(fd)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError("not a regular file")
+        if path_stat.st_nlink != 1:
+            raise OSError("multiple hardlinks")
+        with os.fdopen(fd, "r", encoding="utf-8", newline=newline) as file:
+            fd = -1
+            yield file
+    except OSError as exc:
+        msg = f"historical data cannot be read safely: {path}"
+        raise ValueError(msg) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _row_to_signal(row: dict[str, Any]) -> MarketSignal:

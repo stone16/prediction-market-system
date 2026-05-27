@@ -120,6 +120,7 @@ class FillStore:
                     fill_payloads.payload->>'token_id' AS token_id,
                     fill_payloads.payload->>'venue' AS venue,
                     fill_payloads.payload->>'side' AS side,
+                    fill_payloads.payload->>'risk_group_id' AS risk_group_id,
                     (fill_payloads.payload->>'fill_price')::double precision
                         AS fill_price,
                     COALESCE(
@@ -252,6 +253,8 @@ class StoredTradeRow:
     status: str
     strategy_id: str
     strategy_version_id: str
+    fee_bps: int | None = None
+    fees: float | None = None
 
 
 class _PositionAccumulator:
@@ -261,12 +264,14 @@ class _PositionAccumulator:
         market_id: str,
         token_id: str | None,
         venue: str,
+        risk_group_id: str | None,
         strategy_id: str,
         strategy_version_id: str,
     ) -> None:
         self.market_id = market_id
         self.token_id = token_id
         self.venue = venue
+        self.risk_group_id = risk_group_id
         self.strategy_id = strategy_id
         self.strategy_version_id = strategy_version_id
         self.side: str | None = None
@@ -301,6 +306,7 @@ def _fill_payload(fill: FillRecord) -> dict[str, object]:
         "liquidity_side": fill.liquidity_side,
         "transaction_ref": fill.transaction_ref,
         "resolved_outcome": fill.resolved_outcome,
+        "risk_group_id": fill.risk_group_id,
     }
 
 
@@ -329,12 +335,13 @@ def _fill_from_row(row: asyncpg.Record) -> FillRecord:
         liquidity_side=cast(str | None, payload.get("liquidity_side")),
         transaction_ref=cast(str | None, payload.get("transaction_ref")),
         resolved_outcome=cast(float | None, payload.get("resolved_outcome")),
+        risk_group_id=cast(str | None, payload.get("risk_group_id")),
     )
 
 
 def _positions_from_fill_rows(rows: Sequence[asyncpg.Record]) -> list[Position]:
     accumulators: dict[
-        tuple[str, str | None, str, str, str],
+        tuple[str, str | None, str, str | None, str, str],
         _PositionAccumulator,
     ] = {}
     for row in rows:
@@ -342,8 +349,9 @@ def _positions_from_fill_rows(rows: Sequence[asyncpg.Record]) -> list[Position]:
             cast(str, row["market_id"]),
             cast(str | None, row["token_id"]),
             cast(str, row["venue"]),
-            cast(str, row["strategy_id"]),
-            cast(str, row["strategy_version_id"]),
+            cast(str | None, _optional_row_value(row, "risk_group_id")),
+            cast(str, _optional_row_value(row, "strategy_id") or "default"),
+            cast(str, _optional_row_value(row, "strategy_version_id") or "default-v1"),
         )
         accumulator = accumulators.get(key)
         if accumulator is None:
@@ -351,8 +359,9 @@ def _positions_from_fill_rows(rows: Sequence[asyncpg.Record]) -> list[Position]:
                 market_id=key[0],
                 token_id=key[1],
                 venue=key[2],
-                strategy_id=key[3],
-                strategy_version_id=key[4],
+                risk_group_id=key[3],
+                strategy_id=key[4],
+                strategy_version_id=key[5],
             )
             accumulators[key] = accumulator
         _apply_fill_row(accumulator, row)
@@ -463,6 +472,7 @@ def _position_from_accumulator(accumulator: _PositionAccumulator) -> Position:
         opened_at=accumulator.opened_at,
         strategy_id=accumulator.strategy_id,
         strategy_version_id=accumulator.strategy_version_id,
+        risk_group_id=accumulator.risk_group_id,
     )
 
 
@@ -485,6 +495,7 @@ def _position_from_row(row: asyncpg.Record) -> Position:
             str,
             _optional_row_value(row, "strategy_version_id") or "default-v1",
         ),
+        risk_group_id=cast(str | None, _optional_row_value(row, "risk_group_id")),
     )
 
 
@@ -557,6 +568,8 @@ def _trade_from_row(row: asyncpg.Record) -> StoredTradeRow:
         status=cast(str, payload["status"]),
         strategy_id=cast(str, row["strategy_id"]),
         strategy_version_id=cast(str, row["strategy_version_id"]),
+        fee_bps=cast(int | None, payload.get("fee_bps")),
+        fees=cast(float | None, payload.get("fees")),
     )
 
 

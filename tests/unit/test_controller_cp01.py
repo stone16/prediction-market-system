@@ -7,9 +7,11 @@ from typing import Any
 import pytest
 
 from pms.config import PMSSettings
+from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, MarketSignal, Portfolio
 from pms.strategies.projections import (
     EvalSpec,
+    CalibrationSpec,
     ForecasterSpec,
     MarketSelectionSpec,
     RiskParams,
@@ -25,7 +27,11 @@ def _load_symbol(module_name: str, symbol_name: str) -> Any:
     return getattr(module, symbol_name)
 
 
-def _signal(*, token_id: str = "shared-token") -> MarketSignal:
+def _signal(
+    *,
+    token_id: str = "shared-token",
+    external_signal: dict[str, Any] | None = None,
+) -> MarketSignal:
     return MarketSignal(
         market_id="market-cp01",
         token_id=token_id,
@@ -38,7 +44,7 @@ def _signal(*, token_id: str = "shared-token") -> MarketSignal:
             "bids": [{"price": 0.39, "size": 10.0}],
             "asks": [{"price": 0.41, "size": 10.0}],
         },
-        external_signal={"fair_value": 0.55},
+        external_signal=external_signal or {"fair_value": 0.55},
         fetched_at=datetime(2026, 4, 19, tzinfo=UTC),
         market_status="open",
     )
@@ -58,6 +64,8 @@ def _active_strategy(
     strategy_id: str,
     strategy_version_id: str,
     forecaster_names: tuple[str, ...],
+    metadata: tuple[tuple[str, str], ...] = (("owner", "test"),),
+    calibration: CalibrationSpec | None = None,
 ) -> Any:
     active_strategy_cls = _load_symbol(
         "pms.strategies.projections",
@@ -69,7 +77,7 @@ def _active_strategy(
         config=StrategyConfig(
             strategy_id=strategy_id,
             factor_composition=(),
-            metadata=(("owner", "test"),),
+            metadata=metadata,
         ),
         risk=RiskParams(
             max_position_notional_usdc=100.0,
@@ -85,6 +93,7 @@ def _active_strategy(
             resolution_time_max_horizon_days=7,
             volume_min_usdc=500.0,
         ),
+        calibration=calibration or CalibrationSpec(),
     )
 
 
@@ -200,6 +209,76 @@ def test_controller_pipeline_factory_uses_global_total_exposure_for_strategy_ris
 
     assert pipeline.sizer.risk.max_position_per_market == 100.0
     assert pipeline.sizer.risk.max_total_exposure == 10_000.0
+
+
+def test_live_controller_factory_rejects_placeholder_strategy_alpha_metadata() -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    settings = PMSSettings()
+    settings.mode = RunMode.LIVE
+    factory = factory_cls(settings=settings)
+    strategy = _active_strategy(
+        strategy_id="strat-placeholder",
+        strategy_version_id="strat-placeholder-v1",
+        forecaster_names=("rules",),
+        metadata=(
+            ("owner", "test"),
+            ("live_allowed", "true"),
+            ("alpha_source", "placeholder"),
+        ),
+        calibration=CalibrationSpec(enabled=True),
+    )
+
+    with pytest.raises(ValueError, match="alpha_source"):
+        factory.build(strategy)
+
+
+def test_live_controller_factory_requires_strategy_evidence_metadata() -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    settings = PMSSettings()
+    settings.mode = RunMode.LIVE
+    factory = factory_cls(settings=settings)
+    strategy = _active_strategy(
+        strategy_id="strat-missing-evidence",
+        strategy_version_id="strat-missing-evidence-v1",
+        forecaster_names=("rules",),
+        metadata=(("owner", "test"), ("live_allowed", "true")),
+        calibration=CalibrationSpec(enabled=True),
+    )
+
+    with pytest.raises(ValueError, match="alpha_source"):
+        factory.build(strategy)
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_carries_signal_risk_group_into_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pms.controller.forecasters.rules.RulesForecaster.predict",
+        lambda self, signal: (0.65, 0.9, "test-rules"),
+    )
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    factory = factory_cls(settings=PMSSettings())
+    pipeline = factory.build(
+        _active_strategy(
+            strategy_id="strat-a",
+            strategy_version_id="strat-a-v1",
+            forecaster_names=("rules",),
+        )
+    )
+
+    decision = await pipeline.decide(
+        _signal(
+            external_signal={
+                "fair_value": 0.55,
+                "risk_group_id": "event:2028-us-presidential-election",
+            }
+        ),
+        portfolio=_portfolio(),
+    )
+
+    assert decision is not None
+    assert decision.risk_group_id == "event:2028-us-presidential-election"
 
 
 def test_controller_pipeline_factory_rejects_llm_raw_params_until_supported() -> None:

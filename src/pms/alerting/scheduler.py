@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import stat
 from collections.abc import Awaitable, Callable
 from datetime import datetime, time, timedelta
 from pathlib import Path
@@ -85,7 +87,7 @@ async def run_eod_report_once(
         report_path = Path(report_root) / f"{report_date}.md"
         if not report_path.exists():
             raise FileNotFoundError(str(report_path))
-        content = report_path.read_text(encoding="utf-8")
+        content = _read_report_text_no_follow(report_path)
         chunks = _paginate_report(content, report_date)
         total = len(chunks)
         for index, chunk in enumerate(chunks, start=1):
@@ -102,6 +104,27 @@ async def run_eod_report_once(
         await client.send(message)
         logger.error("EOD report generation failed for %s: %s", report_date, exc)
         raise
+
+
+def _read_report_text_no_follow(path: Path) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(path, flags, 0o777)
+        path_stat = os.fstat(fd)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError(f"EOD report file cannot be read safely: {path}")
+        if path_stat.st_nlink != 1:
+            raise OSError(f"EOD report file cannot be read safely: {path}")
+        with os.fdopen(fd, "r", encoding="utf-8") as file:
+            fd = -1
+            return file.read()
+    except OSError as exc:
+        msg = f"EOD report file cannot be read safely: {path}"
+        raise OSError(msg) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 async def _run_paper_report(report_date: str) -> None:

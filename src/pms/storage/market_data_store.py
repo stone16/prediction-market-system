@@ -103,6 +103,9 @@ class PostgresMarketDataStore:
             created_at,
             last_seen_at,
             volume_24h,
+            risk_group_id,
+            category,
+            event_id,
             active,
             closed,
             accepting_orders,
@@ -123,6 +126,9 @@ class PostgresMarketDataStore:
             created_at=row["created_at"],
             last_seen_at=row["last_seen_at"],
             volume_24h=row["volume_24h"],
+            risk_group_id=cast(str | None, _row_value(row, "risk_group_id")),
+            category=cast(str | None, _row_value(row, "category")),
+            event_id=cast(str | None, _row_value(row, "event_id")),
             active=cast(bool | None, _row_value(row, "active")),
             closed=cast(bool | None, _row_value(row, "closed")),
             accepting_orders=cast(
@@ -542,6 +548,9 @@ class PostgresMarketDataStore:
             created_at,
             last_seen_at,
             volume_24h,
+            risk_group_id,
+            category,
+            event_id,
             yes_price,
             no_price,
             best_bid,
@@ -557,7 +566,7 @@ class PostgresMarketDataStore:
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8,
             $9, $10, $11, $12, $13, $14, $15, $16,
-            $17, $18, $19, $20
+            $17, $18, $19, $20, $21, $22, $23
         )
         ON CONFLICT (condition_id) DO UPDATE
         SET slug = EXCLUDED.slug,
@@ -566,6 +575,9 @@ class PostgresMarketDataStore:
             resolves_at = EXCLUDED.resolves_at,
             last_seen_at = EXCLUDED.last_seen_at,
             volume_24h = EXCLUDED.volume_24h,
+            risk_group_id = EXCLUDED.risk_group_id,
+            category = EXCLUDED.category,
+            event_id = EXCLUDED.event_id,
             yes_price = EXCLUDED.yes_price,
             no_price = EXCLUDED.no_price,
             best_bid = EXCLUDED.best_bid,
@@ -590,6 +602,9 @@ class PostgresMarketDataStore:
                 market.created_at,
                 market.last_seen_at,
                 market.volume_24h,
+                market.risk_group_id,
+                market.category,
+                market.event_id,
                 market.yes_price,
                 market.no_price,
                 market.best_bid,
@@ -603,6 +618,24 @@ class PostgresMarketDataStore:
                 market.accepting_orders,
                 market.status_updated_at,
             )
+
+    async def read_market_signal_metadata(self, market_id: str) -> dict[str, str]:
+        query = """
+        SELECT risk_group_id, category, event_id
+        FROM markets
+        WHERE condition_id = $1
+        """
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(query, market_id)
+        if row is None:
+            return {}
+
+        metadata: dict[str, str] = {}
+        for field_name in ("risk_group_id", "category", "event_id"):
+            value = cast(str | None, _row_value(row, field_name))
+            if value is not None and value.strip() != "":
+                metadata[field_name] = value
+        return metadata
 
     async def write_price_snapshot(
         self,

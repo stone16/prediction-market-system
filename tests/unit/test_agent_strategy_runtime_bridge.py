@@ -126,6 +126,7 @@ def _intent(**overrides: object) -> TradeIntent:
         "limit_price": 0.57,
         "notional_usdc": 25.0,
         "expected_price": 0.66,
+        "probability_estimate": 0.66,
         "expected_edge": 0.09,
         "max_slippage_bps": 40,
         "time_in_force": TimeInForce.GTC,
@@ -327,7 +328,39 @@ async def test_bridge_persists_artifacts_before_enqueueing_accepted_decision() -
     assert work_item.decision.market_id == "market-ripple-1"
     assert work_item.decision.strategy_id == "ripple"
     assert work_item.decision.strategy_version_id == "ripple-v1"
+    assert work_item.decision.prob_estimate == pytest.approx(intent.probability_estimate)
     assert runner.state.orders == []
+
+
+@pytest.mark.asyncio
+async def test_bridge_rejects_probability_expected_price_mismatch_without_enqueue() -> None:
+    intent = _intent(probability_estimate=0.61, expected_price=0.66)
+    artifacts = _RecordingArtifactStore()
+    runner = Runner(config=_settings(enabled=True))
+    bridge = _bridge(
+        settings=runner.config,
+        module=_FakeModule([StrategyRunResult(judgement=_judgement(), intents=(intent,))]),
+        planner=_FakePlanner({intent.intent_id: _accepted_plan(intent)}),
+        artifact_store=artifacts,
+        enqueue=runner.enqueue_accepted_decision,
+    )
+
+    report = await bridge.run_once(
+        strategy_id="ripple",
+        strategy_version_id="ripple-v1",
+        as_of=NOW,
+    )
+
+    assert report.enqueued_decision_ids == ()
+    assert report.rejection_reasons == ("intent_probability_mismatch",)
+    assert artifacts.events == [
+        "judgement:approved_intent",
+        "execution:rejected_execution_plan",
+    ]
+    assert artifacts.execution_artifacts[0].rejection_reasons == (
+        "intent_probability_mismatch",
+    )
+    assert runner._decision_queue.empty()  # noqa: SLF001
 
 
 @pytest.mark.asyncio

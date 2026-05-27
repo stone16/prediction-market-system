@@ -9,7 +9,8 @@ Target venues: Polymarket (primary). Kalshi is reserved in the venue enum but
 has no adapter in v1 — see CP06's stub gate. Implemented run modes are
 `backtest`, `paper`, and gated Polymarket `live`. LIVE mode remains fail-closed
 unless `live_trading_enabled=true`, required Polymarket credentials validate,
-and the first live order is approved by an operator gate.
+and `operator_approval_mode=every_order` keeps each live order behind an
+operator gate during the initial real-money phase.
 
 ## Status: Gate 2 CLOSED — Ready for Paper Soak
 
@@ -31,28 +32,38 @@ data spine proves enough coverage and measurable edge.
 
 ### What's Needed Before Live Trading
 
-Three things remain between paper soak and real capital:
+Five things remain between paper soak and real capital:
 
 1. **Polymarket credentials** — 6 fields (private_key, api_key, api_secret,
-   api_passphrase, funder_address, signature_type). Set as env vars, never in
-   config files.
+   api_passphrase, funder_address, signature_type). For local LIVE, stage them
+   in the chmod 600 `local_secret_file` outside the working tree; never put
+   them in shell exports, `.env`, or config files.
 2. **Confirm risk envelope** — Ratified defaults from
    `config.live-soak.yaml`: `max_position_per_market=$5`,
    `max_total_exposure=$50`, `max_drawdown_pct=20%`,
-   `max_open_positions=5`, `min_order_usdc=$1`,
+   `max_daily_loss_usdc=$20`, `max_open_positions=5`,
+   `max_exposure_per_risk_group=$15`, `min_order_usdc=$1`,
    `slippage_threshold_bps=50`, `max_quantity_shares=500`.
-   TODO_DECISION: `$20 daily max loss` was mentioned here previously but
-   has no corresponding config key or enforcement. File a child issue to
-   add `risk.max_daily_loss_usdc` as a 7th auto-halt trigger, or drop
-   it entirely. See [MUL-8](mention://issue/850c30cc-2b18-41cc-8caa-533444b2c6fe).
-3. **24-hour paper soak** — Run with live Polymarket data to verify sensors,
-   risk engine, order lifecycle, and auto-halt triggers before risking capital.
-   See [Orchestration guide](#orchestration-guide) below.
+3. **30-day paper soak** — Run with live Polymarket data and require the
+   machine-checkable Go/No-Go report gate to pass before risking capital. See
+   [Orchestration guide](#orchestration-guide) below.
+4. **Active LIVE strategy** — Confirm the active Postgres strategy version has
+   an explicit `metadata.live_allowed=true` opt-in; `pms-live preflight`
+   rejects paper-only or unmarked strategies before writing a final go/no-go
+   artifact, and LIVE startup rejects that artifact if the active strategy set
+   or projection changes afterward.
+5. **Operator approval rehearsal** — Run `scripts/rehearse_first_order.py`
+   and keep its PASS report at `live_operator_rehearsal_report_path` so LIVE
+   validation can prove the approval gate denies, matches, and consumes
+   artefacts before the first real submit.
 
 See [docs/operations/live-polymarket-runbook.md](docs/operations/live-polymarket-runbook.md)
-for the full PAPER soak, credential setup, first live order, rollback, and
+for the full PAPER soak, credential setup, operator approval, rollback, and
 emergency stop runbook. Install the optional live SDK with
-`uv sync --extra live` before starting LIVE mode.
+`uv sync --extra live --extra llm` before starting LIVE mode or live-soak
+paper mode. The true LIVE template leaves LLM disabled by default; keep it
+disabled for the first real-money path unless you separately stage
+`PMS_LLM__API_KEY`, accept the provider dependency, and rerun preflight.
 
 ## Orchestration Guide
 
@@ -70,7 +81,7 @@ emergency stop runbook. Install the optional live SDK with
 ├──────────────────────────────────────────────────────┤
 │                  Actuator Layer                       │
 │  RiskManager → ExecutionPlan → OrderState            │
-│  (6 auto-halt triggers, exposure limits, drawdown)    │
+│  (7 auto-halt triggers, exposure limits, drawdown)    │
 ├──────────────────────────────────────────────────────┤
 │                  Evaluator Layer                      │
 │  MetricsCollector → EvalSpool → FeedbackEngine       │
@@ -88,21 +99,21 @@ emergency stop runbook. Install the optional live SDK with
 | **LLM Forecaster** | Provider-switchable (Anthropic/OpenAI) market prediction with per-market 30s TTL cache | `forecaster: llm`, `llm.provider`, `llm.base_url` |
 | **FLB Signal** | Detects Favorite-Longshot Bias in Polymarket pricing | `pms.strategies.flb.FlbStrategyModule` |
 | **Kelly Sizer** | Position sizing based on edge magnitude and Kelly fraction | `sizing.kelly_fraction` |
-| **RiskManager** | 6 auto-halt triggers (drawdown, consecutive losses, slippage, rate limit, stale orders, credential failure) | `risk.max_drawdown_pct`, `risk.max_position_per_market` |
+| **RiskManager** | 7 auto-halt triggers plus per-market, total, and risk-group exposure caps | `risk.max_drawdown_pct`, `risk.max_daily_loss_usdc`, `risk.max_exposure_per_risk_group` |
 
 ### Run Modes
 
 | Mode | Purpose | Command |
 |------|---------|---------|
-| **backtest** | Historical simulation against warehouse data | `uv run pms-backtest --config config.backtest.yaml` |
+| **backtest** | Historical simulation through the runner/API control plane | `PMS_MODE=backtest PMS_AUTO_START=1 uv run pms-api` |
 | **paper** | Live data, simulated trades, no real orders | `uv run pms-api --config config.live-soak.yaml` |
 | **live** | Real Polymarket trading (gated) | `uv run pms-api` with `PMS_MODE=live` + credentials |
 
 ### Step-by-Step: From Zero to Paper Soak
 
 ```bash
-# 1. Install dependencies (including live SDK for paper mode)
-uv sync --extra live
+# 1. Install dependencies for live-data paper mode, Polymarket SDK, and the LLM forecaster
+uv sync --extra live --extra llm
 
 # 2. Start PostgreSQL (required for market data persistence)
 docker compose up -d postgres
@@ -125,35 +136,67 @@ uv run pms-api --config config.local.live-soak.yaml
 curl http://127.0.0.1:8000/status
 
 # 7. Generate daily paper soak report
-uv run python scripts/paper-report.py --date 2026-05-03
+uv run python scripts/paper_report.py --date 2026-05-03
 ```
 
 ### Step-by-Step: From Paper Soak to Live
 
-After at least 24 hours of paper soak validating signal quality:
+After 30 days of paper soak and a passing Go/No-Go gate:
 
 ```bash
+# 0. Confirm the latest paper report passes the machine-checkable gate
+sudo install -d -m 700 -o "$USER" /secure/pms
+export PAPER_SOAK_REPORT_DATE="$(date -u +%F)"  # use the completed soak report date
+uv run python scripts/paper_report.py \
+  --date "$PAPER_SOAK_REPORT_DATE" \
+  --output /secure/pms/paper-soak-go-report.md \
+  --require-go
+
 # 1. Stage Polymarket credentials in a chmod 600 local secret file,
 #    never shell exports or .env:
 #    ~/.config/pms/polymarket.local-secrets.yaml
 
-# 2. Create config.live.yaml
-#    mode: live
-#    secret_source: local_file
-#    local_secret_file: ~/.config/pms/polymarket.local-secrets.yaml
-#    live_trading_enabled: true
-#    risk: (copy from your validated paper soak config)
+# 2. Create the ignored local LIVE runtime config from the non-secret template.
+cp config.live.yaml.example config.live.yaml
+#    Fill live_* operator/compliance fields and keep the committed risk envelope.
+#    Do not add Polymarket credential fields to config.live.yaml.
 
-# 3. Create first-order approval file
-#    /secure/pms/first-order.json — reviewed and approved by operator
+# 3. Reconfirm the secure operator artifact directory, but leave the approval
+#    JSON absent for preflight. Do not create the approval JSON before preflight.
+#    This directory must be outside the repo working tree; the artifact path
+#    must be a regular file, not a symlink.
+sudo install -d -m 700 -o "$USER" /secure/pms
 
-# 4. Start live mode (stub-gated — not implemented until paper soak + compliance gates pass)
+# 4. Run the read-only live preflight and write the startup gate artifact
+uv run pms-live preflight \
+  --config config.live.yaml \
+  --output /secure/pms/credentialed-preflight.json
+
+# 5. Start live mode. Create the approval JSON only after preview review.
 uv run pms-api --config config.live.yaml
+
+# 6. After the first approved live order fills, reconcile PMS state against
+#    Polymarket and persist the post-live proof artifact. This requires the
+#    configured credentialed preflight artifact to still validate.
+uv run pms-live reconcile-live-order \
+  --config config.live.yaml \
+  --decision-id <decision-id> \
+  --reconciled-by <operator-id> \
+  --output /secure/pms/first-live-order-reconciliation.json
 ```
 
+For Fly LIVE capital, do not repurpose the paper-soak `fly.toml`. Copy
+`fly.live.toml.example` to the ignored `fly.live.toml`, replace every
+`__FILL_IN_*__` value, create the `/secure` volume, stage `DATABASE_URL`,
+`PMS_API_TOKEN`, `PMS_DISCORD__WEBHOOK_URL`, and all Polymarket credentials
+with `fly secrets import -c fly.live.toml`, then deploy with
+`fly deploy -c fly.live.toml` after the credentialed preflight artifact has
+passed.
+
 **Critical**: The system is fail-closed. If any credential is missing, risk
-limits are violated, or an auto-halt trigger fires, the system stops submitting
-orders automatically.
+limits are violated, the credentialed preflight artifact is missing/invalid or
+stale for the current active strategies, or an auto-halt trigger fires, the
+system stops submitting orders automatically.
 
 ## Agent Strategy Boundary
 
@@ -225,9 +268,11 @@ PMS_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 schema.sql is a reference artifact, not the runtime source; apply runtime
 schema changes with Alembic.
 
-If `PMS_API_BASE_URL` is unset the dashboard silently falls back to the
-bundled mock store (`dashboard/lib/mock-store.ts`) — useful for pure frontend
-work, but every page will show fabricated data.
+If `PMS_API_BASE_URL` is unset outside production, the dashboard falls back to
+the bundled mock store (`dashboard/lib/mock-store.ts`) for pure frontend work.
+In production, API routes fail closed with HTTP 503 until `PMS_API_BASE_URL`
+points at a live backend, so fabricated dashboard data cannot mask a missing
+runtime connection.
 
 ## Runner lifecycle via the API
 
@@ -239,6 +284,9 @@ curl -X POST http://127.0.0.1:8000/run/stop    # graceful shutdown
 
 The `Overview` dashboard page includes a **Runner Controls**
 panel that calls these endpoints directly.
+Changing mode through `POST /config` requires a stopped runner. Changing to
+`live` is guarded by the same candidate LIVE validation and credentialed
+preflight artifact check as startup.
 
 ## Development
 

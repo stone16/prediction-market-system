@@ -7,8 +7,9 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import stat
 import sys
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, TextIO, TypeVar
 
 import asyncpg
 
@@ -91,13 +92,16 @@ def _load_rows(path: Path, parser: Callable[[dict[str, Any]], T]) -> list[T]:
         return []
 
     rows: list[T] = []
-    with path.open("r", encoding="utf-8") as stream:
+    with _open_text_no_follow(path) as stream:
         for line_number, raw_line in enumerate(stream, start=1):
             line = raw_line.strip()
             if not line:
                 continue
             try:
-                payload = json.loads(line)
+                payload = _loads_json_rejecting_duplicate_keys(
+                    line,
+                    label=f"{path.name}:{line_number}",
+                )
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path.name}:{line_number}: invalid JSON row") from exc
             if not isinstance(payload, dict):
@@ -110,6 +114,42 @@ def _load_rows(path: Path, parser: Callable[[dict[str, Any]], T]) -> list[T]:
                     f"{path.name}:{line_number}: invalid row payload"
                 ) from exc
     return rows
+
+
+def _loads_json_rejecting_duplicate_keys(text: str, *, label: str) -> object:
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        seen: set[str] = set()
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in seen:
+                msg = f"{label}: duplicate JSON key: {key}"
+                raise ValueError(msg)
+            seen.add(key)
+            result[key] = value
+        return result
+
+    return json.loads(text, object_pairs_hook=reject_duplicate_keys)
+
+
+def _open_text_no_follow(path: Path) -> TextIO:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(path, flags, 0o777)
+        path_stat = os.fstat(fd)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError(f"JSONL migration source cannot be read safely: {path}")
+        if path_stat.st_nlink != 1:
+            raise OSError(f"JSONL migration source cannot be read safely: {path}")
+        stream = os.fdopen(fd, "r", encoding="utf-8")
+        fd = -1
+        return stream
+    except OSError as exc:
+        msg = f"JSONL migration source cannot be read safely: {path}"
+        raise ValueError(msg) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _feedback_from_payload(payload: dict[str, Any]) -> FeedbackMigrationRow:
@@ -150,6 +190,8 @@ def _eval_record_from_payload(payload: dict[str, Any]) -> EvalRecord:
         prob_estimate=float(payload["prob_estimate"]),
         resolved_outcome=float(payload["resolved_outcome"]),
         brier_score=float(payload["brier_score"]),
+        baseline_prob_estimate=_optional_float(payload.get("baseline_prob_estimate")),
+        baseline_brier_score=_optional_float(payload.get("baseline_brier_score")),
         fill_status=str(payload["fill_status"]),
         recorded_at=_parse_datetime(payload["recorded_at"]),
         citations=[str(item) for item in citations] if isinstance(citations, list) else [],
@@ -180,6 +222,12 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
 
 
 def _strategy_tag(payload: dict[str, Any], key: str, default: str) -> str:

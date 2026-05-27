@@ -19,7 +19,9 @@ outer + middle + inner rings all persisted), `uv` for Python deps.
 **Capability honesty:** implemented run modes are `backtest`, `paper`,
 and gated Polymarket `live`. LIVE remains fail-closed unless
 `live_trading_enabled=true`, required credentials validate, and the
-first live order passes an operator gate. Kalshi is reserved in the
+initial real-money phase uses `operator_approval_mode=every_order`
+to keep each live order behind an operator gate.
+Kalshi is reserved in the
 venue enum but has no adapter in v1.
 
 **Branches:** feature branches only (`feat/…`, `fix/…`, `docs/…`).

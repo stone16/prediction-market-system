@@ -129,6 +129,8 @@ class BacktestExecutionSimulator:
             decision=decision,
             target_notional_usdc=decision.notional_usdc,
             slippage_bps=execution_model.slippage_bps,
+            displayed_depth_fill_ratio=execution_model.displayed_depth_fill_ratio,
+            adverse_selection_bps=execution_model.adverse_selection_bps,
         )
         tif = _effective_time_in_force(decision, execution_model)
         order_id = f"backtest-sim-{uuid4().hex}"
@@ -314,7 +316,11 @@ class BacktestExecutionSimulator:
                 )
                 self.open_orders_ledger.pop(order_id, None)
                 continue
-            best_price = _best_available_price(orderbook, open_order.decision)
+            best_price = _best_available_price(
+                orderbook,
+                open_order.decision,
+                adverse_selection_bps=execution_model.adverse_selection_bps,
+            )
             if best_price is None:
                 continue
             if _is_limit_eligible(
@@ -352,6 +358,8 @@ class BacktestExecutionSimulator:
                 decision=open_order.decision,
                 target_notional_usdc=open_order.remaining_notional_usdc,
                 slippage_bps=execution_model.slippage_bps,
+                displayed_depth_fill_ratio=execution_model.displayed_depth_fill_ratio,
+                adverse_selection_bps=execution_model.adverse_selection_bps,
             )
             if fill.filled_notional_usdc <= 0.0:
                 continue
@@ -451,6 +459,8 @@ def _walk_book(
     decision: TradeDecision,
     target_notional_usdc: float,
     slippage_bps: float,
+    displayed_depth_fill_ratio: float,
+    adverse_selection_bps: float,
 ) -> _FillComputation:
     requested_notional_usdc = _decision_notional_usdc(target_notional_usdc)
     side_key = _side_key(decision)
@@ -467,17 +477,23 @@ def _walk_book(
         if not isinstance(raw_level, dict):
             continue
         level_size = float(cast(str | int | float, raw_level.get("size", 0.0)))
+        level_size *= displayed_depth_fill_ratio
         if level_size <= 0.0:
             continue
+        action = _action(decision)
         level_price = _apply_slippage(
-            _effective_level_price(decision, raw_level),
-            action=_action(decision),
+            _apply_adverse_selection(
+                _effective_level_price(decision, raw_level),
+                action=action,
+                adverse_selection_bps=adverse_selection_bps,
+            ),
+            action=action,
             slippage_bps=slippage_bps,
         )
         if level_price <= 0.0:
             raise InsufficientLiquidityError("fill_price must be positive")
         if not _is_limit_eligible(
-            action=_action(decision),
+            action=action,
             fill_price=level_price,
             limit_price=decision.limit_price,
         ):
@@ -523,7 +539,12 @@ def _side_key(decision: TradeDecision) -> str:
     return "asks" if action == Side.BUY.value else "bids"
 
 
-def _best_available_price(orderbook: dict[str, Any], decision: TradeDecision) -> float | None:
+def _best_available_price(
+    orderbook: dict[str, Any],
+    decision: TradeDecision,
+    *,
+    adverse_selection_bps: float,
+) -> float | None:
     side_key = _side_key(decision)
     levels = orderbook.get(side_key)
     if not isinstance(levels, list) or not levels:
@@ -533,7 +554,11 @@ def _best_available_price(orderbook: dict[str, Any], decision: TradeDecision) ->
             continue
         if float(cast(str | int | float, raw_level.get("size", 0.0))) <= 0.0:
             continue
-        return _effective_level_price(decision, raw_level)
+        return _apply_adverse_selection(
+            _effective_level_price(decision, raw_level),
+            action=_action(decision),
+            adverse_selection_bps=adverse_selection_bps,
+        )
     return None
 
 
@@ -544,6 +569,18 @@ def _effective_level_price(decision: TradeDecision, raw_level: dict[str, Any]) -
 
 def _apply_slippage(price: float, *, action: str, slippage_bps: float) -> float:
     multiplier = slippage_bps / 10_000.0
+    if action == Side.SELL.value:
+        return max(0.0, price * (1.0 - multiplier))
+    return min(1.0, price * (1.0 + multiplier))
+
+
+def _apply_adverse_selection(
+    price: float,
+    *,
+    action: str,
+    adverse_selection_bps: float,
+) -> float:
+    multiplier = adverse_selection_bps / 10_000.0
     if action == Side.SELL.value:
         return max(0.0, price * (1.0 - multiplier))
     return min(1.0, price * (1.0 + multiplier))

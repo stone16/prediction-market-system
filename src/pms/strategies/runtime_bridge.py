@@ -153,6 +153,18 @@ class AgentStrategyRuntimeBridge:
                     )
                     rejection_reasons.append(reason)
                     continue
+                bridge_reason = _accepted_plan_bridge_rejection(intent, plan)
+                if bridge_reason is not None:
+                    execution_artifacts.append(
+                        _bridge_rejection_artifact(
+                            intent,
+                            plan,
+                            rejection_reason=bridge_reason,
+                            as_of=as_of,
+                        )
+                    )
+                    rejection_reasons.append(bridge_reason)
+                    continue
                 execution_artifacts.append(
                     _execution_artifact(intent, plan)
                 )
@@ -353,7 +365,7 @@ def _decision_from_order(order: PlannedOrder, intent: TradeIntent) -> TradeDecis
         order_type="limit",
         max_slippage_bps=order.max_slippage_bps,
         stop_conditions=["agent_strategy_runtime"],
-        prob_estimate=intent.expected_price,
+        prob_estimate=intent.probability_estimate,
         expected_edge=order.expected_edge,
         time_in_force=order.time_in_force,
         opportunity_id=f"agent-{intent.candidate_id}",
@@ -365,6 +377,22 @@ def _decision_from_order(order: PlannedOrder, intent: TradeIntent) -> TradeDecis
         model_id=f"agent-strategy:{intent.strategy_id}",
         intent_key=order.intent_key,
     )
+
+
+def _accepted_plan_bridge_rejection(
+    intent: TradeIntent,
+    plan: ExecutionPlan,
+) -> str | None:
+    if abs(intent.probability_estimate - intent.expected_price) > 1e-9:
+        return "intent_probability_mismatch"
+    if plan.intent_id != intent.intent_id:
+        return "plan_intent_mismatch"
+    if (
+        plan.strategy_id != intent.strategy_id
+        or plan.strategy_version_id != intent.strategy_version_id
+    ):
+        return "plan_strategy_mismatch"
+    return None
 
 
 def _intent_payload(intent: TradeIntent | BasketIntent) -> Mapping[str, Any]:
@@ -386,6 +414,7 @@ def _intent_payload(intent: TradeIntent | BasketIntent) -> Mapping[str, Any]:
         "limit_price": intent.limit_price,
         "notional_usdc": intent.notional_usdc,
         "expected_price": intent.expected_price,
+        "probability_estimate": intent.probability_estimate,
         "expected_edge": intent.expected_edge,
         "max_slippage_bps": intent.max_slippage_bps,
         "time_in_force": intent.time_in_force.value,

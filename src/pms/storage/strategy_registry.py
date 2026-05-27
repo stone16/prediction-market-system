@@ -4,6 +4,7 @@ import json
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 import logging
+import math
 from typing import cast
 
 import asyncpg
@@ -244,15 +245,21 @@ class PostgresStrategyRegistry:
             rows = await connection.fetch(query)
         selections: list[tuple[str, str, MarketSelectionSpec]] = []
         for row in rows:
+            strategy_id = _json_string(row["strategy_id"], "strategy_id")
             strategy_version_id = row["strategy_version_id"]
             if not isinstance(strategy_version_id, str):
                 msg = "strategies.active_version_id did not return a string"
                 raise TypeError(msg)
+            strategy = _strategy_from_versioned_config_json(
+                row["config_json"],
+                strategy_id=strategy_id,
+                strategy_version_id=strategy_version_id,
+            )
             selections.append(
                 (
-                    _json_string(row["strategy_id"], "strategy_id"),
+                    strategy_id,
                     strategy_version_id,
-                    _market_selection_from_config_json(row["config_json"]),
+                    strategy.market_selection,
                 )
             )
         return selections
@@ -274,15 +281,20 @@ class PostgresStrategyRegistry:
             rows = await connection.fetch(query)
         active_strategies: list[ActiveStrategy] = []
         for row in rows:
-            strategy = _strategy_from_config_json(row["config_json"])
-            calibration = _calibration_from_config_json(row["config_json"])
+            strategy_id = _json_string(row["strategy_id"], "strategy_id")
             strategy_version_id = row["strategy_version_id"]
             if not isinstance(strategy_version_id, str):
                 msg = "strategies.active_version_id did not return a string"
                 raise TypeError(msg)
+            strategy = _strategy_from_versioned_config_json(
+                row["config_json"],
+                strategy_id=strategy_id,
+                strategy_version_id=strategy_version_id,
+            )
+            calibration = _calibration_from_config_json(row["config_json"])
             active_strategies.append(
                 ActiveStrategy(
-                    strategy_id=_json_string(row["strategy_id"], "strategy_id"),
+                    strategy_id=strategy_id,
                     strategy_version_id=strategy_version_id,
                     config=strategy.config,
                     risk=strategy.risk,
@@ -299,13 +311,60 @@ class PostgresStrategyRegistry:
         strategy_id: str,
         strategy_version_id: str,
     ) -> None:
-        query = """
+        select_version_query = """
+        SELECT strategy_id, strategy_version_id, config_json
+        FROM strategy_versions
+        WHERE strategy_id = $1 AND strategy_version_id = $2
+        """
+        update_strategy_query = """
         UPDATE strategies
         SET active_version_id = $2
         WHERE strategy_id = $1
+          AND EXISTS (
+              SELECT 1
+              FROM strategy_versions
+              WHERE strategy_versions.strategy_id = $1
+                AND strategy_versions.strategy_version_id = $2
+          )
         """
         async with self._pool.acquire() as connection:
-            await connection.execute(query, strategy_id, strategy_version_id)
+            row = await connection.fetchrow(
+                select_version_query,
+                strategy_id,
+                strategy_version_id,
+            )
+            if row is None:
+                msg = (
+                    "No strategy_versions row matched activation target "
+                    f"strategy_id={strategy_id!r}, "
+                    f"strategy_version_id={strategy_version_id!r}"
+                )
+                raise LookupError(msg)
+            row_strategy_id = _json_string(
+                row["strategy_id"],
+                "strategy_versions.strategy_id",
+            )
+            row_strategy_version_id = _json_string(
+                row["strategy_version_id"],
+                "strategy_versions.strategy_version_id",
+            )
+            _strategy_from_versioned_config_json(
+                row["config_json"],
+                strategy_id=row_strategy_id,
+                strategy_version_id=row_strategy_version_id,
+            )
+            status = await connection.execute(
+                update_strategy_query,
+                strategy_id,
+                strategy_version_id,
+            )
+        updated = _command_tag_row_count(status)
+        if updated != 1:
+            msg = (
+                "No strategy_versions row matched activation target "
+                f"strategy_id={strategy_id!r}, strategy_version_id={strategy_version_id!r}"
+            )
+            raise LookupError(msg)
         await self._notify_strategy_change()
 
     async def populate_strategy_factors(
@@ -431,6 +490,29 @@ def _strategy_from_config_json(raw_value: object) -> Strategy:
         market_selection=_market_selection_from_payload(market_selection_payload),
         calibration=_calibration_from_config_json(payload),
     )
+
+
+def _strategy_from_versioned_config_json(
+    raw_value: object,
+    *,
+    strategy_id: str,
+    strategy_version_id: str,
+) -> Strategy:
+    strategy = _strategy_from_config_json(raw_value)
+    if strategy.config.strategy_id != strategy_id:
+        msg = (
+            "strategy_id does not match strategy config payload: "
+            f"row={strategy_id!r}, payload={strategy.config.strategy_id!r}"
+        )
+        raise ValueError(msg)
+    expected_version_id = compute_strategy_version_id(*strategy.snapshot())
+    if expected_version_id != strategy_version_id:
+        msg = (
+            "strategy_version_id does not match strategy config payload: "
+            f"row={strategy_version_id!r}, expected={expected_version_id!r}"
+        )
+        raise ValueError(msg)
+    return strategy
 
 
 def _market_selection_from_config_json(raw_value: object) -> MarketSelectionSpec:
@@ -709,4 +791,8 @@ def _json_float(value: object, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         msg = f"{field_name} must decode to a float-compatible value"
         raise TypeError(msg)
-    return float(value)
+    decoded = float(value)
+    if not math.isfinite(decoded):
+        msg = f"{field_name} must decode to a finite float"
+        raise ValueError(msg)
+    return decoded

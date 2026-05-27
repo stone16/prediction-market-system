@@ -13,6 +13,13 @@ function formatNumber(value: number, digits = 2) {
   }).format(value);
 }
 
+function formatOptionalNumber(value: number | null | undefined, digits = 2) {
+  if (value === null || value === undefined) {
+    return 'n/a';
+  }
+  return formatNumber(value, digits);
+}
+
 function formatTimestamp(value: string) {
   return new Intl.DateTimeFormat('en-US', {
     month: 'short',
@@ -44,6 +51,7 @@ export function TradesTable({ rows }: TradesTableProps) {
             <th>Price</th>
             <th>Notional</th>
             <th>Quantity</th>
+            <th>Fee</th>
             <th>Venue</th>
             <th>Status</th>
           </tr>
@@ -64,6 +72,7 @@ export function TradesTable({ rows }: TradesTableProps) {
               <td>{formatNumber(row.fill_price, 3)}</td>
               <td>{formatNumber(row.fill_notional_usdc)}</td>
               <td>{formatNumber(row.fill_quantity, 1)}</td>
+              <td>{formatOptionalNumber(row.fees)}</td>
               <td>{row.venue}</td>
               <td>{row.status}</td>
             </tr>

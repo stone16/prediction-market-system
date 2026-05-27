@@ -130,6 +130,7 @@ class TradeIntent:
     limit_price: float
     notional_usdc: float
     expected_price: float
+    probability_estimate: float
     expected_edge: float
     max_slippage_bps: int
     time_in_force: TimeInForce
@@ -144,6 +145,7 @@ class TradeIntent:
         _require_non_empty(self.token_id, "token_id")
         _require_open_probability(self.limit_price, "limit_price")
         _require_open_probability(self.expected_price, "expected_price")
+        _require_open_probability(self.probability_estimate, "probability_estimate")
         if self.notional_usdc <= 0.0:
             msg = "notional_usdc must be > 0.0"
             raise ValueError(msg)

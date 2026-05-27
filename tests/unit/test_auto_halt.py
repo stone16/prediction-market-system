@@ -150,6 +150,86 @@ def test_auto_halt_triggers_on_drawdown_circuit_breaker() -> None:
     assert manager.halt_events[-1].trace_id == "trace-drawdown"
 
 
+def test_auto_halt_triggers_when_daily_net_loss_reaches_limit() -> None:
+    manager = RiskManager(RiskSettings(max_daily_loss_usdc=20.0))
+    manager.record_trade_result(
+        RiskTradeResult(
+            pnl=-12.0,
+            slippage_bps=10.0,
+            filled_at=NOW + timedelta(hours=1),
+            trace_id="trace-loss-1",
+        )
+    )
+    manager.record_trade_result(
+        RiskTradeResult(
+            pnl=-8.0,
+            slippage_bps=10.0,
+            filled_at=NOW + timedelta(hours=2),
+            trace_id="trace-loss-2",
+        )
+    )
+
+    halt = manager.check_auto_halt(_portfolio(), now=NOW + timedelta(hours=3))
+
+    assert halt.halted is True
+    assert halt.trigger_kind == "daily_loss_limit"
+    assert halt.reason == "daily_loss_limit"
+    assert manager.halt_events[-1].trace_id == "trace-loss-2"
+
+
+def test_auto_halt_daily_loss_uses_current_utc_day_net_pnl() -> None:
+    manager = RiskManager(RiskSettings(max_daily_loss_usdc=20.0))
+    manager.record_trade_result(
+        RiskTradeResult(
+            pnl=-100.0,
+            slippage_bps=10.0,
+            filled_at=NOW - timedelta(days=1),
+        )
+    )
+    manager.record_trade_result(
+        RiskTradeResult(
+            pnl=-25.0,
+            slippage_bps=10.0,
+            filled_at=NOW + timedelta(hours=1),
+        )
+    )
+    manager.record_trade_result(
+        RiskTradeResult(
+            pnl=10.0,
+            slippage_bps=10.0,
+            filled_at=NOW + timedelta(hours=2),
+        )
+    )
+
+    halt = manager.check_auto_halt(_portfolio(), now=NOW + timedelta(hours=3))
+
+    assert halt.halted is False
+    assert halt.trigger_kind == "none"
+
+
+def test_daily_loss_evidence_survives_clear_until_next_utc_day() -> None:
+    manager = RiskManager(RiskSettings(max_daily_loss_usdc=20.0))
+    manager.record_trade_result(
+        RiskTradeResult(
+            pnl=-20.0,
+            slippage_bps=10.0,
+            filled_at=NOW + timedelta(hours=1),
+        )
+    )
+    assert manager.check_auto_halt(_portfolio(), now=NOW + timedelta(hours=2)).halted
+
+    manager.clear_halt()
+    same_day = manager.check_auto_halt(_portfolio(), now=NOW + timedelta(hours=3))
+
+    assert same_day.halted is True
+    assert same_day.trigger_kind == "daily_loss_limit"
+
+    manager.clear_halt()
+    next_day = manager.check_auto_halt(_portfolio(), now=NOW + timedelta(days=1))
+
+    assert next_day.halted is False
+
+
 def test_auto_halt_triggers_after_five_consecutive_losses() -> None:
     manager = RiskManager()
     for index in range(5):
@@ -227,6 +307,27 @@ def test_auto_halt_is_reversible_via_clear_halt() -> None:
     manager.clear_halt()
 
     assert manager.check_auto_halt(_portfolio(), now=NOW).halted is False
+
+
+def test_clear_halt_records_recovery_cycles_for_rolling_kill_plan_count() -> None:
+    manager = RiskManager()
+    old_halt_at = NOW - timedelta(days=8)
+    recent_halt_at = NOW - timedelta(days=1)
+
+    manager.record_api_error(401, at=old_halt_at, trace_id="trace-old")
+    manager.check_auto_halt(_portfolio(), now=old_halt_at)
+    manager.clear_halt(at=old_halt_at + timedelta(minutes=1))
+    manager.record_api_error(401, at=recent_halt_at, trace_id="trace-recent")
+    manager.check_auto_halt(_portfolio(), now=recent_halt_at)
+    manager.clear_halt(at=recent_halt_at + timedelta(minutes=1))
+    manager.record_api_error(401, at=NOW, trace_id="trace-unrecovered")
+    manager.check_auto_halt(_portfolio(), now=NOW)
+
+    assert len(manager.halt_recovery_cycles) == 2
+    assert [
+        cycle.halt_event.trace_id
+        for cycle in manager.halt_recovery_cycles_since(NOW - timedelta(days=7))
+    ] == ["trace-recent"]
 
 
 def test_clear_halt_resets_non_credential_halt_evidence() -> None:

@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 import os
+from pathlib import Path
 import signal
+import stat
 import sys
 from typing import Callable
 
@@ -246,8 +248,25 @@ def _parameter_grid(raw_value: object) -> dict[str, Sequence[object]]:
 
 
 def _read_text(path: str) -> str:
-    with open(path, encoding="utf-8") as handle:
-        return handle.read()
+    spec_path = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(spec_path, flags)
+        path_stat = os.fstat(fd)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError("not a regular file")
+        if path_stat.st_nlink != 1:
+            raise OSError("multiple hardlinks")
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    except OSError as exc:
+        msg = f"research sweep spec cannot be read safely: {spec_path}"
+        raise ValueError(msg) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _optional_string(value: object) -> str | None:

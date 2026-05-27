@@ -55,6 +55,7 @@ class FakeConnection:
     fetchval_results: list[object] = field(default_factory=list)
     fetchrow_results: list[dict[str, object] | None] = field(default_factory=list)
     fetch_results: list[list[dict[str, object]]] = field(default_factory=list)
+    execute_results: list[str] = field(default_factory=list)
     execute_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
     fetchval_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
     fetchrow_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
@@ -63,7 +64,9 @@ class FakeConnection:
 
     async def execute(self, query: str, *args: object) -> str:
         self.execute_calls.append((query, args))
-        return "EXECUTE"
+        if self.execute_results:
+            return self.execute_results.pop(0)
+        return "UPDATE 1"
 
     async def fetchval(self, query: str, *args: object) -> object:
         self.fetchval_calls.append((query, args))
@@ -220,6 +223,54 @@ async def test_create_version_raises_type_error_when_created_at_is_not_a_datetim
 
 
 @pytest.mark.asyncio
+async def test_set_active_rejects_version_that_does_not_belong_to_strategy() -> None:
+    connection = FakeConnection(execute_results=["UPDATE 0"])
+    observed: list[str] = []
+
+    async def on_strategy_change() -> None:
+        observed.append("changed")
+
+    registry = PostgresStrategyRegistry(FakePool(connection))
+    registry.register_change_callback(on_strategy_change)
+
+    with pytest.raises(LookupError, match="No strategy_versions row matched"):
+        await registry.set_active("alpha", "beta-v1")
+
+    assert observed == []
+
+
+@pytest.mark.asyncio
+async def test_set_active_rejects_version_payload_that_does_not_match_id() -> None:
+    original_strategy = _strategy(strategy_id="alpha", owner="desk-a", drawdown_pct=2.5)
+    tampered_strategy = _strategy(strategy_id="alpha", owner="desk-a", drawdown_pct=9.9)
+    strategy_version_id = compute_strategy_version_id(*original_strategy.snapshot())
+    connection = FakeConnection(
+        fetchrow_results=[
+            {
+                "strategy_id": "alpha",
+                "strategy_version_id": strategy_version_id,
+                "config_json": serialize_strategy_config_json(
+                    *tampered_strategy.snapshot()
+                ),
+            }
+        ]
+    )
+    observed: list[str] = []
+
+    async def on_strategy_change() -> None:
+        observed.append("changed")
+
+    registry = PostgresStrategyRegistry(FakePool(connection))
+    registry.register_change_callback(on_strategy_change)
+
+    with pytest.raises(ValueError, match="strategy_version_id does not match"):
+        await registry.set_active("alpha", strategy_version_id)
+
+    assert connection.execute_calls == []
+    assert observed == []
+
+
+@pytest.mark.asyncio
 async def test_get_by_id_round_trips_json_string_and_handles_missing_rows() -> None:
     strategy = _strategy()
     connection = FakeConnection(
@@ -298,6 +349,30 @@ async def test_list_active_strategies_returns_full_projection_rows() -> None:
             market_selection=strategy.market_selection,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_active_strategies_rejects_payload_that_does_not_match_version_id() -> None:
+    original_strategy = _strategy(strategy_id="alpha", owner="desk-a", drawdown_pct=2.5)
+    tampered_strategy = _strategy(strategy_id="alpha", owner="desk-a", drawdown_pct=9.9)
+    strategy_version_id = compute_strategy_version_id(*original_strategy.snapshot())
+    connection = FakeConnection(
+        fetch_results=[
+            [
+                {
+                    "strategy_id": "alpha",
+                    "strategy_version_id": strategy_version_id,
+                    "config_json": serialize_strategy_config_json(
+                        *tampered_strategy.snapshot()
+                    ),
+                }
+            ]
+        ]
+    )
+    registry = PostgresStrategyRegistry(FakePool(connection))
+
+    with pytest.raises(ValueError, match="strategy_version_id does not match"):
+        await registry.list_active_strategies()
 
 
 @pytest.mark.asyncio
@@ -382,6 +457,10 @@ def test_json_optional_int_and_float_validate_types() -> None:
         _json_float(True, "risk.min_order_size_usdc")
     with pytest.raises(TypeError, match="float-compatible"):
         _json_float(object(), "risk.min_order_size_usdc")
+    with pytest.raises(ValueError, match="finite"):
+        _json_float("NaN", "risk.min_order_size_usdc")
+    with pytest.raises(ValueError, match="finite"):
+        _json_float("Infinity", "risk.min_order_size_usdc")
 
 
 def test_strategy_from_config_json_validates_nested_fields() -> None:

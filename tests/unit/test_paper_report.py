@@ -1,13 +1,25 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+import os
+import stat
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
 
 from pms.config import RiskSettings
 from pms.core.enums import TimeInForce
 from pms.core.models import EvalRecord, TradeDecision
 from scripts.paper_report import (
+    PaperSoakGateConfig,
     PaperReportMetrics,
+    TradeCostBreakdown,
+    _fetch_api_payload,
+    evaluate_paper_soak_gate,
     build_paper_report_diagnostics,
+    load_live_metrics,
+    main,
     metrics_from_api_payloads,
     render_report,
 )
@@ -21,9 +33,16 @@ def test_paper_report_renders_empty_day_without_crashing() -> None:
 
     assert "# Paper Daily Report - 2026-05-03" in report
     assert "| Decisions made | 0 |" in report
-    assert "| Brier score (7d rolling) | N/A | < 0.20 |" in report
+    assert "| Brier score (14d rolling) | N/A | < 0.20 |" in report
+    assert "| Market baseline Brier (14d rolling) | N/A | - |" in report
+    assert "| Brier improvement vs baseline | N/A | > 0 |" in report
+    assert "| Fill rate | N/A | > 0 |" in report
+    assert "| Average fee (bps) | N/A | - |" in report
+    assert "| Average net edge after costs (bps) | N/A | > 0 |" in report
+    assert "| Unresolved incidents | 0 | 0 required |" in report
     assert "| (none today) | - | - |" in report
     assert "No trades today." in report
+    assert "No controller rejection reasons recorded." in report
 
 
 def test_paper_report_contains_all_gate_three_metrics() -> None:
@@ -35,16 +54,23 @@ def test_paper_report_contains_all_gate_three_metrics() -> None:
         decisions_accepted=3,
         decisions_rejected=9,
         fills=2,
-        average_slippage_bps=12.5,
+        average_slippage_bps=10.0,
         todays_pnl=1.25,
         cumulative_pnl=3.5,
         max_drawdown_pct=4.0,
         open_positions=2,
         total_exposure=8.75,
         brier_score_7d=0.18,
+        baseline_brier_score_7d=0.23,
+        brier_improvement_7d=0.05,
+        fill_rate=0.5,
         hit_rate=0.5,
         average_edge_bps=35.0,
+        average_fee_bps=2.5,
+        average_net_edge_bps=22.5,
         sharpe_ratio=0.7,
+        unresolved_incidents=1,
+        rejection_reasons=(("missing_no_token", 2),),
         risk_events=(("12:00", "rate_limit_exceeded", "halted"),),
     )
 
@@ -53,10 +79,867 @@ def test_paper_report_contains_all_gate_three_metrics() -> None:
     assert "| Fills | 2 |" in report
     assert "| Today's P&L | +$1.25 |" in report
     assert "| Max exposure | $50.00 |" in report
-    assert "| Brier score (7d rolling) | 0.18 | < 0.20 |" in report
+    assert "| Brier score (14d rolling) | 0.18 | < 0.20 |" in report
+    assert "| Market baseline Brier (14d rolling) | 0.23 | - |" in report
+    assert "| Brier improvement vs baseline | 0.05 | > 0 |" in report
+    assert "| Fill rate | 50.0% | > 0 |" in report
     assert "| Hit rate (all trades) | 50.0% | > 45% |" in report
     assert "| Average edge (bps) | 35.0 | > 5 |" in report
+    assert "| Average fee (bps) | 2.5 | - |" in report
+    assert "| Average net edge after costs (bps) | 22.5 | > 0 |" in report
     assert "| Sharpe ratio (cumulative) | 0.70 | > 0 |" in report
+    assert "| Unresolved incidents | 1 | 0 required |" in report
+    assert "| missing_no_token | 2 |" in report
+
+
+def test_paper_report_escapes_freeform_table_values() -> None:
+    metrics = PaperReportMetrics(
+        report_date=date(2026, 5, 4),
+        strategy="default|paper\nv1",
+        risk_events=(
+            ("12|00", "bad\ntrigger", "operator saw | FAIL | text"),
+        ),
+        trade_costs=(
+            TradeCostBreakdown(
+                decision_id="decision|1",
+                market_id="market\n1",
+                gross_edge=0.12,
+                spread_cost=0.01,
+                net_edge=0.11,
+            ),
+        ),
+        rejection_reasons=(("missing|required\nfactor", 1),),
+        clamp_rejections=(("market|clamp\n1", 2),),
+    )
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert "| Strategy | default\\|paper v1 | - |" in report
+    assert "| 12\\|00 | bad trigger | operator saw \\| FAIL \\| text |" in report
+    assert "| decision\\|1 | market 1 | 12.0% | 1.0% | 11.0% |" in report
+    assert "| missing\\|required factor | 1 |" in report
+    assert "| market\\|clamp 1 | 2 |" in report
+
+
+def test_paper_soak_gate_passes_when_metrics_meet_go_live_thresholds() -> None:
+    metrics = _passing_gate_metrics()
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert gate.ok is True
+    assert all(check.ok for check in gate.checks)
+    assert gate.require_check("brier_improvement").detail == "0.0500 > 0.0000"
+
+
+def test_paper_soak_gate_fails_missing_or_bad_production_metrics() -> None:
+    metrics = _passing_gate_metrics(
+        day_of_soak=4,
+        fills=0,
+        brier_improvement_7d=None,
+        sharpe_ratio=-0.1,
+        average_net_edge_bps=-1.0,
+        unresolved_incidents=1,
+        risk_events=(("12:00", "sensor stale", "investigate"),),
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert gate.ok is False
+    assert gate.require_check("soak_days").ok is False
+    assert gate.require_check("fills").detail == "0 < 10"
+    assert gate.require_check("brier_improvement").detail == "missing"
+    assert gate.require_check("sharpe_ratio").detail == "-0.1000 <= 0.0000"
+    assert gate.require_check("average_net_edge_bps").detail == "-1.0000 <= 0.0000"
+    assert gate.require_check("unresolved_incidents").detail == "1 unresolved"
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_without_concrete_strategy_version_evidence() -> None:
+    metrics = _passing_gate_metrics(strategy="unknown")
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert gate.ok is False
+    assert gate.require_check("strategy_evidence").detail == (
+        "missing concrete strategy_id@strategy_version_id"
+    )
+
+
+def test_paper_soak_gate_requires_launch_sample_size() -> None:
+    metrics = _passing_gate_metrics(fills=9)
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert gate.ok is False
+    assert gate.require_check("fills").detail == "9 < 10"
+
+
+def test_paper_report_renders_machine_checkable_go_no_go_gate() -> None:
+    report = render_report(
+        _passing_gate_metrics(),
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert "## Go/No-Go Gate" in report
+    assert "**Decision:** GO" in report
+    assert "| brier_improvement | PASS | 0.0500 > 0.0000 |" in report
+
+
+def test_paper_report_require_go_returns_nonzero_when_gate_fails(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "  max_drawdown_pct: 20.0",
+                "  max_daily_loss_usdc: 20.0",
+                "  max_open_positions: 5",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--dry-run",
+            "--require-go",
+        ]
+    )
+
+    assert exit_code == 1
+    assert "**Decision:** NO-GO" in capsys.readouterr().out
+
+
+def test_paper_report_require_go_rejects_future_report_date(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    future_date = datetime.now(tz=UTC).date() + timedelta(days=1)
+
+    exit_code = main(
+        [
+            "--date",
+            future_date.isoformat(),
+            "--config",
+            str(config_path),
+            "--offline",
+            "--dry-run",
+            "--require-go",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == 1
+    assert "paper report --require-go date must not be in the future" in output.err
+    assert "**Decision:**" not in output.out
+
+
+def test_paper_report_dry_run_marks_report_as_non_persisted(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--dry-run",
+        ]
+    )
+
+    report = capsys.readouterr().out
+    assert exit_code == 0
+    assert "| generated_by | scripts/paper_report.py |" in report
+    assert "| generated_at | " in report
+    assert "| artifact_mode | dry_run |" in report
+    assert "| output_path | stdout |" in report
+
+
+def test_paper_report_persisted_file_marks_report_as_persisted(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+    expected_output_path = output_dir / "2026-05-03.md"
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == str(expected_output_path)
+    report = expected_output_path.read_text(encoding="utf-8")
+    assert "| generated_by | scripts/paper_report.py |" in report
+    assert "| generated_at | " in report
+    assert "| artifact_mode | persisted |" in report
+    assert f"| output_path | {expected_output_path} |" in report
+
+
+def test_paper_report_persisted_file_can_target_exact_output_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "reports" / "paper-soak-go-report.md"
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == str(output_path)
+    report = output_path.read_text(encoding="utf-8")
+    assert "| artifact_mode | persisted |" in report
+    assert f"| output_path | {output_path} |" in report
+    assert not (output_path.parent / "2026-05-03.md").exists()
+
+
+def test_paper_report_returns_operator_error_for_unsafe_config_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_target = tmp_path / "config.yaml"
+    config_target.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config-link.yaml"
+    config_path.symlink_to(config_target)
+    output_path = tmp_path / "reports" / "paper-soak-go-report.md"
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output",
+            str(output_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "Config file cannot be read safely" in captured.err
+    assert str(config_path) in captured.err
+    assert not output_path.exists()
+
+
+def test_paper_report_returns_operator_error_for_malformed_report_date(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--date",
+            "2026/05/03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--dry-run",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "--date must be YYYY-MM-DD" in captured.err
+    assert "2026/05/03" in captured.err
+
+
+def test_paper_report_records_absolute_output_path_for_relative_output_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(repo_root)
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output-dir",
+            "../secure/paper-reports",
+        ]
+    )
+
+    expected_output_path = (
+        tmp_path / "secure" / "paper-reports" / "2026-05-03.md"
+    )
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == str(expected_output_path)
+    report = expected_output_path.read_text(encoding="utf-8")
+    assert f"| output_path | {expected_output_path} |" in report
+
+
+def test_paper_report_creates_persisted_output_directory_private(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    assert stat.S_IMODE(output_dir.stat().st_mode) == 0o700
+
+
+def test_paper_report_require_go_rejects_output_inside_working_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(mode=0o700)
+    (repo_root / ".git").mkdir()
+    config_path = repo_root / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = repo_root / "docs" / "paper-reports"
+    monkeypatch.chdir(repo_root)
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--require-go",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "working tree" in captured.err
+    assert not (output_dir / "2026-05-03.md").exists()
+
+
+def test_paper_report_require_go_rejects_output_reusing_local_secret_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secure_dir = tmp_path / "secure"
+    secure_dir.mkdir(mode=0o700)
+    secret_path = secure_dir / "2026-05-03.md"
+    original_secret_text = "polymarket:\n  private_key: original-secret\n"
+    secret_path.write_text(original_secret_text, encoding="utf-8")
+    secret_path.chmod(0o600)
+    config_path = tmp_path / "config.live.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: live",
+                "secret_source: local_file",
+                f"local_secret_file: {secret_path}",
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--require-go",
+            "--output-dir",
+            str(secure_dir),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "LIVE local secret file" in captured.err
+    assert secret_path.read_text(encoding="utf-8") == original_secret_text
+
+
+def test_paper_report_refuses_permissive_persisted_output_directory(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "shared-reports"
+    output_dir.mkdir(mode=0o700)
+    output_dir.chmod(0o755)
+
+    try:
+        exit_code = main(
+            [
+                "--date",
+                "2026-05-03",
+                "--config",
+                str(config_path),
+                "--offline",
+                "--output-dir",
+                str(output_dir),
+            ]
+        )
+        captured = capsys.readouterr()
+    finally:
+        output_dir.chmod(0o700)
+
+    assert exit_code == 2
+    assert "paper report output directory" in captured.err
+    assert "too permissive" in captured.err
+    assert not (output_dir / "2026-05-03.md").exists()
+
+
+def test_paper_report_refuses_symlink_persisted_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir(mode=0o700)
+    target_path = tmp_path / "target-report.md"
+    target_path.write_text("target must not be overwritten\n", encoding="utf-8")
+    expected_output_path = output_dir / "2026-05-03.md"
+    expected_output_path.symlink_to(target_path)
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "regular file" in captured.err
+    assert target_path.read_text(encoding="utf-8") == "target must not be overwritten\n"
+
+
+def test_paper_report_refuses_hardlinked_persisted_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir(mode=0o700)
+    target_path = tmp_path / "target-report.md"
+    target_path.write_text("target must not be overwritten\n", encoding="utf-8")
+    expected_output_path = output_dir / "2026-05-03.md"
+    os.link(target_path, expected_output_path)
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "single-link" in captured.err
+    assert target_path.read_text(encoding="utf-8") == "target must not be overwritten\n"
+
+
+def test_paper_report_hardlink_swap_during_atomic_publish_keeps_linked_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir(mode=0o700)
+    target_path = tmp_path / "target-report.md"
+    target_path.write_text("target must not be overwritten\n", encoding="utf-8")
+    expected_output_path = output_dir / "2026-05-03.md"
+    expected_output_path.write_text("old report\n", encoding="utf-8")
+    real_replace = os.replace
+    swapped = False
+
+    def swapping_replace(
+        src: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        dst: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+    ) -> None:
+        nonlocal swapped
+        observed_path = Path(os.fsdecode(os.fspath(dst)))
+        if observed_path == expected_output_path and not swapped:
+            swapped = True
+            expected_output_path.unlink()
+            os.link(target_path, expected_output_path)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", swapping_replace)
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.err == ""
+    assert swapped is True
+    assert target_path.read_text(encoding="utf-8") == "target must not be overwritten\n"
+    assert "**Decision:** NO-GO" in expected_output_path.read_text(encoding="utf-8")
+
+
+def test_paper_report_preserves_existing_output_when_truncate_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir(mode=0o700)
+    expected_output_path = output_dir / "2026-05-03.md"
+    original_report_text = "# Existing paper-soak GO report\n"
+    expected_output_path.write_text(original_report_text, encoding="utf-8")
+    expected_output_path.chmod(0o600)
+    real_ftruncate = os.ftruncate
+
+    def truncate_then_fail(fd: int, length: int) -> None:
+        real_ftruncate(fd, length)
+        raise OSError("simulated paper report truncate failure")
+
+    monkeypatch.setattr(os, "ftruncate", truncate_then_fail)
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "simulated paper report truncate failure" in captured.err
+    assert expected_output_path.read_text(encoding="utf-8") == original_report_text
+
+
+def test_paper_report_does_not_publish_new_output_when_truncate_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir(mode=0o700)
+    expected_output_path = output_dir / "2026-05-03.md"
+    real_ftruncate = os.ftruncate
+
+    def truncate_then_fail(fd: int, length: int) -> None:
+        real_ftruncate(fd, length)
+        raise OSError("simulated paper report truncate failure")
+
+    monkeypatch.setattr(os, "ftruncate", truncate_then_fail)
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "simulated paper report truncate failure" in captured.err
+    assert not expected_output_path.exists()
+
+
+def test_paper_report_overwrite_clamps_output_permissions(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "risk:",
+                "  max_total_exposure: 50.0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir(mode=0o700)
+    expected_output_path = output_dir / "2026-05-03.md"
+    expected_output_path.write_text("pre-existing report\n", encoding="utf-8")
+    expected_output_path.chmod(0o644)
+
+    exit_code = main(
+        [
+            "--date",
+            "2026-05-03",
+            "--config",
+            str(config_path),
+            "--offline",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    assert stat.S_IMODE(expected_output_path.stat().st_mode) == 0o600
 
 
 def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
@@ -75,18 +958,65 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
             "controller": {
                 "decisions_total": 17,
                 "diagnostics_total": 3,
+                "diagnostic_counts": {
+                    "missing_no_token": 2,
+                    "missing_required_factors": 1,
+                },
             },
             "actuator": {
                 "fills_total": 4,
+                "halt_recovery_cycles_7d": 2,
             },
             "evaluator": {
                 "brier_overall": 0.18,
+                "baseline_brier_overall": 0.23,
+                "brier_improvement_overall": 0.05,
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {
+                "unresolved_feedback_total": 2,
             },
         },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.25,
+            "slippage_bps": 20.0,
+            "pnl_series": _pnl_series(date(2026, 5, 5), pnl=1.0),
+        },
+        decisions=[
+            {
+                "decision_id": "d-1",
+                "market_id": "m-1",
+                "prob_estimate": 0.64,
+                "limit_price": 0.60,
+                "expected_edge": 0.04,
+                "spread_bps_at_decision": 100,
+                "created_at": "2026-05-05T00:00:00+00:00",
+            },
+            {
+                "decision_id": "d-2",
+                "market_id": "m-2",
+                "prob_estimate": 0.72,
+                "limit_price": 0.69,
+                "expected_edge": 0.03,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-05T00:00:00+00:00",
+            },
+        ],
         trades={
             "trades": [
-                {"fill_notional_usdc": 2.5},
-                {"fill_notional_usdc": 1.5},
+                {
+                    "fill_notional_usdc": 100.0,
+                    "fees": 0.02,
+                    "filled_at": "2026-05-05T00:00:00+00:00",
+                },
+                {
+                    "fill_notional_usdc": 100.0,
+                    "fees": 0.03,
+                    "filled_at": "2026-05-05T00:00:00+00:00",
+                },
             ],
         },
         positions={
@@ -109,16 +1039,2031 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
     assert metrics.day_of_soak == 2
     assert metrics.decisions_made == 17
     assert metrics.decisions_rejected == 3
-    assert metrics.fills == 4
+    assert metrics.fills == 2
     assert metrics.open_positions == 2
     assert metrics.total_exposure == 5.0
     assert metrics.cumulative_pnl == 1.0
-    assert metrics.brier_score_7d == 0.18
+    assert metrics.brier_score_7d == 0.16
+    assert metrics.baseline_brier_score_7d == 0.24
+    assert metrics.brier_improvement_7d == 0.08
+    assert metrics.fill_rate == pytest.approx(0.5)
+    assert metrics.hit_rate == pytest.approx(0.25)
+    assert metrics.average_slippage_bps == pytest.approx(20.0)
+    assert metrics.average_fee_bps == pytest.approx(2.5)
+    assert metrics.average_edge_bps == pytest.approx(350.0)
+    assert metrics.average_net_edge_bps == pytest.approx(252.5)
+    assert metrics.rejection_reasons == (
+        ("missing_no_token", 2),
+        ("missing_required_factors", 1),
+    )
+    assert metrics.unresolved_incidents == 2
     assert (
         "sensor",
         "MarketDataSensor stale",
         "last_signal_at=2026-05-04T01:00:00+00:00",
     ) in metrics.risk_events
+    assert (
+        "actuator",
+        "halt_recovery_cycles_7d",
+        "2 recovered halt cycle(s) in trailing 7d",
+    ) in metrics.risk_events
+
+
+def test_metrics_from_api_payloads_derives_report_day_pnl_from_pnl_series() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": [
+                {
+                    "recorded_at": "2026-05-29T23:59:00+00:00",
+                    "pnl": 5.0,
+                },
+                {
+                    "recorded_at": "2026-05-30T12:00:00+00:00",
+                    "pnl": 2.5,
+                },
+                {
+                    "recorded_at": "2026-05-31T00:00:00+00:00",
+                    "pnl": 999.0,
+                },
+            ],
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.todays_pnl == pytest.approx(-2.5)
+    assert (
+        "report generation",
+        "daily P&L evidence missing",
+        "metrics.pnl_series is required",
+    ) not in metrics.risk_events
+
+
+def test_metrics_from_api_payloads_reads_max_drawdown_pct_from_metrics_payload() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "max_drawdown_pct": 12.5,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.max_drawdown_pct == pytest.approx(12.5)
+
+
+def test_metrics_from_api_payloads_reads_sharpe_ratio_from_metrics_payload() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "max_drawdown_pct": 12.5,
+            "sharpe_ratio": 1.5,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.sharpe_ratio == pytest.approx(1.5)
+
+
+def test_paper_soak_gate_fails_when_rejection_reason_evidence_is_missing() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 20,
+            "diagnostics_total": 1,
+            "diagnostic_counts": None,
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "report generation",
+        "controller rejection evidence missing",
+        "status.controller.diagnostic_counts is required when diagnostics_total > 0",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_rejection_reason_evidence_is_incomplete() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 20,
+            "diagnostics_total": 3,
+            "diagnostic_counts": {"missing_no_token": 1},
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "report generation",
+        "controller rejection evidence incomplete",
+        "status.controller.diagnostic_counts sum 1 is less than diagnostics_total 3",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_rejection_reason_evidence_is_overcounted() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 20,
+            "diagnostics_total": 1,
+            "diagnostic_counts": {"missing_no_token": 2},
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "report generation",
+        "controller rejection evidence inconsistent",
+        "status.controller.diagnostic_counts sum 2 does not match diagnostics_total 1",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_rejection_reason_key_is_blank() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 20,
+            "diagnostics_total": 1,
+            "diagnostic_counts": {"": 1},
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "report generation",
+        "controller rejection evidence malformed",
+        "status.controller.diagnostic_counts keys must be non-empty strings",
+    ) in metrics.risk_events
+    assert metrics.rejection_reasons == ()
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_daily_pnl_evidence_is_missing() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            **_baseline_score_metrics(),
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "decision_evidence": _decision_evidence(),
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "report generation",
+        "daily P&L evidence missing",
+        "metrics.pnl_series is required",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_metrics_from_api_payloads_summarizes_secondary_baseline_evidence() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 2,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 1},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": _pnl_series(date(2026, 5, 5)),
+            "baseline_brier_by_source": {
+                "market_implied": 0.24,
+                "mid_quote": 0.23,
+                "last_trade": 0.22,
+                "category_prior": 0.21,
+            },
+            "brier_improvement_by_source": {
+                "market_implied": 0.08,
+                "mid_quote": 0.07,
+                "last_trade": 0.06,
+                "category_prior": 0.05,
+            },
+        },
+        decisions=[
+            {
+                "decision_id": "d-baseline-1",
+                "market_id": "m-baseline-1",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-05T00:00:00+00:00",
+                "decision_evidence": {
+                    "market_implied_baseline_prob_estimate": 0.60,
+                    "mid_quote_baseline_prob_estimate": 0.59,
+                    "last_trade_baseline_prob_estimate": 0.58,
+                    "category_prior_baseline_prob_estimate": 0.55,
+                },
+            },
+            {
+                "decision_id": "d-baseline-2",
+                "market_id": "m-baseline-2",
+                "expected_edge": 0.04,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-05T00:00:00+00:00",
+                "decision_evidence": {
+                    "market_implied_baseline_prob_estimate": 0.42,
+                    "mid_quote_baseline_prob_estimate": 0.43,
+                },
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+        },
+        positions={"positions": []},
+    )
+
+    assert metrics.baseline_evidence is not None
+    assert metrics.baseline_evidence.decisions == 2
+    assert metrics.baseline_evidence.market_implied_count == 2
+    assert metrics.baseline_evidence.mid_quote_count == 2
+    assert metrics.baseline_evidence.last_trade_count == 1
+    assert metrics.baseline_evidence.category_prior_count == 1
+    assert metrics.risk_events == ()
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert "## Baseline Evidence Coverage" in report
+    assert "| market_implied | 2 / 2 | 100.0% |" in report
+    assert "| mid_quote | 2 / 2 | 100.0% |" in report
+    assert "| last_trade | 1 / 2 | 50.0% |" in report
+    assert "| category_prior | 1 / 2 | 50.0% |" in report
+
+
+def test_baseline_evidence_coverage_uses_reported_decision_denominator() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 2,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 1},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": _pnl_series(date(2026, 5, 5)),
+            "baseline_brier_by_source": {
+                "market_implied": 0.24,
+                "mid_quote": 0.23,
+            },
+            "brier_improvement_by_source": {
+                "market_implied": 0.08,
+                "mid_quote": 0.07,
+            },
+        },
+        decisions=[
+            {
+                "decision_id": "d-with-evidence",
+                "market_id": "m-with-evidence",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-05T00:00:00+00:00",
+                "decision_evidence": {
+                    "market_implied_baseline_prob_estimate": 0.60,
+                    "mid_quote_baseline_prob_estimate": 0.59,
+                },
+            },
+            {
+                "decision_id": "d-without-evidence",
+                "market_id": "m-without-evidence",
+                "expected_edge": 0.04,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-05T00:00:00+00:00",
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+        },
+        positions={"positions": []},
+    )
+
+    assert metrics.baseline_evidence is not None
+    assert metrics.baseline_evidence.decisions == 2
+    assert metrics.baseline_evidence.market_implied_count == 1
+    assert metrics.baseline_evidence.mid_quote_count == 1
+    assert (
+        "report generation",
+        "secondary baseline evidence incomplete",
+        "1 reported decision(s) lack decision_evidence",
+    ) in metrics.risk_events
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert "| market_implied | 1 / 2 | 50.0% |" in report
+    assert "| mid_quote | 1 / 2 | 50.0% |" in report
+
+
+def test_paper_soak_gate_fails_when_reported_decisions_lack_baseline_evidence() -> None:
+    metrics = _passing_metrics_from_api_payloads(include_decision_evidence=False)
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.baseline_evidence is not None
+    assert metrics.baseline_evidence.decisions == 1
+    assert metrics.baseline_evidence.market_implied_count == 0
+    assert metrics.baseline_evidence.mid_quote_count == 0
+    assert (
+        "report generation",
+        "secondary baseline evidence incomplete",
+        "1 reported decision(s) lack decision_evidence",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_decision_payload_is_incomplete() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 2,
+            "diagnostics_total": 0,
+            "diagnostic_counts": {},
+        },
+        decision_payload_count=1,
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.decisions_made == 2
+    assert metrics.baseline_evidence is not None
+    assert metrics.baseline_evidence.decisions == 1
+    assert (
+        "report generation",
+        "decision payload incomplete",
+        "/decisions returned 1 row(s), but /status.controller.decisions_total reports 2",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_metrics_from_api_payloads_surfaces_secondary_baseline_scores() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 2,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 1},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "baseline_brier_by_source": {
+                "market_implied": 0.24,
+                "mid_quote": 0.22,
+                "last_trade": 0.23,
+            },
+            "brier_improvement_by_source": {
+                "market_implied": 0.08,
+                "mid_quote": 0.06,
+                "last_trade": 0.07,
+            },
+        },
+        decisions=[
+            {
+                "decision_id": "d-baseline-1",
+                "market_id": "m-baseline-1",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-05T00:00:00+00:00",
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+        },
+        positions={"positions": []},
+    )
+
+    assert metrics.baseline_brier_by_source == {
+        "market_implied": 0.24,
+        "mid_quote": 0.22,
+        "last_trade": 0.23,
+    }
+    assert metrics.brier_improvement_by_source == {
+        "market_implied": 0.08,
+        "mid_quote": 0.06,
+        "last_trade": 0.07,
+    }
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert "## Secondary Baseline Brier" in report
+    assert "| market_implied | 0.2400 | 0.0800 |" in report
+    assert "| mid_quote | 0.2200 | 0.0600 |" in report
+    assert "| last_trade | 0.2300 | 0.0700 |" in report
+
+
+def test_paper_soak_gate_fails_when_secondary_baseline_does_not_improve() -> None:
+    metrics = PaperReportMetrics(
+        report_date=date(2026, 5, 30),
+        strategy="default@default-v2",
+        day_of_soak=30,
+        fills=10,
+        fill_rate=0.4,
+        average_slippage_bps=10.0,
+        cumulative_pnl=2.0,
+        max_drawdown_pct=5.0,
+        open_positions=2,
+        total_exposure=10.0,
+        brier_score_7d=0.18,
+        baseline_brier_score_7d=0.23,
+        brier_improvement_7d=0.05,
+        hit_rate=0.5,
+        average_edge_bps=20.0,
+        average_fee_bps=2.0,
+        average_net_edge_bps=5.0,
+        baseline_brier_by_source={"mid_quote": 0.17},
+        brier_improvement_by_source={"mid_quote": -0.01},
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert gate.ok is False
+    assert gate.require_check("secondary_brier_improvement:mid_quote").detail == (
+        "-0.0100 <= 0.0000"
+    )
+
+
+def test_metrics_from_api_payloads_flags_invalid_secondary_baseline_scores() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 2,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 1},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "baseline_brier_by_source": {
+                "mid_quote": "nan",
+                "last_trade": 0.23,
+            },
+            "brier_improvement_by_source": {
+                "mid_quote": 0.06,
+            },
+        },
+        decisions=[
+            {
+                "decision_id": "d-baseline-1",
+                "market_id": "m-baseline-1",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-05T00:00:00+00:00",
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+        },
+        positions={"positions": []},
+    )
+
+    assert metrics.baseline_brier_by_source == {"last_trade": 0.23}
+    assert (
+        "report generation",
+        "non-finite numeric evidence",
+        "metrics.baseline_brier_by_source.mid_quote must be finite",
+    ) in metrics.risk_events
+    assert (
+        "report generation",
+        "secondary baseline score incomplete",
+        "last_trade baseline_brier_by_source lacks brier_improvement_by_source",
+    ) in metrics.risk_events
+    assert (
+        "report generation",
+        "secondary baseline score incomplete",
+        "mid_quote brier_improvement_by_source lacks baseline_brier_by_source",
+    ) in metrics.risk_events
+
+
+def test_paper_soak_gate_fails_when_secondary_baseline_source_label_is_placeholder() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "max_drawdown_pct": 12.5,
+            "sharpe_ratio": 1.5,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+            "baseline_brier_by_source": {
+                "placeholder_baseline": 0.24,
+                "Market Price": 0.25,
+            },
+            "brier_improvement_by_source": {
+                "placeholder_baseline": 0.08,
+                "Market Price": 0.07,
+            },
+        },
+        decisions=[],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+        strategies={
+            "strategies": [
+                {
+                    "strategy_id": "default",
+                    "active_version_id": "default-v1",
+                }
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.baseline_brier_by_source == {}
+    assert metrics.brier_improvement_by_source == {}
+    assert (
+        "report generation",
+        "secondary baseline source invalid",
+        "metrics.baseline_brier_by_source source must be concrete lowercase snake_case: placeholder_baseline",
+    ) in metrics.risk_events
+    assert (
+        "report generation",
+        "secondary baseline source invalid",
+        "metrics.brier_improvement_by_source source must be concrete lowercase snake_case: Market Price",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "4 risk event(s)"
+
+
+def test_metrics_from_api_payloads_flags_missing_required_baseline_evidence() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"fill_rate": 0.5, "win_rate": 0.5, "slippage_bps": 10.0},
+        decisions=[
+            {
+                "decision_id": "d-baseline-missing",
+                "market_id": "m-baseline-missing",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-05T00:00:00+00:00",
+                "decision_evidence": {
+                    "market_implied_baseline_prob_estimate": 0.60,
+                },
+            },
+        ],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.baseline_evidence is not None
+    assert metrics.baseline_evidence.mid_quote_count == 0
+    assert (
+        "report generation",
+        "secondary baseline evidence incomplete",
+        "1 decision(s) with decision_evidence lack mid_quote_baseline_prob_estimate",
+    ) in metrics.risk_events
+
+
+def test_paper_soak_gate_fails_when_covered_secondary_baseline_lacks_score() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "max_drawdown_pct": 12.5,
+            "sharpe_ratio": 1.5,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+            "baseline_brier_by_source": {
+                "market_implied": 0.24,
+                "mid_quote": 0.23,
+            },
+            "brier_improvement_by_source": {
+                "market_implied": 0.08,
+                "mid_quote": 0.07,
+            },
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "decision_evidence": {
+                    "market_implied_baseline_prob_estimate": 0.60,
+                    "mid_quote_baseline_prob_estimate": 0.59,
+                    "category_prior_baseline_prob_estimate": 0.55,
+                },
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+        strategies={
+            "strategies": [
+                {
+                    "strategy_id": "default",
+                    "active_version_id": "default-v1",
+                }
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.baseline_evidence is not None
+    assert metrics.baseline_evidence.category_prior_count == 1
+    assert (
+        "report generation",
+        "secondary baseline score incomplete",
+        "category_prior decision-time evidence lacks baseline_brier_by_source",
+    ) in metrics.risk_events
+    assert (
+        "report generation",
+        "secondary baseline score incomplete",
+        "category_prior decision-time evidence lacks brier_improvement_by_source",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "2 risk event(s)"
+
+
+def test_metrics_from_api_payloads_prefers_active_strategy_versions_over_status_label() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "strategy": "default",
+            "runner_started_at": "2026-05-03T09:03:03.240858+00:00",
+        },
+        trades={"trades": []},
+        positions={"positions": []},
+        strategies={
+            "strategies": [
+                {
+                    "strategy_id": "default",
+                    "active_version_id": "default-v2",
+                },
+                {
+                    "strategy_id": "h1-flb",
+                    "active_version_id": "h1-flb-v7",
+                },
+            ],
+        },
+    )
+
+    assert metrics.strategy == "default@default-v2, h1-flb@h1-flb-v7"
+
+
+def test_paper_soak_gate_fails_when_strategies_endpoint_has_no_active_versions() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "strategy": "default@legacy-v1",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+            **_baseline_score_metrics(),
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "decision_evidence": _decision_evidence(),
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+        strategies={"strategies": []},
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.strategy == "default@legacy-v1"
+    assert (
+        "report generation",
+        "/strategies active version evidence missing",
+        "paper-soak GO reports require active strategy_id@strategy_version_id rows",
+    ) in metrics.risk_events
+    assert gate.require_check("strategy_evidence").ok is True
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_fetch_api_payload_rejects_duplicate_json_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DuplicateKeyResponse:
+        def __enter__(self) -> DuplicateKeyResponse:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"mode": "paper", "mode": "live"}'
+
+    def fake_urlopen(request: object, timeout: float) -> DuplicateKeyResponse:
+        assert timeout == 5.0
+        return DuplicateKeyResponse()
+
+    monkeypatch.setattr("scripts.paper_report.urlopen", fake_urlopen)
+
+    payload, error = _fetch_api_payload(
+        api_base_url="http://api.test",
+        path="/status",
+        api_token=None,
+    )
+
+    assert payload == {}
+    assert error == "duplicate JSON key: mode"
+
+
+def test_load_live_metrics_fetches_metrics_for_soak_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched_json_paths: list[str] = []
+
+    def fake_fetch_api_json(
+        *,
+        api_base_url: str,
+        path: str,
+        api_token: str | None,
+    ) -> tuple[dict[str, object], str | None]:
+        assert api_base_url == "http://api.test"
+        assert api_token == "token"
+        fetched_json_paths.append(path)
+        if path == "/status":
+            return (
+                {
+                    "mode": "paper",
+                    "runner_started_at": "2026-04-30T00:00:00+00:00",
+                    "sensors": [
+                        {
+                            "name": "MarketDataSensor",
+                            "status": "running",
+                            "last_signal_at": "2026-05-30T00:00:00+00:00",
+                        }
+                    ],
+                    "controller": {
+                        "decisions_total": 20,
+                        "diagnostics_total": 0,
+                        "diagnostic_counts": {},
+                    },
+                    "actuator": {"fills_total": 10},
+                    "evaluator": {
+                        "brier_14d": 0.16,
+                        "baseline_brier_14d": 0.24,
+                        "brier_improvement_14d": 0.08,
+                    },
+                    "supervision": {"unresolved_feedback_total": 0},
+                },
+                None,
+            )
+        if path == "/trades?limit=200":
+            return (
+                {
+                    "trades": [
+                        {
+                            "trade_id": f"trade-{index}",
+                            "fill_notional_usdc": 10.0,
+                            "fees": 0.01,
+                            "filled_at": "2026-05-30T00:00:00+00:00",
+                        }
+                        for index in range(10)
+                    ]
+                },
+                None,
+            )
+        if path == "/positions":
+            return ({"positions": [{"locked_usdc": 10.0, "unrealized_pnl": 2.0}]}, None)
+        if path.startswith("/metrics"):
+            return (
+                {
+                    "fill_rate": 0.5,
+                    "win_rate": 0.5,
+                    "slippage_bps": 10.0,
+                    "window_started_at": "2026-04-30T00:00:00+00:00",
+                    "window_ended_at": "2026-05-31T00:00:00+00:00",
+                },
+                None,
+            )
+        if path == "/strategies":
+            return ({"strategies": []}, None)
+        raise AssertionError(f"unexpected JSON path: {path}")
+
+    def fake_fetch_api_payload(
+        *,
+        api_base_url: str,
+        path: str,
+        api_token: str | None,
+    ) -> tuple[object, str | None]:
+        assert api_base_url == "http://api.test"
+        assert path == "/decisions?limit=200"
+        assert api_token == "token"
+        return (
+            [
+                {
+                    "decision_id": "d-paper-soak",
+                    "market_id": "m-paper-soak",
+                    "expected_edge": 0.05,
+                    "spread_bps_at_decision": 50,
+                    "created_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            None,
+        )
+
+    monkeypatch.setattr("scripts.paper_report._fetch_api_json", fake_fetch_api_json)
+    monkeypatch.setattr("scripts.paper_report._fetch_api_payload", fake_fetch_api_payload)
+
+    metrics = load_live_metrics(
+        report_date=date(2026, 5, 30),
+        api_base_url="http://api.test",
+        api_token="token",
+    )
+
+    metrics_path = next(path for path in fetched_json_paths if path.startswith("/metrics"))
+    parsed = urlsplit(metrics_path)
+    query = parse_qs(parsed.query)
+    assert parsed.path == "/metrics"
+    assert query == {
+        "since": ["2026-04-30T00:00:00+00:00"],
+        "until": ["2026-05-31T00:00:00+00:00"],
+    }
+    assert metrics.average_slippage_bps == pytest.approx(10.0)
+
+
+def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
+    trades = [
+        {
+            "trade_id": f"trade-{index}",
+            "fill_notional_usdc": 10.0,
+            "fees": 0.01,
+            "filled_at": "2026-05-30T00:00:00+00:00",
+        }
+        for index in range(9)
+    ]
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+            },
+        ],
+        trades={"trades": trades},
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.fills == 9
+    assert gate.ok is False
+    assert gate.require_check("fills").detail == "9 < 10"
+
+
+def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
+    trades = [
+        {
+            "trade_id": f"trade-{index}",
+            "fill_notional_usdc": 10.0,
+            "fees": 0.01,
+            "filled_at": "2026-05-30T00:00:00+00:00",
+        }
+        for index in range(9)
+    ]
+    trades.append(
+        {
+            "trade_id": "trade-before-soak",
+            "fill_notional_usdc": 10.0,
+            "fees": 0.01,
+            "filled_at": "2026-04-29T23:59:59+00:00",
+        }
+    )
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+            },
+        ],
+        trades={"trades": trades},
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.fills == 9
+    assert gate.ok is False
+    assert gate.require_check("fills").detail == "9 < 10"
+
+
+def test_paper_soak_gate_excludes_decisions_outside_soak_window() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+        },
+        decisions=[
+            {
+                "decision_id": "d-before-soak",
+                "market_id": "m-before-soak",
+                "expected_edge": 0.50,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-04-29T23:59:59+00:00",
+            },
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.001,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.average_edge_bps == pytest.approx(10.0)
+    assert metrics.average_net_edge_bps == pytest.approx(-60.0)
+    assert gate.ok is False
+    assert gate.require_check("average_net_edge_bps").detail == "-60.0000 <= 0.0000"
+
+
+def test_paper_soak_gate_fails_when_metrics_payload_contains_non_finite_value() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": "inf",
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+            **_baseline_score_metrics(),
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "decision_evidence": _decision_evidence(),
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.fill_rate is None
+    assert (
+        "report generation",
+        "non-finite numeric evidence",
+        "metrics.fill_rate must be finite",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("fill_rate").detail == "missing"
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_position_payload_contains_non_finite_value() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+            **_baseline_score_metrics(),
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "decision_evidence": _decision_evidence(),
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": "nan", "unrealized_pnl": 2.0},
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.total_exposure == 0.0
+    assert (
+        "report generation",
+        "non-finite numeric evidence",
+        "positions.locked_usdc must be finite",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_trade_payload_contains_non_finite_fee_value() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+            **_baseline_score_metrics(),
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "decision_evidence": _decision_evidence(),
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": "nan",
+                    "fee_bps": 1.0,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.average_net_edge_bps == pytest.approx(439.0)
+    assert (
+        "report generation",
+        "non-finite numeric evidence",
+        "trades.fees must be finite",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_decision_payload_contains_non_finite_edge_value() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+            **_baseline_score_metrics(),
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "prob_estimate": 0.55,
+                "limit_price": 0.50,
+                "expected_edge": "nan",
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "decision_evidence": _decision_evidence(),
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.average_net_edge_bps == pytest.approx(430.0)
+    assert (
+        "report generation",
+        "non-finite numeric evidence",
+        "decisions.expected_edge must be finite",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_unresolved_incident_evidence_is_missing() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.unresolved_incidents == 0
+    assert (
+        "report generation",
+        "unresolved incident evidence missing",
+        "status.supervision.unresolved_feedback_total is required",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_status_mode_is_not_paper() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "backtest",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+        },
+        decisions=[
+            {
+                "decision_id": "d-paper-soak",
+                "market_id": "m-paper-soak",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "report generation",
+        "paper mode evidence missing",
+        "status.mode must be paper for paper-soak GO reports",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
 
 
 def test_metrics_from_api_payloads_records_missing_status_as_risk_event() -> None:
@@ -130,9 +3075,21 @@ def test_metrics_from_api_payloads_records_missing_status_as_risk_event() -> Non
     )
 
     assert metrics.day_of_soak == 0
-    assert metrics.risk_events == (
-        ("report generation", "runner_started_at missing", "check /status"),
-    )
+    assert (
+        "report generation",
+        "runner_started_at missing",
+        "check /status",
+    ) in metrics.risk_events
+    assert (
+        "report generation",
+        "paper mode evidence missing",
+        "status.mode must be paper for paper-soak GO reports",
+    ) in metrics.risk_events
+    assert (
+        "report generation",
+        "unresolved incident evidence missing",
+        "status.supervision.unresolved_feedback_total is required",
+    ) in metrics.risk_events
 
 
 def test_paper_report_renders_calibration_and_cost_diagnostics() -> None:
@@ -197,6 +3154,172 @@ def _eval_record(decision_id: str, *, prob: float, outcome: float) -> EvalRecord
         fill_status="filled",
         recorded_at=datetime(2026, 5, 8, tzinfo=UTC),
         citations=[],
+    )
+
+
+def _passing_gate_metrics(
+    *,
+    strategy: str = "default@default-v2",
+    day_of_soak: int = 30,
+    fills: int = 10,
+    brier_improvement_7d: float | None = 0.05,
+    sharpe_ratio: float | None = 0.5,
+    average_net_edge_bps: float | None = 5.0,
+    unresolved_incidents: int = 0,
+    risk_events: tuple[tuple[str, str, str], ...] = (),
+) -> PaperReportMetrics:
+    return PaperReportMetrics(
+        report_date=date(2026, 5, 30),
+        strategy=strategy,
+        day_of_soak=day_of_soak,
+        decisions_made=100,
+        fills=fills,
+        fill_rate=0.4,
+        average_slippage_bps=10.0,
+        todays_pnl=0.0,
+        cumulative_pnl=2.0,
+        max_drawdown_pct=5.0,
+        open_positions=2,
+        total_exposure=10.0,
+        brier_score_7d=0.18,
+        baseline_brier_score_7d=0.23,
+        brier_improvement_7d=brier_improvement_7d,
+        hit_rate=0.5,
+        average_edge_bps=20.0,
+        average_fee_bps=2.0,
+        average_net_edge_bps=average_net_edge_bps,
+        sharpe_ratio=sharpe_ratio,
+        unresolved_incidents=unresolved_incidents,
+        risk_events=risk_events,
+    )
+
+
+def _pnl_series(report_date: date, *, pnl: float = 0.0) -> list[dict[str, object]]:
+    return [
+        {
+            "recorded_at": (
+                datetime(
+                    report_date.year,
+                    report_date.month,
+                    report_date.day,
+                    tzinfo=UTC,
+                ).isoformat()
+            ),
+            "pnl": pnl,
+        }
+    ]
+
+
+def _baseline_score_metrics() -> dict[str, object]:
+    return {
+        "baseline_brier_by_source": {
+            "market_implied": 0.24,
+            "mid_quote": 0.23,
+        },
+        "brier_improvement_by_source": {
+            "market_implied": 0.08,
+            "mid_quote": 0.07,
+        },
+    }
+
+
+def _decision_evidence() -> dict[str, float]:
+    return {
+        "market_implied_baseline_prob_estimate": 0.60,
+        "mid_quote_baseline_prob_estimate": 0.59,
+    }
+
+
+def _passing_metrics_from_api_payloads(
+    *,
+    controller: dict[str, object] | None = None,
+    include_decision_evidence: bool = True,
+    decision_payload_count: int | None = None,
+) -> PaperReportMetrics:
+    report_date = date(2026, 5, 30)
+    controller_payload: dict[str, object] = {
+        "decisions_total": 1,
+        "diagnostics_total": 0,
+        "diagnostic_counts": {},
+    }
+    if controller is not None:
+        controller_payload.update(controller)
+
+    raw_decisions_total = controller_payload.get("decisions_total")
+    decisions_total = raw_decisions_total if isinstance(raw_decisions_total, int) else 1
+    decision_count = (
+        max(0, decisions_total)
+        if decision_payload_count is None
+        else max(0, decision_payload_count)
+    )
+    decision_rows: list[dict[str, object]] = []
+    for index in range(decision_count):
+        decision_row: dict[str, object] = {
+            "decision_id": f"d-paper-soak-{index}",
+            "market_id": f"m-paper-soak-{index}",
+            "expected_edge": 0.05,
+            "spread_bps_at_decision": 50,
+            "created_at": "2026-05-30T00:00:00+00:00",
+        }
+        if include_decision_evidence:
+            decision_row["decision_evidence"] = _decision_evidence()
+        decision_rows.append(decision_row)
+
+    return metrics_from_api_payloads(
+        report_date=report_date,
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": controller_payload,
+            "actuator": {"fills_total": 10},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 0.5,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "max_drawdown_pct": 12.5,
+            "sharpe_ratio": 1.5,
+            "pnl_series": _pnl_series(report_date),
+            **_baseline_score_metrics(),
+        },
+        decisions=decision_rows,
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-{index}",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                }
+                for index in range(10)
+            ]
+        },
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+            ],
+        },
+        strategies={
+            "strategies": [
+                {
+                    "strategy_id": "default",
+                    "active_version_id": "default-v1",
+                }
+            ],
+        },
     )
 
 

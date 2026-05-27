@@ -3,17 +3,17 @@
 This document defines the **strategic** exit criteria that stop live trading
 program-wide and require an explicit operator review before resumption. It is
 distinct from the **intra-session** auto-halt triggers in
-`src/pms/actuator/risk.py:21-29`, which pause a single live session and can be
-cleared with `RiskManager.clear_halt()` once venue / credential / order state
-is reconciled.
+`src/pms/actuator/risk.py:21-30`, which pause a single live session. Most can
+be cleared with `RiskManager.clear_halt()` once venue / credential / order
+state is reconciled; the daily-loss cap remains armed until the next UTC day.
 
 A halt pauses the session. A kill-plan threshold, when tripped, ends the live
 program until the named owner runs the named resume gate.
 
 ## Scope
 
-- **Applies once:** `live_trading_enabled=true` AND the first-order operator
-  gate (`docs/operations/live-polymarket-runbook.md` §First Live Order) has
+- **Applies once:** `live_trading_enabled=true` AND the operator approval gate
+  (`docs/operations/live-polymarket-runbook.md` §Operator Approval Gate) has
   been used at least once.
 - **Does not apply:** during BACKTEST or PAPER mode, or before the first live
   order. Intra-session halts (`risk.py`) continue to apply on every mode.
@@ -28,9 +28,10 @@ order**, by the operator listed under each threshold's *Owner*. Once ratified,
 they are not renegotiable while live capital is at risk; renegotiation
 requires the program to first hit its resume gate.
 
-The numeric defaults below come from the suggested values in STO-11. Each is
-marked `TODO_DECISION:` until the operator confirms or amends. **Do not flip
-`live_trading_enabled=true` while any threshold is unresolved.**
+The numeric defaults below are the committed v1 kill-plan thresholds. An
+operator may amend them before first live capital, but LIVE mode must not start
+until the final values are ratified via `live_exit_criteria_ratified_by` and
+`live_exit_criteria_ratified_at` in `config.live.yaml`.
 
 ---
 
@@ -42,14 +43,8 @@ is *distinct* from `risk.max_drawdown_pct` (intra-session circuit breaker
 defined in `src/pms/config.py:128` and enforced at
 `src/pms/actuator/risk.py:140-150`).
 
-**Threshold (default).** **35%** of starting live bankroll.
-
-> `TODO_DECISION:` confirm `35%` or amend.
-> *Options:* 25% (more conservative; matches a one-stddev tail for many
-> mean-reverting strategies), 35% (default per issue body), 50% (softer but
-> closer to typical bankroll-management heuristics for high-variance
-> strategies).
-> *Who can resolve:* user (operator).
+**Threshold.** **35%** of starting live bankroll. Alternative values must be
+written into the ratified operator review before `live_trading_enabled=true`.
 
 **Measurement source.** `Portfolio.max_drawdown_pct` as exposed via the
 `/status` endpoint and surfaced in the daily paper/live report
@@ -74,35 +69,35 @@ defined in `src/pms/config.py:128` and enforced at
 **Definition.** Maximum number of consecutive trading days during which the
 strategy's Brier score does not show *positive improvement* over a fixed
 **baseline forecaster** computed on the same resolved markets. Improvement is
-measured as a non-trivial, sustained reduction in Brier; the exact statistical
-test is part of the decision below.
+measured as a non-trivial, sustained reduction in Brier under the v1 mechanical
+test below.
 
-**Threshold (default).** **14 consecutive trading days** without positive
+**Threshold.** **14 consecutive trading days** without positive improvement.
+The v1 mechanical test is rolling 14-day mean Brier improvement strictly
+greater than zero.
+
+**Baseline.** The mechanical baseline is the decision-time market-implied YES
+probability carried by the accepted decision: `limit_price` for YES decisions,
+and `1 - limit_price` for NO decisions. This keeps the baseline paired to the
+same market, decision time, and resolved outcome as the strategy forecast.
+Each persisted decision also carries secondary baseline evidence for the
+decision-time mid-quote and last-trade probability when those prices were
+available; resolved fills persist per-source baseline probability and Brier
+maps on `EvalRecord`.
+
+**Measurement source.** Each `EvalRecord` stores `baseline_prob_estimate` and
+`baseline_brier_score` alongside the strategy Brier score. `/status` exposes
+`evaluator.baseline_brier_overall` and
+`evaluator.brier_improvement_overall`, plus
+`evaluator.baseline_brier_14d` and `evaluator.brier_improvement_14d` for the
+rolling kill-plan window. `/metrics` exposes the overall fields in the ops view
+and per-strategy rollups, including `baseline_brier_by_source` and
+`brier_improvement_by_source` maps for secondary baselines. The daily report
+displays the market baseline Brier and improvement rows, secondary baseline
+coverage from `/decisions` including category-prior evidence when supplied,
+and a `Secondary Baseline Brier` table from `/metrics`. The Go/No-Go gate
+fails when any available secondary baseline source has non-positive Brier
 improvement.
-
-> `TODO_DECISION:` confirm `14d` or amend, AND specify the baseline.
-> *Baseline options:*
-> a. **Mid-quote prior** — at decision time, use the venue mid as the
->    forecast. Naive but venue-priced and free.
-> b. **Historical category prior** — use the long-run resolved frequency for
->    the market's category as the forecast.
-> c. **Last-trade prior** — last trade price snapshot at decision time.
-> *Improvement test options:* (i) mean Brier strictly lower over rolling
-> window; (ii) one-sided paired test at α=0.10; (iii) bootstrapped 90%
-> confidence interval excludes 0.
-> *Who can resolve:* user (operator), with input from research.
-
-**Measurement source — gap.** `evaluator.brier_overall`
-(`src/pms/evaluation/metrics.py:16`) is currently **absolute**, not vs. a
-baseline. The paired baseline-vs-strategy series is **not yet instrumented**.
-A follow-up implementation issue is required before this threshold is
-mechanically checkable; until then, the operator computes the comparison
-manually from the daily report and stored decisions.
-
-> `TODO_DECISION:` open a follow-up implementation issue to wire
-> `brier_vs_baseline_<window>d` into the evaluator and `/status` once the
-> baseline is chosen above.
-> *Who can resolve:* tech lead (Erdong) once Threshold 2's baseline is fixed.
 
 **Owner.** Operator. (Research can recommend, operator decides.)
 
@@ -121,24 +116,18 @@ manually from the daily report and stored decisions.
 ## Threshold 3 — Halt-recovery cycle ceiling
 
 **Definition.** Maximum number of distinct intra-session halts (any
-`HaltTriggerKind` other than `none`, see `src/pms/actuator/risk.py:21-29`)
+`HaltTriggerKind` other than `none`, see `src/pms/actuator/risk.py:21-30`)
 followed by a `RiskManager.clear_halt()` recovery, observed within a rolling
 **7-day window**. A halt that is not recovered (i.e. live remains paused) does
 not count toward this threshold; only halt → recover → halt-again cycles do.
 
-**Threshold (default).** **3 halt-recovery cycles per rolling 7 days**.
+**Threshold.** **3 halt-recovery cycles per rolling 7 days**.
 
-> `TODO_DECISION:` confirm `3` per rolling 7d, or amend.
-> *Options:* 2/week (stricter — almost any operational instability stops the
-> program), 3/week (default), 5/week (more permissive; appropriate only if
-> early operational issues are expected and capped).
-> *Who can resolve:* user (operator).
-
-**Measurement source.** Count of `HaltEvent` entries in
-`RiskManager.halt_events` (`src/pms/actuator/risk.py:74-75`) emitted within
-the trailing 7-day window, excluding events that did not subsequently call
-`clear_halt()`. Surfaced via the supervision alerting feed introduced in
-PR #60 (`feat: add supervision alerting foundation`).
+**Measurement source.** Count of `HaltRecoveryCycle` entries in
+`RiskManager.halt_recovery_cycles` emitted when `clear_halt()` recovers an
+active halt. `/status` exposes the rolling 7-day count as
+`actuator.halt_recovery_cycles_7d`, excluding halts that have not been
+recovered.
 
 **Owner.** Operator. (Tech lead reviews root cause for each halt; operator
 decides whether to keep going.)
@@ -165,13 +154,8 @@ threshold at any time. Verification commands:
 |-----------|------------------|-----------------|
 | T1 — Drawdown | `curl -s :8000/status \| jq '.portfolio.max_drawdown_pct'` | < ratified value |
 | T1 — Drawdown (daily) | `uv run python scripts/paper_report.py --date <YYYY-MM-DD>` | `max_drawdown_pct` row |
-| T2 — Brier vs baseline | (pending instrumentation) — manual: `uv run python scripts/paper_report.py` and compare `brier_score_7d` to baseline computed from resolved-market history | strategy strictly lower |
-| T3 — Halt-recovery cycles | `curl -s :8000/status \| jq '.actuator.halt_events_7d'` *(if exposed)* or count `HaltEvent` rows in the supervision feed for the trailing 7d | < ratified value |
-
-> `TODO_DECISION:` confirm whether `/status` should expose `halt_events_7d`
-> and `brier_vs_baseline_14d` directly. Recommended: yes — it removes the
-> manual-counting failure mode and lets a single dashboard render the
-> kill-plan health. Tracked as a follow-up to this issue.
+| T2 — Brier vs baseline | `curl -s :8000/status \| jq '.evaluator.brier_improvement_14d'` and `uv run python scripts/paper_report.py --date <YYYY-MM-DD>` | > 0 |
+| T3 — Halt-recovery cycles | `curl -s :8000/status \| jq '.actuator.halt_recovery_cycles_7d'` | < ratified value |
 
 ## Review cadence
 
@@ -190,4 +174,5 @@ threshold at any time. Verification commands:
 
 | Date | Change | Author |
 |------|--------|--------|
-| 2026-05-07 | Initial draft for ratification (STO-11). Defaults per issue body; all values marked `TODO_DECISION:` until operator confirms. | Erdong (Tech Lead) |
+| 2026-05-07 | Initial draft for ratification (STO-11). Defaults per issue body. | Erdong (Tech Lead) |
+| 2026-05-25 | Committed v1 default thresholds and linked T2/T3 to `/status` machine-observable fields. | Codex |

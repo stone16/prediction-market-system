@@ -5,7 +5,8 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Protocol
+from math import isfinite
+from typing import Protocol, cast
 
 from pms.core.models import BookSummary
 from pms.core.models import FillRecord, TradeDecision
@@ -49,7 +50,9 @@ class EvalSpool:
     quote_reader: QuoteReader | None = None
     quote_scorer: QuoteScorer = field(default_factory=QuoteScorer)
     quote_lag_seconds: int = 0
-    _queue: asyncio.Queue[tuple[FillRecord, TradeDecision]] = field(
+    _queue: asyncio.Queue[
+        tuple[FillRecord, TradeDecision, Mapping[str, object] | None]
+    ] = field(
         default_factory=asyncio.Queue,
     )
     _task: asyncio.Task[None] | None = None
@@ -58,8 +61,14 @@ class EvalSpool:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run())
 
-    def enqueue(self, fill: FillRecord, decision: TradeDecision) -> None:
-        self._queue.put_nowait((fill, decision))
+    def enqueue(
+        self,
+        fill: FillRecord,
+        decision: TradeDecision,
+        *,
+        decision_evidence: Mapping[str, object] | None = None,
+    ) -> None:
+        self._queue.put_nowait((fill, decision, decision_evidence))
 
     async def join(self) -> None:
         await self._queue.join()
@@ -74,12 +83,20 @@ class EvalSpool:
 
     async def _run(self) -> None:
         while True:
-            fill, decision = await self._queue.get()
+            fill, decision, decision_evidence = await self._queue.get()
             try:
                 if fill.resolved_outcome is None:
                     await self._record_quote_eval(fill, decision)
                     continue
-                await self.store.append(self.scorer.score(fill, decision))
+                await self.store.append(
+                    self.scorer.score(
+                        fill,
+                        decision,
+                        baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
+                            decision_evidence,
+                        ),
+                    )
+                )
                 try:
                     await self._generate_feedback()
                 except Exception:  # noqa: BLE001
@@ -127,3 +144,34 @@ class EvalSpool:
             )
         except Exception:  # noqa: BLE001
             logger.exception("quote evaluation failed in evaluator spool")
+
+
+def _baseline_prob_estimates_from_evidence(
+    decision_evidence: Mapping[str, object] | None,
+) -> dict[str, float]:
+    if decision_evidence is None:
+        return {}
+
+    baselines: dict[str, float] = {}
+    for evidence_key, baseline_source in (
+        ("market_implied_baseline_prob_estimate", "market_implied"),
+        ("mid_quote_baseline_prob_estimate", "mid_quote"),
+        ("last_trade_baseline_prob_estimate", "last_trade"),
+        ("category_prior_baseline_prob_estimate", "category_prior"),
+    ):
+        probability = _probability_or_none(decision_evidence.get(evidence_key))
+        if probability is not None:
+            baselines[baseline_source] = probability
+    return baselines
+
+
+def _probability_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        probability = float(cast(int | float | str, value))
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(probability) or probability < 0.0 or probability > 1.0:
+        return None
+    return probability

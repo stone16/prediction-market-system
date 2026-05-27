@@ -15,12 +15,13 @@ export async function GET(_: Request, context: RouteContext) {
   }
 
   let upstream: Response;
+  const encodedId = encodeURIComponent(id);
   try {
-    upstream = await fetch(new URL(`/share/${id}`, baseUrl), {
+    upstream = await fetch(new URL(`/share/${encodedId}`, baseUrl), {
       cache: 'no-store'
     });
   } catch (error) {
-    console.warn(`PMS upstream unavailable at ${baseUrl}/share/${id}`, error);
+    console.warn(`PMS upstream unavailable at ${baseUrl}/share/${encodedId}`, error);
     return NextResponse.json({ detail: 'Research backend unavailable' }, { status: 503 });
   }
 

@@ -8,16 +8,22 @@ type RouteContext = {
 export async function POST(request: Request, context: RouteContext) {
   const { id } = await context.params;
   const body = await request.text();
-  const upstream = await upstreamResponse(`/decisions/${id}/accept`, {
-    method: 'POST',
-    headers: {
-      'content-type': request.headers.get('content-type') ?? 'application/json'
-    },
-    body
-  });
+  const upstream = await upstreamResponse(
+    `/decisions/${encodeURIComponent(id)}/accept`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': request.headers.get('content-type') ?? 'application/json'
+      },
+      body
+    }
+  );
   if (upstream) return upstream;
   return NextResponse.json(
-    { detail: 'PMS_API_BASE_URL is not configured — idea acceptance requires a live backend.' },
+    {
+      detail:
+        'PMS_API_BASE_URL is not configured — idea acceptance requires a live backend.'
+    },
     { status: 503 }
   );
 }

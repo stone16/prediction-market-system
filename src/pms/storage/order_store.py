@@ -169,6 +169,7 @@ def _order_payload(order: OrderState) -> dict[str, object]:
         "outcome": order.outcome,
         "time_in_force": order.time_in_force,
         "intent_key": order.intent_key,
+        "risk_group_id": order.risk_group_id,
     }
 
 
@@ -201,6 +202,7 @@ def _order_from_row(row: asyncpg.Record) -> OrderState:
         outcome=cast(Any, row["outcome"] or payload.get("outcome")),
         time_in_force=cast(str | None, row["time_in_force"] or payload.get("time_in_force")),
         intent_key=cast(str | None, row["intent_key"] or payload.get("intent_key")),
+        risk_group_id=cast(str | None, payload.get("risk_group_id")),
     )
 
 

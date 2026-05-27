@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import inspect
 import logging
-from collections.abc import Iterator, Sequence
+from math import isfinite
+from hashlib import sha256
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -38,6 +41,11 @@ from pms.actuator.exit_monitor import (
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import PMSSettings, validate_live_mode_ready
+from pms.controller.baselines import (
+    CategoryPriorBaselineEstimator,
+    enrich_signal_with_category_prior,
+    load_category_prior_observations_csv,
+)
 from pms.controller.diagnostics import ControllerDiagnostic
 from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
@@ -54,6 +62,7 @@ from pms.core.interfaces import (
 )
 from pms.core.models import (
     FillRecord,
+    LiveTradingDisabledError,
     MarketSignal,
     Opportunity,
     OrderState,
@@ -78,11 +87,18 @@ from pms.event_stream import RuntimeEventBus
 from pms.factors.catalog import ensure_factor_catalog
 from pms.factors.definitions import REGISTERED
 from pms.factors.service import FactorService
+from pms.live_preflight import (
+    ensure_live_market_data_freshness,
+    live_preflight_active_strategies_fingerprint,
+    require_live_preflight_artifact,
+    require_live_preflight_active_strategies_artifact,
+)
 from pms.market_selection import (
     MarketSelector,
     SensorSubscriptionController,
     UnionMergePolicy,
 )
+from pms.redaction import redact_live_error_values
 from pms.sensor.adapters.historical import HistoricalSensor
 from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
@@ -111,13 +127,16 @@ from pms.strategies.anchoring import (
 from pms.strategies.anchoring.source import AnchoringMarketSnapshotReader
 from pms.strategies.flb import FlbAgent, FlbController, FlbStrategyModule
 from pms.strategies.flb.source import (
+    FlbCalibrationModel,
     FlbMarketSnapshot,
     FlbMarketSnapshotReader,
     LiveFlbSource,
+    load_flb_calibration_csv,
 )
 from pms.strategies.intents import StrategyContext
 from pms.strategies.projections import (
     ActiveStrategy,
+    CalibrationSpec,
     EvalSpec,
     FactorCompositionStep,
     ForecasterSpec,
@@ -209,6 +228,7 @@ class ActuatorWorkItem:
     decision: TradeDecision
     signal: MarketSignal | None
     dedup_acquired: bool = False
+    decision_evidence: Mapping[str, object] = field(default_factory=dict)
 
     def __iter__(self) -> Iterator[TradeDecision | MarketSignal | None]:
         yield self.decision
@@ -308,6 +328,7 @@ class Runner:
     _reselection_task: asyncio.Task[None] | None = field(init=False, default=None)
     _reselection_lock: asyncio.Lock = field(init=False)
     _reselection_requested: asyncio.Event = field(init=False)
+    _strategy_change_callbacks_registered: bool = field(init=False, default=False)
     _active_sensors: tuple[ISensor, ...] = field(init=False, default=())
     _paper_orderbooks: dict[str, dict[str, Any]] = field(
         init=False, default_factory=dict
@@ -320,9 +341,27 @@ class Runner:
     _position_exit_keys_by_decision: dict[
         str, tuple[str, str, str, str | None, str]
     ] = field(init=False, default_factory=dict)
+    _category_prior_estimator: CategoryPriorBaselineEstimator | None = field(
+        init=False,
+        default=None,
+    )
+    _flb_calibration_model: FlbCalibrationModel | None = field(
+        init=False,
+        default=None,
+    )
     _live_trading_suspended_reason: str | None = field(init=False, default=None)
+    _live_preflight_artifact_validated: bool = field(init=False, default=False)
+    _live_preflight_active_strategies_fingerprint: str | None = field(
+        init=False,
+        default=None,
+    )
 
     def __post_init__(self) -> None:
+        if self.config.mode == RunMode.LIVE:
+            self.portfolio = _portfolio_with_configured_budget(
+                self.portfolio,
+                total_budget_usdc=self.config.risk.max_total_exposure,
+            )
         self.state = RunnerState(mode=self.config.mode)
         self._controller_factory = ControllerPipelineFactory(settings=self.config)
         self._evaluator_spool = EvalSpool(
@@ -338,6 +377,10 @@ class Runner:
         self._reselection_lock = asyncio.Lock()
         self._reselection_requested = asyncio.Event()
         self._position_exit_monitor = PositionExitMonitor(self.config.position_exit)
+        self._category_prior_estimator = _category_prior_estimator_from_settings(
+            self.config
+        )
+        self._flb_calibration_model = _flb_calibration_model_from_settings(self.config)
         self.actuator_executor = self._build_executor(self.config.mode)
 
     @property
@@ -440,6 +483,8 @@ class Runner:
 
         if self.config.mode == RunMode.LIVE:
             validate_live_mode_ready(self.config)
+            require_live_preflight_artifact(self.config)
+            self._live_preflight_artifact_validated = True
 
         self._stop_event.clear()
         self._controller_pipeline_error = None
@@ -461,9 +506,17 @@ class Runner:
                     msg = "Runner PostgreSQL pool is not initialized"
                     raise RuntimeError(msg)
                 self._strategy_registry = PostgresStrategyRegistry(self._pg_pool)
+                if self.config.mode == RunMode.LIVE:
+                    self._live_preflight_active_strategies_fingerprint = (
+                        await require_live_preflight_active_strategies_artifact(
+                            self.config,
+                            self._strategy_registry,
+                        )
+                    )
                 await ensure_factor_catalog(self._pg_pool)
                 if self.config.mode == RunMode.LIVE:
                     await self._assert_no_unresolved_submission_unknown_incidents()
+                    await self._assert_live_market_data_freshness()
                 await self._ensure_default_v2_version()
                 if self._pg_pool is None:
                     msg = "Runner PostgreSQL pool is not initialized"
@@ -496,6 +549,8 @@ class Runner:
             if self._pg_pool is not None:
                 self._decision_expiry_task = asyncio.create_task(self._decision_expiry_loop())
         except Exception:
+            self._live_preflight_artifact_validated = False
+            self._live_preflight_active_strategies_fingerprint = None
             await self._cleanup_after_start_failure()
             raise
 
@@ -575,6 +630,8 @@ class Runner:
         self._controller_pipeline_tasks = {}
         self._controller_release_cancel_point = None
         self._reselection_task = None
+        self._live_preflight_artifact_validated = False
+        self._live_preflight_active_strategies_fingerprint = None
 
         try:
             await self._close_pg_pool()
@@ -597,8 +654,15 @@ class Runner:
                 self._task = None
 
     def switch_mode(self, new_mode: RunMode) -> None:
+        self._live_preflight_artifact_validated = False
+        self._live_preflight_active_strategies_fingerprint = None
         self.config.mode = new_mode
         self.state.mode = new_mode
+        if new_mode == RunMode.LIVE:
+            self.portfolio = _portfolio_with_configured_budget(
+                self.portfolio,
+                total_budget_usdc=self.config.risk.max_total_exposure,
+            )
         self.actuator_executor = self._build_executor(new_mode)
 
     async def wait_until_idle(self) -> None:
@@ -661,9 +725,14 @@ class Runner:
                 position_sizer=KellySizer(self.config.risk),
                 portfolio=self.portfolio,
                 max_slippage_bps=self.config.controller.max_slippage_bps,
+                entry_execution_cost_bps=(
+                    self.config.strategies.flb_entry_execution_cost_bps
+                ),
+                fee_rate=self.config.strategies.flb_fee_rate,
                 time_in_force=TimeInForce(
                     self.config.controller.time_in_force.upper()
                 ),
+                calibration_model=self._flb_calibration_model,
             ),
             controller=FlbController(),
             agent=FlbAgent(),
@@ -884,6 +953,9 @@ class Runner:
             msg = "Runner PostgreSQL pool is not initialized"
             raise RuntimeError(msg)
 
+        if self._strategy_registry is not None:
+            self._register_strategy_change_callbacks()
+
         discovery_sensor = _find_discovery_sensor(sensors)
         subscription_sink = _find_subscription_sink(sensors)
         if discovery_sensor is None or subscription_sink is None:
@@ -904,19 +976,26 @@ class Runner:
         self._reselection_task = asyncio.create_task(self._periodic_reselection_loop())
 
     def _register_strategy_change_callbacks(self) -> None:
+        if self._strategy_change_callbacks_registered:
+            return
         registry = self._strategy_registry
         if registry is None:
             msg = "Runner strategy registry is not initialized"
             raise RuntimeError(msg)
         registry.register_change_callback(self._request_reselection)
         registry.register_change_callback(self._sync_controller_runtimes)
+        self._strategy_change_callbacks_registered = True
 
     def _unregister_strategy_change_callbacks(self) -> None:
         registry = self._strategy_registry
+        if not self._strategy_change_callbacks_registered:
+            return
         if registry is None:
+            self._strategy_change_callbacks_registered = False
             return
         registry.unregister_change_callback(self._request_reselection)
         registry.unregister_change_callback(self._sync_controller_runtimes)
+        self._strategy_change_callbacks_registered = False
 
     def _assert_no_legacy_jsonl_paths(self) -> None:
         for store in (self.eval_store, self.feedback_store):
@@ -1070,21 +1149,19 @@ class Runner:
                 ),
                 settings=self.config,
             )
-        # STO-10 cp-02: reuse `live_emergency_audit_path` as the single
-        # consolidated authorization-event log. First-order audit records
-        # have a distinct schema (event/preview fields) from emergency
-        # records (phase/decision/error), so a reader filters by the
-        # `event` vs `phase` field to extract first-order events.
-        # TODO_DECISION (user): switch to a dedicated `first_order_audit_path`
-        # if you prefer separate sinks; this is the recommended default
-        # from the STO-10 spec.
         return PolymarketActuator(
             self.config,
             client=PolymarketSDKClient(),
             operator_gate=_first_live_order_gate(self.config),
             quote_provider=quote_provider,
             audit_writer=JsonlFirstOrderAuditWriter(
-                Path(self.config.live_emergency_audit_path)
+                Path(self.config.live_first_order_audit_path)
+            ),
+            live_preflight_validated=(
+                mode == RunMode.LIVE and self._live_preflight_artifact_validated
+            ),
+            live_preflight_active_strategies_fingerprint=(
+                self._live_preflight_active_strategies_fingerprint
             ),
         )
 
@@ -1093,6 +1170,17 @@ class Runner:
             self._paper_orderbooks[signal.token_id] = signal.orderbook
             return
         self._paper_orderbooks[signal.market_id] = signal.orderbook
+
+    def _enrich_signal_with_controller_baselines(
+        self,
+        signal: MarketSignal,
+    ) -> MarketSignal:
+        if self._category_prior_estimator is None:
+            return signal
+        return enrich_signal_with_category_prior(
+            signal,
+            self._category_prior_estimator,
+        )
 
     async def _controller_loop(self) -> None:
         while True:
@@ -1137,6 +1225,7 @@ class Runner:
                     continue
 
                 try:
+                    signal = self._enrich_signal_with_controller_baselines(signal)
                     opportunity: Opportunity | None = None
                     decision: TradeDecision | None = None
                     if isinstance(runtime.controller, OpportunityAwareController):
@@ -1168,15 +1257,24 @@ class Runner:
                             opportunity,
                             created_at=created_at,
                         )
+                        factor_snapshot_hash = (
+                            opportunity.factor_snapshot_hash
+                            if opportunity is not None
+                            else None
+                        )
+                        decision_evidence = _decision_evidence_from_signal(
+                            signal,
+                            decision=decision,
+                            factor_snapshot_hash=factor_snapshot_hash,
+                            quote_source=self.config.controller.quote_source,
+                            decision_created_at=created_at,
+                        )
                         await self.decision_store.insert(
                             decision,
-                            factor_snapshot_hash=(
-                                opportunity.factor_snapshot_hash
-                                if opportunity is not None
-                                else None
-                            ),
+                            factor_snapshot_hash=factor_snapshot_hash,
                             created_at=created_at,
                             expires_at=expires_at,
+                            decision_evidence=decision_evidence,
                         )
                         update_status = getattr(
                             self.decision_store,
@@ -1202,6 +1300,7 @@ class Runner:
                             decision,
                             signal=signal,
                             queued_at=created_at,
+                            decision_evidence=decision_evidence,
                         )
                 finally:
                     queue.task_done()
@@ -1305,7 +1404,20 @@ class Runner:
                             )
                         logger.warning("fill persistence failed: %s", error)
                     self.portfolio = _portfolio_with_fill(self.portfolio, fill)
-                    self._evaluator_spool.enqueue(fill, decision)
+                    decision_evidence = work_item.decision_evidence
+                    if not decision_evidence and signal is not None:
+                        decision_evidence = _decision_evidence_from_signal(
+                            signal,
+                            decision=decision,
+                            factor_snapshot_hash=None,
+                            quote_source=self.config.controller.quote_source,
+                            decision_created_at=signal.fetched_at,
+                        )
+                    self._evaluator_spool.enqueue(
+                        fill,
+                        decision,
+                        decision_evidence=decision_evidence,
+                    )
                     await self.event_bus.publish(
                         "actuator.fill",
                         _fill_event_summary(fill),
@@ -1320,6 +1432,7 @@ class Runner:
                     next_status=_decision_status_from_order(order_state),
                 )
             except PolymarketSubmissionUnknownError as error:
+                detail = _runtime_error_detail(error, self.config)
                 self._live_trading_suspended_reason = "submission_unknown"
                 self._stop_event.set()
                 unknown_order_state = error.order_state
@@ -1346,21 +1459,25 @@ class Runner:
                 )
                 await self.event_bus.publish(
                     "error",
-                    f"live trading suspended for submission_unknown: {error}",
+                    f"live trading suspended for submission_unknown: {detail}",
                     market_id=decision.market_id,
                     decision_id=decision.decision_id,
                 )
-                logger.warning("live trading suspended for submission_unknown: %s", error)
+                logger.warning(
+                    "live trading suspended for submission_unknown: %s",
+                    detail,
+                )
             except LivePersistenceFailureError:
                 raise
             except Exception as error:
+                detail = _runtime_error_detail(error, self.config)
                 await self.event_bus.publish(
                     "error",
-                    f"actuator execution failed: {error}",
+                    f"actuator execution failed: {detail}",
                     market_id=decision.market_id,
                     decision_id=decision.decision_id,
                 )
-                logger.warning("actuator execution failed: %s", error)
+                logger.warning("actuator execution failed: %s", detail)
             finally:
                 self._release_position_exit_key(decision.decision_id)
                 self._decision_queue.task_done()
@@ -1390,6 +1507,7 @@ class Runner:
         signal: MarketSignal | None,
         dedup_acquired: bool = False,
         queued_at: datetime | None = None,
+        decision_evidence: Mapping[str, object] | None = None,
     ) -> None:
         await self._update_decision_status_if_supported(
             decision.decision_id,
@@ -1402,6 +1520,7 @@ class Runner:
                 decision=decision,
                 signal=signal,
                 dedup_acquired=dedup_acquired,
+                decision_evidence=decision_evidence or {},
             )
         )
 
@@ -1555,6 +1674,7 @@ class Runner:
     ) -> None:
         self._live_trading_suspended_reason = "persistence_failure"
         self._stop_event.set()
+        detail = _runtime_error_detail(error, self.config)
         audit_writer = LiveEmergencyAuditWriter(
             Path(self.config.live_emergency_audit_path)
         )
@@ -1564,16 +1684,17 @@ class Runner:
                 decision=decision,
                 order_state=order_state,
                 error=error,
+                error_detail=detail,
             )
         except Exception as audit_error:  # noqa: BLE001
             logger.warning("live emergency audit append failed: %s", audit_error)
         await self.event_bus.publish(
             "error",
-            f"live trading suspended: persistence failure during {phase}: {error}",
+            f"live trading suspended: persistence failure during {phase}: {detail}",
             market_id=decision.market_id,
             decision_id=decision.decision_id,
         )
-        msg = f"LIVE persistence failure during {phase}: {error}"
+        msg = f"LIVE persistence failure during {phase}: {detail}"
         raise LivePersistenceFailureError(msg) from error
 
     async def _sweep_expired_decisions_once(
@@ -1596,21 +1717,41 @@ class Runner:
         acquire = getattr(pool, "acquire", None)
         if acquire is None:
             return
-        async with acquire() as connection:
-            count = await connection.fetchval(
-                """
-                SELECT COUNT(*)
-                FROM order_intents
-                WHERE outcome = 'submission_unknown'
-                  AND reconciled_at IS NULL
-                """
+        try:
+            async with acquire() as connection:
+                count = await connection.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM order_intents
+                    WHERE outcome = 'submission_unknown'
+                      AND reconciled_at IS NULL
+                    """
+                )
+        except Exception as error:  # noqa: BLE001
+            detail = _runtime_error_detail(error, self.config)
+            msg = (
+                "LIVE submission_unknown guard failed "
+                f"({type(error).__name__}: {detail}); refusing to start "
+                "without verified incident state"
             )
+            raise RuntimeError(msg) from error
         if int(count or 0) > 0:
             msg = (
                 "LIVE start refused: unresolved submission_unknown incident "
                 "requires venue reconciliation before resume"
             )
             raise RuntimeError(msg)
+
+    async def _assert_live_market_data_freshness(self) -> None:
+        if self.config.mode != RunMode.LIVE:
+            return
+        pool = self._pg_pool
+        if pool is None:
+            return
+        acquire = getattr(pool, "acquire", None)
+        if acquire is None:
+            return
+        await ensure_live_market_data_freshness(self.config, pool)
 
     async def _metrics_by_strategy(
         self,
@@ -1760,6 +1901,7 @@ class Runner:
         self._controller_pipeline_tasks = {}
         self._controller_release_cancel_point = None
         self._reselection_task = None
+        self._live_preflight_artifact_validated = False
         await self._close_pg_pool()
 
         if stop_error is not None:
@@ -1768,14 +1910,13 @@ class Runner:
     async def _reconcile_portfolio_from_db(self) -> None:
         """Rebuild the in-memory portfolio from persisted fills.
 
-        On a fresh process start the default Runner portfolio is hardcoded
-        (`Portfolio(total_usdc=1000, free_usdc=1000, locked_usdc=0,
-        open_positions=[])`). Without this step, restarting in LIVE mode
+        On a fresh process start the default Runner portfolio is seeded from
+        `risk.max_total_exposure`. Without this step, restarting in LIVE mode
         forgets all open Polymarket exposure: every new BUY decision sizes
-        against the hardcoded `free_usdc` while the venue actually holds
-        real positions. Empirically observed during the 2026-04-25 PAPER
-        soak — DB held 44 positions / $1984 locked while a fresh runner
-        instance reported `locked_usdc=0`.
+        against the configured free budget while the venue actually holds real
+        positions. Empirically observed during the 2026-04-25 PAPER soak — DB
+        held 44 positions / $1984 locked while a fresh runner instance reported
+        `locked_usdc=0`.
 
         Reconciliation aggregates fills via `FillStore.read_positions`,
         sums `locked_usdc`, and rebuilds the in-memory `Portfolio`. We
@@ -1796,9 +1937,10 @@ class Runner:
                 # autostart_error path on /status (see api/app.py
                 # lifespan). Do not start trading without a verified
                 # baseline.
+                detail = _runtime_error_detail(error, self.config)
                 msg = (
                     "LIVE portfolio reconciliation failed "
-                    f"({type(error).__name__}: {error}); refusing to start "
+                    f"({type(error).__name__}: {detail}); refusing to start "
                     "without a verified portfolio"
                 )
                 raise RuntimeError(msg) from error
@@ -1860,10 +2002,20 @@ class Runner:
                 return
             reconciler = PolymarketVenueAccountReconciler()
         credentials = validate_live_mode_ready(self.config)
-        snapshot = await reconciler.snapshot(credentials)
-        report = await reconciler.compare(self.portfolio, snapshot)
+        try:
+            snapshot = await reconciler.snapshot(credentials)
+            report = await reconciler.compare(self.portfolio, snapshot)
+        except Exception as error:  # noqa: BLE001
+            detail = _runtime_error_detail(error, self.config)
+            msg = (
+                "LIVE venue account reconciliation failed "
+                f"({type(error).__name__}: {detail}); refusing to start "
+                "without a verified venue account"
+            )
+            raise RuntimeError(msg) from error
         if not report.ok:
-            details = "; ".join(report.mismatches) or "unknown mismatch"
+            raw_details = "; ".join(report.mismatches) or "unknown mismatch"
+            details = _runtime_error_detail(RuntimeError(raw_details), self.config)
             msg = f"LIVE venue account reconciliation mismatch: {details}"
             raise RuntimeError(msg)
 
@@ -2128,20 +2280,15 @@ class Runner:
                 )
             ]
 
-        if (
-            self._strategy_registry is not None
-            and hasattr(self._strategy_registry, "list_active_strategies")
-            and (
-                (
-                    self._market_selector is not None
-                    and hasattr(self._market_selector, "select_per_strategy")
-                )
-                or not self._owns_pg_pool
-            )
-        ):
-            active_strategies = await self._strategy_registry.list_active_strategies()
+        if self._should_build_strategy_registry_controllers():
+            registry = self._strategy_registry
+            if registry is None:
+                msg = "Runner strategy registry is not initialized"
+                raise RuntimeError(msg)
+            active_strategies = await registry.list_active_strategies()
             if not active_strategies:
                 return []
+            self._require_live_active_strategies_match_preflight(active_strategies)
             scopes: dict[str, frozenset[str]] = {}
             if (
                 self._market_selector is not None
@@ -2173,6 +2320,41 @@ class Runner:
                 asset_ids=None,
             )
         ]
+
+    def _should_build_strategy_registry_controllers(self) -> bool:
+        registry = self._strategy_registry
+        if registry is None or not hasattr(registry, "list_active_strategies"):
+            return False
+        if self.config.mode == RunMode.LIVE:
+            return True
+        if (
+            self._market_selector is not None
+            and hasattr(self._market_selector, "select_per_strategy")
+        ):
+            return True
+        return not self._owns_pg_pool
+
+    def _require_live_active_strategies_match_preflight(
+        self,
+        active_strategies: Sequence[ActiveStrategy],
+    ) -> None:
+        if self.config.mode != RunMode.LIVE:
+            return
+        expected = self._live_preflight_active_strategies_fingerprint
+        if expected is None:
+            return
+        observed = live_preflight_active_strategies_fingerprint(active_strategies)
+        if observed == expected:
+            return
+        self._live_preflight_artifact_validated = False
+        self._live_preflight_active_strategies_fingerprint = None
+        self._live_trading_suspended_reason = "active_strategy_preflight_mismatch"
+        self.actuator_executor = self._build_executor(self.config.mode)
+        msg = (
+            "LIVE active strategies changed after credentialed preflight; "
+            "rerun pms-live preflight before live trading"
+        )
+        raise LiveTradingDisabledError(msg)
 
 
 @dataclass(frozen=True)
@@ -2425,7 +2607,11 @@ def _first_live_order_gate(
     approval_path = settings.polymarket.first_live_order_approval_path
     if approval_path is None or approval_path.strip() == "":
         return DenyFirstLiveOrderGate()
-    return FileFirstLiveOrderGate(Path(approval_path))
+    return FileFirstLiveOrderGate(
+        Path(approval_path),
+        require_approver_sidecar=settings.mode == RunMode.LIVE,
+        approval_max_age_s=settings.polymarket.operator_approval_max_age_s,
+    )
 
 
 def _controller_diagnostic(controller: object) -> ControllerDiagnostic | None:
@@ -2468,7 +2654,15 @@ def _default_active_strategy(settings: PMSSettings) -> ActiveStrategy:
     config = StrategyConfig(
         strategy_id="default",
         factor_composition=DEFAULT_V2_FACTOR_COMPOSITION,
-        metadata=(("owner", "system"), ("tier", "default")),
+        metadata=(
+            ("owner", "system"),
+            ("tier", "default"),
+            ("live_allowed", "true"),
+            ("alpha_source", "warehouse_flb_decile_model_v1"),
+            ("edge_model_source", "paper_soak_net_edge_model_v1"),
+            ("calibration_source", "paper_soak_eval_records_v1"),
+            ("evidence_source", "paper_soak_go_report_v1"),
+        ),
     )
     risk = RiskParams(
         max_position_notional_usdc=settings.risk.max_position_per_market,
@@ -2507,6 +2701,7 @@ def _default_active_strategy(settings: PMSSettings) -> ActiveStrategy:
         eval_spec=eval_spec,
         forecaster=forecaster,
         market_selection=market_selection,
+        calibration=CalibrationSpec(enabled=True),
     )
 
 
@@ -2577,6 +2772,31 @@ def _build_discovery_http_client(settings: PMSSettings) -> httpx.AsyncClient:
     )
 
 
+def _portfolio_with_configured_budget(
+    portfolio: Portfolio,
+    *,
+    total_budget_usdc: float,
+) -> Portfolio:
+    if not _is_default_runner_portfolio(portfolio):
+        return portfolio
+    return replace(
+        portfolio,
+        total_usdc=total_budget_usdc,
+        free_usdc=total_budget_usdc,
+    )
+
+
+def _is_default_runner_portfolio(portfolio: Portfolio) -> bool:
+    return (
+        portfolio.total_usdc == 1000.0
+        and portfolio.free_usdc == 1000.0
+        and portfolio.locked_usdc == 0.0
+        and portfolio.open_positions == []
+        and portfolio.max_drawdown_pct is None
+        and portfolio.max_open_positions is None
+    )
+
+
 def _fill_from_order(
     order_state: OrderState,
     decision: TradeDecision,
@@ -2612,6 +2832,7 @@ def _fill_from_order(
         strategy_id=decision.strategy_id,
         strategy_version_id=decision.strategy_version_id,
         resolved_outcome=_resolved_outcome(signal),
+        risk_group_id=decision.risk_group_id,
     )
 
 
@@ -2657,6 +2878,7 @@ def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
                 avg_entry_price=avg_entry_price,
                 locked_usdc=position.locked_usdc + fill_size,
                 current_price=fill.fill_price,
+                risk_group_id=position.risk_group_id or fill.risk_group_id,
             )
             break
     else:
@@ -2694,6 +2916,7 @@ def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
                 opened_at=fill.filled_at,
                 strategy_id=fill.strategy_id,
                 strategy_version_id=fill.strategy_version_id,
+                risk_group_id=fill.risk_group_id,
             )
         )
     return replace(
@@ -2774,6 +2997,22 @@ def _coerce_actuator_work_item(
     raise TypeError(msg)
 
 
+def _runtime_error_detail(error: BaseException, settings: PMSSettings) -> str:
+    message = str(error)
+    if settings.mode != RunMode.LIVE:
+        return message
+    return redact_live_error_values(
+        message,
+        (
+            settings.polymarket.private_key,
+            settings.polymarket.api_key,
+            settings.polymarket.api_secret,
+            settings.polymarket.api_passphrase,
+            settings.polymarket.funder_address,
+        ),
+    )
+
+
 async def _execute_actuator_work_item(
     executor: Any,
     decision: TradeDecision,
@@ -2823,6 +3062,208 @@ def _raw_factor_steps(
             continue
         raw_steps.append(step)
     return tuple(raw_steps)
+
+
+def _decision_evidence_from_signal(
+    signal: MarketSignal,
+    *,
+    decision: TradeDecision,
+    factor_snapshot_hash: str | None,
+    quote_source: str,
+    decision_created_at: datetime,
+) -> dict[str, object]:
+    book_top_levels = _top_orderbook_levels(signal.orderbook)
+    return {
+        "market_id": signal.market_id,
+        "token_id": signal.token_id,
+        "book_token_id": signal.token_id,
+        "decision_token_id": decision.token_id,
+        "decision_outcome": decision.outcome,
+        "decision_side": decision.side,
+        "venue": signal.venue,
+        "market_status": signal.market_status,
+        "signal_fetched_at": signal.fetched_at.isoformat(),
+        "yes_price": signal.yes_price,
+        "book_top_levels": book_top_levels,
+        "book_hash": _decision_book_hash(
+            market_id=signal.market_id,
+            token_id=signal.token_id,
+            book_top_levels=book_top_levels,
+        ),
+        "book_depth": 5,
+        "market_implied_baseline_prob_estimate": (
+            _market_implied_baseline_prob_estimate(decision)
+        ),
+        "mid_quote_baseline_prob_estimate": (
+            _mid_quote_baseline_prob_estimate(book_top_levels)
+        ),
+        "last_trade_baseline_prob_estimate": (
+            _last_trade_baseline_prob_estimate(signal)
+        ),
+        "category_prior_baseline_prob_estimate": (
+            _category_prior_baseline_prob_estimate(signal)
+        ),
+        "book_age_ms": _optional_float(signal.external_signal.get("book_age_ms")),
+        "decision_latency_ms": _signal_to_decision_latency_ms(
+            signal,
+            decision_created_at=decision_created_at,
+        ),
+        "quote_source": quote_source,
+        "factor_snapshot_hash": factor_snapshot_hash,
+        "spread_bps_at_decision": decision.spread_bps_at_decision,
+        "external_signal_keys": sorted(str(key) for key in signal.external_signal),
+    }
+
+
+def _category_prior_estimator_from_settings(
+    settings: PMSSettings,
+) -> CategoryPriorBaselineEstimator | None:
+    raw_path = settings.controller.category_prior_observations_path
+    if raw_path is None or raw_path.strip() == "":
+        return None
+
+    loaded = load_category_prior_observations_csv(raw_path)
+    logger.info(
+        "loaded category prior observations",
+        extra={
+            "event": "category_prior_observations_loaded",
+            "path": raw_path,
+            "observation_count": len(loaded.observations),
+            "skipped_ambiguous_count": loaded.skipped_ambiguous_count,
+        },
+    )
+    return CategoryPriorBaselineEstimator(
+        observations=loaded.observations,
+        min_category_samples=settings.controller.category_prior_min_category_samples,
+        min_global_samples=settings.controller.category_prior_min_global_samples,
+        smoothing_alpha=settings.controller.category_prior_smoothing_alpha,
+        smoothing_beta=settings.controller.category_prior_smoothing_beta,
+    )
+
+
+def _flb_calibration_model_from_settings(
+    settings: PMSSettings,
+) -> FlbCalibrationModel | None:
+    raw_path = settings.strategies.flb_calibration_path
+    if raw_path is None or raw_path.strip() == "":
+        return None
+
+    model = load_flb_calibration_csv(
+        raw_path,
+        min_sample_count=settings.strategies.flb_min_calibration_samples,
+    )
+    logger.info(
+        "loaded FLB calibration model",
+        extra={
+            "event": "flb_calibration_model_loaded",
+            "path": raw_path,
+            "signal_count": len(model.calibrations),
+            "min_sample_count": model.min_sample_count,
+        },
+    )
+    return model
+
+
+def _market_implied_baseline_prob_estimate(decision: TradeDecision) -> float:
+    if decision.outcome == "NO":
+        return 1.0 - decision.limit_price
+    return decision.limit_price
+
+
+def _mid_quote_baseline_prob_estimate(
+    book_top_levels: dict[str, list[dict[str, float]]],
+) -> float | None:
+    bids = book_top_levels["bids"]
+    asks = book_top_levels["asks"]
+    if not bids or not asks:
+        return None
+    return _probability_or_none((bids[0]["price"] + asks[0]["price"]) / 2.0)
+
+
+def _last_trade_baseline_prob_estimate(signal: MarketSignal) -> float | None:
+    for value in (
+        signal.external_signal.get("last_trade_price"),
+        signal.orderbook.get("last_trade_price"),
+    ):
+        probability = _probability_or_none(value)
+        if probability is not None:
+            return probability
+    return None
+
+
+def _category_prior_baseline_prob_estimate(signal: MarketSignal) -> float | None:
+    return _probability_or_none(
+        signal.external_signal.get("category_prior_baseline_prob_estimate")
+    )
+
+
+def _top_orderbook_levels(
+    orderbook: dict[str, Any],
+    *,
+    depth: int = 5,
+) -> dict[str, list[dict[str, float]]]:
+    return {
+        "bids": _side_levels(orderbook.get("bids"), depth=depth),
+        "asks": _side_levels(orderbook.get("asks"), depth=depth),
+    }
+
+
+def _side_levels(value: object, *, depth: int) -> list[dict[str, float]]:
+    if not isinstance(value, list):
+        return []
+
+    levels: list[dict[str, float]] = []
+    for raw_level in value[:depth]:
+        if not isinstance(raw_level, dict):
+            continue
+        price = _optional_float(raw_level.get("price"))
+        size = _optional_float(raw_level.get("size"))
+        if price is None or size is None:
+            continue
+        levels.append({"price": price, "size": size})
+    return levels
+
+
+def _decision_book_hash(
+    *,
+    market_id: str,
+    token_id: str | None,
+    book_top_levels: dict[str, list[dict[str, float]]],
+) -> str:
+    payload = {
+        "market_id": market_id,
+        "token_id": token_id,
+        "book_top_levels": book_top_levels,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _signal_to_decision_latency_ms(
+    signal: MarketSignal,
+    *,
+    decision_created_at: datetime,
+) -> float:
+    return max(0.0, (decision_created_at - signal.fetched_at).total_seconds() * 1000.0)
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(cast(int | float | str, value))
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(parsed):
+        return None
+    return parsed
+
+
+def _probability_or_none(value: object) -> float | None:
+    parsed = _optional_float(value)
+    if parsed is None or parsed < 0.0 or parsed > 1.0:
+        return None
+    return parsed
 
 
 def _decision_created_at(

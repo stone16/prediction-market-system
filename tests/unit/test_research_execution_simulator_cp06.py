@@ -114,6 +114,8 @@ def _execution_model(
     ] = "immediate_or_cancel",
     latency_ms: float = 0.0,
     slippage_bps: float = 0.0,
+    displayed_depth_fill_ratio: float = 1.0,
+    adverse_selection_bps: float = 0.0,
     order_ttl_ms: int = 60_000,
     price_invalidation_streak: int = 3,
 ) -> ExecutionModel:
@@ -123,6 +125,8 @@ def _execution_model(
         latency_ms=latency_ms,
         staleness_ms=1_000.0,
         fill_policy=fill_policy,
+        displayed_depth_fill_ratio=displayed_depth_fill_ratio,
+        adverse_selection_bps=adverse_selection_bps,
         order_ttl_ms=order_ttl_ms,
         price_invalidation_streak=price_invalidation_streak,
         replay_window_ms=86_400_000,
@@ -178,6 +182,41 @@ async def test_simulator_limit_blocks_and_returns_partial_for_ioc() -> None:
     assert state.filled_notional_usdc == pytest.approx(50.0)
     assert state.remaining_notional_usdc == pytest.approx(150.0)
     assert state.raw_status == "ioc_partial_remainder_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_simulator_haircuts_displayed_depth_for_queue_position() -> None:
+    simulator = BacktestExecutionSimulator()
+    signal = _signal(asks=[{"price": 0.25, "size": 400.0}])
+
+    state = await simulator.execute(
+        signal=signal,
+        decision=_decision(limit_price=0.25, notional_usdc=100.0),
+        portfolio=_portfolio(),
+        execution_model=_execution_model(displayed_depth_fill_ratio=0.5),
+    )
+
+    assert state.status == OrderStatus.CANCELLED.value
+    assert state.filled_notional_usdc == pytest.approx(50.0)
+    assert state.filled_quantity == pytest.approx(200.0)
+    assert state.remaining_notional_usdc == pytest.approx(50.0)
+    assert state.raw_status == "ioc_partial_remainder_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_simulator_applies_adverse_selection_before_limit_eligibility() -> None:
+    simulator = BacktestExecutionSimulator()
+
+    state = await simulator.execute(
+        signal=_signal(asks=[{"price": 0.25, "size": 400.0}]),
+        decision=_decision(limit_price=0.251, notional_usdc=50.0),
+        portfolio=_portfolio(),
+        execution_model=_execution_model(adverse_selection_bps=100.0),
+    )
+
+    assert state.status == "rejected"
+    assert state.raw_status == "ioc_unfilled"
+    assert state.filled_notional_usdc == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio
@@ -305,6 +344,57 @@ async def test_simulator_applies_slippage_bps_to_fill_price() -> None:
 
     assert order_state.status == OrderStatus.MATCHED.value
     assert order_state.fill_price == pytest.approx(0.41 * 1.01)
+
+
+@pytest.mark.asyncio
+async def test_simulator_combines_adverse_selection_and_slippage() -> None:
+    simulator = BacktestExecutionSimulator()
+
+    order_state = await simulator.execute(
+        signal=_signal(
+            bids=[{"price": 0.39, "size": 100.0}],
+            asks=[{"price": 0.40, "size": 100.0}],
+        ),
+        decision=_decision(limit_price=0.50, notional_usdc=10.0),
+        portfolio=_portfolio(),
+        execution_model=_execution_model(
+            adverse_selection_bps=100.0,
+            slippage_bps=50.0,
+        ),
+    )
+
+    assert order_state.status == OrderStatus.MATCHED.value
+    assert order_state.fill_price == pytest.approx(0.40 * 1.01 * 1.005)
+
+
+@pytest.mark.asyncio
+async def test_gtc_price_invalidation_uses_adverse_selection_price() -> None:
+    simulator = BacktestExecutionSimulator()
+    opened = await simulator.execute(
+        signal=_signal(asks=[{"price": 0.25, "size": 0.0}]),
+        decision=_decision(
+            time_in_force=TimeInForce.GTC,
+            limit_price=0.251,
+            notional_usdc=50.0,
+        ),
+        portfolio=_portfolio(),
+        execution_model=_execution_model(fill_policy="good_til_cancelled"),
+    )
+
+    assert opened.status == OrderStatus.LIVE.value
+
+    results = await simulator.advance(
+        signal=_signal(asks=[{"price": 0.25, "size": 400.0}]),
+        execution_model=_execution_model(
+            fill_policy="good_til_cancelled",
+            adverse_selection_bps=100.0,
+            price_invalidation_streak=1,
+        ),
+    )
+
+    assert len(results) == 1
+    assert results[0].status == OrderStatus.CANCELLED.value
+    assert results[0].raw_status == "cancelled_limit_invalidated"
 
 
 @pytest.mark.asyncio

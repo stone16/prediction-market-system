@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 import inspect
+import importlib.machinery
+import importlib.util
 import logging
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
 
 import pytest
+from pydantic import SecretStr
 
 from pms.actuator import executor
 from pms.actuator.adapters import backtest
@@ -26,17 +31,36 @@ from pms.actuator.adapters.polymarket import (
     PolymarketActuator,
     PolymarketOrderResult,
     PolymarketOrderRequest,
+    PolymarketVenueAccountReconciler,
     PolymarketSDKClient,
     PolymarketSubmissionUnknownError,
 )
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
-from pms.config import ControllerSettings, PMSSettings, PolymarketSettings, RiskSettings
-from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side, TimeInForce
-from pms.core.models import LiveTradingDisabledError, OrderState, Portfolio, TradeDecision
+from pms.config import (
+    ControllerSettings,
+    DiscordSettings,
+    PMSSettings,
+    PolymarketSettings,
+    RiskSettings,
+)
+from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, RunMode, Side, TimeInForce
+from pms.core.models import (
+    LiveTradingDisabledError,
+    OrderState,
+    Portfolio,
+    TradeDecision,
+    VenueAccountSnapshot,
+)
+from pms.live_preflight_artifact import (
+    live_preflight_readiness_reports_fingerprint,
+    live_preflight_settings_fingerprint,
+    validate_live_strategy_artifacts_for_submission,
+)
 from pms.storage.dedup_store import InMemoryDedupStore
 from pms.storage.feedback_store import FeedbackStore
 from tests.support.fake_stores import InMemoryFeedbackStore
+from tests.support.live_paths import make_live_report_paths
 
 
 def _decision(
@@ -177,6 +201,640 @@ def test_backtest_adapter_documents_license_decision_before_internal_replay() ->
     assert "internal replay" in source
 
 
+@pytest.mark.asyncio
+async def test_polymarket_reconciler_rejects_missing_cash_balance() -> None:
+    report = await PolymarketVenueAccountReconciler().compare(
+        _portfolio(),
+        VenueAccountSnapshot(balances={}, open_orders=(), positions=()),
+    )
+
+    assert report.ok is False
+    assert report.mismatches == (
+        "venue pUSD balance missing; cannot prove LIVE cash budget",
+    )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_reconciler_accepts_pusd_balance_and_allowance() -> None:
+    report = await PolymarketVenueAccountReconciler().compare(
+        _portfolio(),
+        VenueAccountSnapshot(
+            balances={"PUSD": 1000.0, "PUSD_ALLOWANCE": 1000.0},
+            open_orders=(),
+            positions=(),
+        ),
+    )
+
+    assert report.ok is True
+    assert report.mismatches == ()
+
+
+@pytest.mark.asyncio
+async def test_polymarket_reconciler_rejects_missing_pusd_allowance() -> None:
+    report = await PolymarketVenueAccountReconciler().compare(
+        _portfolio(),
+        VenueAccountSnapshot(
+            balances={"PUSD": 1000.0},
+            open_orders=(),
+            positions=(),
+        ),
+    )
+
+    assert report.ok is False
+    assert report.mismatches == (
+        "venue pUSD allowance missing; cannot prove LIVE buy capacity",
+    )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_reconciler_rejects_insufficient_pusd_allowance() -> None:
+    report = await PolymarketVenueAccountReconciler().compare(
+        _portfolio(),
+        VenueAccountSnapshot(
+            balances={"PUSD": 1000.0, "PUSD_ALLOWANCE": 5.0},
+            open_orders=(),
+            positions=(),
+        ),
+    )
+
+    assert report.ok is False
+    assert report.mismatches == (
+        "venue pUSD allowance below PMS free cash: venue=5.00000000 DB=1000.00000000",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_balance", [float("nan"), float("inf"), float("-inf")])
+async def test_polymarket_reconciler_rejects_non_finite_cash_balance(
+    bad_balance: float,
+) -> None:
+    report = await PolymarketVenueAccountReconciler().compare(
+        _portfolio(),
+        VenueAccountSnapshot(
+            balances={"USDC": bad_balance},
+            open_orders=(),
+            positions=(),
+        ),
+    )
+
+    assert report.ok is False
+    assert report.mismatches == (
+        "venue pUSD balance invalid; cannot prove LIVE cash budget",
+    )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_account_snapshot_parses_wrapped_collections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeBalanceAllowanceParams:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs: dict[str, object] = kwargs
+
+    class FakeAssetType:
+        COLLATERAL = "COLLATERAL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def get_orders(self) -> dict[str, object]:
+            return {
+                "orders": [
+                    {
+                        "order_id": "pm-open-1",
+                        "market_id": "m-open",
+                        "token_id": "t-open",
+                        "remaining": "7.50",
+                        "price": "0.25",
+                        "status": "open",
+                    }
+                ]
+            }
+
+        def get_positions(self, user: str) -> dict[str, object]:
+            assert user == "0x1111111111111111111111111111111111111111"
+            return {
+                "positions": [
+                    {
+                        "market_id": "m-position",
+                        "token_id": "t-position",
+                        "shares": "12.5",
+                        "avg_entry_price": "0.40",
+                    }
+                ]
+            }
+
+        def update_balance_allowance(self, **kwargs: object) -> None:
+            del kwargs
+
+        def get_balance_allowance(self, **kwargs: object) -> dict[str, object]:
+            del kwargs
+            return {"balance": "1000.00", "allowance": "500.00"}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        AssetType=FakeAssetType,
+        BalanceAllowanceParams=FakeBalanceAllowanceParams,
+        ClobClient=FakeClobClient,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    snapshot = await PolymarketSDKClient().read_account_snapshot(
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert snapshot.balances == {"PUSD": 1000.0, "PUSD_ALLOWANCE": 500.0}
+    assert len(snapshot.open_orders) == 1
+    assert snapshot.open_orders[0].order_id == "pm-open-1"
+    assert snapshot.open_orders[0].remaining_notional_usdc == pytest.approx(7.5)
+    assert len(snapshot.positions) == 1
+    assert snapshot.positions[0].market_id == "m-position"
+    assert snapshot.positions[0].locked_usdc == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_account_snapshot_syncs_balance_allowance_before_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeBalanceAllowanceParams:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs: dict[str, object] = kwargs
+
+    class FakeAssetType:
+        COLLATERAL = "COLLATERAL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def get_orders(self) -> list[object]:
+            return []
+
+        def get_positions(self, user: str) -> list[object]:
+            assert user == "0x1111111111111111111111111111111111111111"
+            return []
+
+        def update_balance_allowance(self, **kwargs: object) -> None:
+            calls.append(("update", kwargs["params"]))
+
+        def get_balance_allowance(self, **kwargs: object) -> dict[str, object]:
+            calls.append(("get", kwargs["params"]))
+            return {"balance": "1000.00", "allowance": "1000.00"}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        AssetType=FakeAssetType,
+        BalanceAllowanceParams=FakeBalanceAllowanceParams,
+        ClobClient=FakeClobClient,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    snapshot = await PolymarketSDKClient().read_account_snapshot(
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert snapshot.balances == {"PUSD": 1000.0, "PUSD_ALLOWANCE": 1000.0}
+    assert [name for name, _ in calls] == ["update", "get"]
+    assert [cast(FakeBalanceAllowanceParams, param).kwargs for _, param in calls] == [
+        {"asset_type": "COLLATERAL"},
+        {"asset_type": "COLLATERAL"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_account_snapshot_uses_camelcase_balance_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeBalanceAllowanceParams:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs: dict[str, object] = kwargs
+
+    class FakeAssetType:
+        COLLATERAL = "COLLATERAL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def get_orders(self) -> list[object]:
+            return []
+
+        def get_positions(self, user: str) -> list[object]:
+            assert user == "0x1111111111111111111111111111111111111111"
+            return []
+
+        def updateBalanceAllowance(self, **kwargs: object) -> None:  # noqa: N802
+            params = cast(FakeBalanceAllowanceParams, kwargs["params"])
+            assert params.kwargs == {"asset_type": "COLLATERAL"}
+            calls.append("update")
+
+        def get_balance_allowance(self, **kwargs: object) -> dict[str, object]:
+            params = cast(FakeBalanceAllowanceParams, kwargs["params"])
+            assert params.kwargs == {"asset_type": "COLLATERAL"}
+            calls.append("get")
+            return {"balance": "1000.00", "allowance": "1000.00"}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        AssetType=FakeAssetType,
+        BalanceAllowanceParams=FakeBalanceAllowanceParams,
+        ClobClient=FakeClobClient,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    snapshot = await PolymarketSDKClient().read_account_snapshot(
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert snapshot.balances == {"PUSD": 1000.0, "PUSD_ALLOWANCE": 1000.0}
+    assert calls == ["update", "get"]
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_account_snapshot_fails_when_balance_sync_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sync_attempted = False
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeBalanceAllowanceParams:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs: dict[str, object] = kwargs
+
+    class FakeAssetType:
+        COLLATERAL = "COLLATERAL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def get_orders(self) -> list[object]:
+            return []
+
+        def get_positions(self, user: str) -> list[object]:
+            assert user == "0x1111111111111111111111111111111111111111"
+            return []
+
+        def update_balance_allowance(self, **kwargs: object) -> None:
+            nonlocal sync_attempted
+            params = cast(FakeBalanceAllowanceParams, kwargs["params"])
+            assert params.kwargs == {"asset_type": "COLLATERAL"}
+            sync_attempted = True
+            raise RuntimeError("cache sync rejected")
+
+        def get_balance_allowance(self, **kwargs: object) -> dict[str, object]:
+            raise AssertionError("snapshot must not read stale cached balances")
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        AssetType=FakeAssetType,
+        BalanceAllowanceParams=FakeBalanceAllowanceParams,
+        ClobClient=FakeClobClient,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    with pytest.raises(LiveTradingDisabledError, match="account snapshot failed"):
+        await PolymarketSDKClient().read_account_snapshot(
+            _live_settings().polymarket.credentials(),
+        )
+    assert sync_attempted is True
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_account_snapshot_passes_deposit_wallet_signature_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    init_kwargs: dict[str, object] = {}
+    balance_param_calls: list[dict[str, object]] = []
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeSignatureTypeV2:
+        POLY_1271 = "SDK_POLY_1271"
+
+    class FakeBalanceAllowanceParams:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs: dict[str, object] = kwargs
+
+    class FakeAssetType:
+        COLLATERAL = "COLLATERAL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            init_kwargs.update(kwargs)
+
+        def get_orders(self) -> list[object]:
+            return []
+
+        def get_positions(self, user: str) -> list[object]:
+            assert user == "0x1111111111111111111111111111111111111111"
+            return []
+
+        def update_balance_allowance(self, **kwargs: object) -> None:
+            params = cast(FakeBalanceAllowanceParams, kwargs["params"])
+            balance_param_calls.append(params.kwargs)
+
+        def get_balance_allowance(self, **kwargs: object) -> dict[str, object]:
+            params = cast(FakeBalanceAllowanceParams, kwargs["params"])
+            balance_param_calls.append(params.kwargs)
+            return {"balance": "1000.00", "allowance": "1000.00"}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        AssetType=FakeAssetType,
+        BalanceAllowanceParams=FakeBalanceAllowanceParams,
+        ClobClient=FakeClobClient,
+        SignatureTypeV2=FakeSignatureTypeV2,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    snapshot = await PolymarketSDKClient().read_account_snapshot(
+        _live_settings(signature_type=3).polymarket.credentials(),
+    )
+
+    assert init_kwargs["signature_type"] == "SDK_POLY_1271"
+    assert snapshot.balances == {"PUSD": 1000.0, "PUSD_ALLOWANCE": 1000.0}
+    assert balance_param_calls == [
+        {"asset_type": "COLLATERAL", "signature_type": "SDK_POLY_1271"},
+        {"asset_type": "COLLATERAL", "signature_type": "SDK_POLY_1271"},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order_id", [None, "", "   ", "__FILL_IN_ORDER_ID__"])
+async def test_polymarket_sdk_account_snapshot_rejects_open_order_without_concrete_id(
+    monkeypatch: pytest.MonkeyPatch,
+    order_id: object,
+) -> None:
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeBalanceAllowanceParams:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeAssetType:
+        COLLATERAL = "COLLATERAL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def get_orders(self) -> list[dict[str, object]]:
+            order: dict[str, object] = {
+                "market_id": "m-open",
+                "token_id": "t-open",
+                "remaining": "7.50",
+                "price": "0.25",
+                "status": "open",
+            }
+            if order_id is not None:
+                order["order_id"] = order_id
+            return [order]
+
+        def get_positions(self, user: str) -> list[object]:
+            assert user == "0x1111111111111111111111111111111111111111"
+            return []
+
+        def get_balance_allowance(self, **kwargs: object) -> dict[str, object]:
+            del kwargs
+            return {"balance": "1000.00"}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        AssetType=FakeAssetType,
+        BalanceAllowanceParams=FakeBalanceAllowanceParams,
+        ClobClient=FakeClobClient,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    with pytest.raises(LiveTradingDisabledError, match="account snapshot failed"):
+        await PolymarketSDKClient().read_account_snapshot(
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "order_payload",
+    [
+        {"order_id": "pm-open-1", "market_id": "m-open", "token_id": "t-open"},
+        {
+            "order_id": "pm-open-1",
+            "market_id": "m-open",
+            "token_id": "t-open",
+            "remaining": "",
+        },
+        {
+            "order_id": "pm-open-1",
+            "market_id": "m-open",
+            "token_id": "t-open",
+            "remaining": "nan",
+        },
+        {
+            "order_id": "pm-open-1",
+            "market_id": "m-open",
+            "token_id": "t-open",
+            "remaining": -1.0,
+        },
+    ],
+)
+async def test_polymarket_sdk_account_snapshot_rejects_open_order_with_bad_remaining(
+    monkeypatch: pytest.MonkeyPatch,
+    order_payload: dict[str, object],
+) -> None:
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeBalanceAllowanceParams:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeAssetType:
+        COLLATERAL = "COLLATERAL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def get_orders(self) -> list[dict[str, object]]:
+            return [order_payload]
+
+        def get_positions(self, user: str) -> list[object]:
+            assert user == "0x1111111111111111111111111111111111111111"
+            return []
+
+        def get_balance_allowance(self, **kwargs: object) -> dict[str, object]:
+            del kwargs
+            return {"balance": "1000.00"}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        AssetType=FakeAssetType,
+        BalanceAllowanceParams=FakeBalanceAllowanceParams,
+        ClobClient=FakeClobClient,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    with pytest.raises(LiveTradingDisabledError, match="account snapshot failed"):
+        await PolymarketSDKClient().read_account_snapshot(
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "position_payload",
+    [
+        {"market_id": "m-position", "token_id": "t-position"},
+        {"market_id": "m-position", "token_id": "t-position", "shares": ""},
+        {"market_id": "m-position", "token_id": "t-position", "shares": "nan"},
+        {"market_id": "m-position", "token_id": "t-position", "shares": -1.0},
+    ],
+)
+async def test_polymarket_sdk_account_snapshot_rejects_position_with_bad_shares(
+    monkeypatch: pytest.MonkeyPatch,
+    position_payload: dict[str, object],
+) -> None:
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeBalanceAllowanceParams:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeAssetType:
+        COLLATERAL = "COLLATERAL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def get_orders(self) -> list[object]:
+            return []
+
+        def get_positions(self, user: str) -> list[dict[str, object]]:
+            assert user == "0x1111111111111111111111111111111111111111"
+            return [position_payload]
+
+        def get_balance_allowance(self, **kwargs: object) -> dict[str, object]:
+            del kwargs
+            return {"balance": "1000.00"}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        AssetType=FakeAssetType,
+        BalanceAllowanceParams=FakeBalanceAllowanceParams,
+        ClobClient=FakeClobClient,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    with pytest.raises(LiveTradingDisabledError, match="account snapshot failed"):
+        await PolymarketSDKClient().read_account_snapshot(
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "position_payload",
+    [
+        {"market_id": "m-position", "token_id": "t-position", "shares": 12.5},
+        {
+            "market_id": "m-position",
+            "token_id": "t-position",
+            "shares": 12.5,
+            "avg_entry_price": "",
+        },
+        {
+            "market_id": "m-position",
+            "token_id": "t-position",
+            "shares": 12.5,
+            "avg_entry_price": "nan",
+        },
+        {
+            "market_id": "m-position",
+            "token_id": "t-position",
+            "shares": 12.5,
+            "avg_entry_price": -0.01,
+        },
+        {
+            "market_id": "m-position",
+            "token_id": "t-position",
+            "shares": 12.5,
+            "avg_entry_price": 1.01,
+        },
+    ],
+)
+async def test_polymarket_sdk_account_snapshot_rejects_position_with_bad_price(
+    monkeypatch: pytest.MonkeyPatch,
+    position_payload: dict[str, object],
+) -> None:
+    class FakeApiCreds:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeBalanceAllowanceParams:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+    class FakeAssetType:
+        COLLATERAL = "COLLATERAL"
+
+    class FakeClobClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def get_orders(self) -> list[object]:
+            return []
+
+        def get_positions(self, user: str) -> list[dict[str, object]]:
+            assert user == "0x1111111111111111111111111111111111111111"
+            return [position_payload]
+
+        def get_balance_allowance(self, **kwargs: object) -> dict[str, object]:
+            del kwargs
+            return {"balance": "1000.00"}
+
+    fake_module = SimpleNamespace(
+        ApiCreds=FakeApiCreds,
+        AssetType=FakeAssetType,
+        BalanceAllowanceParams=FakeBalanceAllowanceParams,
+        ClobClient=FakeClobClient,
+    )
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", fake_module)
+
+    with pytest.raises(LiveTradingDisabledError, match="account snapshot failed"):
+        await PolymarketSDKClient().read_account_snapshot(
+            _live_settings().polymarket.credentials(),
+        )
+
+
 def test_risk_manager_position_breakpoint_exact_limit_and_plus_one() -> None:
     manager = RiskManager(
         RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
@@ -295,6 +953,7 @@ async def test_polymarket_actuator_raises_when_live_trading_disabled() -> None:
 
 @dataclass
 class RecordingPolymarketClient:
+    requires_live_mode: bool = False
     submitted: list[PolymarketOrderRequest] = field(default_factory=list)
 
     async def submit_order(
@@ -308,10 +967,10 @@ class RecordingPolymarketClient:
             order_id="pm-live-order-1",
             status=OrderStatus.MATCHED.value,
             raw_status="matched",
-            filled_notional_usdc=10.0,
+            filled_notional_usdc=order.notional_usdc,
             remaining_notional_usdc=0.0,
-            fill_price=0.4,
-            filled_quantity=25.0,
+            fill_price=order.price,
+            filled_quantity=order.estimated_quantity,
         )
 
 
@@ -364,7 +1023,24 @@ class AllowQuoteProvider:
         )
 
 
-def _live_settings() -> PMSSettings:
+@dataclass(frozen=True)
+class StaticQuoteProvider:
+    quote_result: LivePreSubmitQuote
+
+    async def quote(
+        self,
+        order: PolymarketOrderRequest,
+        credentials: object,
+    ) -> LivePreSubmitQuote:
+        del order, credentials
+        return self.quote_result
+
+
+def _live_settings(
+    *,
+    operator_approval_mode: Literal["first_order", "every_order"] = "first_order",
+    signature_type: int = 1,
+) -> PMSSettings:
     return PMSSettings(
         live_trading_enabled=True,
         controller=ControllerSettings(time_in_force="IOC"),
@@ -373,18 +1049,1508 @@ def _live_settings() -> PMSSettings:
             api_key="api-key",
             api_secret="api-secret",
             api_passphrase="passphrase",
-            signature_type=1,
-            funder_address="0xabc",
+            signature_type=signature_type,
+            funder_address="0x1111111111111111111111111111111111111111",
+            operator_approval_mode=operator_approval_mode,
         ),
     )
 
 
+_SECRET_CREDENTIAL_VALUES = (
+    "private-key-secret",
+    "api-key-secret",
+    "api-secret-secret",
+    "passphrase-secret",
+    "0x2222222222222222222222222222222222222222",
+)
+_SECRET_DSN = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+
+
+def _live_settings_with_secret_credentials() -> PMSSettings:
+    settings = _live_settings()
+    settings.polymarket.private_key = _SECRET_CREDENTIAL_VALUES[0]
+    settings.polymarket.api_key = _SECRET_CREDENTIAL_VALUES[1]
+    settings.polymarket.api_secret = _SECRET_CREDENTIAL_VALUES[2]
+    settings.polymarket.api_passphrase = _SECRET_CREDENTIAL_VALUES[3]
+    settings.polymarket.funder_address = _SECRET_CREDENTIAL_VALUES[4]
+    return settings
+
+
+def _true_live_settings_without_preflight_artifact(tmp_path: Path) -> PMSSettings:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix="pms-actuator-live-preflight-reports-"
+    )
+    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    return PMSSettings(
+        mode=RunMode.LIVE,
+        secret_source="fly",
+        live_trading_enabled=True,
+        live_account_reconciliation_required=True,
+        live_emergency_audit_path=str(approval_dir / "live-emergency-audit.jsonl"),
+        live_first_order_audit_path=str(approval_dir / "first-order-audit.jsonl"),
+        live_exit_criteria_ratified_by="operator",
+        live_exit_criteria_ratified_at=attested_at,
+        live_compliance_reviewed_by="counsel",
+        live_compliance_reviewed_at=attested_at,
+        live_compliance_jurisdiction="US-operator-approved",
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+        controller=ControllerSettings(
+            time_in_force="IOC",
+            quote_source="dual",
+            strict_factor_gates=True,
+        ),
+        risk=RiskSettings(
+            max_position_per_market=5.0,
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+            max_exposure_per_risk_group=15.0,
+            max_quantity_shares=500.0,
+            min_order_usdc=1.0,
+        ),
+        discord=DiscordSettings(
+            webhook_url=SecretStr("https://discord.example/webhooks/actuator/unit"),
+            alert_dir=str(approval_dir / "discord-alerts"),
+        ),
+        polymarket=PolymarketSettings(
+            private_key="private-key",
+            api_key="api-key",
+            api_secret="api-secret",
+            api_passphrase="passphrase",
+            signature_type=1,
+            funder_address="0x1111111111111111111111111111111111111111",
+            first_live_order_approval_path=str(approval_dir / "first-order.json"),
+            operator_approval_mode="every_order",
+        ),
+    )
+
+
+def _stage_readiness_fingerprint_files(settings: PMSSettings, root: Path) -> None:
+    execution_model_path = root / "execution-model.json"
+    paper_backtest_diff_path = root / "paper-backtest-diff.json"
+    category_prior_path = root / "category-prior.csv"
+    flb_calibration_path = root / "flb-calibration.csv"
+    generated_at = datetime.now(UTC) - timedelta(seconds=30)
+    execution_model_path.write_text(
+        json.dumps(
+            {
+                "artifact_mode": "telemetry_execution_model",
+                "generated_at": generated_at.isoformat(),
+                "generated_by": "scripts/execution_model_from_telemetry.py",
+                "fee_rate": 0.04,
+                "slippage_bps": 6.0,
+                "latency_ms": 500.0,
+                "staleness_ms": 120_000.0,
+                "fill_policy": "immediate_or_cancel",
+                "displayed_depth_fill_ratio": 0.75,
+                "adverse_selection_bps": 9.0,
+                "order_ttl_ms": 60_000,
+                "price_invalidation_streak": 10,
+                "replay_window_ms": 86_400_000,
+                "calibration_source": "telemetry_calibrated",
+                "min_samples": 10,
+                "telemetry_sample_count": 10,
+                "adverse_selection_sample_count": 10,
+                "require_adverse_selection": True,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paper_backtest_diff_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "scripts/paper_backtest_execution_diff.py",
+                "artifact_mode": "paper_backtest_execution_diff",
+                "generated_at": generated_at.isoformat(),
+                "final_go_no_go_valid": True,
+                "thresholds": {
+                    "min_matched_decisions": 10,
+                    "max_fill_rate_delta": 0.05,
+                    "max_rejection_rate_delta": 0.05,
+                    "max_avg_slippage_bps_delta": 5.0,
+                    "max_total_pnl_delta": 1.0,
+                },
+                "metrics": {
+                    "paper_decision_count": 10,
+                    "backtest_decision_count": 10,
+                    "matched_decision_count": 10,
+                    "fill_rate_delta_abs": 0.0,
+                    "rejection_rate_delta_abs": 0.0,
+                    "avg_slippage_bps_delta_abs": 0.0,
+                    "total_pnl_delta_abs": 0.0,
+                },
+                "paper_only_decision_ids": [],
+                "backtest_only_decision_ids": [],
+                "status_mismatches": [],
+                "failures": [],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    category_prior_rows = ["market_id,category,yes_payout,no_payout,resolved_at"]
+    for index in range(1, 121):
+        category = "politics" if index % 2 == 0 else "sports"
+        yes_payout, no_payout = ("1", "0") if index % 3 == 0 else ("0", "1")
+        category_prior_rows.append(
+            f"m-{index},{category},{yes_payout},{no_payout},2026-05-{(index % 20) + 1:02d}T12:00:00Z"
+        )
+    category_prior_path.write_text(
+        "\n".join(category_prior_rows) + "\n",
+        encoding="utf-8",
+    )
+    flb_calibration_path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings.live_execution_model_path = str(execution_model_path)
+    settings.live_paper_backtest_diff_path = str(paper_backtest_diff_path)
+    settings.controller.category_prior_observations_path = str(category_prior_path)
+    settings.strategies.flb_calibration_path = str(flb_calibration_path)
+
+
+def _replace_report_generated_at(path: str, generated_at: datetime) -> None:
+    report_path = Path(path)
+    replaced = False
+    lines: list[str] = []
+    for line in report_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("| generated_at |"):
+            lines.append(f"| generated_at | {generated_at.isoformat()} |")
+            replaced = True
+        else:
+            lines.append(line)
+    assert replaced
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_final_live_preflight_artifact(
+    settings: PMSSettings,
+    artifact_path: Path,
+    *,
+    generated_at: datetime | None = None,
+) -> None:
+    check_names = (
+        "live_config",
+        "runtime_dependencies",
+        "operator_approval",
+        "emergency_audit",
+        "first_order_audit",
+        "database_connection",
+        "schema_current",
+        "market_data_freshness",
+        "submission_unknown",
+        "live_open_orders",
+        "active_strategies",
+        "venue_reconciliation",
+    )
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "pms-live preflight",
+                "artifact_mode": "credentialed_preflight",
+                "final_go_no_go_valid": True,
+                "skip_venue": False,
+                "database_url_override_used": False,
+                "settings_fingerprint": live_preflight_settings_fingerprint(settings),
+                "readiness_reports_fingerprint": (
+                    live_preflight_readiness_reports_fingerprint(settings)
+                ),
+                "active_strategies_fingerprint": "d" * 64,
+                "output_path": str(artifact_path),
+                "generated_at": (generated_at or datetime.now(UTC)).isoformat(),
+                "result": {
+                    "ok": True,
+                    "checks": [
+                        {
+                            "name": name,
+                            "ok": True,
+                            "detail": "unit preflight passed",
+                        }
+                        for name in check_names
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def live_sdk_dependency_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(
+        name: str,
+        package: str | None = None,
+    ) -> importlib.machinery.ModuleSpec | None:
+        if name == "py_clob_client_v2":
+            return importlib.machinery.ModuleSpec(name, loader=None)
+        return original_find_spec(name, package)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+
+def _secret_bearing_error_message(prefix: str) -> str:
+    return (
+        f"{prefix} "
+        f"{_SECRET_CREDENTIAL_VALUES[0]} {_SECRET_CREDENTIAL_VALUES[1]} "
+        f"{_SECRET_CREDENTIAL_VALUES[2]} {_SECRET_CREDENTIAL_VALUES[3]} "
+        f"{_SECRET_CREDENTIAL_VALUES[4]} {_SECRET_DSN} password=keyword-secret"
+    )
+
+
+def _assert_live_secrets_redacted(rendered: str) -> None:
+    assert "<redacted-polymarket-credential>" in rendered
+    assert "<redacted-database-url>" in rendered
+    assert "password=<redacted>" in rendered
+    for credential in _SECRET_CREDENTIAL_VALUES:
+        assert credential not in rendered
+    assert "supersecret" not in rendered
+    assert "keyword-secret" not in rendered
+    assert "admin" not in rendered
+
+
 @pytest.mark.asyncio
 async def test_polymarket_actuator_rejects_missing_live_credentials() -> None:
-    actuator = PolymarketActuator(PMSSettings(live_trading_enabled=True))
+    actuator = PolymarketActuator(
+        PMSSettings(mode=RunMode.LIVE, live_trading_enabled=True)
+    )
 
     with pytest.raises(LiveTradingDisabledError, match="Missing Polymarket credential fields"):
         await actuator.execute(_decision(), _portfolio())
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_real_client_outside_live_mode() -> None:
+    settings = _live_settings()
+    settings.mode = RunMode.PAPER
+    actuator = PolymarketActuator(
+        settings,
+        client=PolymarketSDKClient(),
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="mode=live"):
+        await actuator.execute(_decision(), _portfolio())
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_unmarked_custom_client_outside_live_mode() -> None:
+    @dataclass
+    class _CustomVenueClient:
+        submitted: list[PolymarketOrderRequest] = field(default_factory=list)
+
+        async def submit_order(
+            self,
+            order: PolymarketOrderRequest,
+            credentials: object,
+        ) -> PolymarketOrderResult:
+            del credentials
+            self.submitted.append(order)
+            return PolymarketOrderResult(
+                order_id="pm-custom-client-order",
+                status=OrderStatus.MATCHED.value,
+                raw_status="matched",
+                filled_notional_usdc=10.0,
+                remaining_notional_usdc=0.0,
+                fill_price=0.4,
+                filled_quantity=25.0,
+            )
+
+    settings = _live_settings()
+    settings.mode = RunMode.PAPER
+    client = _CustomVenueClient()
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="mode=live"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+
+
+@pytest.mark.parametrize("order_id", ["", "   ", "__FILL_IN_ORDER_ID__"])
+@pytest.mark.asyncio
+async def test_polymarket_actuator_treats_missing_result_order_id_as_unknown(
+    order_id: str,
+) -> None:
+    @dataclass
+    class _MissingOrderIdClient:
+        requires_live_mode: bool = False
+        submitted: list[PolymarketOrderRequest] = field(default_factory=list)
+
+        async def submit_order(
+            self,
+            order: PolymarketOrderRequest,
+            credentials: object,
+        ) -> PolymarketOrderResult:
+            del credentials
+            self.submitted.append(order)
+            return PolymarketOrderResult(
+                order_id=order_id,
+                status=OrderStatus.MATCHED.value,
+                raw_status="matched",
+                filled_notional_usdc=10.0,
+                remaining_notional_usdc=0.0,
+                fill_price=0.4,
+                filled_quantity=25.0,
+            )
+
+    client = _MissingOrderIdClient()
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(PolymarketSubmissionUnknownError, match="venue order id"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert len(client.submitted) == 1
+
+
+@pytest.mark.parametrize(
+    ("quote_overrides", "expected_detail"),
+    [
+        ({"book_age_ms": float("nan")}, "book_age_ms"),
+        ({"book_age_ms": -1.0}, "book_age_ms"),
+        ({"executable_notional_usdc": float("nan")}, "executable_notional"),
+        ({"best_executable_price": float("nan")}, "best_executable_price"),
+        ({"best_executable_price": 0.0}, "best_executable_price"),
+        ({"spread_bps": float("nan")}, "spread_bps"),
+        ({"spread_bps": -1.0}, "spread_bps"),
+        ({"quote_hash": ""}, "quote_hash"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_malformed_pre_submit_quote(
+    quote_overrides: dict[str, object],
+    expected_detail: str,
+) -> None:
+    client = RecordingPolymarketClient()
+    quote = {
+        "market_status": "open",
+        "book_age_ms": 25.0,
+        "executable_notional_usdc": 10.0,
+        "best_executable_price": 0.4,
+        "spread_bps": 10.0,
+        "quote_hash": "quote-valid",
+        "book_ts": datetime(2026, 4, 26, tzinfo=UTC),
+    } | quote_overrides
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=client,
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=StaticQuoteProvider(
+            LivePreSubmitQuote(
+                market_status=cast(str, quote["market_status"]),
+                book_age_ms=cast(float, quote["book_age_ms"]),
+                executable_notional_usdc=cast(float, quote["executable_notional_usdc"]),
+                best_executable_price=cast(float, quote["best_executable_price"]),
+                spread_bps=cast(float, quote["spread_bps"]),
+                quote_hash=cast(str, quote["quote_hash"]),
+                book_ts=cast(datetime, quote["book_ts"]),
+            )
+        ),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match=expected_detail):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+
+
+@pytest.mark.parametrize(
+    ("result_overrides", "expected_detail"),
+    [
+        ({"filled_notional_usdc": float("nan")}, "filled_notional"),
+        ({"filled_notional_usdc": -1.0}, "filled_notional"),
+        ({"filled_notional_usdc": 11.0, "remaining_notional_usdc": 0.0}, "filled_notional"),
+        ({"remaining_notional_usdc": -0.01}, "remaining_notional"),
+        ({"filled_quantity": -1.0}, "filled_quantity"),
+        ({"fill_price": 1.5}, "fill_price"),
+        (
+            {
+                "filled_notional_usdc": 4.0,
+                "remaining_notional_usdc": 6.0,
+                "filled_quantity": 100.0,
+                "fill_price": 0.5,
+            },
+            "fill accounting",
+        ),
+        (
+            {
+                "filled_notional_usdc": 4.0,
+                "remaining_notional_usdc": 7.0,
+                "filled_quantity": 10.0,
+                "fill_price": 0.4,
+            },
+            "notional accounting",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_malformed_client_result_accounting(
+    result_overrides: dict[str, object],
+    expected_detail: str,
+) -> None:
+    @dataclass
+    class _MalformedResultClient:
+        requires_live_mode: bool = False
+
+        async def submit_order(
+            self,
+            order: PolymarketOrderRequest,
+            credentials: object,
+        ) -> PolymarketOrderResult:
+            del order, credentials
+            result = {
+                "order_id": "pm-malformed-result",
+                "status": OrderStatus.MATCHED.value,
+                "raw_status": "matched",
+                "filled_notional_usdc": 10.0,
+                "remaining_notional_usdc": 0.0,
+                "fill_price": 0.4,
+                "filled_quantity": 25.0,
+            } | result_overrides
+            return PolymarketOrderResult(
+                order_id=cast(str, result["order_id"]),
+                status=cast(str, result["status"]),
+                raw_status=cast(str, result["raw_status"]),
+                filled_notional_usdc=cast(float, result["filled_notional_usdc"]),
+                remaining_notional_usdc=cast(
+                    float,
+                    result["remaining_notional_usdc"],
+                ),
+                fill_price=cast(float | None, result["fill_price"]),
+                filled_quantity=cast(float, result["filled_quantity"]),
+            )
+
+    actuator = PolymarketActuator(
+        _live_settings(),
+        client=_MalformedResultClient(),
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(PolymarketSubmissionUnknownError, match=expected_detail):
+        await actuator.execute(_decision(), _portfolio())
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_requires_preflight_artifact_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        _true_live_settings_without_preflight_artifact(tmp_path),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="preflight artifact"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_runner_validated_live_submit_without_preflight_artifact_path(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        _true_live_settings_without_preflight_artifact(tmp_path),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+        live_preflight_validated=True,
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="preflight artifact"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_preflight_artifact_permissive_parent_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_dir = tmp_path / "preflight"
+    artifact_dir.mkdir(mode=0o755)
+    readiness_dir = tmp_path / "readiness"
+    readiness_dir.mkdir(mode=0o700)
+    artifact_path = artifact_dir / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, readiness_dir)
+    _write_final_live_preflight_artifact(settings, artifact_path)
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    try:
+        with pytest.raises(
+            LiveTradingDisabledError,
+            match="preflight artifact parent",
+        ):
+            await actuator.execute(_decision(), _portfolio())
+    finally:
+        artifact_dir.chmod(0o700)
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_preflight_artifact_inside_working_tree_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_dir = (
+        Path.cwd()
+        / f".pms-live-preflight-actuator-test-{os.getpid()}-{tmp_path.name}"
+    )
+    readiness_dir = tmp_path / "readiness"
+    readiness_dir.mkdir(mode=0o700)
+    artifact_path = artifact_dir / "credentialed-preflight.json"
+    artifact_dir.mkdir(mode=0o700)
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, readiness_dir)
+    _write_final_live_preflight_artifact(settings, artifact_path)
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    try:
+        with pytest.raises(LiveTradingDisabledError, match="working tree"):
+            await actuator.execute(_decision(), _portfolio())
+    finally:
+        artifact_path.unlink(missing_ok=True)
+        artifact_dir.rmdir()
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_incomplete_preflight_artifact_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "pms-live preflight",
+                "artifact_mode": "credentialed_preflight",
+                "final_go_no_go_valid": True,
+                "generated_at": datetime.now(UTC).isoformat(),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="preflight artifact"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_wrong_settings_preflight_artifact_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    check_names = (
+        "live_config",
+        "runtime_dependencies",
+        "operator_approval",
+        "emergency_audit",
+        "first_order_audit",
+        "database_connection",
+        "schema_current",
+        "market_data_freshness",
+        "submission_unknown",
+        "live_open_orders",
+        "active_strategies",
+        "venue_reconciliation",
+    )
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "pms-live preflight",
+                "artifact_mode": "credentialed_preflight",
+                "final_go_no_go_valid": True,
+                "skip_venue": False,
+                "database_url_override_used": False,
+                "settings_fingerprint": "b" * 64,
+                "readiness_reports_fingerprint": "c" * 64,
+                "active_strategies_fingerprint": "d" * 64,
+                "output_path": str(artifact_path),
+                "generated_at": datetime.now(UTC).isoformat(),
+                "result": {
+                    "ok": True,
+                    "checks": [
+                        {
+                            "name": name,
+                            "ok": True,
+                            "detail": "unit preflight passed",
+                        }
+                        for name in check_names
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="settings fingerprint"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_stale_readiness_preflight_artifact_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    check_names = (
+        "live_config",
+        "runtime_dependencies",
+        "operator_approval",
+        "emergency_audit",
+        "first_order_audit",
+        "database_connection",
+        "schema_current",
+        "market_data_freshness",
+        "submission_unknown",
+        "live_open_orders",
+        "active_strategies",
+        "venue_reconciliation",
+    )
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "pms-live preflight",
+                "artifact_mode": "credentialed_preflight",
+                "final_go_no_go_valid": True,
+                "skip_venue": False,
+                "database_url_override_used": False,
+                "settings_fingerprint": live_preflight_settings_fingerprint(settings),
+                "readiness_reports_fingerprint": "c" * 64,
+                "active_strategies_fingerprint": "d" * 64,
+                "output_path": str(artifact_path),
+                "generated_at": datetime.now(UTC).isoformat(),
+                "result": {
+                    "ok": True,
+                    "checks": [
+                        {
+                            "name": name,
+                            "ok": True,
+                            "detail": "unit preflight passed",
+                        }
+                        for name in check_names
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="readiness reports fingerprint"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_revalidates_strategy_artifacts_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    execution_model_path = Path(cast(str, settings.live_execution_model_path))
+    execution_model_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "scripts/execution_model_from_telemetry.py",
+                "artifact_mode": "telemetry_execution_model",
+                "generated_at": datetime.now(UTC).isoformat(),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    _write_final_live_preflight_artifact(settings, artifact_path)
+    decision = _decision()
+    approval_path = Path(cast(str, settings.polymarket.first_live_order_approval_path))
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=settings.polymarket.operator_approval_max_age_s,
+    )
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    try:
+        with pytest.raises(LiveTradingDisabledError, match="execution-model artifact"):
+            await actuator.execute(decision, _portfolio())
+    finally:
+        approval_path.unlink(missing_ok=True)
+        _sidecar_path(approval_path).unlink(missing_ok=True)
+
+    assert client.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_duplicate_flb_calibration_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    calibration_path = Path(cast(str, settings.strategies.flb_calibration_path))
+    calibration_path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
+                "longshot_yes_overpriced_buy_no,0.98,151,warehouse-flb-v2",
+                "favorite_yes_underpriced_buy_yes,0.97,152,warehouse-flb-v1",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_final_live_preflight_artifact(settings, artifact_path)
+    decision = _decision()
+    approval_path = Path(cast(str, settings.polymarket.first_live_order_approval_path))
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=settings.polymarket.operator_approval_max_age_s,
+    )
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    try:
+        with pytest.raises(LiveTradingDisabledError, match="FLB calibration artifact"):
+            await actuator.execute(decision, _portfolio())
+    finally:
+        approval_path.unlink(missing_ok=True)
+        _sidecar_path(approval_path).unlink(missing_ok=True)
+
+    assert client.submitted == []
+
+
+def test_direct_live_submit_artifact_validation_rejects_infinite_execution_staleness(
+    tmp_path: Path,
+) -> None:
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    payload["staleness_ms"] = ".inf"
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="execution-model artifact staleness_ms must be finite",
+    ):
+        validate_live_strategy_artifacts_for_submission(settings)
+
+
+def test_direct_live_submit_artifact_validation_rejects_duplicate_execution_json_key(
+    tmp_path: Path,
+) -> None:
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    model_text = model_path.read_text(encoding="utf-8")
+    model_text = model_text.replace(
+        '"generated_by": "scripts/execution_model_from_telemetry.py"',
+        '"generated_by": "forged-generator.py", '
+        '"generated_by": "scripts/execution_model_from_telemetry.py"',
+        1,
+    )
+    assert '"generated_by": "forged-generator.py"' in model_text
+    model_path.write_text(model_text, encoding="utf-8")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="execution-model artifact duplicate JSON key: generated_by",
+    ):
+        validate_live_strategy_artifacts_for_submission(settings)
+
+
+def test_direct_live_submit_artifact_validation_rejects_missing_execution_sample_contract(
+    tmp_path: Path,
+) -> None:
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    payload.pop("min_samples", None)
+    payload.pop("telemetry_sample_count", None)
+    payload.pop("adverse_selection_sample_count", None)
+    payload.pop("require_adverse_selection", None)
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="execution-model artifact missing telemetry sample contract",
+    ):
+        validate_live_strategy_artifacts_for_submission(settings)
+
+
+def test_direct_live_submit_artifact_validation_rejects_missing_paper_backtest_min_matched_threshold(
+    tmp_path: Path,
+) -> None:
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    thresholds = cast(dict[str, object], payload["thresholds"])
+    thresholds.pop("min_matched_decisions", None)
+    diff_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="missing threshold: min_matched_decisions",
+    ):
+        validate_live_strategy_artifacts_for_submission(settings)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_inconsistent_paper_backtest_diff_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    metrics = cast(dict[str, object], payload["metrics"])
+    metrics["matched_decision_count"] = 10
+    metrics["paper_decision_count"] = 11
+    metrics["backtest_decision_count"] = 10
+    payload["paper_only_decision_ids"] = []
+    payload["backtest_only_decision_ids"] = []
+    payload["status_mismatches"] = []
+    diff_path.write_text(json.dumps(payload), encoding="utf-8")
+    _write_final_live_preflight_artifact(settings, artifact_path)
+    decision = _decision()
+    approval_path = Path(cast(str, settings.polymarket.first_live_order_approval_path))
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=settings.polymarket.operator_approval_max_age_s,
+    )
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    try:
+        with pytest.raises(
+            LiveTradingDisabledError,
+            match="matched_decision_count must equal paper_decision_count",
+        ):
+            await actuator.execute(decision, _portfolio())
+    finally:
+        approval_path.unlink(missing_ok=True)
+        _sidecar_path(approval_path).unlink(missing_ok=True)
+
+    assert client.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_preflight_before_emergency_audit_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    generated_at = datetime.now(UTC) - timedelta(seconds=20)
+    emergency_audit_at = datetime.now(UTC) - timedelta(seconds=10)
+    Path(settings.live_emergency_audit_path).write_text(
+        json.dumps(
+            {
+                "event": "emergency_stop_completed",
+                "operator_id": "operator",
+                "timestamp": emergency_audit_at.isoformat(),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    check_names = (
+        "live_config",
+        "runtime_dependencies",
+        "operator_approval",
+        "emergency_audit",
+        "first_order_audit",
+        "database_connection",
+        "schema_current",
+        "market_data_freshness",
+        "submission_unknown",
+        "live_open_orders",
+        "active_strategies",
+        "venue_reconciliation",
+    )
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "pms-live preflight",
+                "artifact_mode": "credentialed_preflight",
+                "final_go_no_go_valid": True,
+                "skip_venue": False,
+                "database_url_override_used": False,
+                "settings_fingerprint": live_preflight_settings_fingerprint(settings),
+                "readiness_reports_fingerprint": (
+                    live_preflight_readiness_reports_fingerprint(settings)
+                ),
+                "active_strategies_fingerprint": "d" * 64,
+                "output_path": str(artifact_path),
+                "generated_at": generated_at.isoformat(),
+                "result": {
+                    "ok": True,
+                    "checks": [
+                        {
+                            "name": name,
+                            "ok": True,
+                            "detail": "unit preflight passed",
+                        }
+                        for name in check_names
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="emergency audit"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rechecks_preflight_artifact_after_runner_start_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    generated_at = datetime.now(UTC) - timedelta(seconds=20)
+    emergency_audit_at = datetime.now(UTC) - timedelta(seconds=10)
+    _write_final_live_preflight_artifact(
+        settings,
+        artifact_path,
+        generated_at=generated_at,
+    )
+    Path(settings.live_emergency_audit_path).write_text(
+        json.dumps(
+            {
+                "event": "emergency_stop_completed",
+                "operator_id": "operator",
+                "timestamp": emergency_audit_at.isoformat(),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+        live_preflight_validated=True,
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="emergency audit"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_preflight_active_strategy_fingerprint_changed_after_runner_validation(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    _write_final_live_preflight_artifact(settings, artifact_path)
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+        live_preflight_validated=True,
+        live_preflight_active_strategies_fingerprint="e" * 64,
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="active strategies fingerprint mismatch",
+    ):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_allows_pending_strict_sidecar_approval_during_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    _write_final_live_preflight_artifact(settings, artifact_path)
+    approval_path = Path(cast(str, settings.polymarket.first_live_order_approval_path))
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=FileFirstLiveOrderGate(
+            approval_path,
+            require_approver_sidecar=True,
+            approval_max_age_s=settings.polymarket.operator_approval_max_age_s,
+        ),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    assert len(client.submitted) == 1
+    assert approval_path.exists() is False
+    assert _sidecar_path(approval_path).exists() is False
+    assert [
+        (event, approver_id) for event, _, approver_id in writer.events
+    ] == [
+        ("approval_matched", "operator-alice"),
+        ("approval_consumed", "operator-alice"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_requires_strict_sidecar_gate_for_true_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    _write_final_live_preflight_artifact(settings, artifact_path)
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="strict sidecar"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_spoofed_sidecar_gate_for_true_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+
+    @dataclass
+    class SpoofedSidecarGate:
+        require_approver_sidecar: bool = True
+        previews: list[LiveOrderPreview] = field(default_factory=list)
+
+        async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+            self.previews.append(preview)
+            return True
+
+        async def consume(self, preview: LiveOrderPreview) -> None:
+            del preview
+
+        def read_approver_id(self) -> str:
+            return "operator-spoof"
+
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    _write_final_live_preflight_artifact(settings, artifact_path)
+    client = RecordingPolymarketClient()
+    gate = SpoofedSidecarGate()
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="FileFirstLiveOrderGate"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_preflight_before_readiness_reports_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    generated_at = datetime.now(UTC) - timedelta(seconds=20)
+    report_generated_at = datetime.now(UTC) - timedelta(seconds=10)
+    readiness_attested_at = datetime.now(UTC) - timedelta(seconds=5)
+    settings.live_exit_criteria_ratified_at = readiness_attested_at
+    settings.live_compliance_reviewed_at = readiness_attested_at
+    assert settings.live_paper_soak_report_path is not None
+    assert settings.live_operator_rehearsal_report_path is not None
+    _replace_report_generated_at(
+        settings.live_paper_soak_report_path,
+        report_generated_at,
+    )
+    _replace_report_generated_at(
+        settings.live_operator_rehearsal_report_path,
+        report_generated_at,
+    )
+    check_names = (
+        "live_config",
+        "runtime_dependencies",
+        "operator_approval",
+        "emergency_audit",
+        "first_order_audit",
+        "database_connection",
+        "schema_current",
+        "market_data_freshness",
+        "submission_unknown",
+        "live_open_orders",
+        "active_strategies",
+        "venue_reconciliation",
+    )
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "pms-live preflight",
+                "artifact_mode": "credentialed_preflight",
+                "final_go_no_go_valid": True,
+                "skip_venue": False,
+                "database_url_override_used": False,
+                "settings_fingerprint": live_preflight_settings_fingerprint(settings),
+                "readiness_reports_fingerprint": (
+                    live_preflight_readiness_reports_fingerprint(settings)
+                ),
+                "active_strategies_fingerprint": "d" * 64,
+                "output_path": str(artifact_path),
+                "generated_at": generated_at.isoformat(),
+                "result": {
+                    "ok": True,
+                    "checks": [
+                        {
+                            "name": name,
+                            "ok": True,
+                            "detail": "unit preflight passed",
+                        }
+                        for name in check_names
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="readiness reports"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_preflight_before_live_readiness_signoff_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    generated_at = datetime.now(UTC) - timedelta(seconds=20)
+    report_generated_at = datetime.now(UTC) - timedelta(seconds=30)
+    readiness_attested_at = datetime.now(UTC) - timedelta(seconds=10)
+    settings.live_exit_criteria_ratified_at = readiness_attested_at
+    settings.live_compliance_reviewed_at = readiness_attested_at
+    assert settings.live_paper_soak_report_path is not None
+    assert settings.live_operator_rehearsal_report_path is not None
+    _replace_report_generated_at(
+        settings.live_paper_soak_report_path,
+        report_generated_at,
+    )
+    _replace_report_generated_at(
+        settings.live_operator_rehearsal_report_path,
+        report_generated_at,
+    )
+    check_names = (
+        "live_config",
+        "runtime_dependencies",
+        "operator_approval",
+        "emergency_audit",
+        "first_order_audit",
+        "database_connection",
+        "schema_current",
+        "market_data_freshness",
+        "submission_unknown",
+        "live_open_orders",
+        "active_strategies",
+        "venue_reconciliation",
+    )
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "generated_by": "pms-live preflight",
+                "artifact_mode": "credentialed_preflight",
+                "final_go_no_go_valid": True,
+                "skip_venue": False,
+                "database_url_override_used": False,
+                "settings_fingerprint": live_preflight_settings_fingerprint(settings),
+                "readiness_reports_fingerprint": (
+                    live_preflight_readiness_reports_fingerprint(settings)
+                ),
+                "active_strategies_fingerprint": "d" * 64,
+                "output_path": str(artifact_path),
+                "generated_at": generated_at.isoformat(),
+                "result": {
+                    "ok": True,
+                    "checks": [
+                        {
+                            "name": name,
+                            "ok": True,
+                            "detail": "unit preflight passed",
+                        }
+                        for name in check_names
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="LIVE readiness"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert gate.previews == []
 
 
 @pytest.mark.asyncio
@@ -459,6 +2625,135 @@ async def test_polymarket_actuator_submits_mocked_live_order_after_first_order_g
     # task. Verifies the consume-on-success contract.
     assert len(gate.consumed) == 1
     assert gate.consumed[0] == gate.previews[0]
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_default_first_order_mode_skips_gate_after_first_success() -> None:
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        _live_settings(operator_approval_mode="first_order"),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    await actuator.execute(_decision(decision_id="d-first"), _portfolio())
+    await actuator.execute(_decision(decision_id="d-second"), _portfolio())
+
+    assert len(client.submitted) == 2
+    assert [preview.market_id for preview in gate.previews] == ["m-cp06"]
+    assert len(gate.consumed) == 1
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_every_order_mode_requires_approval_for_each_submit() -> None:
+    client = RecordingPolymarketClient()
+    gate = RecordingOperatorGate(approved=True)
+    actuator = PolymarketActuator(
+        _live_settings(operator_approval_mode="every_order"),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    await actuator.execute(_decision(decision_id="d-first"), _portfolio())
+    await actuator.execute(
+        _decision(decision_id="d-second", market_id="m-second"),
+        _portfolio(),
+    )
+
+    assert len(client.submitted) == 2
+    assert [preview.market_id for preview in gate.previews] == [
+        "m-cp06",
+        "m-second",
+    ]
+    assert [preview.market_id for preview in gate.consumed] == [
+        "m-cp06",
+        "m-second",
+    ]
+    assert actuator._first_order_approved() is True  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_every_order_mode_denial_blocks_later_submit() -> None:
+    @dataclass
+    class _SequencedOperatorGate:
+        approvals: list[bool]
+        previews: list[LiveOrderPreview] = field(default_factory=list)
+        consumed: list[LiveOrderPreview] = field(default_factory=list)
+
+        async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+            self.previews.append(preview)
+            return self.approvals.pop(0)
+
+        async def consume(self, preview: LiveOrderPreview) -> None:
+            self.consumed.append(preview)
+
+    client = RecordingPolymarketClient()
+    gate = _SequencedOperatorGate(approvals=[True, False])
+    actuator = PolymarketActuator(
+        _live_settings(operator_approval_mode="every_order"),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    await actuator.execute(_decision(decision_id="d-first"), _portfolio())
+    with pytest.raises(OperatorApprovalRequiredError):
+        await actuator.execute(
+            _decision(decision_id="d-second", market_id="m-second"),
+            _portfolio(),
+        )
+
+    assert len(client.submitted) == 1
+    assert [preview.market_id for preview in gate.previews] == [
+        "m-cp06",
+        "m-second",
+    ]
+    assert [preview.market_id for preview in gate.consumed] == ["m-cp06"]
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_every_order_mode_blocks_after_consume_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    @dataclass
+    class _ConsumeRaisesGate:
+        previews: list[LiveOrderPreview] = field(default_factory=list)
+
+        async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+            self.previews.append(preview)
+            return True
+
+        async def consume(self, preview: LiveOrderPreview) -> None:
+            del preview
+            raise OSError("permission denied")
+
+    client = RecordingPolymarketClient()
+    gate = _ConsumeRaisesGate()
+    actuator = PolymarketActuator(
+        _live_settings(operator_approval_mode="every_order"),
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="pms.actuator.adapters.polymarket"):
+        state = await actuator.execute(_decision(decision_id="d-first"), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    assert len(client.submitted) == 1
+    assert any("consume" in record.message.lower() for record in caplog.records)
+
+    with pytest.raises(LiveTradingDisabledError, match="approval consume failed"):
+        await actuator.execute(
+            _decision(decision_id="d-second", market_id="m-second"),
+            _portfolio(),
+        )
+
+    assert len(client.submitted) == 1
+    assert [preview.market_id for preview in gate.previews] == ["m-cp06"]
 
 
 @pytest.mark.asyncio
@@ -592,6 +2887,36 @@ async def test_file_first_live_order_gate_requires_exact_preview(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_file_first_live_order_gate_rejects_duplicate_approval_json_key(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "approval.json"
+    gate = FileFirstLiveOrderGate(path)
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    path.write_text(
+        (
+            '{"approved": false, "approved": true, '
+            '"max_notional_usdc": 10.0, "venue": "polymarket", '
+            '"market_id": "m-cp06", "token_id": "t-yes", '
+            f'"side": "{Side.BUY.value}", "outcome": "YES", '
+            '"limit_price": 0.4, "max_slippage_bps": 50}'
+        ),
+        encoding="utf-8",
+    )
+
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
 async def test_polymarket_sdk_client_posts_limit_order_through_v2_sdk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -684,7 +3009,7 @@ async def test_polymarket_sdk_client_posts_limit_order_through_v2_sdk(
     assert init["chain_id"] == 137
     assert init["key"] == "private-key"
     assert init["signature_type"] == 1
-    assert init["funder"] == "0xabc"
+    assert init["funder"] == "0x1111111111111111111111111111111111111111"
     assert creds.api_key == "api-key"
     assert creds.api_secret == "api-secret"
     assert creds.api_passphrase == "passphrase"
@@ -821,7 +3146,11 @@ async def test_polymarket_sdk_client_redacts_secrets_from_sdk_errors(
 
         def create_and_post_order(self, **kwargs: object) -> object:
             del kwargs
-            raise RuntimeError("venue rejected private-key api-secret passphrase")
+            raise RuntimeError(
+                "venue rejected private-key api-key api-secret passphrase 0x1111111111111111111111111111111111111111 "
+                "postgresql://admin:supersecret@db.internal.example.com/pms_live "
+                "password=keyword-secret"
+            )
 
     fake_module = SimpleNamespace(
         ApiCreds=FakeApiCreds,
@@ -854,14 +3183,23 @@ async def test_polymarket_sdk_client_redacts_secrets_from_sdk_errors(
 
     message = str(exc_info.value)
     assert "private-key" not in message
+    assert "api-key" not in message
     assert "api-secret" not in message
     assert "passphrase" not in message
+    assert "0x1111111111111111111111111111111111111111" not in message
     assert "Polymarket live order submission failed" in message
     rendered_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert "venue rejected" in rendered_logs
+    assert "<redacted-database-url>" in rendered_logs
+    assert "password=<redacted>" in rendered_logs
     assert "private-key" not in rendered_logs
+    assert "api-key" not in rendered_logs
     assert "api-secret" not in rendered_logs
     assert "passphrase" not in rendered_logs
+    assert "0x1111111111111111111111111111111111111111" not in rendered_logs
+    assert "supersecret" not in rendered_logs
+    assert "keyword-secret" not in rendered_logs
+    assert "admin" not in rendered_logs
 
 
 @pytest.mark.asyncio
@@ -1059,6 +3397,7 @@ async def test_executor_soft_release_keeps_decision_blocked_until_retention_scan
 class _FailThenSucceedClient:
     """Polymarket client that raises on the first call and succeeds after."""
 
+    requires_live_mode: bool = False
     fail_count: int = 1
     submitted: list[PolymarketOrderRequest] = field(default_factory=list)
     error: Exception = field(
@@ -2196,6 +4535,78 @@ async def test_polymarket_sdk_polyapiexception_with_resp_routes_as_venue_rejecti
     assert "venue error redacted" in str(exc_info.value)
 
 
+@pytest.mark.parametrize("success_value", ["false", "False", "0", 0])
+@pytest.mark.asyncio
+async def test_polymarket_sdk_rejects_non_boolean_false_success_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    success_value: object,
+) -> None:
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "sdk-rejected-flag",
+            "status": "matched",
+            "success": success_value,
+            "errorMsg": "",
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="rejected by venue"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_rejects_unparseable_success_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "sdk-unparseable-success",
+            "status": "matched",
+            "success": "definitely",
+            "errorMsg": "",
+        },
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="unparseable success flag"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
+@pytest.mark.parametrize(
+    "response_overrides",
+    [
+        {},
+        {"orderID": ""},
+        {"orderID": "   "},
+        {"orderID": "__FILL_IN_ORDER_ID__"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_polymarket_sdk_success_without_concrete_venue_order_id_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    response_overrides: dict[str, object],
+) -> None:
+    response = {
+        "status": "matched",
+        "success": True,
+        "errorMsg": "",
+    } | response_overrides
+    _install_partial_fill_sdk(monkeypatch, response=response)
+
+    with pytest.raises(PolymarketSubmissionUnknownError, match="venue order id"):
+        await PolymarketSDKClient().submit_order(
+            _partial_fill_request(),
+            _live_settings().polymarket.credentials(),
+        )
+
+
 def _install_partial_fill_sdk(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -2257,6 +4668,7 @@ class _SlowPolymarketClient:
     approval.
     """
 
+    requires_live_mode: bool = False
     release: asyncio.Event = field(default_factory=asyncio.Event)
     entered_submit: asyncio.Event = field(default_factory=asyncio.Event)
     submitted: list[PolymarketOrderRequest] = field(default_factory=list)
@@ -2499,6 +4911,7 @@ async def test_polymarket_actuator_failed_first_submit_re_prompts_gate(
 
     @dataclass
     class _FailingClient:
+        requires_live_mode: bool = False
         attempts: int = 0
 
         async def submit_order(
@@ -2529,6 +4942,8 @@ async def test_polymarket_actuator_failed_first_submit_re_prompts_gate(
     # Second attempt must succeed by re-reading the approval file.
     @dataclass
     class _PassingClient:
+        requires_live_mode: bool = False
+
         async def submit_order(
             self,
             order: PolymarketOrderRequest,
@@ -2657,6 +5072,7 @@ async def test_polymarket_partial_fill_accepts_sub_cent_rounding_drift(
 class RecordingFirstOrderAuditWriter:
     events: list[tuple[str, LiveOrderPreview, str | None]] = field(default_factory=list)
     raise_on_event: str | None = None
+    error_message: str | None = None
 
     async def record_event(
         self,
@@ -2667,7 +5083,8 @@ class RecordingFirstOrderAuditWriter:
     ) -> None:
         self.events.append((event, preview, approver_id))
         if self.raise_on_event == event:
-            raise RuntimeError(f"audit write failed: {event}")
+            message = self.error_message or f"audit write failed: {event}"
+            raise RuntimeError(message)
 
 
 @pytest.mark.asyncio
@@ -2759,6 +5176,65 @@ async def test_polymarket_actuator_audit_writer_failure_does_not_break_submit(
     )
 
 
+@pytest.mark.asyncio
+async def test_polymarket_actuator_redacts_audit_writer_failure_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    writer = RecordingFirstOrderAuditWriter(
+        raise_on_event="approval_matched",
+        error_message=_secret_bearing_error_message("audit sink failed"),
+    )
+    actuator = PolymarketActuator(
+        _live_settings_with_secret_credentials(),
+        client=RecordingPolymarketClient(),
+        operator_gate=RecordingOperatorGate(approved=True),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="pms.actuator.adapters.polymarket"):
+        state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    rendered = "\n".join(record.message for record in caplog.records)
+    _assert_live_secrets_redacted(rendered)
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_redacts_read_approver_id_failure_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    @dataclass
+    class _ApproverReaderRaisesGate:
+        previews: list[LiveOrderPreview] = field(default_factory=list)
+
+        async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+            self.previews.append(preview)
+            return True
+
+        async def consume(self, preview: LiveOrderPreview) -> None:
+            del preview
+
+        def read_approver_id(self) -> str:
+            raise RuntimeError(
+                _secret_bearing_error_message("approver sidecar read failed")
+            )
+
+    actuator = PolymarketActuator(
+        _live_settings_with_secret_credentials(),
+        client=RecordingPolymarketClient(),
+        operator_gate=_ApproverReaderRaisesGate(),
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="pms.actuator.adapters.polymarket"):
+        state = await actuator.execute(_decision(), _portfolio())
+
+    assert state.status == OrderStatus.MATCHED.value
+    rendered = "\n".join(record.message for record in caplog.records)
+    _assert_live_secrets_redacted(rendered)
+
+
 # ---------------------------------------------------------------------------
 # STO-10 follow-up: sidecar approver_id reader on FileFirstLiveOrderGate
 # ---------------------------------------------------------------------------
@@ -2775,6 +5251,29 @@ def _approval_payload(*, market_id: str = "m-cp06") -> dict[str, object]:
         "outcome": "YES",
         "limit_price": 0.4,
         "max_slippage_bps": 50,
+    }
+
+
+def _approval_payload_hash(payload: dict[str, object]) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _approval_sidecar_payload(
+    approval_payload: dict[str, object],
+    *,
+    approver_id: str = "operator-alice",
+    ts: datetime | None = None,
+) -> dict[str, object]:
+    return {
+        "approver_id": approver_id,
+        "approval_sha256": _approval_payload_hash(approval_payload),
+        "ts": (ts or datetime.now(tz=UTC)).isoformat(),
     }
 
 
@@ -2826,6 +5325,398 @@ def test_file_first_live_order_gate_returns_none_when_sidecar_malformed(
         json.dumps({"approver_id": 42}), encoding="utf-8"
     )
     assert FileFirstLiveOrderGate(approval_path).read_approver_id() is None
+
+
+def test_file_first_live_order_gate_returns_none_for_duplicate_sidecar_json_key(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approval.json"
+    _sidecar_path(approval_path).write_text(
+        (
+            '{"approver_id": "operator-mallory", '
+            '"approver_id": "operator-alice", '
+            '"ts": "2026-05-07T00:00:00Z"}'
+        ),
+        encoding="utf-8",
+    )
+
+    assert FileFirstLiveOrderGate(approval_path).read_approver_id() is None
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_requires_sidecar_when_configured(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approval.json"
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=300.0,
+    )
+
+    assert await gate.approve_first_order(preview) is False
+
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+
+    assert await gate.approve_first_order(preview) is True
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_opens_artifacts_with_no_follow_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    no_follow_flag = getattr(os, "O_NOFOLLOW", 0)
+    if no_follow_flag == 0:
+        pytest.skip("os.O_NOFOLLOW is unavailable on this platform")
+
+    approval_path = tmp_path / "approval.json"
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    observed_flags: list[int] = []
+    real_open = os.open
+
+    def recording_open(
+        path_arg: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        observed_flags.append(flags)
+        return real_open(path_arg, flags, mode)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=300.0,
+    )
+
+    assert await gate.approve_first_order(preview) is True
+    assert len(observed_flags) == 2
+    assert all(flags & no_follow_flag for flags in observed_flags)
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_rejects_permissive_approval_parent(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "permissive-approval"
+    approval_dir.mkdir(mode=0o700)
+    approval_dir.chmod(0o755)
+    approval_path = approval_dir / "approval.json"
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=300.0,
+    )
+
+    try:
+        assert await gate.approve_first_order(preview) is False
+    finally:
+        approval_dir.chmod(0o700)
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_rejects_symlink_approval_parent(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "approval-target"
+    approval_dir.mkdir(mode=0o700)
+    approval_path = approval_dir / "approval.json"
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    symlink_parent = tmp_path / "approval-parent-link"
+    symlink_parent.symlink_to(approval_dir, target_is_directory=True)
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(
+        symlink_parent / "approval.json",
+        require_approver_sidecar=True,
+        approval_max_age_s=300.0,
+    )
+
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_rejects_symlink_approval_file(
+    tmp_path: Path,
+) -> None:
+    target_path = tmp_path / "target-approval.json"
+    target_path.write_text(json.dumps(_approval_payload()), encoding="utf-8")
+    approval_path = tmp_path / "approval.json"
+    approval_path.symlink_to(target_path)
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(approval_path)
+
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_rejects_hardlinked_approval_file(
+    tmp_path: Path,
+) -> None:
+    target_path = tmp_path / "target-approval.json"
+    approval_payload = _approval_payload()
+    target_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    approval_path = tmp_path / "approval.json"
+    os.link(target_path, approval_path)
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=300.0,
+    )
+
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_rejects_symlink_sidecar(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approval.json"
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    sidecar_target = tmp_path / "sidecar-target.json"
+    sidecar_target.write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    _sidecar_path(approval_path).symlink_to(sidecar_target)
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=300.0,
+    )
+
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_rejects_hardlinked_sidecar(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approval.json"
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    sidecar_target = tmp_path / "sidecar-target.json"
+    sidecar_target.write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    os.link(sidecar_target, _sidecar_path(approval_path))
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=300.0,
+    )
+
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_rejects_stale_sidecar_when_configured(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approval.json"
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(
+            _approval_sidecar_payload(
+                approval_payload,
+                ts=datetime.now(tz=UTC) - timedelta(seconds=301),
+            )
+        ),
+        encoding="utf-8",
+    )
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=300.0,
+    )
+
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_rejects_placeholder_approver_id(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approval.json"
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(
+            _approval_sidecar_payload(
+                approval_payload,
+                approver_id="__FILL_IN_OPERATOR_ID__",
+            )
+        ),
+        encoding="utf-8",
+    )
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=300.0,
+    )
+
+    assert await gate.approve_first_order(preview) is False
+
+
+@pytest.mark.asyncio
+async def test_file_first_live_order_gate_requires_sidecar_hash_match(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(json.dumps(_approval_payload()), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(
+            {
+                "approver_id": "operator-alice",
+                "approval_sha256": "not-the-approval-payload-hash",
+                "ts": datetime.now(tz=UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    preview = LiveOrderPreview(
+        max_notional_usdc=10.0,
+        venue="polymarket",
+        market_id="m-cp06",
+        token_id="t-yes",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        max_slippage_bps=50,
+        outcome="YES",
+    )
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=300.0,
+    )
+
+    assert await gate.approve_first_order(preview) is False
 
 
 @pytest.mark.asyncio
@@ -2895,6 +5786,106 @@ async def test_polymarket_actuator_audit_includes_approver_id_from_sidecar(
 
 
 @pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_when_strict_sidecar_disappears(
+    tmp_path: Path,
+) -> None:
+    """If strict sidecar provenance disappears after approve() returns
+    but before audit attribution, the actuator must fail closed instead
+    of submitting an unattributed live order."""
+
+    @dataclass(frozen=True)
+    class _DeletingSidecarGate(FileFirstLiveOrderGate):
+        async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+            approved = await super().approve_first_order(preview)
+            if approved:
+                self._sidecar_path().unlink()
+            return approved
+
+    approval_path = tmp_path / "approval.json"
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        _live_settings(operator_approval_mode="every_order"),
+        client=client,
+        operator_gate=_DeletingSidecarGate(
+            approval_path,
+            require_approver_sidecar=True,
+            approval_max_age_s=300.0,
+        ),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    with pytest.raises(OperatorApprovalRequiredError, match="approval"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert [(event, approver_id) for event, _, approver_id in writer.events] == [
+        ("approval_denied", None)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_when_strict_sidecar_is_replaced(
+    tmp_path: Path,
+) -> None:
+    """If strict sidecar provenance changes after approve() returns,
+    the actuator must fail closed instead of attributing a live order to
+    an operator id that was not part of the validated authorization."""
+
+    @dataclass(frozen=True)
+    class _ReplacingSidecarGate(FileFirstLiveOrderGate):
+        async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
+            approved = await super().approve_first_order(preview)
+            if approved:
+                self._sidecar_path().write_text(
+                    json.dumps(
+                        _approval_sidecar_payload(
+                            _approval_payload(),
+                            approver_id="operator-mallory",
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+            return approved
+
+    approval_path = tmp_path / "approval.json"
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    writer = RecordingFirstOrderAuditWriter()
+    actuator = PolymarketActuator(
+        _live_settings(operator_approval_mode="every_order"),
+        client=client,
+        operator_gate=_ReplacingSidecarGate(
+            approval_path,
+            require_approver_sidecar=True,
+            approval_max_age_s=300.0,
+        ),
+        quote_provider=AllowQuoteProvider(),
+        audit_writer=writer,
+    )
+
+    with pytest.raises(OperatorApprovalRequiredError, match="approval"):
+        await actuator.execute(_decision(), _portfolio())
+
+    assert client.submitted == []
+    assert [(event, approver_id) for event, _, approver_id in writer.events] == [
+        ("approval_denied", None)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_polymarket_actuator_emits_consume_failed_when_consume_raises(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -2925,9 +5916,13 @@ async def test_polymarket_actuator_emits_consume_failed_when_consume_raises(
             raise self.consume_error
 
     writer = RecordingFirstOrderAuditWriter()
-    gate = _ConsumeRaisesGate(consume_error=OSError("disk full"))
+    gate = _ConsumeRaisesGate(
+        consume_error=OSError(
+            _secret_bearing_error_message("approval consume failed")
+        )
+    )
     actuator = PolymarketActuator(
-        _live_settings(),
+        _live_settings_with_secret_credentials(),
         client=RecordingPolymarketClient(),
         operator_gate=gate,
         quote_provider=AllowQuoteProvider(),
@@ -2954,6 +5949,9 @@ async def test_polymarket_actuator_emits_consume_failed_when_consume_raises(
     ), (
         "expected ERROR log on consume failure, got: "
         f"{[(r.levelname, r.message) for r in caplog.records]}"
+    )
+    _assert_live_secrets_redacted(
+        "\n".join(record.message for record in caplog.records)
     )
 
 

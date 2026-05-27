@@ -44,6 +44,8 @@ async def test_list_trades_returns_market_question_and_fill_fields() -> None:
                 status="matched",
                 strategy_id="default",
                 strategy_version_id="default-v1",
+                fee_bps=12,
+                fees=0.0246,
             )
         ]
     )
@@ -71,6 +73,8 @@ async def test_list_trades_returns_market_question_and_fill_fields() -> None:
                 "status": "matched",
                 "strategy_id": "default",
                 "strategy_version_id": "default-v1",
+                "fee_bps": 12,
+                "fees": 0.0246,
             }
         ],
         "limit": 25,

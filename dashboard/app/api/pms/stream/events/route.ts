@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { MISSING_PRODUCTION_BACKEND_DETAIL } from '@/lib/upstream';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,6 +24,12 @@ function mockStream() {
 export async function GET(request: NextRequest) {
   const baseUrl = process.env.PMS_API_BASE_URL;
   if (!baseUrl) {
+    if (process.env.NODE_ENV === 'production') {
+      return NextResponse.json(
+        { detail: MISSING_PRODUCTION_BACKEND_DETAIL },
+        { status: 503 }
+      );
+    }
     return new Response(mockStream(), {
       headers: streamHeaders()
     });

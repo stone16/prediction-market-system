@@ -7,26 +7,89 @@ sample gate, report generation) without hitting the Gamma API.
 from __future__ import annotations
 
 import csv
+import os
+import stat
+import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import TracebackType
+from typing import IO, cast
 
 import pytest
 
 from scripts.flb_data_feasibility import (
     DecileStats,
+    FlbCalibrationArtifactRow,
     ResolvedMarket,
     _assign_decile,
     _parse_market,
     _wilson_interval,
+    build_flb_calibration_rows,
     check_sample_gate,
     compute_decile_stats,
     generate_report,
     load_warehouse_markets,
+    main,
     markets_to_contracts,
+    save_decile_csv,
+    save_flb_calibration_csv,
 )
+from pms.strategies.flb.source import load_flb_calibration_csv
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+class _FailingTextWriter:
+    def __init__(self, wrapped: IO[str]) -> None:
+        self._wrapped = wrapped
+
+    def __enter__(self) -> "_FailingTextWriter":
+        self._wrapped.__enter__()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        return self._wrapped.__exit__(exc_type, exc, traceback)
+
+    def write(self, content: str) -> int:
+        self._wrapped.write(content)
+        raise OSError("simulated write failure")
+
+
+def _patch_text_artifact_writes_to_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_fdopen = os.fdopen
+
+    def failing_fdopen(
+        fd: int,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+        closefd: bool = True,
+        opener: Callable[[str, int], int] | None = None,
+    ) -> object:
+        file = real_fdopen(
+            fd,
+            mode,
+            buffering,
+            encoding,
+            errors,
+            newline,
+            closefd,
+            opener,
+        )
+        if "w" in mode:
+            return _FailingTextWriter(cast(IO[str], file))
+        return file
+
+    monkeypatch.setattr(os, "fdopen", failing_fdopen)
 
 
 def _market(
@@ -159,6 +222,29 @@ class TestWarehouseCsvLoading:
         with pytest.raises(ValueError, match="missing required columns: liquidity"):
             load_warehouse_markets(path)
 
+    def test_rejects_duplicate_header(self, tmp_path: Path) -> None:
+        path = tmp_path / "duplicate_header.csv"
+        path.write_text(
+            "\n".join(
+                (
+                    (
+                        "market_id,question,entry_yes_price,yes_payout,no_payout,"
+                        "volume,liquidity,liquidity,entry_timestamp,resolved_at,"
+                        "category"
+                    ),
+                    (
+                        "m-1,Will duplicate headers fail?,0.05,0,1,10000,500,"
+                        "999,2025-12-01T00:00:00Z,2026-01-01T00:00:00Z,"
+                        "politics"
+                    ),
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="duplicate CSV column: liquidity"):
+            load_warehouse_markets(path)
+
     def test_rejects_duplicate_market_ids(self, tmp_path: Path) -> None:
         """Duplicate markets would falsely inflate the contract sample gate."""
         path = tmp_path / "duplicate_markets.csv"
@@ -169,6 +255,78 @@ class TestWarehouseCsvLoading:
 
         with pytest.raises(ValueError, match="duplicate market_id"):
             load_warehouse_markets(path)
+
+    def test_rejects_symlink_input(self, tmp_path: Path) -> None:
+        target_path = tmp_path / "target-warehouse.csv"
+        _write_warehouse_csv(target_path, [_warehouse_row()])
+        path = tmp_path / "resolved_binary.csv"
+        path.symlink_to(target_path)
+
+        with pytest.raises(ValueError, match="cannot be read safely"):
+            load_warehouse_markets(path)
+
+    def test_opens_input_with_no_follow_when_available(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        no_follow_flag = getattr(os, "O_NOFOLLOW", 0)
+        if no_follow_flag == 0:
+            pytest.skip("os.O_NOFOLLOW is unavailable on this platform")
+
+        path = tmp_path / "resolved_binary.csv"
+        _write_warehouse_csv(path, [_warehouse_row()])
+        observed: list[tuple[Path, int]] = []
+        real_open = os.open
+
+        def recording_open(
+            path_arg: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            flags: int,
+            mode: int = 0o777,
+        ) -> int:
+            observed.append((Path(os.fsdecode(os.fspath(path_arg))), flags))
+            return real_open(path_arg, flags, mode)
+
+        monkeypatch.setattr(os, "open", recording_open)
+
+        markets, skipped = load_warehouse_markets(path)
+
+        observed_by_path = {observed_path: flags for observed_path, flags in observed}
+        assert len(markets) == 1
+        assert skipped == 0
+        assert observed_by_path[path] & no_follow_flag
+
+    def test_rejects_hardlink_swap_during_input_read(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        path = tmp_path / "resolved_binary.csv"
+        _write_warehouse_csv(path, [_warehouse_row()])
+        replacement_source = tmp_path / "replacement-warehouse.csv"
+        _write_warehouse_csv(replacement_source, [_warehouse_row(market_id="m-2")])
+        real_open = os.open
+        swapped = False
+
+        def swapping_open(
+            path_arg: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            flags: int,
+            mode: int = 0o777,
+        ) -> int:
+            nonlocal swapped
+            observed_path = Path(os.fsdecode(os.fspath(path_arg)))
+            if observed_path == path and not swapped:
+                swapped = True
+                path.unlink()
+                os.link(replacement_source, path)
+            return real_open(path_arg, flags, mode)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+
+        with pytest.raises(ValueError, match="cannot be read safely"):
+            load_warehouse_markets(path)
+
+        assert swapped is True
 
     def test_rejects_entry_timestamp_after_resolution(self, tmp_path: Path) -> None:
         """Post-resolution entry prices leak settlement truth into FLB samples."""
@@ -284,6 +442,597 @@ class TestWarehouseCsvLoading:
         assert gate.passed is True
         assert "H1 DATA VIABLE" in report
         assert "warehouse CSV:" in report
+
+
+class TestFlbCalibrationArtifact:
+    def test_build_flb_calibration_rows_uses_signal_specific_outcomes(self) -> None:
+        markets = [
+            _market(0.05, False, category="politics")
+            for _ in range(119)
+        ]
+        markets.append(_market(0.05, True, category="politics"))
+        markets.extend(
+            _market(0.95, True, category="sports")
+            for _ in range(118)
+        )
+        markets.extend(
+            _market(0.95, False, category="sports")
+            for _ in range(2)
+        )
+
+        rows = build_flb_calibration_rows(
+            markets,
+            source_label="warehouse-flb-v1",
+        )
+
+        assert rows == [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=120 / 122,
+                sample_count=120,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=119 / 122,
+                sample_count=120,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+
+    def test_build_flb_calibration_rows_requires_each_target_signal_sample_gate(
+        self,
+    ) -> None:
+        markets = [_market(0.05, False) for _ in range(120)]
+
+        with pytest.raises(ValueError, match="favorite_yes_underpriced_buy_yes"):
+            build_flb_calibration_rows(
+                markets,
+                source_label="warehouse-flb-v1",
+            )
+
+    def test_save_flb_calibration_csv_round_trips_into_runtime_loader(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        rows = [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=0.99,
+                sample_count=150,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=0.97,
+                sample_count=151,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+        output_path = tmp_path / "flb-calibration.csv"
+
+        save_flb_calibration_csv(rows, output_path)
+        model = load_flb_calibration_csv(output_path)
+
+        assert model.calibration_for(
+            "longshot_yes_overpriced_buy_no"
+        ).probability_estimate == pytest.approx(0.99)
+
+    def test_save_flb_calibration_csv_creates_output_parent_private(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        rows = [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=0.99,
+                sample_count=150,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=0.97,
+                sample_count=151,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+        output_dir = tmp_path / "artifacts"
+
+        save_flb_calibration_csv(rows, output_dir / "flb-calibration.csv")
+
+        assert stat.S_IMODE(output_dir.stat().st_mode) == 0o700
+
+    def test_save_flb_calibration_csv_refuses_permissive_output_parent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        rows = [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=0.99,
+                sample_count=150,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=0.97,
+                sample_count=151,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+        output_dir = tmp_path / "shared-artifacts"
+        output_dir.mkdir(mode=0o700)
+        output_dir.chmod(0o755)
+
+        try:
+            with pytest.raises(OSError, match="FLB calibration CSV output parent"):
+                save_flb_calibration_csv(rows, output_dir / "flb-calibration.csv")
+        finally:
+            output_dir.chmod(0o700)
+
+        assert not (output_dir / "flb-calibration.csv").exists()
+
+    def test_save_flb_calibration_csv_preserves_existing_output_when_write_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        rows = [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=0.99,
+                sample_count=150,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=0.97,
+                sample_count=151,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+        output_path = tmp_path / "flb-calibration.csv"
+        output_path.write_text("old calibration\n", encoding="utf-8")
+        _patch_text_artifact_writes_to_fail(monkeypatch)
+
+        with pytest.raises(OSError, match="simulated write failure"):
+            save_flb_calibration_csv(rows, output_path)
+
+        assert output_path.read_text(encoding="utf-8") == "old calibration\n"
+
+    def test_save_flb_calibration_csv_does_not_publish_new_output_when_write_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        rows = [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=0.99,
+                sample_count=150,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=0.97,
+                sample_count=151,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+        output_path = tmp_path / "flb-calibration.csv"
+        _patch_text_artifact_writes_to_fail(monkeypatch)
+
+        with pytest.raises(OSError, match="simulated write failure"):
+            save_flb_calibration_csv(rows, output_path)
+
+        assert not output_path.exists()
+
+    def test_save_decile_csv_creates_output_parent_private(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        stats = compute_decile_stats(
+            markets_to_contracts(
+                [
+                    _market(0.05, False),
+                    _market(0.95, True),
+                ]
+            )
+        )
+        output_dir = tmp_path / "artifacts"
+
+        save_decile_csv(stats, output_dir / "flb-deciles.csv")
+
+        assert stat.S_IMODE(output_dir.stat().st_mode) == 0o700
+
+    def test_save_decile_csv_refuses_permissive_output_parent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        stats = compute_decile_stats(
+            markets_to_contracts(
+                [
+                    _market(0.05, False),
+                    _market(0.95, True),
+                ]
+            )
+        )
+        output_dir = tmp_path / "shared-artifacts"
+        output_dir.mkdir(mode=0o700)
+        output_dir.chmod(0o755)
+
+        try:
+            with pytest.raises(OSError, match="FLB decile CSV output parent"):
+                save_decile_csv(stats, output_dir / "flb-deciles.csv")
+        finally:
+            output_dir.chmod(0o700)
+
+        assert not (output_dir / "flb-deciles.csv").exists()
+
+    def test_save_decile_csv_preserves_existing_output_when_write_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stats = compute_decile_stats(
+            markets_to_contracts(
+                [
+                    _market(0.05, False),
+                    _market(0.95, True),
+                ]
+            )
+        )
+        output_path = tmp_path / "flb-deciles.csv"
+        output_path.write_text("old deciles\n", encoding="utf-8")
+        _patch_text_artifact_writes_to_fail(monkeypatch)
+
+        with pytest.raises(OSError, match="simulated write failure"):
+            save_decile_csv(stats, output_path)
+
+        assert output_path.read_text(encoding="utf-8") == "old deciles\n"
+
+    def test_save_decile_csv_does_not_publish_new_output_when_write_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stats = compute_decile_stats(
+            markets_to_contracts(
+                [
+                    _market(0.05, False),
+                    _market(0.95, True),
+                ]
+            )
+        )
+        output_path = tmp_path / "flb-deciles.csv"
+        _patch_text_artifact_writes_to_fail(monkeypatch)
+
+        with pytest.raises(OSError, match="simulated write failure"):
+            save_decile_csv(stats, output_path)
+
+        assert not output_path.exists()
+
+    def test_cli_returns_operator_error_for_permissive_report_parent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        _write_warehouse_csv(
+            input_path,
+            [
+                _warehouse_row(market_id="longshot-1"),
+                _warehouse_row(
+                    market_id="favorite-1",
+                    entry_yes_price="0.95",
+                    yes_payout="1",
+                    no_payout="0",
+                ),
+            ],
+        )
+        output_dir = tmp_path / "shared-artifacts"
+        output_dir.mkdir(mode=0o700)
+        output_dir.chmod(0o755)
+        output_path = output_dir / "flb-report.md"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+            ],
+        )
+
+        try:
+            exit_code = main()
+            captured = capsys.readouterr()
+        finally:
+            output_dir.chmod(0o700)
+
+        assert exit_code == 2
+        assert "FLB report output parent" in captured.err
+        assert "too permissive" in captured.err
+        assert not output_path.exists()
+
+    def test_cli_returns_operator_error_for_permissive_calibration_parent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        rows = [
+            _warehouse_row(
+                market_id=f"longshot-{index}",
+                entry_yes_price="0.05",
+                yes_payout="0",
+                no_payout="1",
+            )
+            for index in range(120)
+        ] + [
+            _warehouse_row(
+                market_id=f"favorite-{index}",
+                entry_yes_price="0.95",
+                yes_payout="1",
+                no_payout="0",
+            )
+            for index in range(120)
+        ]
+        _write_warehouse_csv(input_path, rows)
+        output_dir = tmp_path / "shared-artifacts"
+        output_dir.mkdir(mode=0o700)
+        output_dir.chmod(0o755)
+        output_path = output_dir / "flb-calibration.csv"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--calibration-csv",
+                str(output_path),
+            ],
+        )
+
+        try:
+            exit_code = main()
+            captured = capsys.readouterr()
+        finally:
+            output_dir.chmod(0o700)
+
+        assert exit_code == 2
+        assert "FLB calibration CSV output parent" in captured.err
+        assert "too permissive" in captured.err
+        assert not output_path.exists()
+
+    def test_save_flb_calibration_csv_atomic_publish_does_not_mutate_hardlink_swap_target(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        rows = [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=0.99,
+                sample_count=150,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=0.97,
+                sample_count=151,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+        target_path = tmp_path / "target-flb-calibration.csv"
+        target_path.write_text("target must not be overwritten\n", encoding="utf-8")
+        output_path = tmp_path / "flb-calibration.csv"
+        output_path.write_text("old calibration\n", encoding="utf-8")
+        real_replace = os.replace
+        swapped = False
+
+        def swapping_replace(
+            src: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            dst: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        ) -> None:
+            nonlocal swapped
+            observed_dst = Path(os.fsdecode(os.fspath(dst)))
+            if observed_dst == output_path and not swapped:
+                swapped = True
+                output_path.unlink()
+                os.link(target_path, output_path)
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", swapping_replace)
+
+        save_flb_calibration_csv(rows, output_path)
+
+        assert swapped is True
+        assert target_path.read_text(encoding="utf-8") == (
+            "target must not be overwritten\n"
+        )
+        assert output_path.stat().st_nlink == 1
+        assert load_flb_calibration_csv(output_path).calibration_for(
+            "longshot_yes_overpriced_buy_no"
+        ).probability_estimate == pytest.approx(0.99)
+
+    def test_cli_rejects_calibration_output_reusing_warehouse_input(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        rows = [
+            _warehouse_row(
+                market_id=f"longshot-{index}",
+                entry_yes_price="0.05",
+                yes_payout="0",
+                no_payout="1",
+            )
+            for index in range(100)
+        ] + [
+            _warehouse_row(
+                market_id=f"favorite-{index}",
+                entry_yes_price="0.95",
+                yes_payout="1",
+                no_payout="0",
+            )
+            for index in range(100)
+        ]
+        _write_warehouse_csv(input_path, rows)
+        original_input = input_path.read_text(encoding="utf-8")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--calibration-csv",
+                str(input_path),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 2
+        assert input_path.read_text(encoding="utf-8") == original_input
+
+    def test_cli_rejects_report_output_reusing_decile_csv_output(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        output_path = tmp_path / "flb-artifact.csv"
+        _write_warehouse_csv(
+            input_path,
+            [
+                _warehouse_row(market_id="longshot-1"),
+                _warehouse_row(
+                    market_id="favorite-1",
+                    entry_yes_price="0.95",
+                    yes_payout="1",
+                    no_payout="0",
+                ),
+            ],
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+                "--csv",
+                str(output_path),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 2
+        assert not output_path.exists()
+
+    def test_cli_returns_operator_error_for_malformed_warehouse_csv(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        with input_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[column for column in WAREHOUSE_COLUMNS if column != "liquidity"],
+            )
+            writer.writeheader()
+            row = _warehouse_row(market_id="longshot-1")
+            del row["liquidity"]
+            writer.writerow(row)
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+            ],
+        )
+
+        exit_code = main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 2
+        assert "missing required columns: liquidity" in captured.err
+        assert "# H1 FLB Data Feasibility Report" not in captured.out
+
+    def test_cli_returns_operator_error_for_symlink_report_output(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        _write_warehouse_csv(
+            input_path,
+            [
+                _warehouse_row(market_id="longshot-1"),
+                _warehouse_row(
+                    market_id="favorite-1",
+                    entry_yes_price="0.95",
+                    yes_payout="1",
+                    no_payout="0",
+                ),
+            ],
+        )
+        target_path = tmp_path / "target-report.md"
+        target_path.write_text("target must not be overwritten\n", encoding="utf-8")
+        output_path = tmp_path / "flb-report.md"
+        output_path.symlink_to(target_path)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+            ],
+        )
+
+        exit_code = main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 2
+        assert "FLB report output path" in captured.err
+        assert "regular file" in captured.err
+        assert target_path.read_text(encoding="utf-8") == (
+            "target must not be overwritten\n"
+        )
 
 
 # ── Decile Assignment ───────────────────────────────────────────────────────

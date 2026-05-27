@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import json
+from math import isfinite
 from typing import Any, Final, Literal, cast
 
 import asyncpg
@@ -128,6 +129,7 @@ class StoredDecisionRow:
     created_at: datetime
     updated_at: datetime
     expires_at: datetime
+    decision_evidence: Mapping[str, Any] = field(default_factory=dict)
     opportunity: Opportunity | None = None
 
 
@@ -146,6 +148,7 @@ class DecisionStore:
         created_at: datetime,
         expires_at: datetime,
         status: DecisionStatus = "pending",
+        decision_evidence: Mapping[str, Any] | None = None,
     ) -> None:
         if self.pool is None or not hasattr(self.pool, "acquire"):
             return
@@ -198,7 +201,13 @@ class DecisionStore:
                     SET payload = EXCLUDED.payload
                     """,
                     decision.decision_id,
-                    json.dumps(_decision_payload(decision)),
+                    json.dumps(
+                        _decision_payload(
+                            decision,
+                            decision_evidence=decision_evidence,
+                        ),
+                        allow_nan=False,
+                    ),
                 )
 
     async def read_decisions(
@@ -415,7 +424,11 @@ def _coerce_decision_status(status: str) -> DecisionStatus:
     return status
 
 
-def _decision_payload(decision: TradeDecision) -> dict[str, object]:
+def _decision_payload(
+    decision: TradeDecision,
+    *,
+    decision_evidence: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
     return {
         "decision_id": decision.decision_id,
         "market_id": decision.market_id,
@@ -437,7 +450,13 @@ def _decision_payload(decision: TradeDecision) -> dict[str, object]:
         "outcome": decision.outcome,
         "model_id": decision.model_id,
         "intent_key": decision.intent_key,
+        "risk_group_id": decision.risk_group_id,
         "spread_bps_at_decision": decision.spread_bps_at_decision,
+        "decision_evidence": (
+            cast(dict[str, object], _json_safe(decision_evidence))
+            if decision_evidence is not None
+            else {}
+        ),
     }
 
 
@@ -446,7 +465,8 @@ def _stored_decision_from_row(
     *,
     include_opportunity: bool,
 ) -> StoredDecisionRow:
-    decision = _decision_from_payload(_json_object(row["payload"]))
+    payload = _json_object(row["payload"])
+    decision = _decision_from_payload(payload)
     return StoredDecisionRow(
         decision=decision,
         status=_coerce_decision_status(cast(str, row["status"])),
@@ -454,6 +474,7 @@ def _stored_decision_from_row(
         created_at=cast(datetime, row["created_at"]),
         updated_at=cast(datetime, row["updated_at"]),
         expires_at=cast(datetime, row["expires_at"]),
+        decision_evidence=_json_object(payload.get("decision_evidence")),
         opportunity=(
             _opportunity_from_row(row)
             if include_opportunity and row["opportunity_row_id"] is not None
@@ -484,6 +505,7 @@ def _decision_from_payload(payload: Mapping[str, Any]) -> TradeDecision:
         outcome=cast(Literal["YES", "NO"], payload.get("outcome", "YES")),
         model_id=cast(str | None, payload.get("model_id")),
         intent_key=cast(str | None, payload.get("intent_key")),
+        risk_group_id=cast(str | None, payload.get("risk_group_id")),
         spread_bps_at_decision=_optional_int(payload.get("spread_bps_at_decision")),
     )
 
@@ -516,6 +538,24 @@ def _json_object(value: object) -> dict[str, Any]:
         if isinstance(loaded, dict):
             return cast(dict[str, Any], loaded)
     return {}
+
+
+def _json_safe(value: object) -> object:
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if isfinite(value):
+            return value
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(raw_value) for key, raw_value in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return str(value)
 
 
 def _numeric_mapping(value: object) -> dict[str, float]:

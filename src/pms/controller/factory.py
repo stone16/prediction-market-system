@@ -146,9 +146,12 @@ def _risk_settings(
         max_position_per_market=strategy.risk.max_position_notional_usdc,
         max_total_exposure=fallback.max_total_exposure,
         max_drawdown_pct=strategy.risk.max_daily_drawdown_pct,
+        max_daily_loss_usdc=fallback.max_daily_loss_usdc,
         max_open_positions=fallback.max_open_positions,
+        max_exposure_per_risk_group=fallback.max_exposure_per_risk_group,
         min_order_usdc=strategy.risk.min_order_size_usdc,
         slippage_threshold_bps=fallback.slippage_threshold_bps,
+        max_quantity_shares=fallback.max_quantity_shares,
     )
 
 
@@ -156,7 +159,91 @@ def _assert_strategy_mode_allowed(strategy: ActiveStrategy, *, mode: RunMode) ->
     if mode != RunMode.LIVE:
         return
     metadata = dict(strategy.config.metadata)
-    if metadata.get("live_allowed") != "false":
-        return
-    msg = f"{strategy.strategy_id} is PAPER-only"
-    raise ValueError(msg)
+    live_allowed = metadata.get("live_allowed")
+    if live_allowed is not None and live_allowed.strip().lower() == "false":
+        msg = f"{strategy.strategy_id} is PAPER-only"
+        raise ValueError(msg)
+    if live_allowed is None or live_allowed.strip().lower() != "true":
+        msg = (
+            f"{strategy.strategy_id} requires metadata.live_allowed=true "
+            "for LIVE mode"
+        )
+        raise ValueError(msg)
+    _assert_live_strategy_metadata_ready(strategy, metadata)
+    if not strategy.calibration.enabled:
+        msg = (
+            f"{strategy.strategy_id} requires calibration.enabled=true "
+            "for LIVE mode"
+        )
+        raise ValueError(msg)
+    if not _live_strategy_has_non_llm_forecaster(strategy):
+        msg = (
+            f"{strategy.strategy_id} requires at least one non-LLM forecaster "
+            "for LIVE mode"
+        )
+        raise ValueError(msg)
+
+
+def _live_strategy_has_non_llm_forecaster(strategy: ActiveStrategy) -> bool:
+    return any(name != "llm" for name, _raw_params in strategy.forecaster.forecasters)
+
+
+def _assert_live_strategy_metadata_ready(
+    strategy: ActiveStrategy,
+    metadata: dict[str, str],
+) -> None:
+    for key in _REQUIRED_LIVE_STRATEGY_EVIDENCE_METADATA_KEYS:
+        value = metadata.get(key)
+        if value is None or value.strip() == "":
+            msg = (
+                f"{strategy.strategy_id} requires metadata.{key} "
+                "for LIVE mode"
+            )
+            raise ValueError(msg)
+        if _looks_like_unready_live_strategy_metadata(value):
+            msg = (
+                f"{strategy.strategy_id} metadata.{key} must not be "
+                "placeholder/static for LIVE mode"
+            )
+            raise ValueError(msg)
+
+    for key in _LIVE_STRATEGY_EVIDENCE_METADATA_KEYS:
+        value = metadata.get(key)
+        if value is None:
+            continue
+        if _looks_like_unready_live_strategy_metadata(value):
+            msg = (
+                f"{strategy.strategy_id} metadata.{key} must not be "
+                "placeholder/static for LIVE mode"
+            )
+            raise ValueError(msg)
+
+
+_REQUIRED_LIVE_STRATEGY_EVIDENCE_METADATA_KEYS = (
+    "alpha_source",
+    "edge_model_source",
+    "calibration_source",
+    "evidence_source",
+)
+
+
+_LIVE_STRATEGY_EVIDENCE_METADATA_KEYS = (
+    "model_source",
+    *_REQUIRED_LIVE_STRATEGY_EVIDENCE_METADATA_KEYS,
+)
+
+
+def _looks_like_unready_live_strategy_metadata(value: str) -> bool:
+    normalized = value.strip().lower()
+    unready_markers = (
+        "placeholder",
+        "todo",
+        "fill_in",
+        "__fill",
+        "replace",
+        "static_live_estimate",
+        "static_estimate",
+        "paper_soak_placeholder",
+        "uncalibrated",
+    )
+    return any(marker in normalized for marker in unready_markers)

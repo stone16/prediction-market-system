@@ -46,8 +46,8 @@ that governs this layer:
   `FillRecord` + `TradeDecision`.
 - `metrics.py` — `MetricsCollector.global_ops_snapshot()` for the
   cross-strategy ops view and `snapshot_by_strategy()` for
-  per-strategy Brier, P&L, slippage, fill rate, and calibration
-  samples.
+  per-strategy Brier, secondary baseline Brier improvement, P&L,
+  slippage, fill rate, and calibration samples.
 - `feedback.py` — `EvaluatorFeedback` emits `Feedback` items when
   thresholds breach.
 - `/metrics` dashboard page — the per-strategy breakdown is the
@@ -63,6 +63,10 @@ that governs this layer:
   such in the SQL or comment.
 - Never mutate `EvalRecord` after writing — event-sourced semantics
   apply (Invariant 3 sibling constraint on immutability).
+- Secondary baselines are scored only from decision-time evidence.
+  `category_prior` is valid when the signal supplied
+  `category_prior_baseline_prob_estimate`; do not derive it from
+  later resolved outcomes inside Evaluator.
 - Never resolve feedback silently. Resolution is a user action
   surfaced through `POST /feedback/{id}/resolve`.
 - Never write outside the inner ring (Invariant 8). Do not reach

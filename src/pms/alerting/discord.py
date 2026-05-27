@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import stat
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -125,14 +127,92 @@ class DiscordWebhookClient:
 
 
 def _write_fallback(alert_dir: Path, payload: dict[str, Any], *, prefix: str) -> Path:
-    alert_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_alert_dir(alert_dir)
     timestamp = datetime.now(tz=UTC).isoformat().replace(":", "-")
     target = alert_dir / f"{prefix}-{timestamp}.json"
     tmp = target.with_suffix(".tmp")
     sanitized = _sanitize_payload(payload)
-    tmp.write_text(json.dumps(sanitized, sort_keys=True), encoding="utf-8")
-    tmp.replace(target)
+    published = False
+    try:
+        _write_tmp_text_no_follow(tmp, json.dumps(sanitized, sort_keys=True))
+        tmp.replace(target)
+        published = True
+        _fsync_parent_directory(alert_dir)
+    finally:
+        if not published:
+            _unlink_regular_single_link_file_if_present(tmp)
     return target
+
+
+def _prepare_alert_dir(alert_dir: Path) -> None:
+    try:
+        path_stat = alert_dir.lstat()
+    except FileNotFoundError:
+        alert_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+        os.chmod(alert_dir, 0o700)
+        return
+    if not stat.S_ISDIR(path_stat.st_mode):
+        raise OSError(f"alert fallback directory is not a directory: {alert_dir}")
+    permissions = stat.S_IMODE(path_stat.st_mode)
+    if permissions & 0o077:
+        raise OSError(
+            f"alert fallback directory {alert_dir} is too permissive; "
+            "run `chmod 700`."
+        )
+    if not permissions & stat.S_IWUSR:
+        raise OSError(
+            f"alert fallback directory {alert_dir} is not owner-writable; "
+            "run `chmod 700`."
+        )
+
+
+def _write_tmp_text_no_follow(path: Path, content: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        raise OSError(f"alert fallback temporary path already exists: {path}") from exc
+    try:
+        path_stat = os.fstat(fd)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError(f"alert fallback temporary path is not a regular file: {path}")
+        if path_stat.st_nlink != 1:
+            raise OSError(
+                f"alert fallback temporary path is not a single-link file: {path}"
+            )
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            fd = -1
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _unlink_regular_single_link_file_if_present(path: Path) -> None:
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1:
+        return
+    path.unlink()
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        return
+    finally:
+        os.close(fd)
 
 
 def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:

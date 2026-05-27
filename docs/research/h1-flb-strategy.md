@@ -29,15 +29,26 @@ For binary Polymarket contracts:
 
 ## Edge Model
 
-The first slice uses `min_expected_edge` as a placeholder edge model:
+The runtime edge model has two modes:
 
-- probability estimate = observed limit price + `min_expected_edge`
-- default `min_expected_edge` = 2%
+- With `strategies.flb_calibration_path`, probability estimates come from a
+  warehouse-calibrated CSV artifact keyed by H1 signal name.
+- Without that artifact, probability estimate falls back to observed limit
+  price + `min_expected_edge`; this path is paper-plumbing only.
 
-This is intentionally conservative and deterministic for paper soak. Before
-live trading, replace the placeholder with data-driven decile edge estimates
-from the historical warehouse / Wilson CI pipeline so 1% longshots, 9%
-longshots, and 95% favorites are not treated as having identical edge.
+The emitted `expected_edge` is net edge:
+
+```text
+probability_estimate
+- limit_price
+- (entry_execution_cost_bps / 10_000)
+- fee_rate * (1 - limit_price)
+```
+
+Signals below `min_expected_edge` after these deductions are suppressed before
+sizing. Before live trading, replace the placeholder probability path and the
+static execution-cost buffer with data-driven decile/category/horizon estimates
+from the historical warehouse plus paper/live telemetry.
 
 ## Out Of Scope
 

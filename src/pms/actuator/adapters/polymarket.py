@@ -5,12 +5,14 @@ import importlib
 import json
 import logging
 import math
+import os
+import stat
+from hashlib import sha256
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Final, Literal, Protocol, cast
-from uuid import uuid4
 
 from pms.config import PMSSettings, validate_live_mode_ready
 from pms.core.enums import OrderStatus, RunMode
@@ -27,13 +29,56 @@ from pms.core.models import (
     VenueAccountSnapshot,
     VenueCredentials,
 )
+from pms.live_preflight_artifact import (
+    is_sha256_hexdigest as _is_sha256_hexdigest,
+    latest_live_emergency_audit_timestamp,
+    live_preflight_readiness_report_generated_at_values,
+    live_preflight_readiness_reports_fingerprint,
+    live_preflight_settings_fingerprint,
+    loads_json_rejecting_duplicate_keys,
+    validate_live_strategy_artifacts_for_submission,
+)
+from pms.redaction import redact_live_error_values
 
 
 logger = logging.getLogger(__name__)
 
 
+_REQUIRED_FINAL_PREFLIGHT_CHECKS: tuple[str, ...] = (
+    "live_config",
+    "runtime_dependencies",
+    "operator_approval",
+    "emergency_audit",
+    "first_order_audit",
+    "database_connection",
+    "schema_current",
+    "market_data_freshness",
+    "submission_unknown",
+    "live_open_orders",
+    "active_strategies",
+    "venue_reconciliation",
+)
+
+
+def _read_text_no_follow(path: Path) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        path_stat = os.fstat(fd)
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise OSError(f"path is not a regular file: {path}")
+        if path_stat.st_nlink != 1:
+            raise OSError(f"path is not a single-link file: {path}")
+        with os.fdopen(fd, "r", encoding="utf-8") as file:
+            fd = -1
+            return file.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 class OperatorApprovalRequiredError(LiveTradingDisabledError):
-    """Raised when the first live order has not been approved by an operator."""
+    """Raised when a required live-order operator approval is absent."""
 
 
 class PolymarketSubmissionUnknownError(RuntimeError):
@@ -121,6 +166,10 @@ class PolymarketClient(Protocol):
         order: PolymarketOrderRequest,
         credentials: VenueCredentials,
     ) -> PolymarketOrderResult: ...
+
+
+def _client_requires_live_mode(client: PolymarketClient) -> bool:
+    return getattr(client, "requires_live_mode", True) is not False
 
 
 class LiveQuoteProvider(Protocol):
@@ -266,12 +315,9 @@ class PolymarketRoutingQuoteProvider:
         *,
         first_live_order: bool,
     ) -> LivePreSubmitQuote:
+        del first_live_order
         source = self.settings.controller.quote_source
-        if (
-            source == "venue_direct"
-            or first_live_order
-            or _requires_direct_quote(order, self.settings)
-        ):
+        if source == "venue_direct" or _requires_direct_quote(order, self.settings):
             return await self.direct_provider.quote(order, credentials)
         if source == "dual":
             snapshot_quote = await self.snapshot_provider.quote(order, credentials)
@@ -338,22 +384,46 @@ class _NoopFirstOrderAuditWriter:
 @dataclass
 class FirstLiveOrderApprovalState:
     approved: bool = False
+    consume_failed: bool = False
 
 
 @dataclass(frozen=True)
 class FileFirstLiveOrderGate:
     path: Path
+    require_approver_sidecar: bool = False
+    approval_max_age_s: float | None = None
+    _approved_sidecar_fingerprint: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     async def approve_first_order(self, preview: LiveOrderPreview) -> bool:
-        if not self.path.exists():
+        self._set_approved_sidecar_fingerprint(None)
+        if not self._path_is_regular_file(self.path):
             return False
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            payload = loads_json_rejecting_duplicate_keys(
+                _read_text_no_follow(self.path),
+                label="LIVE first-order approval artifact",
+            )
+        except (OSError, json.JSONDecodeError, LiveTradingDisabledError):
             return False
         if not isinstance(payload, dict):
             return False
-        return _approval_payload_matches(cast(dict[str, object], payload), preview)
+        approval_payload = cast(dict[str, object], payload)
+        if not _approval_payload_matches(approval_payload, preview):
+            return False
+        if not self.require_approver_sidecar:
+            return True
+        sidecar_payload = self._valid_approval_sidecar(approval_payload)
+        if sidecar_payload is None:
+            return False
+        self._set_approved_sidecar_fingerprint(
+            _canonical_json_fingerprint(sidecar_payload)
+        )
+        return True
 
     async def consume(self, preview: LiveOrderPreview) -> None:
         # Atomically consume the approval artefact so it cannot be replayed
@@ -373,20 +443,125 @@ class FileFirstLiveOrderGate:
             pass
 
     def read_approver_id(self) -> str | None:
-        sidecar = self._sidecar_path()
-        if not sidecar.exists():
+        payload = self._read_sidecar_payload()
+        if payload is None:
             return None
-        try:
-            payload = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        approver_id = self._sidecar_approver_id(payload)
+        if approver_id is None:
             return None
-        if not isinstance(payload, dict):
+        if self.require_approver_sidecar and not self._sidecar_timestamp_fresh(
+            payload
+        ):
             return None
-        approver_id = payload.get("approver_id")
-        return approver_id if isinstance(approver_id, str) else None
+        if (
+            self.require_approver_sidecar
+            and self._approved_sidecar_fingerprint
+            != _canonical_json_fingerprint(payload)
+        ):
+            return None
+        return approver_id
 
     def _sidecar_path(self) -> Path:
         return Path(str(self.path) + ".meta.json")
+
+    def _approval_sidecar_valid(self, approval_payload: Mapping[str, object]) -> bool:
+        return self._valid_approval_sidecar(approval_payload) is not None
+
+    def _valid_approval_sidecar(
+        self,
+        approval_payload: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        payload = self._read_sidecar_payload()
+        if payload is None:
+            return None
+        if self._sidecar_approver_id(payload) is None:
+            return None
+        if not self._sidecar_timestamp_fresh(payload):
+            return None
+        if not self._sidecar_hash_matches_approval(payload, approval_payload):
+            return None
+        return payload
+
+    def _read_sidecar_payload(self) -> dict[str, object] | None:
+        sidecar = self._sidecar_path()
+        if not self._path_is_regular_file(sidecar):
+            return None
+        try:
+            payload = loads_json_rejecting_duplicate_keys(
+                _read_text_no_follow(sidecar),
+                label="LIVE first-order approval sidecar",
+            )
+        except (OSError, json.JSONDecodeError, LiveTradingDisabledError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return cast(dict[str, object], payload)
+
+    @staticmethod
+    def _path_is_regular_file(path: Path) -> bool:
+        try:
+            path_stat = path.lstat()
+        except FileNotFoundError:
+            return False
+        return (
+            stat.S_ISREG(path_stat.st_mode)
+            and path_stat.st_nlink == 1
+            and FileFirstLiveOrderGate._parent_is_private(path)
+        )
+
+    @staticmethod
+    def _parent_is_private(path: Path) -> bool:
+        parent = path.parent
+        try:
+            parent_stat = parent.lstat()
+        except FileNotFoundError:
+            return False
+        mode = stat.S_IMODE(parent_stat.st_mode)
+        return (
+            stat.S_ISDIR(parent_stat.st_mode)
+            and mode & 0o077 == 0
+            and bool(mode & stat.S_IWUSR)
+        )
+
+    def _sidecar_approver_id(self, payload: Mapping[str, object]) -> str | None:
+        approver_id = payload.get("approver_id")
+        if not isinstance(approver_id, str):
+            return None
+        normalized = approver_id.strip()
+        if normalized == "" or _looks_like_placeholder(normalized):
+            return None
+        return normalized
+
+    def _sidecar_timestamp_fresh(self, payload: Mapping[str, object]) -> bool:
+        raw_ts = payload.get("ts")
+        if not isinstance(raw_ts, str) or raw_ts.strip() == "":
+            return False
+        try:
+            ts = datetime.fromisoformat(raw_ts.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        ts = ts.astimezone(UTC)
+        now = datetime.now(tz=UTC)
+        if ts > now:
+            return False
+        if self.approval_max_age_s is None:
+            return True
+        return (now - ts).total_seconds() <= self.approval_max_age_s
+
+    def _sidecar_hash_matches_approval(
+        self,
+        sidecar_payload: Mapping[str, object],
+        approval_payload: Mapping[str, object],
+    ) -> bool:
+        expected_hash = sidecar_payload.get("approval_sha256")
+        if not isinstance(expected_hash, str) or expected_hash.strip() == "":
+            return False
+        return expected_hash == _approval_payload_hash(approval_payload)
+
+    def _set_approved_sidecar_fingerprint(self, fingerprint: str | None) -> None:
+        object.__setattr__(self, "_approved_sidecar_fingerprint", fingerprint)
 
 
 @dataclass(frozen=True)
@@ -543,7 +718,7 @@ class PolymarketSDKClient:
                 _get_sdk_positions(client, credentials),
                 credentials=credentials,
             )
-            balances = _get_sdk_balances(client, sdk)
+            balances = _get_sdk_balances(client, sdk, credentials)
         except Exception as exc:  # noqa: BLE001
             redacted = _redacted_exception_message(exc, credentials)
             logger.warning(
@@ -585,15 +760,39 @@ class PolymarketVenueAccountReconciler:
                 f"venue has {len(venue_snapshot.open_orders)} open orders; "
                 "PMS has no durable live open-order ledger yet"
             )
-        usdc_balance = _venue_usdc_balance(venue_snapshot.balances)
-        if (
-            usdc_balance is not None
-            and usdc_balance + self.cash_tolerance_usdc < db_portfolio.free_usdc
-        ):
+        cash_balance = _venue_cash_balance(venue_snapshot.balances)
+        if cash_balance is None:
             mismatches.append(
-                "venue USDC balance below PMS free cash: "
-                f"venue={usdc_balance:.8f} DB={db_portfolio.free_usdc:.8f}"
+                "venue pUSD balance missing; cannot prove LIVE cash budget"
             )
+        elif not math.isfinite(cash_balance):
+            mismatches.append(
+                "venue pUSD balance invalid; cannot prove LIVE cash budget"
+            )
+        elif cash_balance + self.cash_tolerance_usdc < db_portfolio.free_usdc:
+            mismatches.append(
+                "venue pUSD balance below PMS free cash: "
+                f"venue={cash_balance:.8f} DB={db_portfolio.free_usdc:.8f}"
+            )
+        collateral_allowance = _venue_pusd_allowance(venue_snapshot.balances)
+        if cash_balance is not None and math.isfinite(cash_balance):
+            if collateral_allowance is None:
+                mismatches.append(
+                    "venue pUSD allowance missing; cannot prove LIVE buy capacity"
+                )
+            elif not math.isfinite(collateral_allowance):
+                mismatches.append(
+                    "venue pUSD allowance invalid; cannot prove LIVE buy capacity"
+                )
+            elif (
+                collateral_allowance + self.cash_tolerance_usdc
+                < db_portfolio.free_usdc
+            ):
+                mismatches.append(
+                    "venue pUSD allowance below PMS free cash: "
+                    f"venue={collateral_allowance:.8f} "
+                    f"DB={db_portfolio.free_usdc:.8f}"
+                )
         mismatches.extend(
             _compare_positions(
                 db_portfolio.open_positions,
@@ -629,6 +828,8 @@ class PolymarketActuator:
     audit_writer: FirstOrderAuditWriter = field(
         default_factory=_NoopFirstOrderAuditWriter,
     )
+    live_preflight_validated: bool = False
+    live_preflight_active_strategies_fingerprint: str | None = None
     _approval_state: FirstLiveOrderApprovalState = field(
         default_factory=FirstLiveOrderApprovalState,
         init=False,
@@ -649,15 +850,29 @@ class PolymarketActuator:
     ) -> OrderState:
         if not self.settings.live_trading_enabled:
             raise LiveTradingDisabledError("Polymarket live trading is disabled")
+        if self.settings.mode != RunMode.LIVE and _client_requires_live_mode(
+            self.client
+        ):
+            msg = (
+                "Polymarket live submission requires mode=live; "
+                f"got mode={self.settings.mode.value!r}"
+            )
+            raise LiveTradingDisabledError(msg)
         del portfolio
-        credentials = validate_live_mode_ready(self.settings)
+        credentials = validate_live_mode_ready(
+            self.settings,
+            allow_pending_operator_approval=True,
+            require_live_mode=_client_requires_live_mode(self.client),
+        )
         request = _order_request(decision)
+        self._require_live_preflight_artifact()
+        self._require_strict_operator_gate_for_true_live()
+        self._raise_if_operator_approval_blocked()
 
-        # Fast path: once the first order has been confirmed by the venue
-        # the floodgates are open and subsequent submits do not serialize
-        # on `_approval_lock`. This keeps live throughput unaffected after
-        # the one-time gate.
-        if self._first_order_approved():
+        # Fast path: in first-order mode, once the first order has been
+        # confirmed by the venue, subsequent submits do not serialize on
+        # `_approval_lock`. In every-order mode this remains closed.
+        if not self._operator_approval_required():
             return await self._submit_with_quote_guard(
                 decision=decision,
                 request=request,
@@ -676,9 +891,9 @@ class PolymarketActuator:
         # raises, the lock releases without flipping the flag and the
         # next caller will re-prompt the gate.
         async with self._approval_lock:
-            # Double-check after acquiring — another task may have just
-            # opened the floodgates while we were waiting.
-            if self._first_order_approved():
+            # Double-check after acquiring — in first-order mode another
+            # task may have just opened the fast path while we were waiting.
+            if not self._operator_approval_required():
                 return await self._submit_with_quote_guard(
                     decision=decision,
                     request=request,
@@ -693,22 +908,28 @@ class PolymarketActuator:
             # the audit log answers "who authorized this" consistently
             # across all three records for one authorization act.
             approver_id = self._read_approver_id()
+            if (
+                approved
+                and self._operator_gate_requires_approver_id()
+                and approver_id is None
+            ):
+                await self._emit_audit(
+                    event="approval_denied",
+                    preview=preview,
+                    approver_id=None,
+                )
+                raise OperatorApprovalRequiredError(
+                    self._operator_approval_error_message(preview)
+                )
             if not approved:
                 await self._emit_audit(
                     event="approval_denied",
                     preview=preview,
                     approver_id=approver_id,
                 )
-                msg = (
-                    "First Polymarket live order requires operator approval: "
-                    f"venue={preview.venue} market={preview.market_id} "
-                    f"token={preview.token_id} side={preview.side} "
-                    f"outcome={preview.outcome} "
-                    f"max_notional_usdc={preview.max_notional_usdc} "
-                    f"limit_price={preview.limit_price} "
-                    f"max_slippage_bps={preview.max_slippage_bps}"
+                raise OperatorApprovalRequiredError(
+                    self._operator_approval_error_message(preview)
                 )
-                raise OperatorApprovalRequiredError(msg)
 
             await self._emit_audit(
                 event="approval_matched",
@@ -739,16 +960,19 @@ class PolymarketActuator:
             try:
                 await self.operator_gate.consume(preview)
             except Exception as exc:  # noqa: BLE001
+                detail = _redacted_settings_exception_message(exc, self.settings)
                 # Record the truth: cleanup failed, the artefact may
                 # still be on disk, a future restart could replay it.
                 # ERROR-level so an external alerter can page the
                 # operator for manual cleanup.
                 logger.error(
-                    "first-order gate consume failed: %s. Approval "
+                    "operator approval gate consume failed: %s. Approval "
                     "artefact may remain on disk and could replay on "
                     "restart; manual cleanup required.",
-                    exc,
+                    detail,
                 )
+                if self.settings.polymarket.operator_approval_mode == "every_order":
+                    self._approval_state.consume_failed = True
                 await self._emit_audit(
                     event="approval_consume_failed",
                     preview=preview,
@@ -780,10 +1004,11 @@ class PolymarketActuator:
                 approver_id=approver_id,
             )
         except Exception as exc:  # noqa: BLE001
+            detail = _redacted_settings_exception_message(exc, self.settings)
             logger.warning(
                 "first-order audit write failed: event=%s err=%s",
                 event,
-                exc,
+                detail,
             )
 
     def _read_approver_id(self) -> str | None:
@@ -799,14 +1024,69 @@ class PolymarketActuator:
         try:
             result = reader()
         except Exception as exc:  # noqa: BLE001
+            detail = _redacted_settings_exception_message(exc, self.settings)
             logger.warning(
-                "first-order operator gate read_approver_id failed: %s", exc
+                "first-order operator gate read_approver_id failed: %s",
+                detail,
             )
             return None
         return result if isinstance(result, str) else None
 
+    def _operator_gate_requires_approver_id(self) -> bool:
+        return bool(getattr(self.operator_gate, "require_approver_sidecar", False))
+
     def _first_order_approved(self) -> bool:
         return self._approval_state.approved
+
+    def _operator_approval_required(self) -> bool:
+        if self.settings.polymarket.operator_approval_mode == "every_order":
+            return True
+        return not self._first_order_approved()
+
+    def _require_strict_operator_gate_for_true_live(self) -> None:
+        if self.settings.mode != RunMode.LIVE:
+            return
+        if self.settings.polymarket.operator_approval_mode != "every_order":
+            return
+        if (
+            isinstance(self.operator_gate, FileFirstLiveOrderGate)
+            and self.operator_gate.require_approver_sidecar
+        ):
+            return
+        msg = (
+            "Polymarket LIVE every-order approval requires a strict sidecar "
+            "operator gate; configure FileFirstLiveOrderGate with "
+            "require_approver_sidecar=True."
+        )
+        raise LiveTradingDisabledError(msg)
+
+    def _raise_if_operator_approval_blocked(self) -> None:
+        if (
+            self.settings.polymarket.operator_approval_mode == "every_order"
+            and self._approval_state.consume_failed
+        ):
+            msg = (
+                "Every-order operator approval blocked: approval consume failed "
+                "after a prior submit. Stop the runner, remove the stale approval "
+                "artefact, reconcile venue state, and restart."
+            )
+            raise LiveTradingDisabledError(msg)
+
+    def _operator_approval_error_message(self, preview: LiveOrderPreview) -> str:
+        subject = (
+            "Every Polymarket live order"
+            if self.settings.polymarket.operator_approval_mode == "every_order"
+            else "First Polymarket live order"
+        )
+        return (
+            f"{subject} requires operator approval: "
+            f"venue={preview.venue} market={preview.market_id} "
+            f"token={preview.token_id} side={preview.side} "
+            f"outcome={preview.outcome} "
+            f"max_notional_usdc={preview.max_notional_usdc} "
+            f"limit_price={preview.limit_price} "
+            f"max_slippage_bps={preview.max_slippage_bps}"
+        )
 
     async def _live_order_preview(self, decision: TradeDecision) -> LiveOrderPreview:
         market_slug, question = await self._preview_market_metadata(decision.market_id)
@@ -863,8 +1143,432 @@ class PolymarketActuator:
         )
         return order_state
 
+    def _require_live_preflight_artifact(self) -> None:
+        if self.settings.mode != RunMode.LIVE:
+            return
+        raw_path = self.settings.live_preflight_artifact_path
+        if raw_path is None or raw_path.strip() == "":
+            msg = (
+                "LIVE credentialed preflight artifact missing: "
+                "live_preflight_artifact_path"
+            )
+            raise LiveTradingDisabledError(msg)
+        if _looks_like_placeholder(raw_path):
+            msg = "LIVE credentialed preflight artifact path contains placeholder"
+            raise LiveTradingDisabledError(msg)
+        path = Path(raw_path).expanduser()
+        _require_live_preflight_artifact_outside_working_tree(path)
+        _require_live_preflight_artifact_parent_owner_writable(path)
+        try:
+            path_stat = path.lstat()
+        except FileNotFoundError as exc:
+            msg = f"LIVE credentialed preflight artifact does not exist: {path}"
+            raise LiveTradingDisabledError(msg) from exc
+        if not stat.S_ISREG(path_stat.st_mode):
+            msg = (
+                "LIVE credentialed preflight artifact path is not a regular "
+                f"file: {path}"
+            )
+            raise LiveTradingDisabledError(msg)
+        if path_stat.st_nlink != 1:
+            msg = (
+                "LIVE credentialed preflight artifact path is not a single-link "
+                f"file: {path}"
+            )
+            raise LiveTradingDisabledError(msg)
+        try:
+            artifact = loads_json_rejecting_duplicate_keys(
+                _read_text_no_follow(path),
+                label="LIVE credentialed preflight artifact",
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            msg = f"LIVE credentialed preflight artifact is unreadable: {path}"
+            raise LiveTradingDisabledError(msg) from exc
+        if not isinstance(artifact, dict):
+            msg = "LIVE credentialed preflight artifact must be a JSON object"
+            raise LiveTradingDisabledError(msg)
+        _require_final_live_preflight_artifact_shape(
+            cast(dict[str, object], artifact),
+            path=path,
+            settings=self.settings,
+        )
+        self._require_validated_active_strategies_fingerprint(
+            cast(dict[str, object], artifact)
+        )
+        validate_live_strategy_artifacts_for_submission(self.settings)
+
+    def _require_validated_active_strategies_fingerprint(
+        self,
+        artifact: Mapping[str, object],
+    ) -> None:
+        if not self.live_preflight_validated:
+            return
+        expected = self.live_preflight_active_strategies_fingerprint
+        if expected is None:
+            return
+        observed = _require_preflight_fingerprint_field(
+            artifact,
+            "active_strategies_fingerprint",
+        )
+        if observed == expected:
+            return
+        msg = "LIVE credentialed preflight active strategies fingerprint mismatch"
+        raise LiveTradingDisabledError(msg)
+
+
+def _require_live_preflight_artifact_outside_working_tree(path: Path) -> None:
+    configured_path = _absolute_path_without_symlink_resolution(path)
+    resolved_path = path.expanduser().resolve(strict=False)
+    working_tree = _working_tree_root(Path.cwd().resolve(strict=False))
+    working_trees = [working_tree]
+    for candidate in (configured_path, resolved_path):
+        candidate_working_tree = _containing_working_tree_root(candidate)
+        if candidate_working_tree is not None:
+            working_trees.append(candidate_working_tree)
+
+    for working_tree_candidate in dict.fromkeys(working_trees):
+        if working_tree_candidate.parent == working_tree_candidate:
+            continue
+        for candidate in (configured_path, resolved_path):
+            try:
+                candidate.relative_to(working_tree_candidate)
+            except ValueError:
+                continue
+            msg = (
+                "LIVE credentialed preflight artifact must live outside "
+                f"the working tree: {candidate}"
+            )
+            raise LiveTradingDisabledError(msg)
+
+
+def _require_live_preflight_artifact_parent_owner_writable(path: Path) -> None:
+    parent = path.parent
+    try:
+        parent_stat = parent.lstat()
+    except FileNotFoundError as exc:
+        msg = f"LIVE credentialed preflight artifact parent does not exist: {parent}"
+        raise LiveTradingDisabledError(msg) from exc
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        msg = (
+            "LIVE credentialed preflight artifact parent is not a directory: "
+            f"{parent}"
+        )
+        raise LiveTradingDisabledError(msg)
+    mode = stat.S_IMODE(parent_stat.st_mode)
+    if mode & 0o077:
+        msg = (
+            "LIVE credentialed preflight artifact parent "
+            f"{parent} is too permissive; run `chmod 700 {parent}`."
+        )
+        raise LiveTradingDisabledError(msg)
+    if not mode & stat.S_IWUSR:
+        msg = (
+            "LIVE credentialed preflight artifact parent "
+            f"{parent} is not owner-writable; run `chmod 700 {parent}`."
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _absolute_path_without_symlink_resolution(path: Path) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
+    return Path(os.path.abspath(expanded))
+
+
+def _working_tree_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return start
+
+
+def _containing_working_tree_root(path: Path) -> Path | None:
+    start = path if path.is_dir() else path.parent
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _require_final_live_preflight_artifact_shape(
+    artifact: Mapping[str, object],
+    *,
+    path: Path,
+    settings: PMSSettings,
+) -> None:
+    if artifact.get("generated_by") != "pms-live preflight":
+        msg = "LIVE credentialed preflight artifact generated_by is invalid"
+        raise LiveTradingDisabledError(msg)
+    if artifact.get("artifact_mode") != "credentialed_preflight":
+        msg = (
+            "LIVE credentialed preflight artifact_mode must be "
+            "credentialed_preflight"
+        )
+        raise LiveTradingDisabledError(msg)
+    if artifact.get("final_go_no_go_valid") is not True:
+        msg = "LIVE credentialed preflight artifact final_go_no_go_valid must be true"
+        raise LiveTradingDisabledError(msg)
+    if artifact.get("skip_venue") is not False:
+        msg = "LIVE credentialed preflight artifact must not skip venue reconciliation"
+        raise LiveTradingDisabledError(msg)
+    if artifact.get("database_url_override_used") is not False:
+        msg = (
+            "LIVE credentialed preflight artifact must not use "
+            "database URL override"
+        )
+        raise LiveTradingDisabledError(msg)
+    _require_preflight_artifact_output_path(artifact, path=path)
+    _require_preflight_settings_fingerprint(artifact, settings=settings)
+    _require_preflight_readiness_reports_fingerprint(artifact, settings=settings)
+    _require_preflight_fingerprint_field(artifact, "active_strategies_fingerprint")
+    generated_at = _require_fresh_live_preflight_artifact_timestamp(
+        artifact,
+        settings,
+    )
+    _require_preflight_after_readiness_reports(settings, generated_at=generated_at)
+    _require_preflight_after_readiness(settings, generated_at=generated_at)
+    _require_preflight_after_emergency_audit(settings, generated_at=generated_at)
+    _require_final_live_preflight_result_shape(artifact)
+
+
+def _require_preflight_artifact_output_path(
+    artifact: Mapping[str, object],
+    *,
+    path: Path,
+) -> None:
+    raw_output_path = artifact.get("output_path")
+    if not isinstance(raw_output_path, str) or raw_output_path.strip() == "":
+        msg = "LIVE credentialed preflight artifact missing output_path"
+        raise LiveTradingDisabledError(msg)
+    if _looks_like_placeholder(raw_output_path):
+        msg = "LIVE credentialed preflight artifact output_path contains placeholder"
+        raise LiveTradingDisabledError(msg)
+    if Path(raw_output_path).expanduser() != path:
+        msg = (
+            "LIVE credentialed preflight artifact output_path must match "
+            "live_preflight_artifact_path"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _require_preflight_fingerprint_field(
+    artifact: Mapping[str, object],
+    field_name: str,
+) -> str:
+    raw_value = artifact.get(field_name)
+    if not isinstance(raw_value, str) or raw_value.strip() == "":
+        msg = f"LIVE credentialed preflight artifact missing {field_name}"
+        raise LiveTradingDisabledError(msg)
+    if _looks_like_placeholder(raw_value) or not _is_sha256_hexdigest(raw_value):
+        msg = f"LIVE credentialed preflight artifact {field_name} is invalid"
+        raise LiveTradingDisabledError(msg)
+    return raw_value
+
+
+def _require_preflight_settings_fingerprint(
+    artifact: Mapping[str, object],
+    *,
+    settings: PMSSettings,
+) -> None:
+    observed = _require_preflight_fingerprint_field(artifact, "settings_fingerprint")
+    expected = live_preflight_settings_fingerprint(settings)
+    if observed != expected:
+        msg = "LIVE credentialed preflight artifact settings fingerprint mismatch"
+        raise LiveTradingDisabledError(msg)
+
+
+def _require_preflight_readiness_reports_fingerprint(
+    artifact: Mapping[str, object],
+    *,
+    settings: PMSSettings,
+) -> None:
+    observed = _require_preflight_fingerprint_field(
+        artifact,
+        "readiness_reports_fingerprint",
+    )
+    expected = live_preflight_readiness_reports_fingerprint(settings)
+    if observed != expected:
+        msg = (
+            "LIVE credentialed preflight artifact readiness reports "
+            "fingerprint mismatch"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _require_final_live_preflight_result_shape(
+    artifact: Mapping[str, object],
+) -> None:
+    raw_result = artifact.get("result")
+    if not isinstance(raw_result, Mapping):
+        msg = "LIVE credentialed preflight artifact result must be a JSON object"
+        raise LiveTradingDisabledError(msg)
+    if raw_result.get("ok") is not True:
+        msg = "LIVE credentialed preflight artifact result must be ok"
+        raise LiveTradingDisabledError(msg)
+    raw_checks = raw_result.get("checks")
+    if not isinstance(raw_checks, list):
+        msg = "LIVE credentialed preflight artifact checks must be a list"
+        raise LiveTradingDisabledError(msg)
+    observed_names: list[str] = []
+    failed_names: list[str] = []
+    malformed_names: list[str] = []
+    for index, raw_check in enumerate(raw_checks):
+        if not isinstance(raw_check, Mapping):
+            malformed_names.append(str(index))
+            continue
+        raw_name = raw_check.get("name")
+        raw_detail = raw_check.get("detail")
+        if (
+            not isinstance(raw_name, str)
+            or raw_name.strip() == ""
+            or not isinstance(raw_detail, str)
+            or raw_detail.strip() == ""
+            or _looks_like_placeholder(raw_detail)
+        ):
+            malformed_names.append(str(index))
+            continue
+        name = raw_name.strip()
+        observed_names.append(name)
+        if raw_check.get("ok") is not True:
+            failed_names.append(name)
+    if malformed_names:
+        fields = ", ".join(malformed_names)
+        msg = f"LIVE credentialed preflight artifact malformed checks: {fields}"
+        raise LiveTradingDisabledError(msg)
+    duplicate_names = sorted(
+        name for name in set(observed_names) if observed_names.count(name) > 1
+    )
+    if duplicate_names:
+        fields = ", ".join(duplicate_names)
+        msg = f"LIVE credentialed preflight artifact duplicate checks: {fields}"
+        raise LiveTradingDisabledError(msg)
+    required_names = set(_REQUIRED_FINAL_PREFLIGHT_CHECKS)
+    unknown_names = sorted(set(observed_names) - required_names)
+    if unknown_names:
+        fields = ", ".join(unknown_names)
+        msg = f"LIVE credentialed preflight artifact unknown checks: {fields}"
+        raise LiveTradingDisabledError(msg)
+    missing_names = sorted(required_names - set(observed_names))
+    if missing_names:
+        fields = ", ".join(missing_names)
+        msg = f"LIVE credentialed preflight artifact missing checks: {fields}"
+        raise LiveTradingDisabledError(msg)
+    if failed_names:
+        fields = ", ".join(failed_names)
+        msg = f"LIVE credentialed preflight artifact failed checks: {fields}"
+        raise LiveTradingDisabledError(msg)
+
+
+def _require_fresh_live_preflight_artifact_timestamp(
+    artifact: Mapping[str, object],
+    settings: PMSSettings,
+) -> datetime:
+    raw_generated_at = artifact.get("generated_at")
+    if not isinstance(raw_generated_at, str) or raw_generated_at.strip() == "":
+        msg = "LIVE credentialed preflight artifact missing generated_at"
+        raise LiveTradingDisabledError(msg)
+    try:
+        generated_at = datetime.fromisoformat(
+            raw_generated_at.strip().replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        msg = "LIVE credentialed preflight artifact generated_at is invalid"
+        raise LiveTradingDisabledError(msg) from exc
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=UTC)
+    generated_at = generated_at.astimezone(UTC)
+    now = datetime.now(tz=UTC)
+    if generated_at > now:
+        msg = "LIVE credentialed preflight artifact generated_at is in the future"
+        raise LiveTradingDisabledError(msg)
+    age_s = (now - generated_at).total_seconds()
+    if age_s <= settings.live_preflight_artifact_max_age_s:
+        return generated_at
+    msg = (
+        "LIVE credentialed preflight artifact is stale: "
+        f"age {age_s:.1f}s exceeds {settings.live_preflight_artifact_max_age_s:.1f}s"
+    )
+    raise LiveTradingDisabledError(msg)
+
+
+def _require_preflight_after_emergency_audit(
+    settings: PMSSettings,
+    *,
+    generated_at: datetime,
+) -> None:
+    latest_emergency_audit_at = latest_live_emergency_audit_timestamp(
+        settings.live_emergency_audit_path
+    )
+    if latest_emergency_audit_at is None or latest_emergency_audit_at <= generated_at:
+        return
+    msg = (
+        "LIVE credentialed preflight artifact generated_at predates "
+        "emergency audit: live_emergency_audit_path"
+    )
+    raise LiveTradingDisabledError(msg)
+
+
+def _require_preflight_after_readiness(
+    settings: PMSSettings,
+    *,
+    generated_at: datetime,
+) -> None:
+    readiness_timestamps = {
+        "live_exit_criteria_ratified_at": settings.live_exit_criteria_ratified_at,
+        "live_compliance_reviewed_at": settings.live_compliance_reviewed_at,
+    }
+    stale_fields = [
+        field_name
+        for field_name, timestamp_value in readiness_timestamps.items()
+        if timestamp_value is not None
+        and _coerce_preflight_datetime(timestamp_value) > generated_at
+    ]
+    if not stale_fields:
+        return
+    fields = ", ".join(stale_fields)
+    msg = (
+        "LIVE credentialed preflight artifact generated_at predates "
+        f"LIVE readiness: {fields}"
+    )
+    raise LiveTradingDisabledError(msg)
+
+
+def _require_preflight_after_readiness_reports(
+    settings: PMSSettings,
+    *,
+    generated_at: datetime,
+) -> None:
+    stale_reports = [
+        label
+        for label, report_generated_at in (
+            live_preflight_readiness_report_generated_at_values(settings)
+        )
+        if report_generated_at > generated_at
+    ]
+    if not stale_reports:
+        return
+    fields = ", ".join(stale_reports)
+    msg = (
+        "LIVE credentialed preflight artifact generated_at predates "
+        f"readiness reports: {fields}"
+    )
+    raise LiveTradingDisabledError(msg)
+
+
+def _coerce_preflight_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
 
 def _order_request(decision: TradeDecision) -> PolymarketOrderRequest:
+    if decision.time_in_force.value not in {"IOC", "FOK"}:
+        msg = (
+            "LIVE order time_in_force must be IOC or FOK until PMS has a "
+            "durable open-order ledger"
+        )
+        raise LiveTradingDisabledError(msg)
     if decision.token_id is None:
         msg = "Polymarket live execution requires decision.token_id"
         raise LiveTradingDisabledError(msg)
@@ -889,10 +1593,11 @@ def _order_state_from_result(
     *,
     quote: LivePreSubmitQuote | None = None,
 ) -> OrderState:
+    _validate_order_result_accounting(decision, result)
     now = datetime.now(tz=UTC)
     status = result.status or OrderStatus.LIVE.value
     return OrderState(
-        order_id=result.order_id or f"polymarket-{uuid4().hex}",
+        order_id=_concrete_result_order_id(result),
         decision_id=decision.decision_id,
         status=status,
         market_id=decision.market_id,
@@ -913,7 +1618,110 @@ def _order_state_from_result(
         outcome=decision.outcome,
         time_in_force=decision.time_in_force.value,
         intent_key=decision.intent_key,
+        risk_group_id=decision.risk_group_id,
     )
+
+
+def _concrete_result_order_id(result: PolymarketOrderResult) -> str:
+    order_id = result.order_id.strip()
+    if order_id != "" and not _looks_like_placeholder(order_id):
+        return order_id
+    msg = (
+        "Polymarket live order result missing concrete venue order id; "
+        "order status is unknown — reconcile with venue before retrying"
+    )
+    raise PolymarketSubmissionUnknownError(msg)
+
+
+def _validate_order_result_accounting(
+    decision: TradeDecision,
+    result: PolymarketOrderResult,
+) -> None:
+    requested_notional = decision.notional_usdc
+    filled_notional = result.filled_notional_usdc
+    remaining_notional = result.remaining_notional_usdc
+    filled_quantity = result.filled_quantity
+    fill_price = result.fill_price
+
+    _require_finite_result_number(
+        filled_notional,
+        field_name="filled_notional_usdc",
+    )
+    _require_finite_result_number(
+        remaining_notional,
+        field_name="remaining_notional_usdc",
+    )
+    _require_finite_result_number(
+        filled_quantity,
+        field_name="filled_quantity",
+    )
+    if fill_price is not None:
+        _require_finite_result_number(fill_price, field_name="fill_price")
+
+    if filled_notional < 0.0:
+        _raise_unknown_malformed_result("filled_notional_usdc must be >= 0.0")
+    if filled_notional > requested_notional + _NOTIONAL_OVERFILL_TOLERANCE:
+        _raise_unknown_malformed_result(
+            "filled_notional_usdc exceeds requested notional"
+        )
+    if remaining_notional < 0.0:
+        _raise_unknown_malformed_result("remaining_notional_usdc must be >= 0.0")
+    if filled_quantity < 0.0:
+        _raise_unknown_malformed_result("filled_quantity must be >= 0.0")
+    if fill_price is not None and not (
+        _PROBABILITY_PRICE_MIN < fill_price <= _PROBABILITY_PRICE_MAX
+    ):
+        _raise_unknown_malformed_result("fill_price must satisfy 0.0 < price <= 1.0")
+
+    if filled_notional > 0.0:
+        if fill_price is None:
+            _raise_unknown_malformed_result(
+                "fill_price is required when filled_notional_usdc > 0.0"
+            )
+        if filled_quantity <= 0.0:
+            _raise_unknown_malformed_result(
+                "filled_quantity must be > 0.0 when filled_notional_usdc > 0.0"
+            )
+        assert fill_price is not None
+        if not math.isclose(
+            filled_notional,
+            filled_quantity * fill_price,
+            rel_tol=0.01,
+            abs_tol=0.01,
+        ):
+            _raise_unknown_malformed_result(
+                "fill accounting mismatch: filled_notional_usdc must equal "
+                "filled_quantity * fill_price"
+            )
+    elif filled_quantity > 0.0:
+        _raise_unknown_malformed_result(
+            "filled_quantity must be 0.0 when filled_notional_usdc is 0.0"
+        )
+
+    if not math.isclose(
+        filled_notional + remaining_notional,
+        requested_notional,
+        rel_tol=0.01,
+        abs_tol=0.01,
+    ):
+        _raise_unknown_malformed_result(
+            "notional accounting mismatch: filled_notional_usdc plus "
+            "remaining_notional_usdc must equal requested notional"
+        )
+
+
+def _require_finite_result_number(value: float, *, field_name: str) -> None:
+    if math.isfinite(value):
+        return
+    _raise_unknown_malformed_result(f"{field_name} must be finite")
+
+
+def _raise_unknown_malformed_result(detail: str) -> None:
+    msg = (
+        "Polymarket live order result has malformed accounting: "
+        f"{detail}; order status is unknown — reconcile with venue before retrying"
+    )
+    raise PolymarketSubmissionUnknownError(msg)
 
 
 def _raise_if_unexpected_resting_non_gtc(
@@ -937,6 +1745,7 @@ def _validate_pre_submit_quote(
     quote: LivePreSubmitQuote,
     settings: PMSSettings,
 ) -> None:
+    _validate_pre_submit_quote_shape(quote)
     if quote.market_status.lower() != "open":
         msg = f"Polymarket market is not open at submit: {quote.market_status}"
         raise LiveTradingDisabledError(msg)
@@ -969,6 +1778,30 @@ def _validate_pre_submit_quote(
             "Polymarket spread exceeds pre-submit guard: "
             f"{quote.spread_bps:.1f}bps > {settings.controller.max_spread_bps:.1f}bps"
         )
+        raise LiveTradingDisabledError(msg)
+
+
+def _validate_pre_submit_quote_shape(quote: LivePreSubmitQuote) -> None:
+    if not math.isfinite(quote.book_age_ms) or quote.book_age_ms < 0.0:
+        msg = "Polymarket pre-submit quote book_age_ms is invalid"
+        raise LiveTradingDisabledError(msg)
+    if (
+        not math.isfinite(quote.executable_notional_usdc)
+        or quote.executable_notional_usdc < 0.0
+    ):
+        msg = "Polymarket pre-submit quote executable_notional_usdc is invalid"
+        raise LiveTradingDisabledError(msg)
+    if not (
+        math.isfinite(quote.best_executable_price)
+        and _PROBABILITY_PRICE_MIN < quote.best_executable_price <= _PROBABILITY_PRICE_MAX
+    ):
+        msg = "Polymarket pre-submit quote best_executable_price is invalid"
+        raise LiveTradingDisabledError(msg)
+    if not math.isfinite(quote.spread_bps) or quote.spread_bps < 0.0:
+        msg = "Polymarket pre-submit quote spread_bps is invalid"
+        raise LiveTradingDisabledError(msg)
+    if quote.quote_hash.strip() == "" or _looks_like_placeholder(quote.quote_hash):
+        msg = "Polymarket pre-submit quote quote_hash is invalid"
         raise LiveTradingDisabledError(msg)
 
 
@@ -1155,6 +1988,36 @@ def _float_close(value: object, expected: float) -> bool:
     return math.isclose(float(value), expected, rel_tol=1e-9, abs_tol=1e-12)
 
 
+def _approval_payload_hash(payload: Mapping[str, object]) -> str:
+    return _canonical_json_fingerprint(payload)
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "":
+        return False
+    placeholder_markers = (
+        "fill_in",
+        "__fill",
+        "<",
+        ">",
+        "todo",
+        "replace",
+        "placeholder",
+    )
+    return any(marker in normalized for marker in placeholder_markers)
+
+
+def _canonical_json_fingerprint(payload: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _build_sdk_client(sdk: object, credentials: VenueCredentials) -> object:
     api_creds = getattr(sdk, "ApiCreds")(
         api_key=_required_secret(credentials.api_key, "api_key"),
@@ -1169,7 +2032,7 @@ def _build_sdk_client(sdk: object, credentials: VenueCredentials) -> object:
         chain_id=credentials.chain_id,
         key=_required_secret(credentials.private_key, "private_key"),
         creds=api_creds,
-        signature_type=credentials.signature_type,
+        signature_type=_sdk_signature_type(sdk, credentials.signature_type),
         funder=credentials.funder_address,
     )
 
@@ -1244,35 +2107,48 @@ def _get_sdk_positions(client: object, credentials: VenueCredentials) -> object:
     return ()
 
 
-def _get_sdk_balances(client: object, sdk: object) -> dict[str, float]:
-    for response in _sdk_balance_responses(client, sdk):
-        usdc = _usdc_balance_from_response(response)
-        if usdc is not None:
-            return {"USDC": usdc}
+def _get_sdk_balances(
+    client: object,
+    sdk: object,
+    credentials: VenueCredentials,
+) -> dict[str, float]:
+    _sync_sdk_balance_allowance(client, sdk, credentials)
+    for response in _sdk_balance_responses(client, sdk, credentials):
+        balances = _collateral_balances_from_response(response)
+        if balances:
+            return balances
     return {}
 
 
-def _sdk_balance_responses(client: object, sdk: object) -> list[object]:
+def _sync_sdk_balance_allowance(
+    client: object,
+    sdk: object,
+    credentials: VenueCredentials,
+) -> None:
+    for method_name in ("update_balance_allowance", "updateBalanceAllowance"):
+        method = getattr(client, method_name, None)
+        if callable(method):
+            _call_sdk_collateral_balance_allowance(method, sdk, credentials)
+            return
+    msg = "Polymarket SDK client does not expose balance allowance sync"
+    raise LiveTradingDisabledError(msg)
+
+
+def _sdk_balance_responses(
+    client: object,
+    sdk: object,
+    credentials: VenueCredentials,
+) -> list[object]:
     responses: list[object] = []
     balance_allowance = getattr(client, "get_balance_allowance", None)
     if callable(balance_allowance):
-        params_cls = getattr(sdk, "BalanceAllowanceParams", None)
-        asset_type_cls = getattr(sdk, "AssetType", None)
-        asset_type = getattr(asset_type_cls, "COLLATERAL", "COLLATERAL")
-        if callable(params_cls):
-            try:
-                params = params_cls(asset_type=asset_type)
-                responses.append(balance_allowance(params=params))
-            except TypeError:
-                try:
-                    params = params_cls(asset_type=asset_type)
-                    responses.append(balance_allowance(params))
-                except TypeError:
-                    pass
-        try:
-            responses.append(balance_allowance(asset_type=asset_type))
-        except TypeError:
-            pass
+        responses.append(
+            _call_sdk_collateral_balance_allowance(
+                balance_allowance,
+                sdk,
+                credentials,
+            )
+        )
     for method_name in ("get_balance", "get_balances", "getBalance", "getBalances"):
         method = getattr(client, method_name, None)
         if callable(method):
@@ -1283,38 +2159,108 @@ def _sdk_balance_responses(client: object, sdk: object) -> list[object]:
     return responses
 
 
-def _usdc_balance_from_response(response: object) -> float | None:
+def _call_sdk_collateral_balance_allowance(
+    method: Callable[..., object],
+    sdk: object,
+    credentials: VenueCredentials,
+) -> object:
+    params_cls = getattr(sdk, "BalanceAllowanceParams", None)
+    asset_type_cls = getattr(sdk, "AssetType", None)
+    asset_type = getattr(asset_type_cls, "COLLATERAL", "COLLATERAL")
+    params_kwargs: dict[str, object] = {"asset_type": asset_type}
+    if credentials.signature_type == 3:
+        params_kwargs["signature_type"] = _sdk_signature_type(
+            sdk,
+            credentials.signature_type,
+        )
+    if callable(params_cls):
+        try:
+            params = params_cls(**params_kwargs)
+            return method(params=params)
+        except TypeError:
+            try:
+                params = params_cls(**params_kwargs)
+                return method(params)
+            except TypeError:
+                pass
+    try:
+        return method(**params_kwargs)
+    except TypeError:
+        return method()
+
+
+def _sdk_signature_type(sdk: object, signature_type: int | None) -> object:
+    if signature_type is None:
+        return None
+    signature_type_cls = getattr(sdk, "SignatureTypeV2", None)
+    enum_names_by_signature_type = {
+        0: ("EOA",),
+        1: ("POLY_PROXY",),
+        2: ("GNOSIS_SAFE",),
+        3: ("POLY_1271",),
+    }
+    for enum_name in enum_names_by_signature_type.get(signature_type, ()):
+        value = getattr(signature_type_cls, enum_name, None)
+        if value is not None:
+            return value
+    return signature_type
+
+
+def _collateral_balances_from_response(response: object) -> dict[str, float]:
     direct = _coerce_float_or_none(response)
     if direct is not None:
-        return direct
+        return {"PUSD": direct}
     if isinstance(response, Sequence) and not isinstance(response, (str, bytes)):
         for item in response:
             asset = _response_value(item, "asset", "asset_type", "currency", "token")
-            if asset is None or str(asset).upper() in {"USDC", "COLLATERAL"}:
-                value = _coerce_float_or_none(
-                    _response_value(
-                        item,
-                        "balance",
-                        "available",
-                        "available_balance",
-                        "cash",
-                        "usdc",
-                    )
-                )
-                if value is not None:
-                    return value
-        return None
-    return _coerce_float_or_none(
+            balances = _collateral_balance_payload(
+                item,
+                asset_name=None if asset is None else str(asset),
+            )
+            if balances:
+                return balances
+        return {}
+    return _collateral_balance_payload(response, asset_name=None)
+
+
+def _collateral_balance_payload(
+    response: object,
+    *,
+    asset_name: str | None,
+) -> dict[str, float]:
+    normalized_asset = "" if asset_name is None else asset_name.strip().upper()
+    if normalized_asset not in {"", "PUSD", "USDC", "COLLATERAL"}:
+        return {}
+
+    balance = _coerce_float_or_none(
         _response_value(
             response,
             "balance",
             "available",
             "available_balance",
             "cash",
+            "pusd",
             "usdc",
             "collateral",
         )
     )
+    allowance = _coerce_float_or_none(
+        _response_value(
+            response,
+            "allowance",
+            "available_allowance",
+            "collateral_allowance",
+            "pusd_allowance",
+            "approved",
+            "approval",
+        )
+    )
+    balances: dict[str, float] = {}
+    if balance is not None:
+        balances["USDC" if normalized_asset == "USDC" else "PUSD"] = balance
+    if allowance is not None:
+        balances["PUSD_ALLOWANCE"] = allowance
+    return balances
 
 
 def _sdk_order_type(order_type_cls: object, order: PolymarketOrderRequest) -> object:
@@ -1342,7 +2288,7 @@ def _order_result_from_sdk_response(
     order: PolymarketOrderRequest,
     response: object,
 ) -> PolymarketOrderResult:
-    if _response_value(response, "success") is False or _response_value(
+    if _sdk_response_success_is_false(response) or _response_value(
         response,
         "errorMsg",
         "error_msg",
@@ -1526,9 +2472,9 @@ def _order_result_from_sdk_response(
 
     remaining_notional_usdc = max(0.0, order.notional_usdc - filled_notional_usdc)
 
-    order_id = _response_value(response, "orderID", "order_id", "id")
+    order_id = _sdk_response_order_id(response)
     return PolymarketOrderResult(
-        order_id=str(order_id or ""),
+        order_id=order_id,
         status=status,
         raw_status=status,
         filled_notional_usdc=filled_notional_usdc,
@@ -1538,13 +2484,38 @@ def _order_result_from_sdk_response(
     )
 
 
+def _sdk_response_order_id(response: object) -> str:
+    raw_order_id = _response_value(response, "orderID", "order_id", "id")
+    order_id = str(raw_order_id).strip() if raw_order_id is not None else ""
+    if order_id != "" and not _looks_like_placeholder(order_id):
+        return order_id
+    msg = (
+        "Polymarket live order response missing concrete venue order id; "
+        "order status is unknown — reconcile with venue before retrying"
+    )
+    raise PolymarketSubmissionUnknownError(msg)
+
+
+def _sdk_response_success_is_false(response: object) -> bool:
+    if not _response_field_present(response, "success"):
+        return False
+    success = _coerce_bool_or_none(_response_value(response, "success"))
+    if success is None:
+        msg = (
+            "Polymarket live order response has unparseable success flag; "
+            "venue error redacted"
+        )
+        raise LiveTradingDisabledError(msg)
+    return success is False
+
+
 def _venue_book_from_sdk_response(
     response: object,
     *,
     market_id: str,
     token_id: str,
 ) -> LiveVenueBook:
-    book_ts = _coerce_datetime_or_now(
+    book_ts = _require_venue_book_timestamp(
         _response_value(response, "timestamp", "ts", "created_at", "createdAt")
     )
     raw_hash = _response_value(response, "hash", "book_hash", "bookHash")
@@ -1591,6 +2562,12 @@ def _book_levels_from_response_side(
         if price is None or size is None:
             msg = "Polymarket order book level has unparseable price or size"
             raise LiveTradingDisabledError(msg)
+        if not (_PROBABILITY_PRICE_MIN < price <= _PROBABILITY_PRICE_MAX):
+            msg = "Polymarket order book level price is outside (0, 1]"
+            raise LiveTradingDisabledError(msg)
+        if size <= 0.0:
+            msg = "Polymarket order book level size must be positive"
+            raise LiveTradingDisabledError(msg)
         levels.append(
             BookLevel(
                 snapshot_id=0,
@@ -1604,12 +2581,16 @@ def _book_levels_from_response_side(
 
 
 def _venue_market_status_from_response(response: object) -> str:
-    if _coerce_bool_or_none(_response_value(response, "closed", "is_closed")) is True:
+    closed = _venue_bool_flag(response, ("closed", "is_closed"), label="closed")
+    if closed is True:
         return "closed"
-    if _coerce_bool_or_none(_response_value(response, "active", "is_active")) is False:
+    active = _venue_bool_flag(response, ("active", "is_active"), label="active")
+    if active is False:
         return "inactive"
-    accepting_orders = _coerce_bool_or_none(
-        _response_value(response, "accepting_orders", "acceptingOrders")
+    accepting_orders = _venue_bool_flag(
+        response,
+        ("accepting_orders", "acceptingOrders"),
+        label="accepting_orders",
     )
     if accepting_orders is False:
         return "not_accepting_orders"
@@ -1618,6 +2599,21 @@ def _venue_market_status_from_response(response: object) -> str:
         return "open"
     normalized = str(raw_status).strip().lower()
     return normalized or "open"
+
+
+def _venue_bool_flag(
+    response: object,
+    keys: tuple[str, ...],
+    *,
+    label: str,
+) -> bool | None:
+    if not _response_field_present(response, *keys):
+        return None
+    parsed = _coerce_bool_or_none(_response_value(response, *keys))
+    if parsed is None:
+        msg = f"Polymarket order book status flag {label} is invalid"
+        raise LiveTradingDisabledError(msg)
+    return parsed
 
 
 def _coerce_bool_or_none(value: object) -> bool | None:
@@ -1637,11 +2633,14 @@ def _coerce_bool_or_none(value: object) -> bool | None:
     return None
 
 
-def _coerce_datetime_or_now(value: object) -> datetime:
+def _require_venue_book_timestamp(value: object) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         raw = float(value)
+        if not math.isfinite(raw):
+            msg = "Polymarket order book timestamp is invalid"
+            raise LiveTradingDisabledError(msg)
         if raw > 10_000_000_000:
             raw = raw / 1000.0
         return datetime.fromtimestamp(raw, tz=UTC)
@@ -1649,9 +2648,11 @@ def _coerce_datetime_or_now(value: object) -> datetime:
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
-            return _utc_now()
+            msg = "Polymarket order book timestamp is invalid"
+            raise LiveTradingDisabledError(msg)
         return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
-    return _utc_now()
+    msg = "Polymarket order book timestamp is missing"
+    raise LiveTradingDisabledError(msg)
 
 
 def _order_states_from_open_orders(
@@ -1659,25 +2660,37 @@ def _order_states_from_open_orders(
     *,
     credentials: VenueCredentials,
 ) -> list[OrderState]:
-    if raw_orders is None:
-        return []
-    if not isinstance(raw_orders, Sequence) or isinstance(raw_orders, (str, bytes)):
-        return []
+    raw_order_rows = _account_collection_sequence(
+        raw_orders,
+        label="open orders",
+        wrapper_keys=("orders", "open_orders", "openOrders", "data", "results"),
+        item_identity_keys=("order_id", "id", "orderID"),
+    )
     states: list[OrderState] = []
-    for raw_order in raw_orders:
+    for raw_order in raw_order_rows:
         now = _utc_now()
-        order_id = str(_response_value(raw_order, "order_id", "id", "orderID") or "")
-        if not order_id:
-            continue
+        order_id = str(_response_value(raw_order, "order_id", "id", "orderID") or "").strip()
+        if order_id == "" or _looks_like_placeholder(order_id):
+            msg = "Polymarket venue open order missing concrete order id"
+            raise LiveTradingDisabledError(msg)
         market_id = str(
             _response_value(raw_order, "market_id", "condition_id", "market") or ""
         )
         token_id_value = _response_value(raw_order, "token_id", "asset_id", "assetId")
-        remaining = _coerce_float_or_none(
-            _response_value(raw_order, "remaining_notional_usdc", "remaining", "size")
+        raw_remaining = _response_value(
+            raw_order,
+            "remaining_notional_usdc",
+            "remaining",
+            "size",
         )
+        remaining = _coerce_float_or_none(raw_remaining)
+        if remaining is None:
+            msg = "Polymarket venue open order has invalid remaining notional"
+            raise LiveTradingDisabledError(msg)
+        if remaining < 0.0:
+            msg = "Polymarket venue open order has negative remaining notional"
+            raise LiveTradingDisabledError(msg)
         price = _coerce_float_or_none(_response_value(raw_order, "price"))
-        remaining_notional = remaining or 0.0
         states.append(
             OrderState(
                 order_id=order_id,
@@ -1686,9 +2699,9 @@ def _order_states_from_open_orders(
                 market_id=market_id or "unknown",
                 token_id=None if token_id_value is None else str(token_id_value),
                 venue=credentials.venue,
-                requested_notional_usdc=remaining_notional,
+                requested_notional_usdc=remaining,
                 filled_notional_usdc=0.0,
-                remaining_notional_usdc=remaining_notional,
+                remaining_notional_usdc=remaining,
                 fill_price=price,
                 submitted_at=now,
                 last_updated_at=now,
@@ -1705,28 +2718,42 @@ def _positions_from_sdk_positions(
     *,
     credentials: VenueCredentials,
 ) -> list[Position]:
-    if raw_positions is None:
-        return []
-    if not isinstance(raw_positions, Sequence) or isinstance(raw_positions, (str, bytes)):
-        return []
+    raw_position_rows = _account_collection_sequence(
+        raw_positions,
+        label="positions",
+        wrapper_keys=("positions", "data", "results"),
+        item_identity_keys=("shares", "size", "quantity", "balance"),
+    )
     positions: list[Position] = []
-    for raw_position in raw_positions:
-        shares = _coerce_float_or_none(
-            _response_value(raw_position, "shares", "size", "quantity", "balance")
-        )
-        if shares is None or shares <= 0.0:
+    for raw_position in raw_position_rows:
+        raw_shares = _response_value(raw_position, "shares", "size", "quantity", "balance")
+        shares = _coerce_float_or_none(raw_shares)
+        if shares is None:
+            msg = "Polymarket venue position has invalid shares"
+            raise LiveTradingDisabledError(msg)
+        if shares < 0.0:
+            msg = "Polymarket venue position has negative shares"
+            raise LiveTradingDisabledError(msg)
+        if shares == 0.0:
             continue
         market_id = str(
             _response_value(raw_position, "market_id", "condition_id", "market") or ""
         )
         token_id_value = _response_value(raw_position, "token_id", "asset_id", "assetId")
-        avg_price = _coerce_float_or_none(
-            _response_value(raw_position, "avg_entry_price", "avgPrice", "price")
+        avg_price = _optional_position_price(
+            raw_position,
+            ("avg_entry_price", "avgPrice", "price"),
+            label="avg_entry_price",
         )
-        current_price = _coerce_float_or_none(
-            _response_value(raw_position, "current_price", "curPrice")
+        current_price = _optional_position_price(
+            raw_position,
+            ("current_price", "curPrice"),
+            label="current_price",
         )
-        entry_price = avg_price or current_price or 0.0
+        entry_price = avg_price if avg_price is not None else current_price
+        if entry_price is None:
+            msg = "Polymarket venue position missing price basis"
+            raise LiveTradingDisabledError(msg)
         positions.append(
             Position(
                 market_id=market_id or "unknown",
@@ -1740,6 +2767,50 @@ def _positions_from_sdk_positions(
             )
         )
     return positions
+
+
+def _optional_position_price(
+    raw_position: object,
+    keys: tuple[str, ...],
+    *,
+    label: str,
+) -> float | None:
+    if not _response_field_present(raw_position, *keys):
+        return None
+    price = _coerce_float_or_none(_response_value(raw_position, *keys))
+    if price is None or not (_PROBABILITY_PRICE_MIN < price <= _PROBABILITY_PRICE_MAX):
+        msg = f"Polymarket venue position has invalid {label}"
+        raise LiveTradingDisabledError(msg)
+    return price
+
+
+def _account_collection_sequence(
+    raw_collection: object,
+    *,
+    label: str,
+    wrapper_keys: tuple[str, ...],
+    item_identity_keys: tuple[str, ...],
+) -> Sequence[object]:
+    if raw_collection is None:
+        return ()
+    collection = raw_collection
+    for _ in range(3):
+        if not isinstance(collection, Mapping):
+            break
+        mapping = cast(Mapping[str, object], collection)
+        for key in wrapper_keys:
+            if key in mapping:
+                collection = mapping[key]
+                break
+        else:
+            if any(key in mapping for key in item_identity_keys):
+                return (mapping,)
+            msg = f"Polymarket account {label} response has unsupported object shape"
+            raise LiveTradingDisabledError(msg)
+    if isinstance(collection, Sequence) and not isinstance(collection, (str, bytes)):
+        return collection
+    msg = f"Polymarket account {label} response must be a sequence"
+    raise LiveTradingDisabledError(msg)
 
 
 def _compare_positions(
@@ -1776,9 +2847,20 @@ def _compare_positions(
     return mismatches
 
 
-def _venue_usdc_balance(balances: Mapping[str, float]) -> float | None:
+def _venue_cash_balance(balances: Mapping[str, float]) -> float | None:
     for key, value in balances.items():
-        if key.upper() in {"USDC", "COLLATERAL"}:
+        if key.upper() in {"PUSD", "USDC", "COLLATERAL"}:
+            return value
+    return None
+
+
+def _venue_pusd_allowance(balances: Mapping[str, float]) -> float | None:
+    for key, value in balances.items():
+        if key.upper() in {
+            "PUSD_ALLOWANCE",
+            "COLLATERAL_ALLOWANCE",
+            "ALLOWANCE",
+        }:
             return value
     return None
 
@@ -1948,13 +3030,29 @@ def _redacted_exception_message(
     error: Exception,
     credentials: VenueCredentials,
 ) -> str:
-    message = str(error)
-    for secret in (
-        credentials.private_key,
-        credentials.api_key,
-        credentials.api_secret,
-        credentials.api_passphrase,
-    ):
-        if secret:
-            message = message.replace(secret, "[REDACTED]")
-    return message
+    return redact_live_error_values(
+        str(error),
+        (
+            credentials.private_key,
+            credentials.api_key,
+            credentials.api_secret,
+            credentials.api_passphrase,
+            credentials.funder_address,
+        ),
+    )
+
+
+def _redacted_settings_exception_message(
+    error: Exception,
+    settings: PMSSettings,
+) -> str:
+    return redact_live_error_values(
+        str(error),
+        (
+            settings.polymarket.private_key,
+            settings.polymarket.api_key,
+            settings.polymarket.api_secret,
+            settings.polymarket.api_passphrase,
+            settings.polymarket.funder_address,
+        ),
+    )

@@ -49,6 +49,7 @@ INNER_RING_NOT_NULL_TABLES = [
     "alpha_competition_snapshots",
     "strategy_performance_peaks",
     "strategy_runs",
+    "strategy_run_slices",
     "backtest_live_comparisons",
 ]
 REMEDIATION_MESSAGE = """CP04 remediation required before enforcing strategy identity columns.

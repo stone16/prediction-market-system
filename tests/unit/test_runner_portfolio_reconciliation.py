@@ -12,7 +12,8 @@ from typing import Any, cast
 
 import pytest
 
-from pms.core.enums import Venue
+from pms.config import PMSSettings, PolymarketSettings, RiskSettings
+from pms.core.enums import RunMode, Venue
 from pms.core.models import Position
 from pms.runner import Runner
 from pms.storage.fill_store import FillStore
@@ -54,13 +55,52 @@ def _position(
     )
 
 
-def _runner_with_fake_pool(fill_store: FillStore) -> Runner:
-    runner = Runner(fill_store=fill_store)
+def _runner_with_fake_pool(
+    fill_store: FillStore,
+    *,
+    config: PMSSettings | None = None,
+) -> Runner:
+    runner = Runner(config=config or PMSSettings(), fill_store=fill_store)
     # The reconciliation method bails out when `_pg_pool is None` (BACKTEST
     # without DB). Setting a sentinel keeps the path live; the FakeFillStore
     # never actually queries the pool.
     runner._pg_pool = cast(Any, object())  # noqa: SLF001
     return runner
+
+
+@pytest.mark.asyncio
+async def test_reconcile_uses_configured_risk_budget_as_live_cash_baseline() -> None:
+    """The runner's startup cash baseline must match the live risk envelope.
+
+    Otherwise `pms-live preflight` can be tuned for a small launch account
+    while Runner.start still reconciles against the old hardcoded $1000 budget.
+    """
+    runner = _runner_with_fake_pool(
+        _FakeFillStore([]),
+        config=PMSSettings(
+            mode=RunMode.LIVE,
+            risk=RiskSettings(max_total_exposure=50.0),
+        ),
+    )
+
+    await runner._reconcile_portfolio_from_db()  # noqa: SLF001
+
+    assert runner.portfolio.total_usdc == pytest.approx(50.0)
+    assert runner.portfolio.free_usdc == pytest.approx(50.0)
+    assert runner.portfolio.locked_usdc == 0.0
+
+
+def test_switching_default_runner_to_live_uses_configured_risk_budget() -> None:
+    runner = Runner(
+        config=PMSSettings(risk=RiskSettings(max_total_exposure=50.0)),
+        fill_store=_FakeFillStore([]),
+    )
+
+    runner.switch_mode(RunMode.LIVE)
+
+    assert runner.portfolio.total_usdc == pytest.approx(50.0)
+    assert runner.portfolio.free_usdc == pytest.approx(50.0)
+    assert runner.portfolio.locked_usdc == 0.0
 
 
 @pytest.mark.asyncio
@@ -199,6 +239,57 @@ async def test_reconcile_fails_closed_in_live_mode_on_db_error() -> None:
 
     with pytest.raises(RuntimeError, match="LIVE portfolio reconciliation failed"):
         await runner._reconcile_portfolio_from_db()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_live_reconcile_failure_redacts_credentials_from_startup_error() -> None:
+    credential_values = (
+        "private-key-secret",
+        "api-key-secret",
+        "api-secret-secret",
+        "passphrase-secret",
+        "0x2222222222222222222222222222222222222222",
+    )
+    secret_dsn = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+
+    class _BrokenFillStore(FillStore):
+        async def read_positions(self) -> list[Position]:
+            raise RuntimeError(
+                "portfolio read failed "
+                f"{credential_values[0]} {credential_values[1]} "
+                f"{credential_values[2]} {credential_values[3]} "
+                f"{credential_values[4]} {secret_dsn} password=keyword-secret"
+            )
+
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.LIVE,
+            polymarket=PolymarketSettings(
+                private_key=credential_values[0],
+                api_key=credential_values[1],
+                api_secret=credential_values[2],
+                api_passphrase=credential_values[3],
+                signature_type=1,
+                funder_address=credential_values[4],
+            ),
+        ),
+        fill_store=_BrokenFillStore(),
+    )
+    runner._pg_pool = cast(Any, object())  # noqa: SLF001
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await runner._reconcile_portfolio_from_db()  # noqa: SLF001
+
+    rendered = str(exc_info.value)
+    assert "LIVE portfolio reconciliation failed" in rendered
+    assert "<redacted-polymarket-credential>" in rendered
+    assert "<redacted-database-url>" in rendered
+    assert "password=<redacted>" in rendered
+    for credential in credential_values:
+        assert credential not in rendered
+    assert "supersecret" not in rendered
+    assert "keyword-secret" not in rendered
+    assert "admin" not in rendered
 
 
 @pytest.mark.asyncio

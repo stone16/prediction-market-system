@@ -148,6 +148,7 @@ def _matched_order_state(
         outcome=decision.outcome,
         time_in_force=decision.time_in_force.value,
         intent_key=decision.intent_key,
+        risk_group_id=decision.risk_group_id,
     )
 
 

@@ -1,0 +1,110 @@
+# Live-capital Fly.io template.
+# Copy to fly.live.toml, replace every __FILL_IN_*__ value, stage secrets with
+# `fly secrets import`, and deploy with `fly deploy -c fly.live.toml`.
+# Do not add DATABASE_URL, API tokens, webhooks, or Polymarket credentials here.
+
+app = "pms-live-capital"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PMS_AUTO_START = "1"
+  PMS_API_HOST = "0.0.0.0"
+
+  PMS_MODE = "live"
+  PMS_SECRET_SOURCE = "fly"
+  PMS_LIVE_TRADING_ENABLED = "true"
+  PMS_LIVE_ACCOUNT_RECONCILIATION_REQUIRED = "true"
+  PMS_LIVE_EMERGENCY_AUDIT_PATH = "/secure/pms/live-emergency-audit.jsonl"
+  PMS_LIVE_FIRST_ORDER_AUDIT_PATH = "/secure/pms/first-order-audit.jsonl"
+  PMS_LIVE_PAPER_SOAK_REPORT_PATH = "/secure/pms/2026-05-30.md"
+  PMS_LIVE_OPERATOR_REHEARSAL_REPORT_PATH = "/secure/pms/operator-rehearsal-report.md"
+  PMS_LIVE_EXECUTION_MODEL_PATH = "/secure/pms/execution-model.json"
+  PMS_LIVE_PAPER_BACKTEST_DIFF_PATH = "/secure/pms/paper-backtest-execution-diff.json"
+  PMS_LIVE_PREFLIGHT_ARTIFACT_PATH = "/secure/pms/credentialed-preflight.json"
+  PMS_LIVE_PREFLIGHT_ARTIFACT_MAX_AGE_S = "3600.0"
+  PMS_LIVE_READINESS_REPORT_MAX_AGE_S = "604800.0"
+  PMS_LIVE_EXIT_CRITERIA_RATIFIED_BY = "__FILL_IN_OPERATOR_ID__"
+  PMS_LIVE_EXIT_CRITERIA_RATIFIED_AT = "__FILL_IN_ALREADY_OCCURRED_ISO8601__"
+  PMS_LIVE_COMPLIANCE_REVIEWED_BY = "__FILL_IN_REVIEWER_ID__"
+  PMS_LIVE_COMPLIANCE_REVIEWED_AT = "__FILL_IN_ALREADY_OCCURRED_ISO8601__"
+  PMS_LIVE_COMPLIANCE_JURISDICTION = "__FILL_IN_JURISDICTION__"
+
+  PMS_RISK__MAX_POSITION_PER_MARKET = "5.0"
+  PMS_RISK__MAX_TOTAL_EXPOSURE = "50.0"
+  PMS_RISK__MAX_DRAWDOWN_PCT = "20.0"
+  PMS_RISK__MAX_DAILY_LOSS_USDC = "20.0"
+  PMS_RISK__MAX_OPEN_POSITIONS = "5"
+  PMS_RISK__MAX_EXPOSURE_PER_RISK_GROUP = "15.0"
+  PMS_RISK__MIN_ORDER_USDC = "1.0"
+  PMS_RISK__SLIPPAGE_THRESHOLD_BPS = "50.0"
+  PMS_RISK__MAX_QUANTITY_SHARES = "500.0"
+
+  PMS_SENSOR__POLL_INTERVAL_S = "5.0"
+  PMS_SENSOR__MAX_RECONNECT_INTERVAL_S = "60.0"
+  PMS_SENSOR__MAX_SUBSCRIPTION_ASSET_IDS = "100"
+  PMS_SENSOR__PERSIST_DISCOVERY_PRICE_SNAPSHOTS = "false"
+  PMS_SENSOR__PERSIST_PRICE_CHANGES = "false"
+
+  PMS_CONTROLLER__MIN_VOLUME = "0.0"
+  PMS_CONTROLLER__MAX_SLIPPAGE_BPS = "50"
+  PMS_CONTROLLER__TIME_IN_FORCE = "IOC"
+  PMS_CONTROLLER__DECISION_COOLDOWN_S = "60.0"
+  PMS_CONTROLLER__MAX_BOOK_AGE_MS = "1000.0"
+  PMS_CONTROLLER__ALLOWED_BOOK_CLOCK_SKEW_MS = "250.0"
+  PMS_CONTROLLER__MAX_SPREAD_BPS = "100.0"
+  PMS_CONTROLLER__STRICT_FACTOR_GATES = "true"
+  PMS_CONTROLLER__QUOTE_SOURCE = "dual"
+  PMS_CONTROLLER__DIRECT_QUOTE_MIN_NOTIONAL_USDC = "100.0"
+  PMS_CONTROLLER__DUAL_QUOTE_MAX_PRICE_DELTA_BPS = "25.0"
+  PMS_CONTROLLER__CATEGORY_PRIOR_OBSERVATIONS_PATH = "/secure/pms/category-prior-observations.csv"
+  PMS_CONTROLLER__CATEGORY_PRIOR_MIN_CATEGORY_SAMPLES = "20"
+  PMS_CONTROLLER__CATEGORY_PRIOR_MIN_GLOBAL_SAMPLES = "100"
+  PMS_CONTROLLER__CATEGORY_PRIOR_SMOOTHING_ALPHA = "1.0"
+  PMS_CONTROLLER__CATEGORY_PRIOR_SMOOTHING_BETA = "1.0"
+
+  PMS_STRATEGIES__FLB_CALIBRATION_PATH = "/secure/pms/flb-calibration.csv"
+  PMS_STRATEGIES__FLB_MIN_CALIBRATION_SAMPLES = "100"
+  PMS_STRATEGIES__FLB_ENTRY_EXECUTION_COST_BPS = "15.0"
+  PMS_STRATEGIES__FLB_FEE_RATE = "0.04"
+
+  PMS_DISCORD__ALERT_DIR = "/secure/pms/alerts"
+
+  PMS_POLYMARKET__HOST = "https://clob.polymarket.com"
+  PMS_POLYMARKET__WEBSOCKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/"
+  PMS_POLYMARKET__CHAIN_ID = "137"
+  PMS_POLYMARKET__OPERATOR_APPROVAL_MODE = "every_order"
+  PMS_POLYMARKET__FIRST_LIVE_ORDER_APPROVAL_PATH = "/secure/pms/first-order.json"
+  PMS_POLYMARKET__OPERATOR_APPROVAL_MAX_AGE_S = "300.0"
+
+  PMS_LLM__ENABLED = "false"
+  PMS_LLM__PROVIDER = "anthropic"
+  PMS_LLM__MAX_DAILY_LLM_COST_USDC = "25.0"
+
+  PMS_DATABASE__POOL_MIN_SIZE = "2"
+  PMS_DATABASE__POOL_MAX_SIZE = "10"
+
+[mounts]
+  source = "pms_live_secure"
+  destination = "/secure"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/readiness"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1

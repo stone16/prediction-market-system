@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import os
 import socket
@@ -93,6 +93,122 @@ class _ClaimedRun:
     exec_config: BacktestExecutionConfig
 
 
+@dataclass(frozen=True, slots=True)
+class _SliceDescriptor:
+    label: str
+    start: datetime
+    end: datetime
+    kind: Literal["walk_forward", "category", "liquidity"]
+
+
+@dataclass(slots=True)
+class _StrategySliceAccumulator:
+    strategy_id: str
+    strategy_version_id: str
+    execution_model: ExecutionModel
+    slice_label: str
+    slice_start: datetime
+    slice_end: datetime
+    slice_kind: str = "walk_forward"
+    opportunity_count: int = 0
+    decision_count: int = 0
+    fill_count: int = 0
+    fills_with_resolution: int = 0
+    brier_scores: list[Decimal] = field(default_factory=list)
+    slippage_bps_values: list[Decimal] = field(default_factory=list)
+    cumulative_pnl: Decimal = Decimal("0")
+    peak_equity: Decimal = Decimal("0")
+    max_drawdown: Decimal = Decimal("0")
+
+    def record_decision(
+        self,
+        *,
+        signal: MarketSignal,
+        decision: object,
+    ) -> None:
+        self.opportunity_count += 1
+        self.decision_count += 1
+        resolved_outcome = _resolved_outcome(signal)
+        if resolved_outcome is not None:
+            prob_estimate = _yes_probability(decision)
+            resolved = Decimal(str(resolved_outcome))
+            self.brier_scores.append((prob_estimate - resolved) ** 2)
+
+    def record_fill(
+        self,
+        *,
+        signal: MarketSignal,
+        decision: object,
+        fill: FillRecord,
+    ) -> None:
+        self.fill_count += 1
+        self.slippage_bps_values.append(
+            Decimal(
+                str(
+                    _decision_slippage_bps(
+                        decision=decision,
+                        fill_price=fill.fill_price,
+                    )
+                )
+            )
+        )
+        if _resolved_outcome(signal) is not None:
+            self.fills_with_resolution += 1
+        pnl_delta = _pnl_delta(
+            signal=signal,
+            decision_outcome=cast(str, getattr(decision, "outcome", "YES")),
+            fill=fill,
+            execution_model=self.execution_model,
+        )
+        self.cumulative_pnl += pnl_delta
+        if self.cumulative_pnl > self.peak_equity:
+            self.peak_equity = self.cumulative_pnl
+        drawdown = self.peak_equity - self.cumulative_pnl
+        if drawdown > self.max_drawdown:
+            self.max_drawdown = drawdown
+
+    def as_insert_args(self, *, run_id: str) -> tuple[object, ...]:
+        brier = (
+            float(sum(self.brier_scores) / Decimal(len(self.brier_scores)))
+            if self.brier_scores
+            else None
+        )
+        slippage_bps = (
+            float(sum(self.slippage_bps_values) / Decimal(len(self.slippage_bps_values)))
+            if self.slippage_bps_values
+            else None
+        )
+        fill_rate = (
+            self.fill_count / self.decision_count if self.decision_count > 0 else 0.0
+        )
+        pnl_cum: float | None
+        drawdown_max: float | None
+        if self.fills_with_resolution > 0:
+            pnl_cum = float(self.cumulative_pnl)
+            drawdown_max = float(self.max_drawdown)
+        else:
+            pnl_cum = None
+            drawdown_max = None
+        return (
+            str(uuid4()),
+            run_id,
+            self.strategy_id,
+            self.strategy_version_id,
+            self.slice_label,
+            self.slice_start,
+            self.slice_end,
+            self.slice_kind,
+            brier,
+            pnl_cum,
+            drawdown_max,
+            fill_rate,
+            slippage_bps,
+            self.opportunity_count,
+            self.decision_count,
+            self.fill_count,
+        )
+
+
 @dataclass(slots=True)
 class _StrategyAccumulator:
     strategy_id: str
@@ -115,6 +231,10 @@ class _StrategyAccumulator:
     targets: dict[tuple[str, str, Literal["buy_yes", "buy_no"], datetime], float] = field(
         default_factory=dict
     )
+    slice_accumulators: dict[
+        tuple[str, str, datetime, datetime],
+        _StrategySliceAccumulator,
+    ] = field(default_factory=dict)
 
     def record_decision(
         self,
@@ -171,6 +291,70 @@ class _StrategyAccumulator:
         drawdown = self.peak_equity - self.cumulative_pnl
         if drawdown > self.max_drawdown:
             self.max_drawdown = drawdown
+
+    def record_slice_decision(
+        self,
+        *,
+        signal: MarketSignal,
+        opportunity: object,
+        decision: object,
+        slice_descriptor: _SliceDescriptor,
+    ) -> None:
+        del opportunity
+        self._slice_accumulator(
+            slice_descriptor=slice_descriptor,
+        ).record_decision(signal=signal, decision=decision)
+
+    def record_slice_fill(
+        self,
+        *,
+        signal: MarketSignal,
+        decision: object,
+        fill: FillRecord,
+        slice_descriptor: _SliceDescriptor,
+    ) -> None:
+        self._slice_accumulator(
+            slice_descriptor=slice_descriptor,
+        ).record_fill(signal=signal, decision=decision, fill=fill)
+
+    def _slice_accumulator(
+        self,
+        *,
+        slice_descriptor: _SliceDescriptor,
+    ) -> _StrategySliceAccumulator:
+        key = (
+            slice_descriptor.kind,
+            slice_descriptor.label,
+            slice_descriptor.start,
+            slice_descriptor.end,
+        )
+        accumulator = self.slice_accumulators.get(key)
+        if accumulator is None:
+            accumulator = _StrategySliceAccumulator(
+                strategy_id=self.strategy_id,
+                strategy_version_id=self.strategy_version_id,
+                execution_model=self.execution_model,
+                slice_label=slice_descriptor.label,
+                slice_start=slice_descriptor.start,
+                slice_end=slice_descriptor.end,
+                slice_kind=slice_descriptor.kind,
+            )
+            self.slice_accumulators[key] = accumulator
+        return accumulator
+
+    def slice_insert_args(self, *, run_id: str) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            accumulator.as_insert_args(run_id=run_id)
+            for _key, accumulator in sorted(
+                self.slice_accumulators.items(),
+                key=lambda item: (
+                    item[0][2],
+                    item[0][0],
+                    item[0][1],
+                    item[0][3],
+                ),
+            )
+        )
 
     def portfolio_target(self) -> PortfolioTarget:
         return PortfolioTarget(
@@ -325,6 +509,11 @@ class BacktestRunner:
         order_decisions: dict[str, TradeDecision] = {}
 
         async for signal in replay_engine.stream(spec, exec_config):
+            slice_descriptors = _slice_descriptors(
+                signal=signal,
+                spec=spec,
+                exec_config=exec_config,
+            )
             for advanced_state in await _advance_open_orders(
                 self.execution_simulator,
                 signal=signal,
@@ -358,6 +547,13 @@ class BacktestRunner:
                     decision=decision_for_fill,
                     fill=fill,
                 )
+                for slice_descriptor in slice_descriptors:
+                    accumulator.record_slice_fill(
+                        signal=signal,
+                        decision=decision_for_fill,
+                        fill=fill,
+                        slice_descriptor=slice_descriptor,
+                    )
                 if advanced_state.status in {
                     OrderStatus.MATCHED.value,
                     OrderStatus.CANCELLED.value,
@@ -373,6 +569,13 @@ class BacktestRunner:
                 opportunity=opportunity,
                 decision=decision,
             )
+            for slice_descriptor in slice_descriptors:
+                accumulator.record_slice_decision(
+                    signal=signal,
+                    opportunity=opportunity,
+                    decision=decision,
+                    slice_descriptor=slice_descriptor,
+                )
             try:
                 order_state = await self.execution_simulator.execute(
                     signal=signal,
@@ -407,6 +610,13 @@ class BacktestRunner:
                 decision=decision,
                 fill=fill,
             )
+            for slice_descriptor in slice_descriptors:
+                accumulator.record_slice_fill(
+                    signal=signal,
+                    decision=decision,
+                    fill=fill,
+                    slice_descriptor=slice_descriptor,
+                )
             if order_state.status in {
                 OrderStatus.MATCHED.value,
                 OrderStatus.CANCELLED.value,
@@ -544,6 +754,51 @@ class BacktestRunner:
                         """,
                         *accumulator.as_insert_args(run_id=run_id),
                     )
+                    for slice_args in accumulator.slice_insert_args(run_id=run_id):
+                        await connection.execute(
+                            """
+                            INSERT INTO strategy_run_slices (
+                                strategy_run_slice_id,
+                                run_id,
+                                strategy_id,
+                                strategy_version_id,
+                                slice_label,
+                                slice_start,
+                                slice_end,
+                                slice_kind,
+                                brier,
+                                pnl_cum,
+                                drawdown_max,
+                                fill_rate,
+                                slippage_bps,
+                                opportunity_count,
+                                decision_count,
+                                fill_count
+                            ) VALUES (
+                                $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8,
+                                $9, $10, $11, $12, $13, $14, $15, $16
+                            )
+                            ON CONFLICT (
+                                run_id,
+                                strategy_id,
+                                strategy_version_id,
+                                slice_label
+                            ) DO UPDATE
+                            SET
+                                slice_start = EXCLUDED.slice_start,
+                                slice_end = EXCLUDED.slice_end,
+                                slice_kind = EXCLUDED.slice_kind,
+                                brier = EXCLUDED.brier,
+                                pnl_cum = EXCLUDED.pnl_cum,
+                                drawdown_max = EXCLUDED.drawdown_max,
+                                fill_rate = EXCLUDED.fill_rate,
+                                slippage_bps = EXCLUDED.slippage_bps,
+                                opportunity_count = EXCLUDED.opportunity_count,
+                                decision_count = EXCLUDED.decision_count,
+                                fill_count = EXCLUDED.fill_count
+                            """,
+                            *slice_args,
+                        )
         finally:
             await self.writable_pool.release(connection)
 
@@ -727,6 +982,115 @@ async def _maybe_call_cancel_probe(
     outcome = probe(point)
     if asyncio.iscoroutine(outcome):
         await cast(Awaitable[None], outcome)
+
+
+def _slice_bounds(
+    signal_timestamp: datetime,
+    *,
+    spec: BacktestSpec,
+    exec_config: BacktestExecutionConfig,
+) -> tuple[datetime, datetime]:
+    chunk_delta = timedelta(days=exec_config.chunk_days)
+    chunk_seconds = chunk_delta.total_seconds()
+    effective_timestamp = signal_timestamp
+    if effective_timestamp < spec.date_range_start:
+        effective_timestamp = spec.date_range_start
+    if effective_timestamp >= spec.date_range_end:
+        effective_timestamp = spec.date_range_end - timedelta(microseconds=1)
+    elapsed_seconds = max(
+        0.0,
+        (effective_timestamp - spec.date_range_start).total_seconds(),
+    )
+    slice_index = int(elapsed_seconds // chunk_seconds)
+    slice_start = spec.date_range_start + (chunk_delta * slice_index)
+    slice_end = min(slice_start + chunk_delta, spec.date_range_end)
+    return slice_start, slice_end
+
+
+def _slice_descriptors(
+    *,
+    signal: MarketSignal,
+    spec: BacktestSpec,
+    exec_config: BacktestExecutionConfig,
+) -> tuple[_SliceDescriptor, ...]:
+    slice_start, slice_end = _slice_bounds(
+        signal.fetched_at,
+        spec=spec,
+        exec_config=exec_config,
+    )
+    descriptors = [
+        _SliceDescriptor(
+            label=_slice_label(slice_start=slice_start, slice_end=slice_end),
+            start=slice_start,
+            end=slice_end,
+            kind="walk_forward",
+        )
+    ]
+    category_label = _category_slice_label(signal)
+    if category_label is not None:
+        descriptors.append(
+            _SliceDescriptor(
+                label=category_label,
+                start=spec.date_range_start,
+                end=spec.date_range_end,
+                kind="category",
+            )
+        )
+    liquidity_label = _liquidity_slice_label(signal)
+    if liquidity_label is not None:
+        descriptors.append(
+            _SliceDescriptor(
+                label=liquidity_label,
+                start=spec.date_range_start,
+                end=spec.date_range_end,
+                kind="liquidity",
+            )
+        )
+    return tuple(descriptors)
+
+
+def _slice_label(*, slice_start: datetime, slice_end: datetime) -> str:
+    return f"{slice_start.date().isoformat()}/{slice_end.date().isoformat()}"
+
+
+def _category_slice_label(signal: MarketSignal) -> str | None:
+    raw_category = signal.external_signal.get("category")
+    if not isinstance(raw_category, str):
+        raw_category = signal.external_signal.get("market_category")
+    if not isinstance(raw_category, str):
+        return None
+    normalized = _slug_fragment(raw_category)
+    if not normalized:
+        return None
+    return f"category:{normalized}"
+
+
+def _liquidity_slice_label(signal: MarketSignal) -> str | None:
+    volume_24h = signal.volume_24h
+    if volume_24h is None or volume_24h < 0.0:
+        return None
+    if volume_24h < 1_000.0:
+        bucket = "lt1000"
+    elif volume_24h < 10_000.0:
+        bucket = "1000-10000"
+    else:
+        bucket = "gte10000"
+    return f"liquidity:volume_24h:{bucket}"
+
+
+def _slug_fragment(value: str) -> str:
+    normalized = value.strip().lower()
+    fragments: list[str] = []
+    previous_dash = False
+    for char in normalized:
+        if char.isalnum():
+            fragments.append(char)
+            previous_dash = False
+            continue
+        if not previous_dash:
+            fragments.append("-")
+            previous_dash = True
+    return "".join(fragments).strip("-")
 
 
 def _resolved_outcome(signal: MarketSignal) -> float | None:
