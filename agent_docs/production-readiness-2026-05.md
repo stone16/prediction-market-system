@@ -344,6 +344,117 @@ current scope.
 
 ---
 
+## 9. Result of the work block — 2026-05-28
+
+All three code fixes landed atomically on `feat/launch-readiness-2026-05`:
+
+| Commit | Subject |
+| --- | --- |
+| `18f1226` | `docs(launch): add 2026-05 production-readiness work block` |
+| `a8feb8d` | `fix(preflight): join markets on condition_id in risk-metadata check` |
+| `de85d80` | `fix(api): filter quote_records by /metrics window` |
+| `263afdb` | `fix(storage): drop risk_group_id from FillStore position-netting key` |
+
+### Gate suite on post-fix `main`-relative HEAD
+
+| Gate | Result |
+| --- | --- |
+| `uv run pytest -q` | 2245 passed, 174 skipped |
+| `uv run mypy src/ tests/ --strict` | Success: no issues found in 444 source files |
+| `uv run lint-imports` | 9 contracts kept, 0 broken |
+| `(cd dashboard && npm run build)` | succeeded — full Next.js production bundle |
+| `(cd dashboard && npm run test)` | 65 tests / 26 files passed |
+| `PMS_RUN_INTEGRATION=1 PMS_TEST_DATABASE_URL=... uv run pytest -m integration` | 172 passed, 3 skipped (live-credentialed-preflight gated on `PMS_RUN_LIVE_PREFLIGHT=1`, deferred) |
+
+### PAPER-soak artifact
+
+A real PAPER-soak report was generated against the running local soak
+on port 8010 (started 2026-05-27 15:29 UTC, healthy, paper mode):
+
+- **Artifact path:** `~/.pms-soak-reports/launch-readiness-2026-05-28.md`
+  (outside the working tree, per the `require_preflight_artifact_outside_working_tree`
+  contract; chmod 700 parent).
+- **Provenance:** `generated_by=scripts/paper_report.py`,
+  `artifact_mode=persisted`, `generated_at=2026-05-28T11:09:32+00:00`.
+- **Decision: NO-GO** — expected; the deliverable for this block is
+  the artifact + gap list, not a clean GO.
+
+#### Gate-table summary
+
+7 PASS / 11 FAIL (of 18 gates):
+
+| Gate | Status | Detail |
+| --- | --- | --- |
+| `soak_days` | FAIL | 1 < 30 |
+| `fills` | FAIL | 0 < 10 |
+| `fill_rate` | FAIL | 0.0 ≤ 0.0 |
+| `average_slippage_bps` | PASS | 0.0 ≤ 50.0 |
+| `todays_pnl` | PASS | 0.0 ≥ -20.0 |
+| `cumulative_pnl` | FAIL | 0.0 ≤ 0.0 |
+| `max_drawdown_pct` | PASS | 0.0 ≤ 20.0 |
+| `open_positions` | PASS | 0 ≤ 5 |
+| `total_exposure` | PASS | 0.0 ≤ 50.0 |
+| `brier_score` | FAIL | missing |
+| `brier_improvement` | FAIL | missing |
+| `hit_rate` | FAIL | 0.0 ≤ 0.45 |
+| `average_edge_bps` | FAIL | missing |
+| `average_net_edge_bps` | FAIL | missing |
+| `sharpe_ratio` | FAIL | missing |
+| `strategy_evidence` | PASS | `default@f6adb411...` (v2 content-hash version migrated cleanly) |
+| `unresolved_incidents` | PASS | 0 unresolved |
+| `risk_events` | FAIL | 1 (daily P&L evidence missing — `metrics.pnl_series` empty) |
+
+### Gap list for the follow-up work block
+
+The 11 failing gates cluster into 3 buckets — each requires *time* and
+*decisions*, not more code:
+
+**(a) Time-based gates** — need ≥30 days of accrued soak data on a
+durable deployment (not the ephemeral local session):
+- `soak_days` requires ≥30.
+- `cumulative_pnl > 0` requires accrued positive P&L.
+- `risk_events = 0` will clear once `metrics.pnl_series` accrues daily
+  observations.
+
+**(b) Decision-flow gates** — need the runner to actually make decisions,
+fill orders, and resolve them:
+- `fills ≥ 10`, `fill_rate > 0`, `hit_rate > 45%`.
+- The blocker is the **thin eligible universe** documented in
+  `[[project_paper_soak_ops]]` (auto-memory): the default strategy's
+  7-day resolution horizon × `volume ≥ 500` matches ~1 of 100 markets
+  discovered from Polymarket Gamma. Without user-driven subscription
+  bootstrap (cold-start hazard documented in same memory), the runner
+  observes ~0 fresh books.
+- Concrete remediation for the next block: either tune the default
+  strategy's horizon/volume gates (config change, no code), or seed a
+  subscription via `POST /markets/{token_id}/subscribe` for a known
+  high-volume Polymarket market and run a multi-day soak.
+
+**(c) Evidence-quality gates** — derive from decision flow:
+- `brier_score`, `brier_improvement`, `average_edge_bps`,
+  `average_net_edge_bps`, `sharpe_ratio` all require decisions +
+  resolved markets to populate. These auto-clear once bucket (b) clears.
+
+**Not gap items** — the three production-readiness fixes are landed
+and verified. The artifact's `strategy_evidence: PASS` confirms the
+strategy-version migration (`default-v1` → content-hash v2) works
+live, validating one of the items called out in the original review.
+
+### What's still deferred to the next block (cross-link to §7)
+
+- Polymarket credentialed preflight against the real venue
+  (`PMS_RUN_LIVE_PREFLIGHT=1` integration witness; the 3 skipped
+  integration tests above).
+- Fly app split (paper-soak app vs. live app); `config.live.yaml`
+  fill-in; secret manager; Discord alerting; DB migration in live env.
+- 30-day soak duration on the durable Fly paper-soak app.
+- Operator / compliance rehearsal + signoff.
+- Tiny live canary with `operator_approval_mode=every_order`,
+  post-trade venue + DB reconciliation, first-order + emergency +
+  post-live reconciliation audits.
+
+---
+
 ## Provenance
 
 This doc consolidates an external production-readiness review pasted
@@ -352,4 +463,5 @@ and got rejected by the 4000-char limit. Section 2 above is the
 trimmed paste-ready replacement. The full review identified three
 code-level bugs (a P0/P1 SQL join, a P1 windowed-metrics filter, and
 a P1 position-netting key) plus a list of launch-evidence gaps that
-are explicitly deferred to a follow-up block.
+are explicitly deferred to a follow-up block. Section 9 records the
+actual landing + the PAPER-soak artifact produced 2026-05-28.
