@@ -2212,7 +2212,7 @@ async def _fresh_usable_book_market_missing_risk_metadata_count(
                    AND ask_levels.size > 0.0
                    AND ask_levels.price > 0.0
                 LEFT JOIN markets
-                    ON markets.market_id = book_snapshots.market_id
+                    ON markets.condition_id = book_snapshots.market_id
                 WHERE book_snapshots.ts IS NOT NULL
                   AND book_snapshots.ts >= (
                       NOW() - ($1::double precision * INTERVAL '1 second')

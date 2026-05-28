@@ -318,8 +318,13 @@ class _PositionStore:
 
 
 class _QuoteEvalStore:
+    def __init__(self, records: list[QuoteEvalRecord] | None = None) -> None:
+        self._records: list[QuoteEvalRecord] = (
+            [_quote_eval_record()] if records is None else list(records)
+        )
+
     async def all(self) -> list[QuoteEvalRecord]:
-        return [_quote_eval_record()]
+        return list(self._records)
 
 
 @pytest.mark.asyncio
@@ -528,6 +533,48 @@ async def test_metrics_route_filters_eval_records_by_recorded_at_window() -> Non
     assert payload["slippage_bps"] == 10.0
     assert payload["window_started_at"] == "2026-04-30T00:00:00+00:00"
     assert payload["window_ended_at"] == "2026-05-31T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_metrics_route_filters_quote_records_by_recorded_at_window() -> None:
+    old_quote = replace(
+        _quote_eval_record(),
+        fill_id="quote-before-window",
+        recorded_at=datetime(2026, 4, 29, 23, 59, 59, tzinfo=UTC),
+        quote_score=0.9,
+        mtm_pnl=-50.0,
+    )
+    window_quote = replace(
+        _quote_eval_record(),
+        fill_id="quote-inside-window",
+        recorded_at=datetime(2026, 5, 30, tzinfo=UTC),
+        quote_score=0.01,
+        mtm_pnl=2.5,
+    )
+    runner = _runner_with_state()
+    runner.quote_eval_store = cast(
+        QuoteEvalStore, _QuoteEvalStore([old_quote, window_quote])
+    )
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/metrics",
+            params={
+                "since": "2026-04-30T00:00:00+00:00",
+                "until": "2026-05-31T00:00:00+00:00",
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    quote_calibration = payload["quote_calibration"]
+    # Only the in-window record contributes. Out-of-window record's score
+    # (0.9) and PnL (-50.0) must NOT contaminate these aggregates.
+    assert quote_calibration["record_count"] == 1
+    assert quote_calibration["quote_score_overall"] == 0.01
+    assert quote_calibration["mtm_pnl"] == 2.5
 
 
 @pytest.mark.asyncio

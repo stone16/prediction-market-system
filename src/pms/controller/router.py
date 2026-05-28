@@ -17,7 +17,8 @@ class Router:
     controller: ControllerSettings = field(default_factory=ControllerSettings)
 
     def gate(self, signal: MarketSignal) -> bool:
-        passed = self._gate(signal)
+        reason = self.gate_reason(signal)
+        passed = reason is None
         logger.info(
             "router funnel market_id=%s routed=%d",
             signal.market_id,
@@ -30,32 +31,32 @@ class Router:
         )
         return passed
 
-    def _gate(self, signal: MarketSignal) -> bool:
+    def gate_reason(self, signal: MarketSignal) -> str | None:
         if (
             signal.volume_24h is not None
             and signal.volume_24h < self.controller.min_volume
         ):
-            return False
+            return "min_volume_too_low"
         if (
             not isfinite(signal.yes_price)
             or signal.yes_price < 0.02
             or signal.yes_price > 0.98
         ):
-            return False
+            return "yes_price_out_of_band"
         if signal.resolves_at is not None and signal.resolves_at <= signal.timestamp:
-            return False
+            return "resolves_at_in_past"
         market_status = str(
             signal.external_signal.get("market_status", signal.market_status)
         ).lower()
         if market_status not in {"open", "active"}:
-            return False
+            return "market_status_not_open"
         spread_bps = _optional_float(signal.external_signal.get("spread_bps"))
         if spread_bps is not None and spread_bps > self.controller.max_spread_bps:
-            return False
+            return "spread_too_wide"
         book_age_ms = _optional_float(signal.external_signal.get("book_age_ms"))
         if book_age_ms is not None and book_age_ms > self.controller.max_book_age_ms:
-            return False
-        return True
+            return "book_too_stale"
+        return None
 
     def stop_conditions(self, signal: MarketSignal) -> list[str]:
         conditions = [

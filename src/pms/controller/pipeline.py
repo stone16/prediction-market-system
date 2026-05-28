@@ -93,11 +93,42 @@ class ControllerPipeline:
     ) -> OpportunityEmission | None:
         self.last_diagnostic = None
         router = _required(self.router, "router")
+        # Call gate() (rather than gate_reason() twice) so the router funnel
+        # log is emitted exactly once per signal. gate() returns a bool; we
+        # re-derive the specific reason only on failure so we can attach it
+        # to the diagnostic.
         if not router.gate(signal):
+            gate_reason = router.gate_reason(signal)
             _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
+            self.last_diagnostic = ControllerDiagnostic(
+                code=f"router_gate:{gate_reason}",
+                message=(
+                    "Signal rejected by router gate: "
+                    f"{(gate_reason or 'unknown').replace('_', ' ')}."
+                ),
+                market_id=signal.market_id,
+                strategy_id=self.strategy_id,
+                strategy_version_id=self.strategy_version_id,
+                token_id=signal.token_id,
+                severity="info",
+                metadata={"gate_reason": gate_reason or "unknown"},
+            )
             return None
         if signal.token_id is None:
             _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
+            self.last_diagnostic = ControllerDiagnostic(
+                code="missing_token_id",
+                message=(
+                    "Signal arrived without token_id; skipping decision until "
+                    "the sensor populates the outcome token."
+                ),
+                market_id=signal.market_id,
+                strategy_id=self.strategy_id,
+                strategy_version_id=self.strategy_version_id,
+                token_id=None,
+                severity="info",
+                metadata={},
+            )
             return None
 
         forecasters = _required(self.forecasters, "forecasters")
@@ -144,6 +175,19 @@ class ControllerPipeline:
         )
         if not probabilities and not has_factor_composition:
             _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
+            self.last_diagnostic = ControllerDiagnostic(
+                code="no_forecaster_output",
+                message=(
+                    "No forecaster produced a probability and the strategy has "
+                    "no factor composition; skipping decision."
+                ),
+                market_id=signal.market_id,
+                strategy_id=self.strategy_id,
+                strategy_version_id=self.strategy_version_id,
+                token_id=signal.token_id,
+                severity="info",
+                metadata={"forecaster_count": len(forecasters)},
+            )
             return None
 
         prob_estimate = (

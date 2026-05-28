@@ -50,3 +50,50 @@ def test_router_rejects_non_open_status_from_signal_or_external_signal() -> None
 
 def test_router_allows_signal_when_optional_quote_fields_are_absent() -> None:
     assert Router().gate(_signal())
+
+
+def test_router_gate_reason_returns_none_when_signal_passes_all_gates() -> None:
+    assert Router().gate_reason(_signal()) is None
+
+
+def test_router_gate_reason_names_each_specific_gate_failure() -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    router_default = Router()
+    router_capped = Router(
+        ControllerSettings(
+            min_volume=100.0,
+            max_spread_bps=100.0,
+            max_book_age_ms=1_000.0,
+        )
+    )
+
+    assert (
+        router_capped.gate_reason(_signal(volume_24h=50.0))
+        == "min_volume_too_low"
+    )
+    assert (
+        router_default.gate_reason(_signal(yes_price=0.01))
+        == "yes_price_out_of_band"
+    )
+    assert (
+        router_default.gate_reason(
+            _signal(fetched_at=now, resolves_at=now)
+        )
+        == "resolves_at_in_past"
+    )
+    assert (
+        router_default.gate_reason(_signal(market_status="halted"))
+        == "market_status_not_open"
+    )
+    assert (
+        router_capped.gate_reason(
+            _signal(external_signal={"spread_bps": 101.0})
+        )
+        == "spread_too_wide"
+    )
+    assert (
+        router_capped.gate_reason(
+            _signal(external_signal={"book_age_ms": 1_001.0})
+        )
+        == "book_too_stale"
+    )
