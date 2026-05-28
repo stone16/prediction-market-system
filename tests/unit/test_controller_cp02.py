@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from datetime import UTC, datetime, timedelta
 
@@ -22,6 +23,18 @@ class StaticForecaster:
     async def forecast(self, signal: MarketSignal) -> float:
         del signal
         return 0.67
+
+
+class NullForecaster:
+    """Forecaster that always returns None — used to exercise the
+    no-forecaster-output branch of ``ControllerPipeline.on_signal``."""
+
+    def predict(self, signal: MarketSignal) -> tuple[float, float, str] | None:
+        del signal
+        return None
+
+    async def forecast(self, signal: MarketSignal) -> float:
+        return signal.yes_price
 
 
 def _signal(*, fetched_at: datetime | None = None) -> MarketSignal:
@@ -144,3 +157,77 @@ async def test_controller_pipeline_suppresses_duplicate_paper_decisions_within_c
     assert first is not None
     assert duplicate is None
     assert after_cooldown is not None
+
+
+@pytest.mark.asyncio
+async def test_on_signal_emits_diagnostic_when_router_gate_rejects_signal() -> None:
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=100.0)),
+    )
+
+    emission = await pipeline.on_signal(
+        replace(_signal(), external_signal={"spread_bps": 250.0}),
+        portfolio=_portfolio(),
+    )
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None, "router-gate rejections must surface as a diagnostic"
+    assert diagnostic.code == "router_gate:spread_too_wide"
+    assert diagnostic.market_id == "market-cp02"
+    assert diagnostic.strategy_id == "alpha"
+    assert diagnostic.strategy_version_id == "alpha-v1"
+    assert diagnostic.metadata.get("gate_reason") == "spread_too_wide"
+
+
+@pytest.mark.asyncio
+async def test_on_signal_emits_diagnostic_when_signal_lacks_token_id() -> None:
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(
+        replace(_signal(), token_id=None),
+        portfolio=_portfolio(),
+    )
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None, "missing-token-id rejections must surface as a diagnostic"
+    assert diagnostic.code == "missing_token_id"
+    assert diagnostic.market_id == "market-cp02"
+    assert diagnostic.token_id is None
+
+
+@pytest.mark.asyncio
+async def test_on_signal_emits_diagnostic_when_no_forecaster_output_and_no_factor_composition() -> None:
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[NullForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None, (
+        "no-forecaster-output rejections must surface as a diagnostic so operators "
+        "can see that signals reached the pipeline but no forecaster produced a probability"
+    )
+    assert diagnostic.code == "no_forecaster_output"
+    assert diagnostic.market_id == "market-cp02"
+    assert diagnostic.token_id == "token-cp02"
