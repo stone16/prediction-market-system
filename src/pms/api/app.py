@@ -525,6 +525,7 @@ def create_app(
         )
         mark_to_market = await _mark_to_market_payload(active_runner)
         records = _eval_records_in_window(records, since=since, until=until)
+        quote_records = _quote_records_in_window(quote_records, since=since, until=until)
         first_trade_time_seconds = await _first_trade_time_seconds(active_runner.pg_pool)
         return _metrics_payload(
             records,
@@ -912,6 +913,25 @@ def _eval_records_in_window(
     lower = _coerce_aware_datetime(since) if since is not None else None
     upper = _coerce_aware_datetime(until) if until is not None else None
     filtered: list[EvalRecord] = []
+    for record in records:
+        recorded_at = _coerce_aware_datetime(record.recorded_at)
+        if lower is not None and recorded_at < lower:
+            continue
+        if upper is not None and recorded_at >= upper:
+            continue
+        filtered.append(record)
+    return filtered
+
+
+def _quote_records_in_window(
+    records: Sequence[QuoteEvalRecord],
+    *,
+    since: datetime | None,
+    until: datetime | None,
+) -> list[QuoteEvalRecord]:
+    lower = _coerce_aware_datetime(since) if since is not None else None
+    upper = _coerce_aware_datetime(until) if until is not None else None
+    filtered: list[QuoteEvalRecord] = []
     for record in records:
         recorded_at = _coerce_aware_datetime(record.recorded_at)
         if lower is not None and recorded_at < lower:
