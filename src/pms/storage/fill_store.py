@@ -341,7 +341,7 @@ def _fill_from_row(row: asyncpg.Record) -> FillRecord:
 
 def _positions_from_fill_rows(rows: Sequence[asyncpg.Record]) -> list[Position]:
     accumulators: dict[
-        tuple[str, str | None, str, str | None, str, str],
+        tuple[str, str | None, str, str, str],
         _PositionAccumulator,
     ] = {}
     for row in rows:
@@ -349,7 +349,6 @@ def _positions_from_fill_rows(rows: Sequence[asyncpg.Record]) -> list[Position]:
             cast(str, row["market_id"]),
             cast(str | None, row["token_id"]),
             cast(str, row["venue"]),
-            cast(str | None, _optional_row_value(row, "risk_group_id")),
             cast(str, _optional_row_value(row, "strategy_id") or "default"),
             cast(str, _optional_row_value(row, "strategy_version_id") or "default-v1"),
         )
@@ -359,9 +358,11 @@ def _positions_from_fill_rows(rows: Sequence[asyncpg.Record]) -> list[Position]:
                 market_id=key[0],
                 token_id=key[1],
                 venue=key[2],
-                risk_group_id=key[3],
-                strategy_id=key[4],
-                strategy_version_id=key[5],
+                risk_group_id=cast(
+                    str | None, _optional_row_value(row, "risk_group_id")
+                ),
+                strategy_id=key[3],
+                strategy_version_id=key[4],
             )
             accumulators[key] = accumulator
         _apply_fill_row(accumulator, row)
@@ -390,6 +391,9 @@ def _apply_fill_row(accumulator: _PositionAccumulator, row: asyncpg.Record) -> N
     accumulator.mark_source = cast(str | None, _optional_row_value(row, "mark_source"))
     accumulator.mark_age_seconds = _float_or_none(
         _optional_row_value(row, "mark_age_seconds")
+    )
+    accumulator.risk_group_id = cast(
+        str | None, _optional_row_value(row, "risk_group_id")
     )
     accumulator.last_fill_at = filled_at
 

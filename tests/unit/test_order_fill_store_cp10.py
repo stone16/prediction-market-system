@@ -388,6 +388,66 @@ async def test_fill_store_read_positions_maps_missing_market_price_to_zero_pnl()
     ]
 
 
+@pytest.mark.real_fill_store
+@pytest.mark.asyncio
+async def test_fill_store_read_positions_nets_across_risk_group_id_change() -> None:
+    connection = _RecordingConnection()
+    connection.fetch_rows = [
+        _position_fill_row(
+            fill_id="fill-open-rg1",
+            side="BUY",
+            fill_price=0.30,
+            fill_quantity=10.0,
+            risk_group_id="rg-1",
+        ),
+        _position_fill_row(
+            fill_id="fill-partial-close-rg2",
+            side="SELL",
+            fill_price=0.40,
+            fill_quantity=4.0,
+            risk_group_id="rg-2",
+            filled_at=datetime(2026, 4, 21, 11, 0, tzinfo=UTC),
+        ),
+    ]
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    positions = await store.read_positions()
+
+    assert len(positions) == 1
+    assert positions[0].shares_held == pytest.approx(6.0)
+    assert positions[0].risk_group_id == "rg-2"
+
+
+@pytest.mark.real_fill_store
+@pytest.mark.asyncio
+async def test_fill_store_read_positions_keeps_netting_when_risk_group_metadata_appears() -> None:
+    connection = _RecordingConnection()
+    connection.fetch_rows = [
+        _position_fill_row(
+            fill_id="fill-historical-buy",
+            side="BUY",
+            fill_price=0.30,
+            fill_quantity=10.0,
+            risk_group_id=None,
+        ),
+        _position_fill_row(
+            fill_id="fill-later-buy",
+            side="BUY",
+            fill_price=0.32,
+            fill_quantity=5.0,
+            risk_group_id="rg-newly-set",
+            filled_at=datetime(2026, 4, 21, 11, 0, tzinfo=UTC),
+        ),
+    ]
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+
+    positions = await store.read_positions()
+
+    assert len(positions) == 1
+    assert positions[0].shares_held == pytest.approx(15.0)
+    assert positions[0].risk_group_id == "rg-newly-set"
+
+
 @pytest.mark.asyncio
 async def test_fill_store_read_trades_maps_joined_market_rows_and_skips_missing_payloads() -> None:
     connection = _RecordingConnection()
