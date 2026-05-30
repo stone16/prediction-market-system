@@ -1389,7 +1389,17 @@ class Runner:
                             error=error,
                         )
                     logger.warning("order persistence failed: %s", error)
-                fill = _fill_from_order(order_state, decision, signal)
+                # LIVE fills get their real fee from venue reconciliation; for
+                # paper/backtest, model it from the configured rate so net-edge
+                # metrics are not inflated.
+                fill_fee_rate = (
+                    None
+                    if self.config.mode == RunMode.LIVE
+                    else self.config.strategies.flb_fee_rate
+                )
+                fill = _fill_from_order(
+                    order_state, decision, signal, fee_rate=fill_fee_rate
+                )
                 if fill is not None:
                     _append_bounded(self.state.fills, fill)
                     try:
@@ -2801,6 +2811,8 @@ def _fill_from_order(
     order_state: OrderState,
     decision: TradeDecision,
     signal: MarketSignal | None,
+    *,
+    fee_rate: float | None = None,
 ) -> FillRecord | None:
     # Emit a FillRecord whenever the venue reports a non-zero positive
     # fill, regardless of the order's terminal status. Polymarket can
@@ -2813,6 +2825,21 @@ def _fill_from_order(
         return None
     if order_state.filled_notional_usdc <= 0.0:
         return None
+
+    # Simulated (paper/backtest) fills carry the modelled Polymarket fee so the
+    # evaluator's net-edge gate can compute instead of rendering N/A, and so
+    # paper P&L is not inflated relative to live. fee_rate is None for LIVE
+    # fills — there the venue reports the real fee via reconciliation, and we
+    # must not synthesize over it. Formula matches ExecutionModel.compute_fee.
+    fees: float | None = None
+    fee_bps: int | None = None
+    if fee_rate is not None:
+        fees = (
+            order_state.filled_notional_usdc
+            * fee_rate
+            * (1.0 - order_state.fill_price)
+        )
+        fee_bps = int(fee_rate * 10_000)
 
     return FillRecord(
         trade_id=order_state.order_id,
@@ -2833,6 +2860,8 @@ def _fill_from_order(
         strategy_version_id=decision.strategy_version_id,
         resolved_outcome=_resolved_outcome(signal),
         risk_group_id=decision.risk_group_id,
+        fees=fees,
+        fee_bps=fee_bps,
     )
 
 
