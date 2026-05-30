@@ -55,6 +55,7 @@ from pms.storage.feedback_store import FeedbackStore
 from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
 from pms.strategies.projections import (
     ActiveStrategy,
+    CalibrationSpec,
     EvalSpec,
     FactorCompositionStep,
     ForecasterSpec,
@@ -290,6 +291,113 @@ async def test_strategy_does_not_trade_when_required_raw_factor_is_stale() -> No
     assert emission is None
     assert pipeline.last_diagnostic is not None
     assert pipeline.last_diagnostic.code == "stale_required_factors"
+
+
+@pytest.mark.asyncio
+async def test_on_signal_emits_diagnostic_when_composition_resolution_fails() -> None:
+    """A composition that cannot resolve a probability (e.g. a weighted step
+    whose factor is absent and has no threshold gate, raising inside
+    apply_composition) must surface as an ``error``-severity diagnostic. Without
+    it, a broken strategy config looks identical to an idle controller — unsafe
+    for real-money operation.
+    """
+    strategy = _active_strategy(
+        composition=(
+            FactorCompositionStep(
+                factor_id="orderbook_imbalance",
+                role="weighted",
+                param="",
+                weight=1.0,
+                threshold=None,
+            ),
+        )
+    )
+    pipeline = ControllerPipeline(
+        strategy=strategy,
+        factor_reader=SnapshotReader(
+            FactorSnapshot(
+                values={},
+                missing_factors=(("orderbook_imbalance", ""),),
+                snapshot_hash="composition-unresolvable",
+            )
+        ),
+        forecasters=(ConstantForecaster(0.5),),
+        calibrator=NetcalCalibrator(),
+        sizer=FixedSizer(),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(min_volume=0.0, strict_factor_gates=False),
+            risk=RiskSettings(min_order_usdc=1.0),
+        ),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None, (
+        "a composition resolution failure must surface as a diagnostic, not a "
+        "silent drop — it may indicate a broken strategy config"
+    )
+    assert diagnostic.code == "composition_resolution_failed"
+    assert diagnostic.severity == "error"
+
+
+@pytest.mark.asyncio
+async def test_on_signal_emits_diagnostic_when_calibration_clamp_rejects() -> None:
+    """When the extreme-probability clamp rejects a forecast (too few resolved
+    samples to trust a near-0/near-1 estimate), the drop must surface as a
+    diagnostic so the operator sees calibration is gating order flow."""
+    strategy = ActiveStrategy(
+        strategy_id="clamp-probe",
+        strategy_version_id="clamp-probe-v1",
+        config=StrategyConfig(
+            strategy_id="clamp-probe",
+            factor_composition=(),
+            metadata=(("owner", "system"), ("live_allowed", "false")),
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=1_000.0,
+            max_daily_drawdown_pct=0.0,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier", "pnl")),
+        forecaster=ForecasterSpec(forecasters=(("rules", ()),)),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=30,
+            volume_min_usdc=0.0,
+        ),
+        calibration=CalibrationSpec(
+            enabled=True,
+            shrinkage_factor=1.0,  # no shrinkage, so 0.99 stays extreme
+            shrinkage_bias=0.0,
+            extreme_clamp_low=0.08,
+            extreme_clamp_high=0.92,
+            min_resolved_for_extreme=500,  # 0 resolved samples << 500 -> reject
+        ),
+    )
+    pipeline = ControllerPipeline(
+        strategy=strategy,
+        forecasters=(ConstantForecaster(0.99),),
+        calibrator=NetcalCalibrator(),
+        sizer=FixedSizer(),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(min_volume=0.0),
+            risk=RiskSettings(min_order_usdc=1.0),
+        ),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None, (
+        "an extreme-probability clamp rejection must surface as a diagnostic"
+    )
+    assert diagnostic.code == "calibration_clamp_rejected"
+    assert diagnostic.severity == "info"
 
 
 def test_disabled_llm_forecaster_does_not_emit_neutral_runtime_factor() -> None:

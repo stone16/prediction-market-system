@@ -231,3 +231,103 @@ async def test_on_signal_emits_diagnostic_when_no_forecaster_output_and_no_facto
     assert diagnostic.code == "no_forecaster_output"
     assert diagnostic.market_id == "market-cp02"
     assert diagnostic.token_id == "token-cp02"
+
+
+class _EqualToMarketForecaster:
+    """Returns exactly the market YES price so the resulting edge is zero,
+    exercising the decision_edge <= 0 silent-return branch."""
+
+    def predict(self, signal: MarketSignal) -> tuple[float, float, str]:
+        del signal
+        return (0.4, 0.9, "no-edge")
+
+    async def forecast(self, signal: MarketSignal) -> float:
+        return 0.4
+
+
+@pytest.mark.asyncio
+async def test_on_signal_emits_diagnostic_when_decision_edge_not_positive() -> None:
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[_EqualToMarketForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    # _signal() has yes_price=0.4; a forecast of 0.4 yields zero edge.
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None, (
+        "a zero/negative-edge drop must surface as a diagnostic so operators can "
+        "distinguish 'no opportunity' from 'controller idle'"
+    )
+    assert diagnostic.code == "decision_edge_not_positive"
+    assert diagnostic.severity == "info"
+    assert diagnostic.market_id == "market-cp02"
+    assert diagnostic.metadata.get("decision_edge") == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_on_signal_emits_diagnostic_when_order_size_below_minimum() -> None:
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(min_volume=100.0),
+            # Force the computed Kelly size (~$137) below the floor.
+            risk=RiskSettings(min_order_usdc=500.0),
+        ),
+    )
+
+    emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None, (
+        "a sub-minimum order-size drop must surface as a diagnostic"
+    )
+    assert diagnostic.code == "order_size_below_minimum"
+    assert diagnostic.severity == "info"
+    assert diagnostic.metadata.get("min_order_usdc") == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_on_signal_emits_diagnostic_when_within_decision_cooldown() -> None:
+    first_ts = datetime(2026, 4, 19, tzinfo=UTC)
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(min_volume=100.0, decision_cooldown_s=60.0),
+        ),
+    )
+
+    first = await pipeline.on_signal(_signal(fetched_at=first_ts), portfolio=_portfolio())
+    duplicate = await pipeline.on_signal(
+        _signal(fetched_at=first_ts + timedelta(seconds=30)),
+        portfolio=_portfolio(),
+    )
+
+    assert first is not None
+    assert duplicate is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None, (
+        "a cooldown-suppressed duplicate must surface as a diagnostic so the "
+        "suppression is observable, not silent"
+    )
+    assert diagnostic.code == "within_decision_cooldown"
+    assert diagnostic.severity == "info"
