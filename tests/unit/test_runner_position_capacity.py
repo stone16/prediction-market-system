@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,32 @@ def _runner(*, max_open_positions: int | None = 2) -> Runner:
         risk=RiskSettings(max_open_positions=max_open_positions),
     )
     return Runner(config=settings, historical_data_path=FIXTURE_PATH)
+
+
+class _RecordingDecisionStore:
+    def __init__(self) -> None:
+        self.transitions: list[tuple[str, str, str, datetime]] = []
+
+    async def update_status(
+        self,
+        decision_id: str,
+        *,
+        current_status: str,
+        next_status: str,
+        updated_at: datetime,
+    ) -> bool:
+        self.transitions.append(
+            (decision_id, current_status, next_status, updated_at)
+        )
+        return True
+
+
+class _RecordingDedupStore:
+    def __init__(self) -> None:
+        self.release_calls: list[tuple[str, str]] = []
+
+    async def release(self, decision_id: str, outcome: str) -> None:
+        self.release_calls.append((decision_id, outcome))
 
 
 class TestWouldExceedPositionCapacity:
@@ -181,6 +208,42 @@ class TestWouldExceedPositionCapacity:
         )
         assert runner._reserve_position_capacity(first) is not None
 
-        await runner._enqueue_decision(second, signal=None)
+        enqueued = await runner._enqueue_decision(second, signal=None)
 
+        assert enqueued is False
         assert runner._decision_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_enqueue_rejects_and_releases_accepted_decision_when_capacity_fills(
+        self,
+    ) -> None:
+        runner = _runner(max_open_positions=2)
+        runner.portfolio = replace(
+            runner.portfolio,
+            open_positions=[_position()],
+        )
+        first = _decision(market_id="market-b", token_id="token-b")
+        second = replace(
+            _decision(market_id="market-c", token_id="token-c"),
+            decision_id="decision-cap-2",
+        )
+        queued_at = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        decision_store = _RecordingDecisionStore()
+        dedup_store = _RecordingDedupStore()
+        runner.decision_store = decision_store  # type: ignore[assignment]
+        runner.actuator_executor.dedup_store = dedup_store  # type: ignore[assignment]
+        assert runner._reserve_position_capacity(first) is not None
+
+        enqueued = await runner._enqueue_decision(
+            second,
+            signal=None,
+            dedup_acquired=True,
+            queued_at=queued_at,
+        )
+
+        assert enqueued is False
+        assert runner._decision_queue.empty()
+        assert decision_store.transitions == [
+            ("decision-cap-2", "accepted", "rejected", queued_at)
+        ]
+        assert dedup_store.release_calls == [("decision-cap-2", "rejected")]

@@ -44,7 +44,7 @@ DECISION_STATUSES: Final[tuple[DecisionStatus, ...]] = (
 )
 _VALID_STATUS_TRANSITIONS: Final[dict[DecisionStatus, frozenset[DecisionStatus]]] = {
     "pending": frozenset({"pending", "accepted", "rejected", "expired"}),
-    "accepted": frozenset({"accepted", "queued", "submitted"}),
+    "accepted": frozenset({"accepted", "queued", "submitted", "rejected"}),
     "queued": frozenset({"queued", "submitted", "rejected", "cancelled"}),
     "submitted": frozenset(
         {

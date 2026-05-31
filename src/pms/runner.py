@@ -420,8 +420,12 @@ class Runner:
     def pg_pool(self) -> asyncpg.Pool | None:
         return self._pg_pool
 
-    async def enqueue_accepted_decision(self, decision: TradeDecision) -> None:
-        await self._enqueue_decision(decision, signal=None, dedup_acquired=True)
+    async def enqueue_accepted_decision(self, decision: TradeDecision) -> bool:
+        return await self._enqueue_decision(
+            decision,
+            signal=None,
+            dedup_acquired=True,
+        )
 
     async def ensure_pg_pool(self) -> None:
         if self._pg_pool is not None:
@@ -1592,14 +1596,22 @@ class Runner:
         dedup_acquired: bool = False,
         queued_at: datetime | None = None,
         decision_evidence: Mapping[str, object] | None = None,
-    ) -> None:
+    ) -> bool:
         if self._would_exceed_position_capacity(decision):
             if signal is not None:
                 _append_bounded(
                     self.state.controller_diagnostics,
                     self._position_capacity_diagnostic(decision, signal),
                 )
-            return
+            await self._reject_unqueued_decision(
+                decision,
+                dedup_acquired=dedup_acquired,
+                updated_at=(
+                    queued_at or (signal.fetched_at if signal is not None else None)
+                ),
+                reason="max_open_positions_capacity",
+            )
+            return False
         reserved_key = self._reserve_position_capacity(decision)
         try:
             await self._update_decision_status_if_supported(
@@ -1618,10 +1630,36 @@ class Runner:
                     decision_evidence=decision_evidence or {},
                 )
             )
+            return True
         except BaseException:
             if reserved_key is not None:
                 self._release_position_capacity_reservation(decision.decision_id)
             raise
+
+    async def _reject_unqueued_decision(
+        self,
+        decision: TradeDecision,
+        *,
+        dedup_acquired: bool,
+        updated_at: datetime | None,
+        reason: str,
+    ) -> None:
+        await self._update_decision_status_if_supported(
+            decision.decision_id,
+            current_status="accepted",
+            next_status="rejected",
+            updated_at=updated_at,
+        )
+        if dedup_acquired:
+            await self.actuator_executor.dedup_store.release(
+                decision.decision_id,
+                "rejected",
+            )
+        logger.warning(
+            "decision rejected before actuator queue: decision_id=%s reason=%s",
+            decision.decision_id,
+            reason,
+        )
 
     async def _emit_position_exit_decisions(self, signal: MarketSignal) -> int:
         emitted = 0

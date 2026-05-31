@@ -252,7 +252,7 @@ def _bridge(
     module: _FakeModule | None,
     planner: TradeIntentPlanner,
     artifact_store: _RecordingArtifactStore,
-    enqueue: Callable[[TradeDecision], Awaitable[None]],
+    enqueue: Callable[[TradeDecision], Awaitable[bool | None]],
 ) -> AgentStrategyRuntimeBridge:
     registry = StrategyModuleRegistry([module] if module is not None else [])
     return AgentStrategyRuntimeBridge(
@@ -330,6 +330,34 @@ async def test_bridge_persists_artifacts_before_enqueueing_accepted_decision() -
     assert work_item.decision.strategy_version_id == "ripple-v1"
     assert work_item.decision.prob_estimate == pytest.approx(intent.probability_estimate)
     assert runner.state.orders == []
+
+
+@pytest.mark.asyncio
+async def test_bridge_does_not_report_unqueued_decision_as_enqueued() -> None:
+    intent = _intent()
+    judgement = _judgement()
+    artifacts = _RecordingArtifactStore()
+
+    async def reject_enqueue(decision: TradeDecision) -> bool:
+        del decision
+        return False
+
+    bridge = _bridge(
+        settings=_settings(enabled=True),
+        module=_FakeModule([StrategyRunResult(judgement=judgement, intents=(intent,))]),
+        planner=_FakePlanner({intent.intent_id: _accepted_plan(intent)}),
+        artifact_store=artifacts,
+        enqueue=reject_enqueue,
+    )
+
+    report = await bridge.run_once(
+        strategy_id="ripple",
+        strategy_version_id="ripple-v1",
+        as_of=NOW,
+    )
+
+    assert report.enqueued_decision_ids == ()
+    assert report.rejection_reasons == ("decision_enqueue_rejected",)
 
 
 @pytest.mark.asyncio

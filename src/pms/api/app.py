@@ -23,6 +23,7 @@ from pms.api.auth import require_api_token
 from pms.api.health import health_payload, readiness_payload
 from pms.api.routes.decisions import (
     AcceptDecisionRequest,
+    DecisionEnqueueRejectedError,
     DecisionMarketChangedError,
     DecisionNotFoundError,
     DecisionRiskRejectedError,
@@ -503,6 +504,8 @@ def create_app(
                     "current_factor_snapshot_hash": exc.current_factor_snapshot_hash,
                 },
             )
+        except DecisionEnqueueRejectedError as exc:
+            raise HTTPException(status_code=409, detail=exc.reason) from exc
         except DecisionRiskRejectedError as exc:
             raise HTTPException(status_code=422, detail=exc.reason) from exc
         return payload.model_dump(mode="json")

@@ -13,7 +13,7 @@ from pms.actuator.risk import RiskDecision
 from pms.api.app import create_app
 from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import RunMode, Side, TimeInForce
-from pms.core.models import Opportunity, Portfolio, TradeDecision
+from pms.core.models import Opportunity, Portfolio, Position, TradeDecision
 from pms.runner import Runner
 
 
@@ -311,6 +311,66 @@ async def test_accept_decision_returns_422_with_risk_rule_name() -> None:
     assert dedup_store.release_calls == [("decision-cp08", "invalid")]
     assert store.update_calls == [("decision-cp08", "pending", "rejected")]
     enqueue.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_accept_decision_rejects_when_capacity_fills_before_enqueue() -> None:
+    store = _DecisionStoreDouble(_stored_decision_row())
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            auto_migrate_default_v2=False,
+            risk=RiskSettings(
+                max_open_positions=1,
+                max_position_per_market=1_000.0,
+                max_total_exposure=10_000.0,
+            ),
+        )
+    )
+    dedup_store = _DedupStoreDouble(acquire_allowed=True)
+    runner.decision_store = cast(Any, store)
+    runner.portfolio = replace(
+        _portfolio(),
+        open_positions=[
+            Position(
+                market_id="market-existing",
+                token_id="token-existing-yes",
+                venue="polymarket",
+                side=Side.BUY.value,
+                shares_held=10.0,
+                avg_entry_price=0.5,
+                unrealized_pnl=0.0,
+                locked_usdc=5.0,
+            )
+        ],
+    )
+    runner.actuator_executor = cast(
+        Any,
+        SimpleNamespace(
+            risk=_RiskManagerDouble(),
+            dedup_store=dedup_store,
+        ),
+    )
+    app = create_app(runner, auto_start=False)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/decisions/decision-cp08/accept",
+            json={"factor_snapshot_hash": "snapshot-cp08"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "max_open_positions_capacity"}
+    assert dedup_store.acquire_calls == ["decision-cp08"]
+    assert dedup_store.release_calls == [("decision-cp08", "rejected")]
+    assert store.update_calls == [
+        ("decision-cp08", "pending", "accepted"),
+        ("decision-cp08", "accepted", "rejected"),
+    ]
+    assert runner._decision_queue.empty()  # noqa: SLF001
 
 
 @pytest.mark.asyncio

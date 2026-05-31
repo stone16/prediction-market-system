@@ -143,6 +143,12 @@ class DecisionRiskRejectedError(RuntimeError):
         self.reason = reason
 
 
+class DecisionEnqueueRejectedError(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 async def list_decisions(
     store: DecisionsReader,
     *,
@@ -181,7 +187,7 @@ async def accept_decision(
     dedup_store: DedupStoreLike,
     risk: RiskChecker,
     portfolio: Portfolio,
-    enqueue: Callable[[TradeDecision], Awaitable[None]],
+    enqueue: Callable[[TradeDecision], Awaitable[bool | None]],
 ) -> AcceptDecisionResponse:
     row = await store.get_decision(decision_id, include_opportunity=False)
     if row is None:
@@ -221,7 +227,9 @@ async def accept_decision(
         )
         if refreshed is None or refreshed.status != "accepted":
             raise DecisionNotFoundError("Decision not found")
-    await enqueue(row.decision)
+    enqueued = await enqueue(row.decision)
+    if enqueued is False:
+        raise DecisionEnqueueRejectedError("max_open_positions_capacity")
     return _accepted_response(row.decision.decision_id)
 
 

@@ -1933,6 +1933,7 @@ def test_decision_lifecycle_statuses_cover_execution_and_reconciliation() -> Non
     assert "submitted" in DECISION_STATUSES
     assert "submission_unknown" in DECISION_STATUSES
     assert "reconciled" in DECISION_STATUSES
+    validate_decision_status_transition("accepted", "rejected")
     validate_decision_status_transition("accepted", "queued")
     validate_decision_status_transition("queued", "submitted")
     validate_decision_status_transition("submitted", "rejected")
