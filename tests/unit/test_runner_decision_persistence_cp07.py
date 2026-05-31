@@ -12,7 +12,13 @@ import pytest
 
 from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode, Side, TimeInForce
-from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
+from pms.core.models import (
+    MarketSignal,
+    Opportunity,
+    Portfolio,
+    Position,
+    TradeDecision,
+)
 from pms.runner import (
     Runner,
     StrategyControllerRuntime,
@@ -133,6 +139,18 @@ class _RecordingOpportunityStore:
         self.calls.append(opportunity.opportunity_id)
 
 
+class _CapacityFillingOpportunityStore(_RecordingOpportunityStore):
+    async def insert(self, opportunity: Opportunity) -> None:
+        await super().insert(opportunity)
+        competing = replace(
+            _decision(),
+            decision_id="decision-competing-capacity",
+            market_id="market-competing-capacity",
+            token_id="token-competing-capacity",
+        )
+        assert self.runner._reserve_position_capacity(competing) is not None  # noqa: SLF001
+
+
 class _RecordingDecisionStore:
     def __init__(self, runner: Runner) -> None:
         self.runner = runner
@@ -190,7 +208,7 @@ class _RecordingSweepStore:
 
 
 @pytest.mark.asyncio
-async def test_controller_pipeline_persists_decision_before_enqueuing_it() -> None:
+async def test_controller_pipeline_persists_and_enqueues_decision() -> None:
     runner = _runner()
     controller = _OpportunityAwareControllerDouble()
     queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
@@ -249,6 +267,72 @@ async def test_controller_pipeline_persists_decision_before_enqueuing_it() -> No
         2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC
     )
     assert decision_store.expires_at == datetime(2026, 4, 23, 10, 15, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_skips_runtime_state_when_enqueue_rejects() -> None:
+    settings = PMSSettings(
+        mode=RunMode.BACKTEST,
+        auto_migrate_default_v2=False,
+        risk=RiskSettings(
+            max_open_positions=2,
+            max_position_per_market=1000.0,
+            max_total_exposure=10_000.0,
+        ),
+    )
+    runner = Runner(config=settings, historical_data_path=FIXTURE_PATH)
+    runner.portfolio = replace(
+        runner.portfolio,
+        open_positions=[
+            Position(
+                market_id="market-existing-capacity",
+                token_id="token-existing-capacity",
+                venue="polymarket",
+                side=Side.BUY.value,
+                shares_held=10.0,
+                avg_entry_price=0.5,
+                unrealized_pnl=0.0,
+                locked_usdc=5.0,
+            )
+        ],
+    )
+    controller = _OpportunityAwareControllerDouble()
+    queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
+    runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        controller=cast(Any, controller),
+        asset_ids=None,
+    )
+    runner._controller_signal_queues["default"] = queue  # noqa: SLF001
+    runner.opportunity_store = cast(Any, _CapacityFillingOpportunityStore(runner))
+    runner.decision_store = cast(Any, _RecordingDecisionStore(runner))
+    runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+    await runner._controller_task
+    await queue.put(_signal())
+
+    await asyncio.wait_for(
+        runner._controller_pipeline_loop("default"),  # noqa: SLF001
+        timeout=1.0,
+    )
+
+    decision_store = cast(_RecordingDecisionStore, runner.decision_store)
+    assert runner._decision_queue.empty()  # noqa: SLF001
+    assert runner.state.decisions == []
+    assert decision_store.transitions == [
+        (
+            "decision-cp07",
+            "pending",
+            "accepted",
+            datetime(2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC),
+        ),
+        (
+            "decision-cp07",
+            "accepted",
+            "rejected",
+            datetime(2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC),
+        ),
+    ]
 
 
 @pytest.mark.asyncio

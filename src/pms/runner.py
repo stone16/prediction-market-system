@@ -1327,6 +1327,14 @@ class Runner:
                                 next_status="accepted",
                                 updated_at=created_at,
                             )
+                        enqueued = await self._enqueue_decision(
+                            decision,
+                            signal=signal,
+                            queued_at=created_at,
+                            decision_evidence=decision_evidence,
+                        )
+                        if not enqueued:
+                            continue
                         _append_bounded(self.state.decisions, decision)
                         await self.event_bus.publish(
                             "controller.decision",
@@ -1334,12 +1342,6 @@ class Runner:
                             created_at=created_at,
                             market_id=decision.market_id,
                             decision_id=decision.decision_id,
-                        )
-                        await self._enqueue_decision(
-                            decision,
-                            signal=signal,
-                            queued_at=created_at,
-                            decision_evidence=decision_evidence,
                         )
                 finally:
                     queue.task_done()
@@ -1703,6 +1705,20 @@ class Runner:
                     next_status="accepted",
                     updated_at=created_at,
                 )
+            self._emitted_position_exit_keys.add(key)
+            self._position_exit_keys_by_decision[decision.decision_id] = key
+            try:
+                enqueued = await self._enqueue_decision(
+                    decision,
+                    signal=signal,
+                    queued_at=created_at,
+                )
+            except Exception:
+                self._release_position_exit_key(decision.decision_id)
+                raise
+            if not enqueued:
+                self._release_position_exit_key(decision.decision_id)
+                continue
             _append_bounded(self.state.decisions, decision)
             await self.event_bus.publish(
                 "controller.decision",
@@ -1711,17 +1727,6 @@ class Runner:
                 market_id=decision.market_id,
                 decision_id=decision.decision_id,
             )
-            self._emitted_position_exit_keys.add(key)
-            self._position_exit_keys_by_decision[decision.decision_id] = key
-            try:
-                await self._enqueue_decision(
-                    decision,
-                    signal=signal,
-                    queued_at=created_at,
-                )
-            except Exception:
-                self._release_position_exit_key(decision.decision_id)
-                raise
             emitted += 1
         return emitted
 
