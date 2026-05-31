@@ -82,9 +82,16 @@ class RuntimeHeartbeatStore:
                         MIN(observed_at) AS first_observed_at,
                         MAX(observed_at) AS last_observed_at,
                         COUNT(*) AS heartbeat_count,
-                        COALESCE(
-                            MAX(EXTRACT(EPOCH FROM observed_at - prev_observed_at)),
-                            0
+                        GREATEST(
+                            0,
+                            COALESCE(
+                                MAX(EXTRACT(EPOCH FROM observed_at - prev_observed_at)),
+                                0
+                            ),
+                            COALESCE(
+                                EXTRACT(EPOCH FROM MIN(observed_at) - MIN(started_at)),
+                                0
+                            )
                         ) AS max_gap_seconds
                     FROM ordered
                 )

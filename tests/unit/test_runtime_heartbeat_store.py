@@ -32,12 +32,34 @@ async def test_runtime_continuity_counts_only_elapsed_healthy_days() -> None:
     assert continuity.healthy_days == 30
 
 
+@pytest.mark.asyncio
+async def test_runtime_continuity_query_counts_initial_heartbeat_gap() -> None:
+    pool = _Pool(
+        {
+            "first_started_at": datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            "first_observed_at": datetime(2026, 1, 31, 0, 0, tzinfo=UTC),
+            "last_observed_at": datetime(2026, 1, 31, 0, 0, tzinfo=UTC),
+            "heartbeat_count": 1,
+            "max_gap_seconds": 2_592_000.0,
+        }
+    )
+    store = RuntimeHeartbeatStore(pool=cast(Any, pool))
+
+    continuity = await store.continuity(run_id="run-late-heartbeat")
+
+    assert continuity is not None
+    assert continuity.healthy_days == 30
+    assert continuity.max_gap_seconds == 2_592_000.0
+    assert "MIN(observed_at) - MIN(started_at)" in pool.last_query
+
+
 class _Pool:
     def __init__(self, row: Mapping[str, object]) -> None:
         self._row = row
+        self.last_query = ""
 
     def acquire(self) -> _AcquireContext:
-        return _AcquireContext(_Connection(self._row))
+        return _AcquireContext(_Connection(self))
 
 
 class _AcquireContext:
@@ -57,9 +79,10 @@ class _AcquireContext:
 
 
 class _Connection:
-    def __init__(self, row: Mapping[str, object]) -> None:
-        self._row = row
+    def __init__(self, pool: _Pool) -> None:
+        self._pool = pool
 
     async def fetchrow(self, query: str, run_id: str) -> Mapping[str, object]:
-        del query, run_id
-        return self._row
+        del run_id
+        self._pool.last_query = query
+        return self._pool._row
