@@ -2005,11 +2005,11 @@ def _daily_pnl_from_metrics(
     day_end = day_start + timedelta(days=1)
     start_pnl = Decimal("0.0")
     end_pnl: Decimal | None = None
-    for recorded_at, pnl in parsed_rows:
+    for recorded_at, pnl_decimal in parsed_rows:
         if recorded_at < day_start:
-            start_pnl = pnl
+            start_pnl = pnl_decimal
         if recorded_at < day_end:
-            end_pnl = pnl
+            end_pnl = pnl_decimal
 
     if end_pnl is None:
         return 0.0, [
