@@ -195,7 +195,12 @@ class FillStore:
             )
         return _positions_from_fill_rows(rows)
 
-    async def read_trades(self, *, limit: int) -> list["StoredTradeRow"]:
+    async def read_trades(
+        self,
+        *,
+        limit: int,
+        offset: int = 0,
+    ) -> list["StoredTradeRow"]:
         async with self._pool().acquire() as connection:
             await _ensure_fill_payloads_table(connection)
             rows = await connection.fetch(
@@ -218,8 +223,10 @@ class FillStore:
                     ON markets.condition_id = fills.market_id
                 ORDER BY fills.ts DESC, fills.fill_id DESC
                 LIMIT $1
+                OFFSET $2
                 """,
                 limit,
+                offset,
             )
         return [
             _trade_from_row(row)

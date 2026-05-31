@@ -214,6 +214,7 @@ class DecisionStore:
         self,
         *,
         limit: int,
+        offset: int = 0,
         status: str | None = None,
         include_opportunity: bool = False,
     ) -> Sequence[StoredDecisionRow]:
@@ -229,9 +230,11 @@ class DecisionStore:
                 WHERE ($1::text IS NULL OR decisions.status = $1)
                 ORDER BY decisions.created_at DESC, decisions.decision_id DESC
                 LIMIT $2
+                OFFSET $3
                 """,
                 normalized_status,
                 limit,
+                offset,
             )
         return [
             _stored_decision_from_row(row, include_opportunity=include_opportunity)

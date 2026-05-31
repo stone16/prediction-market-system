@@ -31,6 +31,12 @@ from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import MarketStatus
 from pms.core.models import MarketSignal, Portfolio
+from pms.metrics import (
+    LLM_DAILY_COST_USDC_METRIC,
+    LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    LLM_FORECAST_CALLS_TOTAL_METRIC,
+    get_metric,
+)
 from pms.strategies.projections import (
     ActiveStrategy,
     CalibrationSpec,
@@ -501,6 +507,33 @@ def test_llm_forecaster_budget_exhaustion_and_midnight_utc_reset(
     assert forecaster.predict(_signal(market_id="m-2")) is None
     assert forecaster.predict(_signal(market_id="m-3")) is not None
     assert len(client.messages.calls) == 2
+
+
+def test_llm_forecaster_records_estimated_cost_metrics() -> None:
+    client = FakeClaudeClient()
+    forecaster = LLMForecaster(
+        config=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+            model="claude-test",
+            cache_ttl_s=0.0,
+            max_daily_llm_cost_usdc=1.0,
+        ),
+        client=client,
+    )
+    calls_before = get_metric(LLM_FORECAST_CALLS_TOTAL_METRIC) or 0.0
+    total_cost_before = get_metric(LLM_ESTIMATED_COST_USDC_TOTAL_METRIC) or 0.0
+
+    assert forecaster.predict(_signal(market_id="m-cost")) is not None
+
+    assert (get_metric(LLM_FORECAST_CALLS_TOTAL_METRIC) or 0.0) == pytest.approx(
+        calls_before + 1.0
+    )
+    assert (
+        get_metric(LLM_ESTIMATED_COST_USDC_TOTAL_METRIC) or 0.0
+    ) == pytest.approx(total_cost_before + 0.002)
+    assert get_metric(LLM_DAILY_COST_USDC_METRIC) == pytest.approx(0.002)
 
 
 def test_llm_forecaster_reserves_budget_atomically_for_concurrent_calls() -> None:

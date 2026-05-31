@@ -12,11 +12,16 @@ import pytest
 from pms.config import RiskSettings
 from pms.core.enums import TimeInForce
 from pms.core.models import EvalRecord, TradeDecision
+from pms.metrics import (
+    LLM_DAILY_COST_USDC_METRIC,
+    LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+)
 from scripts.paper_report import (
     ExecutionConcentration,
     PaperSoakGateConfig,
     PaperReportMetrics,
     TradeCostBreakdown,
+    _fetch_api_list_pages,
     _fetch_api_payload,
     evaluate_paper_soak_gate,
     build_paper_report_diagnostics,
@@ -150,6 +155,7 @@ def test_paper_soak_gate_passes_when_metrics_meet_go_live_thresholds() -> None:
 def test_paper_soak_gate_fails_missing_or_bad_production_metrics() -> None:
     metrics = _passing_gate_metrics(
         day_of_soak=4,
+        decisions_accepted=0,
         fills=0,
         brier_improvement_7d=None,
         sharpe_ratio=-0.1,
@@ -170,7 +176,8 @@ def test_paper_soak_gate_fails_missing_or_bad_production_metrics() -> None:
 
     assert gate.ok is False
     assert gate.require_check("soak_days").ok is False
-    assert gate.require_check("fills").detail == "0 < 10"
+    assert gate.require_check("decisions_accepted").detail == "0 < 30"
+    assert gate.require_check("fills").detail == "0 < 50"
     assert gate.require_check("brier_improvement").detail == "missing"
     assert gate.require_check("sharpe_ratio").detail == "-0.1000 <= 0.0000"
     assert gate.require_check("average_net_edge_bps").detail == "-1.0000 <= 0.0000"
@@ -182,7 +189,7 @@ def test_paper_soak_gate_fails_concentrated_execution_sample() -> None:
     metrics = replace(
         _passing_gate_metrics(),
         execution_concentration=ExecutionConcentration(
-            entry_fills=10,
+            entry_fills=50,
             distinct_markets=1,
             distinct_risk_groups=1,
             missing_risk_group_fills=0,
@@ -228,7 +235,7 @@ def test_paper_soak_gate_fails_without_concrete_strategy_version_evidence() -> N
 
 
 def test_paper_soak_gate_requires_launch_sample_size() -> None:
-    metrics = _passing_gate_metrics(fills=9)
+    metrics = _passing_gate_metrics(decisions_accepted=29, fills=49)
 
     gate = evaluate_paper_soak_gate(
         metrics,
@@ -241,7 +248,8 @@ def test_paper_soak_gate_requires_launch_sample_size() -> None:
     )
 
     assert gate.ok is False
-    assert gate.require_check("fills").detail == "9 < 10"
+    assert gate.require_check("decisions_accepted").detail == "29 < 30"
+    assert gate.require_check("fills").detail == "49 < 50"
 
 
 def test_paper_report_renders_machine_checkable_go_no_go_gate() -> None:
@@ -1463,6 +1471,43 @@ def test_metrics_from_api_payloads_uses_pnl_series_for_cumulative_pnl() -> None:
     assert metrics.cumulative_pnl == pytest.approx(7.5)
 
 
+def test_metrics_from_api_payloads_deducts_llm_cost_from_pnl() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "pnl_series": [
+                {
+                    "recorded_at": "2026-05-30T12:00:00+00:00",
+                    "pnl": 2.0,
+                },
+            ],
+            LLM_DAILY_COST_USDC_METRIC: 0.75,
+            LLM_ESTIMATED_COST_USDC_TOTAL_METRIC: 1.25,
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.llm_cost_usdc == pytest.approx(1.25)
+    assert metrics.todays_pnl == pytest.approx(1.25)
+    assert metrics.cumulative_pnl == pytest.approx(0.75)
+
+
 def test_metrics_from_api_payloads_falls_back_to_quote_mtm_pnl_series() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
@@ -1702,11 +1747,11 @@ def test_metrics_from_api_payloads_flags_concentrated_entry_fill_sample() -> Non
                 }
             ],
             "controller": {
-                "decisions_total": 10,
+                "decisions_total": 50,
                 "diagnostics_total": 0,
                 "diagnostic_counts": {},
             },
-            "actuator": {"fills_total": 10},
+            "actuator": {"fills_total": 50},
             "evaluator": {},
             "supervision": {"unresolved_feedback_total": 0},
         },
@@ -1723,7 +1768,7 @@ def test_metrics_from_api_payloads_flags_concentrated_entry_fill_sample() -> Non
                 "decision_evidence": _decision_evidence(),
                 "created_at": "2026-05-30T01:00:00+00:00",
             }
-            for index in range(10)
+            for index in range(50)
         ],
         trades={
             "trades": [
@@ -1736,14 +1781,14 @@ def test_metrics_from_api_payloads_flags_concentrated_entry_fill_sample() -> Non
                     "fees": 0.01,
                     "filled_at": "2026-05-30T01:00:01+00:00",
                 }
-                for index in range(10)
+                for index in range(50)
             ]
         },
         positions={"positions": []},
     )
 
     assert metrics.execution_concentration == ExecutionConcentration(
-        entry_fills=10,
+        entry_fills=50,
         distinct_markets=1,
         distinct_risk_groups=1,
         missing_risk_group_fills=0,
@@ -3231,21 +3276,6 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
                 },
                 None,
             )
-        if path == "/trades?limit=200":
-            return (
-                {
-                    "trades": [
-                        {
-                            "trade_id": f"trade-{index}",
-                            "fill_notional_usdc": 10.0,
-                            "fees": 0.01,
-                            "filled_at": "2026-05-30T00:00:00+00:00",
-                        }
-                        for index in range(10)
-                    ]
-                },
-                None,
-            )
         if path == "/positions":
             return ({"positions": [{"locked_usdc": 10.0, "unrealized_pnl": 2.0}]}, None)
         if path.startswith("/metrics"):
@@ -3272,8 +3302,23 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
         api_token: str | None,
     ) -> tuple[object, str | None]:
         assert api_base_url == "http://api.test"
-        assert path == "/decisions?limit=200"
         assert api_token == "token"
+        if path == "/trades?limit=200&offset=0":
+            return (
+                {
+                    "trades": [
+                        {
+                            "trade_id": f"trade-{index}",
+                            "fill_notional_usdc": 10.0,
+                            "fees": 0.01,
+                            "filled_at": "2026-05-30T00:00:00+00:00",
+                        }
+                        for index in range(10)
+                    ]
+                },
+                None,
+            )
+        assert path == "/decisions?limit=200&offset=0"
         return (
             [
                 {
@@ -3307,6 +3352,68 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
     assert metrics.average_slippage_bps == pytest.approx(10.0)
 
 
+def test_fetch_api_list_pages_follows_limit_offset_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    def fake_fetch_api_payload(
+        *,
+        api_base_url: str,
+        path: str,
+        api_token: str | None,
+    ) -> tuple[object, str | None]:
+        assert api_base_url == "http://api.test"
+        assert api_token == "token"
+        paths.append(path)
+        if path == "/decisions?limit=200&offset=0":
+            return ([{"decision_id": f"d-{index}"} for index in range(200)], None)
+        if path == "/decisions?limit=200&offset=200":
+            return ([{"decision_id": "d-200"}], None)
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr("scripts.paper_report._fetch_api_payload", fake_fetch_api_payload)
+
+    rows, error = _fetch_api_list_pages(
+        api_base_url="http://api.test",
+        path="/decisions",
+        api_token="token",
+    )
+
+    assert error is None
+    assert len(rows) == 201
+    assert paths == [
+        "/decisions?limit=200&offset=0",
+        "/decisions?limit=200&offset=200",
+    ]
+
+
+def test_fetch_api_list_pages_fails_when_pagination_does_not_advance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = [{"decision_id": f"d-{index}"} for index in range(200)]
+
+    def fake_fetch_api_payload(
+        *,
+        api_base_url: str,
+        path: str,
+        api_token: str | None,
+    ) -> tuple[object, str | None]:
+        del api_base_url, path, api_token
+        return (list(page), None)
+
+    monkeypatch.setattr("scripts.paper_report._fetch_api_payload", fake_fetch_api_payload)
+
+    rows, error = _fetch_api_list_pages(
+        api_base_url="http://api.test",
+        path="/decisions",
+        api_token="token",
+    )
+
+    assert rows == []
+    assert error == "pagination did not advance"
+
+
 def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
     trades = [
         {
@@ -3315,7 +3422,7 @@ def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
             "fees": 0.01,
             "filled_at": "2026-05-30T00:00:00+00:00",
         }
-        for index in range(9)
+        for index in range(49)
     ]
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
@@ -3335,7 +3442,7 @@ def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
                 "diagnostics_total": 0,
                 "diagnostic_counts": {},
             },
-            "actuator": {"fills_total": 10},
+            "actuator": {"fills_total": 50},
             "evaluator": {
                 "brier_14d": 0.16,
                 "baseline_brier_14d": 0.24,
@@ -3374,9 +3481,9 @@ def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
         ),
     )
 
-    assert metrics.fills == 9
+    assert metrics.fills == 49
     assert gate.ok is False
-    assert gate.require_check("fills").detail == "9 < 10"
+    assert gate.require_check("fills").detail == "49 < 50"
 
 
 def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
@@ -3387,7 +3494,7 @@ def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
             "fees": 0.01,
             "filled_at": "2026-05-30T00:00:00+00:00",
         }
-        for index in range(9)
+        for index in range(49)
     ]
     trades.append(
         {
@@ -3415,7 +3522,7 @@ def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
                 "diagnostics_total": 0,
                 "diagnostic_counts": {},
             },
-            "actuator": {"fills_total": 10},
+            "actuator": {"fills_total": 50},
             "evaluator": {
                 "brier_14d": 0.16,
                 "baseline_brier_14d": 0.24,
@@ -3454,9 +3561,9 @@ def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
         ),
     )
 
-    assert metrics.fills == 9
+    assert metrics.fills == 49
     assert gate.ok is False
-    assert gate.require_check("fills").detail == "9 < 10"
+    assert gate.require_check("fills").detail == "49 < 50"
 
 
 def test_paper_soak_gate_excludes_decisions_outside_soak_window() -> None:
@@ -3539,6 +3646,84 @@ def test_paper_soak_gate_excludes_decisions_outside_soak_window() -> None:
     assert metrics.average_net_edge_bps == pytest.approx(-60.0)
     assert gate.ok is False
     assert gate.require_check("average_net_edge_bps").detail == "-60.0000 <= 0.0000"
+
+
+def test_paper_soak_gate_preserves_negative_decision_edge_sign() -> None:
+    decisions = [
+        {
+            "decision_id": f"d-negative-edge-{index}",
+            "market_id": f"m-negative-edge-{index % 3}",
+            "expected_edge": -0.05,
+            "spread_bps_at_decision": 0,
+            "decision_evidence": _decision_evidence(),
+            "created_at": "2026-05-30T00:00:00+00:00",
+        }
+        for index in range(50)
+    ]
+    trades = [
+        {
+            "trade_id": f"trade-negative-edge-{index}",
+            "decision_id": f"d-negative-edge-{index}",
+            "market_id": f"m-negative-edge-{index % 3}",
+            "risk_group_id": f"event:negative-edge-{index % 3}",
+            "fill_notional_usdc": 1.0,
+            "fees": 0.0,
+            "filled_at": "2026-05-30T00:00:01+00:00",
+        }
+        for index in range(50)
+    ]
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 50,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 50},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 1.0,
+            "win_rate": 0.5,
+            "slippage_bps": 0.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30), pnl=1.0),
+            **_baseline_score_metrics(),
+        },
+        decisions=decisions,
+        trades={"trades": trades},
+        positions={"positions": []},
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.average_edge_bps == pytest.approx(-500.0)
+    assert metrics.average_net_edge_bps == pytest.approx(-500.0)
+    assert gate.require_check("average_edge_bps").detail == "-500.0000 <= 5.0000"
+    assert gate.require_check("average_net_edge_bps").detail == "-500.0000 <= 0.0000"
 
 
 def test_paper_soak_gate_fails_when_metrics_payload_contains_non_finite_value() -> None:
@@ -4124,7 +4309,8 @@ def _passing_gate_metrics(
     *,
     strategy: str = "default@default-v2",
     day_of_soak: int = 30,
-    fills: int = 10,
+    decisions_accepted: int = 50,
+    fills: int = 50,
     brier_improvement_7d: float | None = 0.05,
     sharpe_ratio: float | None = 0.5,
     average_net_edge_bps: float | None = 5.0,
@@ -4136,6 +4322,7 @@ def _passing_gate_metrics(
         strategy=strategy,
         day_of_soak=day_of_soak,
         decisions_made=100,
+        decisions_accepted=decisions_accepted,
         fills=fills,
         fill_rate=0.4,
         average_slippage_bps=10.0,

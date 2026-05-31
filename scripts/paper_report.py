@@ -21,11 +21,16 @@ from urllib.request import Request, urlopen
 
 from pms.config import PMSSettings, RiskSettings
 from pms.core.models import EvalRecord, TradeDecision
+from pms.metrics import (
+    LLM_DAILY_COST_USDC_METRIC,
+    LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+)
 
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
 REPORT_GENERATOR_ID = "scripts/paper_report.py"
 _API_TIMEOUT_S = 5.0
+_API_PAGE_SIZE = 200
 _SECONDARY_BASELINE_ORDER = (
     "market_implied",
     "mid_quote",
@@ -112,6 +117,7 @@ class PaperReportMetrics:
     cumulative_pnl: float = 0.0
     pnl_source: str = "final_eval"
     current_unrealized_pnl: float = 0.0
+    llm_cost_usdc: float = 0.0
     max_drawdown_pct: float | None = None
     open_positions: int = 0
     total_exposure: float = 0.0
@@ -143,7 +149,8 @@ class PaperReportMetrics:
 @dataclass(frozen=True)
 class PaperSoakGateConfig:
     min_soak_days: int = 30
-    min_fills: int = 10
+    min_accepted_decisions: int = 30
+    min_fills: int = 50
     max_slippage_bps: float = 50.0
     max_brier_score: float = 0.20
     min_brier_improvement: float = 0.0
@@ -187,6 +194,11 @@ def evaluate_paper_soak_gate(
 ) -> PaperSoakGateResult:
     checks = [
         _check_min_int("soak_days", metrics.day_of_soak, config.min_soak_days),
+        _check_min_int(
+            "decisions_accepted",
+            metrics.decisions_accepted,
+            config.min_accepted_decisions,
+        ),
         _check_min_int("fills", metrics.fills, config.min_fills),
         _check_distinct_markets(metrics, config=config),
         _check_distinct_risk_groups(metrics, config=config),
@@ -347,7 +359,10 @@ def metrics_from_api_payloads(
             )
         )
     )
-    todays_pnl_decimal = Decimal(str(todays_pnl))
+    llm_total_cost = Decimal(str(_llm_total_cost_usdc(metric_rows)))
+    llm_daily_cost = Decimal(str(_llm_daily_cost_usdc(metric_rows)))
+    cumulative_pnl -= llm_total_cost
+    todays_pnl_decimal = Decimal(str(todays_pnl)) - llm_daily_cost
     max_drawdown_pct = _max_drawdown_pct_from_metrics(metric_rows)
     max_drawdown_pct_decimal = (
         None if max_drawdown_pct is None else Decimal(str(max_drawdown_pct))
@@ -382,6 +397,7 @@ def metrics_from_api_payloads(
         cumulative_pnl=float(cumulative_pnl),
         pnl_source=_pnl_source_from_metrics(metric_rows),
         current_unrealized_pnl=float(current_unrealized_pnl),
+        llm_cost_usdc=float(llm_total_cost),
         max_drawdown_pct=(
             None if max_drawdown_pct_decimal is None else float(max_drawdown_pct_decimal)
         ),
@@ -459,14 +475,17 @@ def load_live_metrics(
         )
 
     events: list[tuple[str, str, str]] = []
-    trades, trades_error = _fetch_api_json(
+    trade_rows, trades_error = _fetch_api_list_pages(
         api_base_url=api_base_url,
-        path="/trades?limit=200",
+        path="/trades",
         api_token=api_token,
+        payload_key="trades",
     )
     if trades_error is not None:
         events.append(("report generation", "/trades unavailable", trades_error))
-        trades = {}
+        trades: dict[str, object] = {}
+    else:
+        trades = {"trades": trade_rows}
 
     positions, positions_error = _fetch_api_json(
         api_base_url=api_base_url,
@@ -477,9 +496,9 @@ def load_live_metrics(
         events.append(("report generation", "/positions unavailable", positions_error))
         positions = {}
 
-    decisions, decisions_error = _fetch_api_payload(
+    decisions, decisions_error = _fetch_api_list_pages(
         api_base_url=api_base_url,
-        path="/decisions?limit=200",
+        path="/decisions",
         api_token=api_token,
     )
     if decisions_error is not None:
@@ -562,9 +581,9 @@ def render_report(
             f"| Strategy | {_escape_table_value(metrics.strategy)} | - |",
             f"| Day of soak | {metrics.day_of_soak} | 30 required |",
             f"| Decisions made | {metrics.decisions_made} | - |",
-            f"| Decisions accepted | {metrics.decisions_accepted} | - |",
+            f"| Decisions accepted | {metrics.decisions_accepted} | >= 30 by soak end |",
             f"| Controller diagnostic sample | {metrics.decisions_rejected} | - |",
-            f"| Entry fills | {metrics.fills} | - |",
+            f"| Entry fills | {metrics.fills} | >= 50 by soak end |",
             f"| Distinct traded markets | {_concentration_count(metrics.execution_concentration, 'distinct_markets')} | >= 3 by soak end |",
             f"| Distinct traded risk groups | {_concentration_count(metrics.execution_concentration, 'distinct_risk_groups')} | >= 3 by soak end |",
             f"| Max market fill share | {_concentration_share(metrics.execution_concentration, 'max_market_fill_share')} | <= 60% by soak end |",
@@ -574,6 +593,7 @@ def render_report(
             f"| Today's P&L | {_fmt_money_signed(metrics.todays_pnl)} | >= -daily limit |",
             f"| Cumulative P&L | {_fmt_money_signed(metrics.cumulative_pnl)} | > 0 by soak end |",
             f"| P&L source | {_escape_table_value(metrics.pnl_source)} | - |",
+            f"| LLM cost (estimated) | {_fmt_money(metrics.llm_cost_usdc)} | deducted from P&L |",
             f"| Current open-position MTM | {_fmt_money_signed(metrics.current_unrealized_pnl)} | informational |",
             f"| Max drawdown | {_fmt_percent(metrics.max_drawdown_pct)} | <= {_fmt_percent(risk.max_drawdown_pct)} |",
             f"| Open positions | {metrics.open_positions} | <= {risk.max_open_positions or 'N/A'} |",
@@ -1375,7 +1395,7 @@ def _trade_costs(decisions: Sequence[TradeDecision]) -> tuple[TradeCostBreakdown
     for decision in decisions:
         if decision.spread_bps_at_decision is None:
             continue
-        gross_edge = abs(decision.prob_estimate - decision.limit_price)
+        gross_edge = decision.prob_estimate - decision.limit_price
         spread_cost = decision.spread_bps_at_decision / 10_000.0
         costs.append(
             TradeCostBreakdown(
@@ -2072,6 +2092,17 @@ def _pnl_source_from_metrics(metrics: Mapping[str, Any]) -> str:
     return "final_eval"
 
 
+def _llm_total_cost_usdc(metrics: Mapping[str, Any]) -> float:
+    return _optional_float_from_mapping(
+        metrics,
+        LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    ) or 0.0
+
+
+def _llm_daily_cost_usdc(metrics: Mapping[str, Any]) -> float:
+    return _optional_float_from_mapping(metrics, LLM_DAILY_COST_USDC_METRIC) or 0.0
+
+
 def _max_drawdown_pct_from_metrics(metrics: Mapping[str, Any]) -> float | None:
     if _pnl_source_from_metrics(metrics) == "quote_mtm":
         quote_calibration = metrics.get("quote_calibration")
@@ -2382,6 +2413,45 @@ def _fetch_api_payload(
         return {}, exc.__class__.__name__
 
 
+def _fetch_api_list_pages(
+    *,
+    api_base_url: str,
+    path: str,
+    api_token: str | None,
+    payload_key: str | None = None,
+) -> tuple[list[object], str | None]:
+    rows: list[object] = []
+    offset = 0
+    previous_page: list[object] | None = None
+    while True:
+        page_path = (
+            f"{path}?{urlencode({'limit': _API_PAGE_SIZE, 'offset': offset})}"
+        )
+        payload, error = _fetch_api_payload(
+            api_base_url=api_base_url,
+            path=page_path,
+            api_token=api_token,
+        )
+        if error is not None:
+            return [], error
+        page_payload: object
+        if payload_key is None:
+            page_payload = payload
+        elif isinstance(payload, dict):
+            page_payload = payload.get(payload_key)
+        else:
+            return [], "invalid JSON payload"
+        if not isinstance(page_payload, list):
+            return [], "invalid JSON payload"
+        if previous_page is not None and page_payload == previous_page:
+            return [], "pagination did not advance"
+        rows.extend(page_payload)
+        if len(page_payload) < _API_PAGE_SIZE:
+            return rows, None
+        previous_page = list(page_payload)
+        offset += _API_PAGE_SIZE
+
+
 def _loads_json_rejecting_duplicate_keys(text: str) -> object:
     def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
         seen: set[str] = set()
@@ -2630,15 +2700,15 @@ def _average_edge_bps(decisions: Sequence[Mapping[str, object]]) -> float | None
 
 
 def _average_fee_bps(trades: Sequence[Mapping[str, object]]) -> float | None:
-    total_fees = sum(
-        _optional_float_from_mapping(row, "fees") or 0.0
-        for row in trades
-    )
+    fee_values = [_optional_float_from_mapping(row, "fees") for row in trades]
     total_notional = sum(
         _optional_float_from_mapping(row, "fill_notional_usdc") or 0.0
         for row in trades
     )
-    if total_notional > 0.0 and total_fees > 0.0:
+    if total_notional > 0.0 and fee_values and all(
+        value is not None for value in fee_values
+    ):
+        total_fees = sum(value for value in fee_values if value is not None)
         return total_fees / total_notional * 10_000.0
 
     fee_bps_values = [
@@ -2828,12 +2898,12 @@ def _is_exit_decision_id(value: object) -> bool:
 def _decision_edge(row: Mapping[str, object]) -> float | None:
     expected_edge = _optional_float_from_mapping(row, "expected_edge")
     if expected_edge is not None:
-        return abs(expected_edge)
+        return expected_edge
     prob_estimate = _optional_float_from_mapping(row, "prob_estimate")
     limit_price = _optional_float_from_mapping(row, "limit_price")
     if prob_estimate is None or limit_price is None:
         return None
-    return abs(prob_estimate - limit_price)
+    return prob_estimate - limit_price
 
 
 def _int_from_dict(payload: dict[str, Any], key: str, *, fallback: int = 0) -> int:

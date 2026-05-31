@@ -32,7 +32,7 @@ class _StoredDecisionRow:
 class _DecisionStoreDouble:
     def __init__(self, row: _StoredDecisionRow | None) -> None:
         self.row = row
-        self.read_calls: list[tuple[int, str | None, bool]] = []
+        self.read_calls: list[tuple[int, int, str | None, bool]] = []
         self.get_calls: list[tuple[str, bool]] = []
         self.update_calls: list[tuple[str, str, str]] = []
 
@@ -40,10 +40,11 @@ class _DecisionStoreDouble:
         self,
         *,
         limit: int,
+        offset: int = 0,
         status: str | None = None,
         include_opportunity: bool = False,
     ) -> list[_StoredDecisionRow]:
-        self.read_calls.append((limit, status, include_opportunity))
+        self.read_calls.append((limit, offset, status, include_opportunity))
         if self.row is None:
             return []
         if status is not None and self.row.status != status:
@@ -439,4 +440,4 @@ async def test_get_decisions_include_opportunity_embeds_factor_payload() -> None
             },
         }
     ]
-    assert store.read_calls == [(1, None, True)]
+    assert store.read_calls == [(1, 0, None, True)]

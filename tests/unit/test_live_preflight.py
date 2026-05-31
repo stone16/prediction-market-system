@@ -6767,8 +6767,8 @@ def test_live_preflight_artifact_rejects_swapped_readiness_report(
     paper_report_path = Path(cast(str, settings.live_paper_soak_report_path))
     paper_report_path.write_text(
         paper_report_path.read_text(encoding="utf-8").replace(
-            "| fills | PASS | 10 >= 10 |",
-            "| fills | PASS | 11 >= 10 |",
+            "| fills | PASS | 50 >= 50 |",
+            "| fills | PASS | 51 >= 50 |",
         ),
         encoding="utf-8",
     )

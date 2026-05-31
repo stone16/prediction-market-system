@@ -13,6 +13,9 @@ SENSOR_DISCOVERY_POOL_TIMEOUTS_TOTAL_METRIC = (
     "pms_sensor_discovery_pool_timeouts_total"
 )
 MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC = "pms_markets_snapshot_lag_seconds_max"
+LLM_FORECAST_CALLS_TOTAL_METRIC = "pms_llm_forecast_calls_total"
+LLM_ESTIMATED_COST_USDC_TOTAL_METRIC = "pms_llm_estimated_cost_usdc_total"
+LLM_DAILY_COST_USDC_METRIC = "pms_llm_daily_cost_usdc"
 
 
 _metrics_lock = Lock()
@@ -21,6 +24,9 @@ _metrics: dict[str, float] = {
     SENSOR_DISCOVERY_SNAPSHOTS_WRITTEN_TOTAL_METRIC: 0.0,
     SENSOR_DISCOVERY_POOL_TIMEOUTS_TOTAL_METRIC: 0.0,
     MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC: 0.0,
+    LLM_FORECAST_CALLS_TOTAL_METRIC: 0.0,
+    LLM_ESTIMATED_COST_USDC_TOTAL_METRIC: 0.0,
+    LLM_DAILY_COST_USDC_METRIC: 0.0,
 }
 
 

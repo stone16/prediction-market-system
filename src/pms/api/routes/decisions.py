@@ -97,6 +97,7 @@ class DecisionsReader(Protocol):
         self,
         *,
         limit: int,
+        offset: int = 0,
         status: str | None = None,
         include_opportunity: bool = False,
     ) -> Sequence[StoredDecisionLike]: ...
@@ -153,11 +154,13 @@ async def list_decisions(
     store: DecisionsReader,
     *,
     limit: int,
+    offset: int = 0,
     status: str | None = None,
     include_opportunity: bool = False,
 ) -> list[DecisionRow]:
     rows = await store.read_decisions(
         limit=limit,
+        offset=offset,
         status=status,
         include_opportunity=include_opportunity,
     )

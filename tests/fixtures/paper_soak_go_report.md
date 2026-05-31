@@ -22,7 +22,8 @@
 | Check | Status | Detail |
 |---|---|---|
 | soak_days | PASS | 30 >= 30 |
-| fills | PASS | 10 >= 10 |
+| decisions_accepted | PASS | 50 >= 30 |
+| fills | PASS | 50 >= 50 |
 | distinct_markets | PASS | 3 >= 3 |
 | distinct_risk_groups | PASS | 3 >= 3 |
 | max_market_fill_share | PASS | 0.4000 <= 0.6000 |
@@ -48,10 +49,10 @@
 
 | Baseline | Decisions | Coverage |
 |---|---:|---:|
-| market_implied | 10 / 10 | 100.0% |
-| mid_quote | 10 / 10 | 100.0% |
-| last_trade | 8 / 10 | 80.0% |
-| category_prior | 10 / 10 | 100.0% |
+| market_implied | 50 / 50 | 100.0% |
+| mid_quote | 50 / 50 | 100.0% |
+| last_trade | 40 / 50 | 80.0% |
+| category_prior | 50 / 50 | 100.0% |
 
 ## Secondary Baseline Brier
 

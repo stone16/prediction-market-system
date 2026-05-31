@@ -404,10 +404,17 @@ def create_app(
         return payload.model_dump(mode="json")
 
     @app.get("/trades", dependencies=[Depends(require_api_token)])
-    async def trades(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+    async def trades(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
-        payload = await list_trades_items(active_runner.fill_store, limit=limit)
+        payload = await list_trades_items(
+            active_runner.fill_store,
+            limit=limit,
+            offset=offset,
+        )
         return payload.model_dump(mode="json")
 
     @app.get("/signals/{market_id}/depth", dependencies=[Depends(require_api_token)])
@@ -431,6 +438,7 @@ def create_app(
     @app.get("/decisions", dependencies=[Depends(require_api_token)])
     async def decisions(
         limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
         status: str | None = None,
         include: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -439,13 +447,14 @@ def create_app(
             rows = await list_decisions_items(
                 cast(Any, active_runner.decision_store),
                 limit=limit,
+                offset=offset,
                 status=status,
                 include_opportunity=include_opportunity,
             )
             return [item.model_dump(mode="json") for item in rows]
 
         payloads: list[dict[str, Any]] = []
-        for decision in _latest(active_runner.state.decisions, limit):
+        for decision in _latest(active_runner.state.decisions, limit, offset=offset):
             payload = cast(dict[str, Any], _jsonable(decision))
             payload["forecaster"] = _forecaster(decision)
             payload["kelly_size"] = decision.notional_usdc
@@ -829,11 +838,18 @@ def create_app(
     return app
 
 
-def _latest(items: Sequence[T], limit: int) -> list[T]:
+def _latest(items: Sequence[T], limit: int, *, offset: int = 0) -> list[T]:
     bounded_limit = max(limit, 0)
     if bounded_limit == 0:
         return []
-    return list(items[-bounded_limit:])
+    bounded_offset = max(offset, 0)
+    if bounded_offset == 0:
+        return list(items[-bounded_limit:])
+    end = len(items) - bounded_offset
+    if end <= 0:
+        return []
+    start = max(0, end - bounded_limit)
+    return list(items[start:end])
 
 
 async def _quote_eval_records(runner: Runner) -> list[QuoteEvalRecord]:

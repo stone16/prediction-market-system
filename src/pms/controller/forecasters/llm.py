@@ -15,6 +15,13 @@ from weakref import ReferenceType, ref
 
 from pms.config import LLMSettings
 from pms.core.models import MarketSignal
+from pms.metrics import (
+    LLM_DAILY_COST_USDC_METRIC,
+    LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    LLM_FORECAST_CALLS_TOTAL_METRIC,
+    increment_metric,
+    set_metric,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +328,12 @@ class LLMForecaster:
     def _record_cost(self, estimated_cost_usdc: Decimal, signal: MarketSignal) -> None:
         assert self.config is not None
         daily_cost = self._daily_cost_usdc_float()
+        increment_metric(LLM_FORECAST_CALLS_TOTAL_METRIC)
+        increment_metric(
+            LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+            float(estimated_cost_usdc),
+        )
+        set_metric(LLM_DAILY_COST_USDC_METRIC, daily_cost)
         logger.info(
             "llm_forecaster_cost_recorded",
             extra={

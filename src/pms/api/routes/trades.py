@@ -10,7 +10,12 @@ from pms.storage.fill_store import StoredTradeRow
 
 
 class TradesReader(Protocol):
-    async def read_trades(self, *, limit: int) -> Sequence[StoredTradeRow]: ...
+    async def read_trades(
+        self,
+        *,
+        limit: int,
+        offset: int = 0,
+    ) -> Sequence[StoredTradeRow]: ...
 
 
 class TradeRow(BaseModel):
@@ -39,14 +44,16 @@ class TradeRow(BaseModel):
 class TradesResponse(BaseModel):
     trades: list[TradeRow]
     limit: int
+    offset: int
 
 
 async def list_trades(
     store: TradesReader,
     *,
     limit: int,
+    offset: int = 0,
 ) -> TradesResponse:
-    rows = await store.read_trades(limit=limit)
+    rows = await store.read_trades(limit=limit, offset=offset)
     return TradesResponse(
         trades=[
             TradeRow(
@@ -74,4 +81,5 @@ async def list_trades(
             for row in rows
         ],
         limit=limit,
+        offset=offset,
     )

@@ -1734,7 +1734,8 @@ def test_live_mode_rejects_paper_soak_go_report_missing_gate_rows(
                 "| Check | Status | Detail |",
                 "|---|---|---|",
                 "| soak_days | PASS | 30 >= 30 |",
-                "| fills | PASS | 10 >= 10 |",
+                "| decisions_accepted | PASS | 30 >= 30 |",
+                "| fills | PASS | 50 >= 50 |",
             ]
         ),
         encoding="utf-8",
@@ -1791,8 +1792,8 @@ def test_live_mode_rejects_paper_soak_go_report_with_incomplete_mid_quote_baseli
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| mid_quote | 10 / 10 | 100.0% |",
-            "| mid_quote | 9 / 10 | 90.0% |",
+            "| mid_quote | 50 / 50 | 100.0% |",
+            "| mid_quote | 49 / 50 | 98.0% |",
         ),
         encoding="utf-8",
     )
@@ -1812,11 +1813,11 @@ def test_live_mode_rejects_paper_soak_go_report_with_duplicate_baseline_coverage
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| mid_quote | 10 / 10 | 100.0% |",
+            "| mid_quote | 50 / 50 | 100.0% |",
             "\n".join(
                 [
-                    "| mid_quote | 9 / 10 | 90.0% |",
-                    "| mid_quote | 10 / 10 | 100.0% |",
+                    "| mid_quote | 49 / 50 | 98.0% |",
+                    "| mid_quote | 50 / 50 | 100.0% |",
                 ]
             ),
         ),
@@ -1838,8 +1839,8 @@ def test_live_mode_rejects_paper_soak_go_report_with_contradictory_baseline_cove
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| mid_quote | 10 / 10 | 100.0% |",
-            "| mid_quote | 10 / 10 | 0.0% |",
+            "| mid_quote | 50 / 50 | 100.0% |",
+            "| mid_quote | 50 / 50 | 0.0% |",
         ),
         encoding="utf-8",
     )
@@ -1859,8 +1860,8 @@ def test_live_mode_rejects_paper_soak_go_report_with_malformed_baseline_coverage
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| category_prior | 10 / 10 | 100.0% |",
-            "| category_prior | 10 / 10 | complete |",
+            "| category_prior | 50 / 50 | 100.0% |",
+            "| category_prior | 50 / 50 | complete |",
         ),
         encoding="utf-8",
     )
@@ -1880,8 +1881,8 @@ def test_live_mode_rejects_baseline_coverage_denominator_mismatch() -> None:
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| last_trade | 8 / 10 | 80.0% |",
-            "| last_trade | 8 / 8 | 100.0% |",
+            "| last_trade | 40 / 50 | 80.0% |",
+            "| last_trade | 40 / 40 | 100.0% |",
         ),
         encoding="utf-8",
     )
@@ -1903,13 +1904,13 @@ def test_live_mode_rejects_baseline_coverage_denominator_mismatch_before_require
     )
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8")
-    report_text = report_text.replace("| last_trade | 8 / 10 | 80.0% |\n", "")
+    report_text = report_text.replace("| last_trade | 40 / 50 | 80.0% |\n", "")
     report_text = report_text.replace(
-        "| market_implied | 10 / 10 | 100.0% |",
+        "| market_implied | 50 / 50 | 100.0% |",
         "\n".join(
             [
-                "| last_trade | 8 / 8 | 100.0% |",
-                "| market_implied | 10 / 10 | 100.0% |",
+                "| last_trade | 40 / 40 | 100.0% |",
+                "| market_implied | 50 / 50 | 100.0% |",
             ]
         ),
     )
@@ -1933,8 +1934,8 @@ def test_live_mode_rejects_blank_baseline_source_label() -> None:
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8")
     report_text = report_text.replace(
-        "| last_trade | 8 / 10 | 80.0% |",
-        "|  | 8 / 10 | 80.0% |",
+        "| last_trade | 40 / 50 | 80.0% |",
+        "|  | 40 / 50 | 80.0% |",
     )
     report_text = report_text.replace(
         "| last_trade | 0.2400 | 0.0300 |",
@@ -1957,8 +1958,8 @@ def test_live_mode_rejects_placeholder_baseline_source_label() -> None:
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8")
     report_text = report_text.replace(
-        "| last_trade | 8 / 10 | 80.0% |",
-        "| TODO_BASELINE | 8 / 10 | 80.0% |",
+        "| last_trade | 40 / 50 | 80.0% |",
+        "| TODO_BASELINE | 40 / 50 | 80.0% |",
     )
     report_text = report_text.replace(
         "| last_trade | 0.2400 | 0.0300 |",
@@ -1981,8 +1982,8 @@ def test_live_mode_rejects_prose_baseline_source_label() -> None:
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8")
     report_text = report_text.replace(
-        "| last_trade | 8 / 10 | 80.0% |",
-        "| last trade baseline | 8 / 10 | 80.0% |",
+        "| last_trade | 40 / 50 | 80.0% |",
+        "| last trade baseline | 40 / 50 | 80.0% |",
     )
     report_text = report_text.replace(
         "| last_trade | 0.2400 | 0.0300 |",
@@ -2005,8 +2006,8 @@ def test_live_mode_rejects_digit_prefixed_baseline_source_label() -> None:
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8")
     report_text = report_text.replace(
-        "| last_trade | 8 / 10 | 80.0% |",
-        "| 7day_baseline | 8 / 10 | 80.0% |",
+        "| last_trade | 40 / 50 | 80.0% |",
+        "| 7day_baseline | 40 / 50 | 80.0% |",
     )
     report_text = report_text.replace(
         "| last_trade | 0.2400 | 0.0300 |",
@@ -2029,7 +2030,7 @@ def test_live_mode_rejects_secondary_baseline_without_coverage_evidence() -> Non
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| last_trade | 8 / 10 | 80.0% |\n",
+            "| last_trade | 40 / 50 | 80.0% |\n",
             "",
         ),
         encoding="utf-8",
@@ -2053,8 +2054,8 @@ def test_live_mode_rejects_secondary_baseline_with_zero_covered_decisions() -> N
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| last_trade | 8 / 10 | 80.0% |",
-            "| last_trade | 0 / 10 | 0.0% |",
+            "| last_trade | 40 / 50 | 80.0% |",
+            "| last_trade | 0 / 50 | 0.0% |",
         ),
         encoding="utf-8",
     )
@@ -2076,7 +2077,7 @@ def test_live_mode_rejects_optional_baseline_coverage_with_zero_total_decisions(
     )
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8").replace(
-        "| last_trade | 8 / 10 | 80.0% |",
+        "| last_trade | 40 / 50 | 80.0% |",
         "| last_trade | 0 / 0 | 0.0% |",
     )
     report_path.write_text(
@@ -2126,8 +2127,8 @@ def test_live_mode_rejects_paper_soak_go_report_with_incomplete_category_prior_b
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| category_prior | 10 / 10 | 100.0% |",
-            "| category_prior | 0 / 10 | 0.0% |",
+            "| category_prior | 50 / 50 | 100.0% |",
+            "| category_prior | 0 / 50 | 0.0% |",
         ),
         encoding="utf-8",
     )
@@ -2304,10 +2305,10 @@ def test_live_mode_rejects_paper_soak_go_report_with_duplicate_gate_row() -> Non
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| fills | PASS | 10 >= 10 |",
+            "| fills | PASS | 50 >= 50 |",
             "\n".join(
                 [
-                    "| fills | PASS | 10 >= 10 |",
+                    "| fills | PASS | 50 >= 50 |",
                     "| fills | PASS | duplicated fill evidence |",
                 ]
             ),
