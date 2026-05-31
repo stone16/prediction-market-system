@@ -455,6 +455,74 @@ live, validating one of the items called out in the original review.
 
 ---
 
+## 10. Work block — 2026-05-30 (production-readiness pass)
+
+Goal: *no bugs, paper trading passes, production code ready to interact
+with Polymarket* (credentials deferred). Findings came from a 6-dimension
+parallel investigation cross-checked against the **live** Gamma API
+(runtime behaviour > design intent).
+
+### 10.1 Code fixes landed (3 commits, all TDD + atomic)
+
+| Commit | Subject | Why it mattered |
+| --- | --- | --- |
+| `0a96d80` | `fix(sensor): derive risk_group_id from Gamma events[] array` | **Linchpin bug.** Live Gamma `/markets` returns the event grouping as `events:[{id,ticker,...}]`, not a scalar `eventId`/`category`. The parser read the scalar → every market got `risk_group_id=NULL` → under production `max_exposure_per_risk_group=15.0` the actuator rejected **every** order with `missing_risk_group_id`. The existing regression test invented a scalar `row['eventId']` fixture the real API never sends, so CI was green while production could not trade. Verified live: 0/100 → 100/101 markets carry a risk group. |
+| `2d03df2` | `fix(controller): emit diagnostics for the remaining on_signal drops` | 5 operationally-meaningful silent returns (composition-failed [error], calibration-clamp, edge≤0, size<min, cooldown) left `/status` showing 0 diagnostics while every signal was being dropped — "idle" was indistinguishable from "all filtered". Pure observability; no decision-logic change. |
+| `697c759` | `fix(runner): model Polymarket fee on paper/backtest fills` | Paper fills carried `fees=None`/`fee_bps=None`, so `average_net_edge_bps`/`average_fee_bps` rendered N/A and a paper GO was unreachable; paper P&L also overstated edge vs live. Paper/backtest fills now carry the configured `strategies.flb_fee_rate` fee (LIVE keeps venue reconciliation as source of truth). |
+
+### 10.2 Verified production-ready *as code* (no fix needed)
+
+- **LIVE Polymarket adapter** (`actuator/adapters/polymarket.py`): fail-closed;
+  `live_trading_enabled` gate first, credential validation before approval,
+  exact 8-field every-order approval matching, lock-protected approve+submit,
+  pre-submit quote guard. No path moves money without all gates passing.
+- **Credentialed preflight + live config gating** (`live_cli.py`,
+  `live_preflight.py`, `config.py`): exits non-zero on any failed check,
+  `--skip-venue` invalid for final go/no-go, operator-readiness fields enforced
+  fail-closed at startup, risk-metadata check joins `markets` on `condition_id`
+  (commit `a8feb8d`).
+
+### 10.3 Verification (this block)
+
+- **Gates:** `pytest` 2259 passed / 174 skipped; `mypy --strict` clean
+  (444 files); `lint-imports` 9/9.
+- **Config restored** to production-tight caps (the 2026-05-28 paper-link
+  hacks reverted); guard test `test_live_soak_config_loads_tight_first_live_risk_caps`
+  passes.
+- **Live end-to-end under production-tight config** (`config.live-soak.yaml`,
+  `max_exposure_per_risk_group=15.0` ON, `pms_soak` DB with
+  `risk_group_id` reset to NULL first): live discovery backfilled
+  `risk_group_id` to 100/101 markets (`event:30615`=48 World-Cup markets,
+  etc.); 15 decisions → 8 fills across 5 markets; order payloads carry the
+  risk group (`event:23784`, …); **0 `missing_risk_group_id` rejections**
+  (only legitimate `insufficient_liquidity`/`min_order_usdc`). This proves
+  the linchpin fix end-to-end: Gamma `events[]` → discovery → markets table
+  → sensor signal → decision → actuator order.
+
+### 10.4 Open decisions for the credential phase (non-blocking now)
+
+Both are product/domain choices that mainly bind at the live GO, which needs
+credentials anyway. Surfaced explicitly so they are not silently assumed:
+
+1. **Live operational strategy.** `default` is intentionally **fail-closed**
+   without external enrichment — `test_default_strategy_does_not_trade_when_required_raw_factors_missing`
+   asserts this is correct. Its required factors (`metaculus_prior`,
+   `fair_value_spread`, `subset_pricing_violation`, `yes_count`, `no_count`)
+   need an external-data pipeline not wired for Polymarket. The strategies
+   that *do* trade on Polymarket-only signals (`paper_multi_factor_v1`,
+   `paper_canary_v1`) are `live_allowed: false`. **Decision needed:** (a)
+   harden `paper_multi_factor_v1` → `live_allowed`, (b) wire external
+   enrichment so `default` trades, or (c) ship FLB live. Until then, paper
+   trades via `paper_multi_factor_v1`; no LIVE-allowed Polymarket-only
+   strategy exists.
+2. **Polymarket fee rate.** Paper fills now use `strategies.flb_fee_rate=0.04`
+   (the repo's own canonical estimate, also in `ExecutionModel.polymarket_live_estimate`).
+   **Decision needed:** confirm `0.04` against Polymarket's actual fee
+   schedule before the final GO (operator-tunable via config; set to `0`
+   if Polymarket charges no taker fee on the target markets).
+
+---
+
 ## Provenance
 
 This doc consolidates an external production-readiness review pasted

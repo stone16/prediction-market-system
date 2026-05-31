@@ -6,16 +6,16 @@ from datetime import UTC, datetime
 from hashlib import sha256
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 
 from pms.config import PMSSettings
 from pms.controller._price_utils import best_ask, spread_bps_at_decision
 from pms.controller.calibrators.extreme_clamp import ExtremeProbClamp
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.calibrators.shrinkage import LogitShrinkageCalibrator
-from pms.controller.diagnostics import ControllerDiagnostic
+from pms.controller.diagnostics import ControllerDiagnostic, DiagnosticSeverity
 from pms.controller.factor_snapshot import (
     FactorKey,
     FactorSnapshotReader,
@@ -85,6 +85,39 @@ class ControllerPipeline:
             self.sizer = KellySizer(risk=self.settings.risk)
         if self.router is None:
             self.router = Router(self.settings.controller)
+
+    def _set_drop_diagnostic(
+        self,
+        signal: MarketSignal,
+        *,
+        code: str,
+        message: str,
+        severity: DiagnosticSeverity = "info",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Record (and log) a ControllerDiagnostic for a signal that the
+        pipeline drops without emitting a decision.
+
+        Every operationally-meaningful early return in ``on_signal`` calls this
+        so an operator watching ``state.controller_diagnostics`` can tell *why*
+        order flow stopped — distinguishing 'idle' from 'every signal filtered'.
+        """
+        self.last_diagnostic = ControllerDiagnostic(
+            code=code,
+            message=message,
+            market_id=signal.market_id,
+            strategy_id=self.strategy_id,
+            strategy_version_id=self.strategy_version_id,
+            token_id=signal.token_id,
+            severity=severity,
+            metadata=dict(metadata or {}),
+        )
+        logger.info(
+            "controller diagnostic %s for %s",
+            code,
+            signal.market_id,
+            extra={"controller_diagnostic": self.last_diagnostic},
+        )
 
     async def on_signal(
         self,
@@ -296,6 +329,19 @@ class ControllerPipeline:
                     }
             except (KeyError, ValueError) as exc:
                 logger.warning("composition resolution failed: %s", exc)
+                self._set_drop_diagnostic(
+                    signal,
+                    code="composition_resolution_failed",
+                    message=(
+                        "Skipping decision because factor composition could not "
+                        "resolve a probability."
+                    ),
+                    severity="error",
+                    metadata={
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
                 _log_pipeline_funnel(
                     signal,
                     forecasted_count=len(probabilities),
@@ -313,6 +359,16 @@ class ControllerPipeline:
             signal=signal,
         )
         if calibrated_estimate is None:
+            self._set_drop_diagnostic(
+                signal,
+                code="calibration_clamp_rejected",
+                message=(
+                    "Skipping decision because pre-calibration rejected the "
+                    "forecast (extreme probability with insufficient resolved "
+                    "samples to trust it)."
+                ),
+                metadata={"raw_probability": prob_estimate},
+            )
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
@@ -370,6 +426,20 @@ class ControllerPipeline:
             decision_price = max(1e-6, min(1.0 - 1e-6, 1.0 - yes_reference_price))
             decision_edge = decision_probability - decision_price
         if decision_edge <= 0.0:
+            self._set_drop_diagnostic(
+                signal,
+                code="decision_edge_not_positive",
+                message=(
+                    "Skipping decision because the best available edge after "
+                    "side selection is not positive."
+                ),
+                metadata={
+                    "decision_edge": decision_edge,
+                    "decision_outcome": decision_outcome,
+                    "decision_probability": decision_probability,
+                    "decision_price": decision_price,
+                },
+            )
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
@@ -386,6 +456,19 @@ class ControllerPipeline:
             min_order_usdc = self.strategy.risk.min_order_size_usdc
         if size <= 0.0 or size < min_order_usdc:
             self.suppressed_zero_size += 1
+            self._set_drop_diagnostic(
+                signal,
+                code="order_size_below_minimum",
+                message=(
+                    "Skipping decision because the sized order is below the "
+                    "minimum order notional."
+                ),
+                metadata={
+                    "size_usdc": size,
+                    "min_order_usdc": min_order_usdc,
+                    "decision_outcome": decision_outcome,
+                },
+            )
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
@@ -405,6 +488,18 @@ class ControllerPipeline:
             current_ts=signal.timestamp,
             settings=self.settings,
         ):
+            self._set_drop_diagnostic(
+                signal,
+                code="within_decision_cooldown",
+                message=(
+                    "Skipping decision because an identical decision was emitted "
+                    "within the configured cooldown window."
+                ),
+                metadata={
+                    "cooldown_s": self.settings.controller.decision_cooldown_s,
+                    "decision_outcome": decision_outcome,
+                },
+            )
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),

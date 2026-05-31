@@ -194,6 +194,7 @@ def _gamma_market_to_market(row: dict[str, Any], fetched_at: datetime) -> Market
         _first_non_empty_value(
             row.get("eventId"),
             row.get("event_id"),
+            _gamma_first_event_id(row),
         )
     )
     category = _optional_text(
@@ -501,6 +502,29 @@ def _optional_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _gamma_first_event_id(row: dict[str, Any]) -> str | None:
+    """Extract the event id from the Gamma ``events`` array.
+
+    The live Gamma ``/markets`` endpoint returns the event grouping as
+    ``events: [{"id": ..., "ticker": ...}, ...]`` rather than a scalar
+    ``eventId``. Every market belongs to an event, and all markets under one
+    event share that ``id`` — making it the natural risk-group key (markets in
+    one event, e.g. a single tournament or neg-risk group, are correlated, so
+    they should share the ``max_exposure_per_risk_group`` budget). Returns the
+    first event's id, or ``None`` when the array is absent, empty, or malformed.
+    """
+    events = row.get("events")
+    if not isinstance(events, list):
+        return None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_id = event.get("id")
+        if event_id is not None and str(event_id).strip() != "":
+            return str(event_id)
+    return None
 
 
 def _market_risk_group_id(

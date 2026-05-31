@@ -3929,6 +3929,59 @@ def test_fill_from_order_drops_zero_filled_state() -> None:
     assert _fill_from_order(no_fill_state, decision, None) is None
 
 
+def _filled_state(decision: object) -> OrderState:
+    d = cast("TradeDecision", decision)
+    return OrderState(
+        order_id="paper-fee-1",
+        decision_id=d.decision_id,
+        status="matched",
+        market_id=d.market_id,
+        token_id=d.token_id,
+        venue=d.venue,
+        requested_notional_usdc=d.notional_usdc,
+        filled_notional_usdc=4.0,
+        remaining_notional_usdc=0.0,
+        fill_price=0.5,
+        submitted_at=datetime(2026, 4, 25, tzinfo=UTC),
+        last_updated_at=datetime(2026, 4, 25, tzinfo=UTC),
+        raw_status="matched",
+        strategy_id=d.strategy_id,
+        strategy_version_id=d.strategy_version_id,
+        filled_quantity=8.0,
+    )
+
+
+def test_fill_from_order_applies_configured_fee_rate() -> None:
+    """Paper/backtest fills must carry the configured Polymarket fee so the
+    evaluator's net-edge gate (average_net_edge_bps) can compute instead of
+    rendering N/A. Fee matches ExecutionModel.compute_fee:
+    notional * fee_rate * (1 - fill_price); fee_bps is the nominal rate."""
+    from pms.runner import _fill_from_order
+
+    decision = _decision(notional_usdc=10.0)
+    fill = _fill_from_order(
+        _filled_state(decision), decision, None, fee_rate=0.04
+    )
+
+    assert fill is not None
+    # 4.0 notional * 0.04 * (1 - 0.5) = 0.08
+    assert fill.fees == pytest.approx(0.08)
+    assert fill.fee_bps == 400
+
+
+def test_fill_from_order_omits_fee_when_rate_is_none() -> None:
+    """LIVE fills (fee_rate=None) leave fees unset; venue reconciliation owns
+    the real fee. Default preserves the prior fee-free behaviour."""
+    from pms.runner import _fill_from_order
+
+    decision = _decision(notional_usdc=10.0)
+    fill = _fill_from_order(_filled_state(decision), decision, None)
+
+    assert fill is not None
+    assert fill.fees is None
+    assert fill.fee_bps is None
+
+
 # --- review-loop round-2 follow-ups (codex findings f7 and f8) ---
 
 

@@ -138,6 +138,42 @@ def test_gamma_row_to_market_derives_risk_group_metadata() -> None:
     assert market.risk_group_id == "event:2028-us-presidential-election"
 
 
+def test_gamma_row_derives_event_id_from_events_array() -> None:
+    """Live Gamma /markets returns the event grouping as an ``events`` array of
+    objects (``events[0].id``), NOT a scalar ``eventId``/``category``. Without
+    parsing the array, ``risk_group_id`` is NULL for every market and the
+    production ``max_exposure_per_risk_group`` cap rejects every order with
+    ``missing_risk_group_id``. Regression for the all-NULL risk_group_id bug
+    confirmed against the real Gamma payload on 2026-05-30.
+    """
+    fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+    row = _gamma_market("pm-gta-event")
+    # Mirror the real Gamma shape: no scalar eventId/category fields at all.
+    row["events"] = [
+        {
+            "id": "23784",
+            "ticker": "what-will-happen-before-gta-vi",
+            "slug": "what-will-happen-before-gta-vi",
+            "title": "What will happen before GTA VI?",
+        }
+    ]
+
+    market = _gamma_market_to_market(row, fetched_at)
+
+    assert market.event_id == "23784"
+    assert market.risk_group_id == "event:23784"
+
+
+def test_gamma_row_without_event_grouping_has_null_risk_group() -> None:
+    """A market with neither an events array nor scalar grouping fields yields
+    a None risk_group_id (the Actuator then rejects only when the cap is set)."""
+    fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+    market = _gamma_market_to_market(_gamma_market("pm-ungrouped"), fetched_at)
+
+    assert market.event_id is None
+    assert market.risk_group_id is None
+
+
 def test_gamma_row_missing_outcome_prices_falls_back_to_none() -> None:
     fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
     market = _gamma_market_to_market(
