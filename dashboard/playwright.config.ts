@@ -43,7 +43,7 @@ export default defineConfig({
               ...process.env,
               DATABASE_URL: databaseUrl
             },
-            url: `${localApiBaseUrl}/status`,
+            url: `${localApiBaseUrl}/health`,
             reuseExistingServer: false,
             timeout: 120_000
           }
