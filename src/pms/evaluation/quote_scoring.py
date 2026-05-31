@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from pms.core.enums import Side
 from pms.core.models import BookSummary, FillRecord, QuoteEvalRecord, TradeDecision
@@ -54,7 +55,13 @@ class QuoteScorer:
 
 def _mtm_pnl(fill: FillRecord, decision: TradeDecision, quote: BookSummary) -> float:
     action = decision.action if decision.action is not None else decision.side
-    fees = 0.0 if fill.fees is None else fill.fees
+    fill_price = Decimal(str(fill.fill_price))
+    fill_quantity = Decimal(str(fill.fill_quantity))
+    best_bid = Decimal(str(quote.best_bid))
+    best_ask = Decimal(str(quote.best_ask))
+    fees = Decimal("0") if fill.fees is None else Decimal(str(fill.fees))
     if action == Side.SELL.value:
-        return (fill.fill_price - quote.best_ask) * fill.fill_quantity - fees
-    return (quote.best_bid - fill.fill_price) * fill.fill_quantity - fees
+        pnl = (fill_price - best_ask) * fill_quantity - fees
+    else:
+        pnl = (best_bid - fill_price) * fill_quantity - fees
+    return float(pnl)

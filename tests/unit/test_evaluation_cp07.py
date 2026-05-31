@@ -263,6 +263,30 @@ def test_quote_scorer_subtracts_fill_fees_from_sell_mtm() -> None:
     assert record.mtm_pnl == pytest.approx((0.70 - 0.66) * 10.0 - 0.12)
 
 
+def test_quote_scorer_uses_decimal_internals_for_boundary_mtm() -> None:
+    quote = BookSummary(
+        best_bid=0.30,
+        best_ask=0.31,
+        spread_bps=327.0,
+        depth_usdc=250.0,
+        timestamp=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    record = QuoteScorer().score(
+        _fill(
+            decision_id="d-quote-decimal",
+            resolved_outcome=None,
+            fill_price=0.20,
+        ),
+        _decision(decision_id="d-quote-decimal", prob=0.70, price=0.20),
+        quote,
+        quote_lag_seconds=3600,
+        recorded_at=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    assert record.mtm_pnl == 1.0
+
+
 def test_scorer_scores_secondary_baselines_from_decision_evidence() -> None:
     record = Scorer().score(
         _fill(resolved_outcome=1.0),

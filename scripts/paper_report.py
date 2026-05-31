@@ -10,6 +10,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
@@ -327,27 +328,44 @@ def metrics_from_api_payloads(
     position_rows = _list_value(positions, "positions")
     events.extend(_non_finite_position_risk_events(position_rows))
 
-    total_exposure = sum(_float_from_dict(row, "locked_usdc") for row in position_rows)
-    current_unrealized_pnl = sum(
-        _float_from_dict(row, "unrealized_pnl") for row in position_rows
+    total_exposure = sum(
+        (Decimal(str(_float_from_dict(row, "locked_usdc"))) for row in position_rows),
+        Decimal("0"),
     )
-    cumulative_pnl = _cumulative_pnl_from_metrics(
-        metric_rows,
-        report_date=report_date,
+    current_unrealized_pnl = sum(
+        (
+            Decimal(str(_float_from_dict(row, "unrealized_pnl")))
+            for row in position_rows
+        ),
+        Decimal("0"),
+    )
+    cumulative_pnl = Decimal(
+        str(
+            _cumulative_pnl_from_metrics(
+                metric_rows,
+                report_date=report_date,
+            )
+        )
+    )
+    todays_pnl_decimal = Decimal(str(todays_pnl))
+    max_drawdown_pct = _max_drawdown_pct_from_metrics(metric_rows)
+    max_drawdown_pct_decimal = (
+        None if max_drawdown_pct is None else Decimal(str(max_drawdown_pct))
     )
     raw_fill_rate = metric_rows.get("fill_rate")
-    fill_rate = _optional_float_from_dict(metric_rows, "fill_rate")
-    invalid_fill_rate_supplied = raw_fill_rate is not None and fill_rate is None
+    fill_rate_float = _optional_float_from_dict(metric_rows, "fill_rate")
+    fill_rate = None if fill_rate_float is None else Decimal(str(fill_rate_float))
+    invalid_fill_rate_supplied = raw_fill_rate is not None and fill_rate_float is None
     if (
         not invalid_fill_rate_supplied
-        and (fill_rate is None or fill_rate <= 0.0)
+        and (fill_rate is None or fill_rate <= Decimal("0.0"))
         and decision_rows
     ):
         entry_decisions = _entry_decision_rows(decision_rows)
         fill_rate = (
-            len(entry_trade_rows) / len(entry_decisions)
+            Decimal(len(entry_trade_rows)) / Decimal(len(entry_decisions))
             if entry_decisions
-            else 0.0
+            else Decimal("0.0")
         )
 
     return PaperReportMetrics(
@@ -358,15 +376,17 @@ def metrics_from_api_payloads(
         decisions_accepted=_accepted_decision_count(decision_rows, trade_rows),
         decisions_rejected=_int_from_dict(controller, "diagnostics_total"),
         fills=len(entry_trade_rows),
-        fill_rate=fill_rate,
+        fill_rate=None if fill_rate is None else float(fill_rate),
         average_slippage_bps=_optional_float_from_dict(metric_rows, "slippage_bps"),
-        todays_pnl=todays_pnl,
-        cumulative_pnl=cumulative_pnl,
+        todays_pnl=float(todays_pnl_decimal),
+        cumulative_pnl=float(cumulative_pnl),
         pnl_source=_pnl_source_from_metrics(metric_rows),
-        current_unrealized_pnl=current_unrealized_pnl,
-        max_drawdown_pct=_max_drawdown_pct_from_metrics(metric_rows),
+        current_unrealized_pnl=float(current_unrealized_pnl),
+        max_drawdown_pct=(
+            None if max_drawdown_pct_decimal is None else float(max_drawdown_pct_decimal)
+        ),
         open_positions=len(position_rows),
-        total_exposure=total_exposure,
+        total_exposure=float(total_exposure),
         brier_score_7d=_optional_float_from_dict_first(
             evaluator,
             ("brier_14d", "brier_overall"),
@@ -1663,7 +1683,8 @@ def _strategy_metrics_risk_events(
             )
             continue
         pnl = _optional_float_from_dict(metric_row, "pnl")
-        if pnl is None or pnl <= 0.0:
+        pnl_decimal = None if pnl is None else Decimal(str(pnl))
+        if pnl_decimal is None or pnl_decimal <= Decimal("0.0"):
             events.append(
                 (
                     "strategy",
@@ -1672,7 +1693,8 @@ def _strategy_metrics_risk_events(
                 )
             )
         fill_rate = _optional_float_from_dict(metric_row, "fill_rate")
-        if fill_rate is None or fill_rate <= 0.0:
+        fill_rate_decimal = None if fill_rate is None else Decimal(str(fill_rate))
+        if fill_rate_decimal is None or fill_rate_decimal <= Decimal("0.0"):
             events.append(
                 (
                     "strategy",
@@ -1684,7 +1706,13 @@ def _strategy_metrics_risk_events(
             metric_row,
             "brier_improvement_overall",
         )
-        if brier_improvement is None or brier_improvement <= 0.0:
+        brier_improvement_decimal = (
+            None if brier_improvement is None else Decimal(str(brier_improvement))
+        )
+        if (
+            brier_improvement_decimal is None
+            or brier_improvement_decimal <= Decimal("0.0")
+        ):
             events.append(
                 (
                     "strategy",
@@ -1953,7 +1981,7 @@ def _daily_pnl_from_metrics(
             )
         ]
 
-    parsed_rows: list[tuple[datetime, float]] = []
+    parsed_rows: list[tuple[datetime, Decimal]] = []
     for raw_row in raw_series:
         if not isinstance(raw_row, Mapping):
             return 0.0, [_invalid_daily_pnl_evidence_event(series_path)]
@@ -1961,7 +1989,7 @@ def _daily_pnl_from_metrics(
         pnl = _optional_float_from_mapping(raw_row, "pnl")
         if recorded_at is None or pnl is None:
             return 0.0, [_invalid_daily_pnl_evidence_event(series_path)]
-        parsed_rows.append((recorded_at, pnl))
+        parsed_rows.append((recorded_at, Decimal(str(pnl))))
 
     if not parsed_rows:
         return 0.0, [
@@ -1975,8 +2003,8 @@ def _daily_pnl_from_metrics(
     parsed_rows.sort(key=lambda row: row[0])
     day_start = datetime(report_date.year, report_date.month, report_date.day, tzinfo=UTC)
     day_end = day_start + timedelta(days=1)
-    start_pnl = 0.0
-    end_pnl: float | None = None
+    start_pnl = Decimal("0.0")
+    end_pnl: Decimal | None = None
     for recorded_at, pnl in parsed_rows:
         if recorded_at < day_start:
             start_pnl = pnl
@@ -1991,7 +2019,7 @@ def _daily_pnl_from_metrics(
                 f"{series_path} has no records before report day end",
             )
         ]
-    return end_pnl - start_pnl, []
+    return float(end_pnl - start_pnl), []
 
 
 def _cumulative_pnl_from_metrics(
@@ -2006,7 +2034,7 @@ def _cumulative_pnl_from_metrics(
     day_start = datetime(report_date.year, report_date.month, report_date.day, tzinfo=UTC)
     day_end = day_start + timedelta(days=1)
     latest_recorded_at: datetime | None = None
-    latest_pnl: float | None = None
+    latest_pnl: Decimal | None = None
     for raw_row in raw_series:
         if not isinstance(raw_row, Mapping):
             return 0.0
@@ -2018,8 +2046,8 @@ def _cumulative_pnl_from_metrics(
             continue
         if latest_recorded_at is None or recorded_at > latest_recorded_at:
             latest_recorded_at = recorded_at
-            latest_pnl = pnl
-    return 0.0 if latest_pnl is None else latest_pnl
+            latest_pnl = Decimal(str(pnl))
+    return 0.0 if latest_pnl is None else float(latest_pnl)
 
 
 def _pnl_series_from_metrics(metrics: Mapping[str, Any]) -> tuple[object, str]:
@@ -2691,16 +2719,19 @@ def _execution_concentration(
     market_counts = Counter(market_ids)
     risk_group_counts = Counter(risk_group_ids)
     entry_fills = len(entry_trade_rows)
+    entry_fills_decimal = Decimal(entry_fills)
     return ExecutionConcentration(
         entry_fills=entry_fills,
         distinct_markets=len(market_counts),
         distinct_risk_groups=len(risk_group_counts),
         missing_risk_group_fills=entry_fills - len(risk_group_ids),
         max_market_fill_share=(
-            max(market_counts.values()) / entry_fills if market_counts else None
+            float(Decimal(max(market_counts.values())) / entry_fills_decimal)
+            if market_counts
+            else None
         ),
         max_risk_group_fill_share=(
-            max(risk_group_counts.values()) / entry_fills
+            float(Decimal(max(risk_group_counts.values())) / entry_fills_decimal)
             if risk_group_counts
             else None
         ),
@@ -2757,7 +2788,8 @@ def _execution_concentration_risk_events(
         )
     if (
         concentration.max_market_fill_share is not None
-        and concentration.max_market_fill_share > config.max_market_fill_share
+        and Decimal(str(concentration.max_market_fill_share))
+        > Decimal(str(config.max_market_fill_share))
     ):
         events.append(
             (
@@ -2772,8 +2804,8 @@ def _execution_concentration_risk_events(
         )
     if (
         concentration.max_risk_group_fill_share is not None
-        and concentration.max_risk_group_fill_share
-        > config.max_risk_group_fill_share
+        and Decimal(str(concentration.max_risk_group_fill_share))
+        > Decimal(str(config.max_risk_group_fill_share))
     ):
         events.append(
             (

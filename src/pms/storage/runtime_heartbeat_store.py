@@ -70,6 +70,7 @@ class RuntimeHeartbeatStore:
                 """
                 WITH ordered AS (
                     SELECT
+                        started_at,
                         observed_at,
                         LAG(observed_at) OVER (ORDER BY observed_at ASC) AS prev_observed_at
                     FROM runtime_heartbeats
@@ -77,6 +78,7 @@ class RuntimeHeartbeatStore:
                 ),
                 aggregate AS (
                     SELECT
+                        MIN(started_at) AS first_started_at,
                         MIN(observed_at) AS first_observed_at,
                         MAX(observed_at) AS last_observed_at,
                         COUNT(*) AS heartbeat_count,
@@ -87,6 +89,7 @@ class RuntimeHeartbeatStore:
                     FROM ordered
                 )
                 SELECT
+                    first_started_at,
                     first_observed_at,
                     last_observed_at,
                     heartbeat_count,
@@ -98,6 +101,7 @@ class RuntimeHeartbeatStore:
             )
         if row is None:
             return None
+        first_started_at = _aware(cast(datetime, row["first_started_at"]))
         first_observed_at = _aware(cast(datetime, row["first_observed_at"]))
         last_observed_at = _aware(cast(datetime, row["last_observed_at"]))
         return RuntimeContinuity(
@@ -106,7 +110,7 @@ class RuntimeHeartbeatStore:
             first_observed_at=first_observed_at,
             last_observed_at=last_observed_at,
             heartbeat_count=int(cast(int, row["heartbeat_count"])),
-            healthy_days=_elapsed_whole_days(first_observed_at, last_observed_at),
+            healthy_days=_elapsed_whole_days(first_started_at, last_observed_at),
             max_gap_seconds=float(row["max_gap_seconds"]),
         )
 

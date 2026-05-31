@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import TimeInForce
 from pms.core.models import Position, TradeDecision, Venue
@@ -148,3 +150,37 @@ class TestWouldExceedPositionCapacity:
         runner._release_position_capacity_reservation(first.decision_id)
 
         assert not runner._would_exceed_position_capacity(second)
+
+    def test_reserve_position_capacity_is_atomic_with_capacity_check(self) -> None:
+        runner = _runner(max_open_positions=2)
+        runner.portfolio = replace(
+            runner.portfolio,
+            open_positions=[_position()],
+        )
+        first = _decision(market_id="market-b", token_id="token-b")
+        second = replace(
+            _decision(market_id="market-c", token_id="token-c"),
+            decision_id="decision-cap-2",
+        )
+
+        assert runner._reserve_position_capacity(first) is not None
+
+        assert runner._reserve_position_capacity(second) is None
+
+    @pytest.mark.asyncio
+    async def test_enqueue_rechecks_capacity_before_queuing(self) -> None:
+        runner = _runner(max_open_positions=2)
+        runner.portfolio = replace(
+            runner.portfolio,
+            open_positions=[_position()],
+        )
+        first = _decision(market_id="market-b", token_id="token-b")
+        second = replace(
+            _decision(market_id="market-c", token_id="token-c"),
+            decision_id="decision-cap-2",
+        )
+        assert runner._reserve_position_capacity(first) is not None
+
+        await runner._enqueue_decision(second, signal=None)
+
+        assert runner._decision_queue.empty()

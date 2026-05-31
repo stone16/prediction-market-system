@@ -75,14 +75,18 @@ class PostgresStrategyRegistry:
         async with self._pool.acquire() as connection:
             await connection.execute(query, strategy_id, metadata_json)
 
-    async def create_version(self, strategy: Strategy) -> StrategyVersion:
-        """Register a strategy snapshot and make that version active.
+    async def create_version(
+        self,
+        strategy: Strategy,
+        *,
+        activate: bool = True,
+    ) -> StrategyVersion:
+        """Register a strategy snapshot and optionally make that version active.
 
         Re-registering an existing version is idempotent for the
-        `strategy_versions` row but still re-points
-        `strategies.active_version_id` to the requested version. S2
-        treats `create_version(...)` as the explicit register-and-activate
-        entrypoint until a separate activation API exists.
+        `strategy_versions` row. By default this still re-points
+        `strategies.active_version_id` to the requested version; installers can
+        pass `activate=False` to populate dependent rows before activation.
         """
         strategy_id = strategy.config.strategy_id
         strategy_version_id = compute_strategy_version_id(*strategy.snapshot())
@@ -141,12 +145,14 @@ class PostgresStrategyRegistry:
                 if not isinstance(created_at, datetime):
                     msg = "strategy_versions.created_at did not return a timestamp"
                     raise TypeError(msg)
-                await connection.execute(
-                    update_strategy_query,
-                    strategy_id,
-                    strategy_version_id,
-                )
-        await self._notify_strategy_change()
+                if activate:
+                    await connection.execute(
+                        update_strategy_query,
+                        strategy_id,
+                        strategy_version_id,
+                    )
+        if activate:
+            await self._notify_strategy_change()
         return StrategyVersion(
             strategy_id=strategy_id,
             strategy_version_id=strategy_version_id,
@@ -386,7 +392,11 @@ class PostgresStrategyRegistry:
         WHERE strategy_id = $1
         """
         async with self._pool.acquire() as connection:
-            await connection.execute(query, strategy_id)
+            status = await connection.execute(query, strategy_id)
+        updated = _command_tag_row_count(status)
+        if updated == 0:
+            msg = f"No strategies row matched archive target strategy_id={strategy_id!r}"
+            raise LookupError(msg)
         await self._notify_strategy_change()
 
     async def populate_strategy_factors(

@@ -9,7 +9,7 @@ import pytest
 from pms.config import ControllerSettings, PMSSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.outcome_tokens import OutcomeTokens
-from pms.controller.pipeline import ControllerPipeline
+from pms.controller.pipeline import ControllerPipeline, _decision_cost_edges
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import RunMode
@@ -53,6 +53,16 @@ class VeryBearishForecaster:
     async def forecast(self, signal: MarketSignal) -> float:
         del signal
         return 0.35
+
+
+class VeryBullishForecaster:
+    def predict(self, signal: MarketSignal) -> tuple[float, float, str]:
+        del signal
+        return (0.80, 0.2, "direct yes edge")
+
+    async def forecast(self, signal: MarketSignal) -> float:
+        del signal
+        return 0.80
 
 
 class StaticOutcomeTokenResolver:
@@ -454,6 +464,46 @@ async def test_no_token_orderbook_imbalance_is_projected_to_canonical_yes_probab
 
 
 @pytest.mark.asyncio
+async def test_no_token_signal_with_positive_yes_edge_does_not_force_no_trade() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[VeryBullishForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=1_000.0)),
+        outcome_token_resolver=StaticOutcomeTokenResolver(),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(max_spread_bps=1_000.0),
+        ),
+    )
+    signal = replace(
+        _signal(),
+        token_id="token-no",
+        yes_price=0.30,
+        external_signal={
+            **_signal().external_signal,
+            "yes_token_id": "token-yes",
+            "no_token_id": "token-no",
+            "signal_token_outcome": "NO",
+        },
+        orderbook={
+            "bids": [{"price": 0.29, "size": 1_000.0}],
+            "asks": [{"price": 0.30, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.code == "direct_outcome_orderbook_required"
+    assert diagnostic.metadata["decision_outcome"] == "YES"
+    assert diagnostic.metadata["decision_token_id"] == "token-yes"
+
+
+@pytest.mark.asyncio
 async def test_controller_pipeline_skips_when_remaining_market_capacity_below_minimum() -> None:
     risk = RiskSettings(max_position_per_market=5.0, min_order_usdc=1.0)
     pipeline = ControllerPipeline(
@@ -663,8 +713,22 @@ async def test_on_signal_rejects_when_configured_costs_erase_gross_edge() -> Non
     assert diagnostic.code == "decision_net_edge_not_positive"
     assert diagnostic.metadata["gross_edge"] == pytest.approx(0.03)
     assert diagnostic.metadata["fee_edge"] == pytest.approx(0.042)
-    assert diagnostic.metadata["slippage_edge"] == pytest.approx(0.005)
+    assert diagnostic.metadata["slippage_edge"] == pytest.approx(0.002)
     assert diagnostic.metadata["net_edge_after_costs"] < 0.0
+
+
+def test_decision_cost_edges_convert_bps_to_price_space() -> None:
+    costs = _decision_cost_edges(
+        decision_price=0.40,
+        spread_bps=500,
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(max_slippage_bps=50),
+        ),
+    )
+
+    assert costs.slippage_edge == pytest.approx(0.002)
+    assert costs.spread_edge == pytest.approx(0.02)
 
 
 @pytest.mark.asyncio

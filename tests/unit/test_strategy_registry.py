@@ -292,6 +292,23 @@ async def test_archive_strategy_clears_active_version_and_notifies_callbacks() -
 
 
 @pytest.mark.asyncio
+async def test_archive_strategy_raises_without_notifying_when_target_missing() -> None:
+    connection = FakeConnection(execute_results=["UPDATE 0"])
+    observed: list[str] = []
+
+    async def on_strategy_change() -> None:
+        observed.append("changed")
+
+    registry = PostgresStrategyRegistry(FakePool(connection))
+    registry.register_change_callback(on_strategy_change)
+
+    with pytest.raises(LookupError, match="No strategies row matched archive target"):
+        await registry.archive_strategy("missing")
+
+    assert observed == []
+
+
+@pytest.mark.asyncio
 async def test_get_by_id_round_trips_json_string_and_handles_missing_rows() -> None:
     strategy = _strategy()
     connection = FakeConnection(

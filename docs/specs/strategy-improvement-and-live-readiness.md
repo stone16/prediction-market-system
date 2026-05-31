@@ -824,7 +824,7 @@ The findings above translate into these concrete spec changes:
 2. **Split P0-1 → P0-1a / P0-1b / P0-1c** (per F-3) — LLM is done; Rules + Stats are not.
 3. **New P0-9: CLOB book staleness fix in `fill_store.py`** (per F-1) — quick win, ~1 day.
 4. **New P0-10: Wire `CalibrationSpec` into `paper_multi_factor_v1` config** (per F-2) — quickest win in the entire spec, ~1 hour.
-5. **Add Option B from F-6 mitigation to P0-6** — constrain paper soak universe to ≤ 30-day resolution horizon, so Gate 3 evidence is achievable in 30 days rather than 50+.
+5. **Add Option B from F-6 mitigation to P0-6** — constrain paper soak universe to ≤ 31-day resolution horizon, matching `resolution_time_max_horizon_days: 31`, so Gate 3 evidence is achievable in 30 days rather than 50+ with the UTC cutoff buffer.
 
 ## Updated LIVE Readiness Verdict (after F-1 through F-7)
 

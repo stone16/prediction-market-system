@@ -43,7 +43,6 @@ async def install_paper_multi_factor_strategy(
     try:
         registry = PostgresStrategyRegistry(pool)
         strategy = build_paper_multi_factor_strategy()
-        version = await registry.create_version(strategy)
         factor_steps = _strategy_factor_steps(strategy)
         await ensure_factor_catalog(
             pool,
@@ -51,6 +50,7 @@ async def install_paper_multi_factor_strategy(
                 dict.fromkeys(step.factor_id for step in factor_steps)
             ),
         )
+        version = await registry.create_version(strategy, activate=False)
         await registry.populate_strategy_factors(
             strategy.config.strategy_id,
             version.strategy_version_id,
@@ -58,6 +58,10 @@ async def install_paper_multi_factor_strategy(
         )
         if archive_default:
             await registry.archive_strategy("default")
+        await registry.set_active(
+            strategy.config.strategy_id,
+            version.strategy_version_id,
+        )
         return version
     finally:
         await pool.close()

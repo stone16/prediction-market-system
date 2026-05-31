@@ -1593,6 +1593,13 @@ class Runner:
         queued_at: datetime | None = None,
         decision_evidence: Mapping[str, object] | None = None,
     ) -> None:
+        if self._would_exceed_position_capacity(decision):
+            if signal is not None:
+                _append_bounded(
+                    self.state.controller_diagnostics,
+                    self._position_capacity_diagnostic(decision, signal),
+                )
+            return
         reserved_key = self._reserve_position_capacity(decision)
         try:
             await self._update_decision_status_if_supported(
@@ -1622,12 +1629,6 @@ class Runner:
             return emitted
         signal = await self._signal_with_exit_outcome_tokens(signal)
         for position in tuple(self.portfolio.open_positions):
-            if (
-                position.token_id is not None
-                and signal.token_id is not None
-                and position.token_id != signal.token_id
-            ):
-                continue
             marked_position = mark_position_from_signal(position, signal)
             if marked_position is None:
                 continue
@@ -1728,6 +1729,8 @@ class Runner:
         self,
         decision: TradeDecision,
     ) -> PositionSlotKey | None:
+        if self._would_exceed_position_capacity(decision):
+            return None
         if not self._decision_opens_new_position_slot(decision):
             return None
         key = _position_key_from_decision(decision)
@@ -1773,30 +1776,38 @@ class Runner:
                 },
             )
         if self._would_exceed_position_capacity(decision):
-            max_positions = self.config.risk.max_open_positions
-            return ControllerDiagnostic(
-                code="max_open_positions_capacity",
-                message=(
-                    "Skipping decision because open plus queued new positions "
-                    "would exceed the configured max_open_positions cap."
-                ),
-                market_id=decision.market_id,
-                strategy_id=decision.strategy_id,
-                strategy_version_id=decision.strategy_version_id,
-                token_id=decision.token_id,
-                severity="warning",
-                metadata={
-                    "max_open_positions": max_positions,
-                    "open_positions": len(self.portfolio.open_positions),
-                    "pending_new_positions": len(
-                        set(self._pending_open_position_keys_by_decision.values())
-                        - _open_position_keys(self.portfolio)
-                    ),
-                    "decision_token_id": decision.token_id,
-                    "decision_outcome": decision.outcome,
-                },
-            )
+            return self._position_capacity_diagnostic(decision, signal)
         return None
+
+    def _position_capacity_diagnostic(
+        self,
+        decision: TradeDecision,
+        signal: MarketSignal,
+    ) -> ControllerDiagnostic:
+        max_positions = self.config.risk.max_open_positions
+        return ControllerDiagnostic(
+            code="max_open_positions_capacity",
+            message=(
+                "Skipping decision because open plus queued new positions "
+                "would exceed the configured max_open_positions cap."
+            ),
+            market_id=decision.market_id,
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            token_id=decision.token_id,
+            severity="warning",
+            metadata={
+                "max_open_positions": max_positions,
+                "open_positions": len(self.portfolio.open_positions),
+                "pending_new_positions": len(
+                    set(self._pending_open_position_keys_by_decision.values())
+                    - _open_position_keys(self.portfolio)
+                ),
+                "decision_token_id": decision.token_id,
+                "decision_outcome": decision.outcome,
+                "signal_token_id": signal.token_id,
+            },
+        )
 
     def _paper_orderbook_ready_for_decision(self, decision: TradeDecision) -> bool:
         if decision.token_id is not None and decision.token_id in self._paper_orderbooks:

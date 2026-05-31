@@ -3050,6 +3050,32 @@ def test_metrics_from_api_payloads_derives_execution_fill_rate_from_window_rows(
     assert metrics.fill_rate == pytest.approx(0.5)
 
 
+def test_metrics_from_api_payloads_uses_decimal_internals_for_position_pnl() -> None:
+    report_date = date(2026, 5, 30)
+
+    metrics = metrics_from_api_payloads(
+        report_date=report_date,
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-29T00:00:00+00:00",
+            "controller": {"decisions_total": 0, "diagnostics_total": 0},
+            "actuator": {"fills_total": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(report_date, pnl=0.0)},
+        trades={"trades": []},
+        positions={
+            "positions": [
+                {"locked_usdc": 1.0, "unrealized_pnl": 0.1},
+                {"locked_usdc": 1.0, "unrealized_pnl": 0.2},
+            ],
+        },
+    )
+
+    assert metrics.current_unrealized_pnl == 0.3
+
+
 def test_paper_soak_gate_fails_when_strategies_endpoint_has_no_active_versions() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),

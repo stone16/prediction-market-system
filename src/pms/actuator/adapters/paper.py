@@ -162,7 +162,7 @@ def _matched_order_state(
         market_id=decision.market_id,
         token_id=decision.token_id,
         venue=decision.venue,
-        requested_notional_usdc=filled_notional_usdc,
+        requested_notional_usdc=_decision_notional_usdc(decision),
         filled_notional_usdc=filled_notional_usdc,
         remaining_notional_usdc=0.0,
         fill_price=fill_price,

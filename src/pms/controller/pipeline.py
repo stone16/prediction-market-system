@@ -397,6 +397,8 @@ class ControllerPipeline:
         prob_estimate = calibrated_estimate
         yes_probability = prob_estimate
         yes_reference_price = _yes_reference_price(signal, self.strategy)
+        if signal_outcome.signal_outcome == "NO":
+            yes_reference_price = signal.yes_price
         yes_edge = yes_probability - yes_reference_price
         active_portfolio = portfolio or _default_portfolio()
         sizer = _required(self.sizer, "sizer")
@@ -408,17 +410,7 @@ class ControllerPipeline:
         decision_probability = yes_probability
         decision_price = yes_reference_price
         decision_edge = yes_edge
-        if signal_outcome.signal_outcome == "NO":
-            decision_token_id = signal_outcome.no_token_id or signal_token_id
-            decision_outcome = "NO"
-            opportunity_side = "no"
-            decision_probability = 1.0 - yes_probability
-            decision_price = _direct_signal_reference_price(
-                raw_signal,
-                strategy=self.strategy,
-            )
-            decision_edge = decision_probability - decision_price
-        elif yes_edge < 0.0:
+        if yes_edge < 0.0:
             if signal_outcome.no_token_id is None:
                 resolved_tokens = await self.outcome_token_resolver.resolve(
                     market_id=signal.market_id,
@@ -458,36 +450,41 @@ class ControllerPipeline:
             opportunity_side = "no"
             decision_probability = 1.0 - yes_probability
             decision_price = max(1e-6, min(1.0 - 1e-6, 1.0 - yes_reference_price))
+            if signal_outcome.signal_outcome == "NO":
+                decision_price = _direct_signal_reference_price(
+                    raw_signal,
+                    strategy=self.strategy,
+                )
             decision_edge = decision_probability - decision_price
-            if (
-                _strategy_metadata(self.strategy).get("price_reference") == "best_ask"
-                and not _decision_uses_signal_orderbook(
-                    signal,
-                    token_id=decision_token_id,
-                    outcome=decision_outcome,
-                )
-            ):
-                self._set_drop_diagnostic(
-                    signal,
-                    code="direct_outcome_orderbook_required",
-                    message=(
-                        "Skipping decision because best-ask execution pricing "
-                        "requires a direct orderbook for the selected outcome token."
-                    ),
-                    metadata={
-                        "signal_token_id": signal.token_id,
-                        "decision_token_id": decision_token_id,
-                        "decision_outcome": decision_outcome,
-                        "yes_reference_price": yes_reference_price,
-                        "synthetic_decision_price": decision_price,
-                    },
-                )
-                _log_pipeline_funnel(
-                    signal,
-                    forecasted_count=len(probabilities),
-                    traded_count=0,
-                )
-                return None
+        if (
+            _strategy_metadata(self.strategy).get("price_reference") == "best_ask"
+            and not _decision_uses_signal_orderbook(
+                signal,
+                token_id=decision_token_id,
+                outcome=decision_outcome,
+            )
+        ):
+            self._set_drop_diagnostic(
+                signal,
+                code="direct_outcome_orderbook_required",
+                message=(
+                    "Skipping decision because best-ask execution pricing "
+                    "requires a direct orderbook for the selected outcome token."
+                ),
+                metadata={
+                    "signal_token_id": signal.token_id,
+                    "decision_token_id": decision_token_id,
+                    "decision_outcome": decision_outcome,
+                    "yes_reference_price": yes_reference_price,
+                    "synthetic_decision_price": decision_price,
+                },
+            )
+            _log_pipeline_funnel(
+                signal,
+                forecasted_count=len(probabilities),
+                traded_count=0,
+            )
+            return None
         if decision_edge <= 0.0:
             self._set_drop_diagnostic(
                 signal,
@@ -909,11 +906,13 @@ def _decision_cost_edges(
     price = Decimal(str(decision_price))
     fee_rate = Decimal(str(settings.strategies.flb_fee_rate))
     fee_edge = fee_rate * (Decimal("1.0") - price)
-    slippage_edge = Decimal(settings.controller.max_slippage_bps) / Decimal("10000")
+    slippage_edge = (
+        Decimal(settings.controller.max_slippage_bps) / Decimal("10000")
+    ) * price
     spread_edge = (
         Decimal("0")
         if spread_bps is None
-        else Decimal(spread_bps) / Decimal("10000")
+        else (Decimal(spread_bps) / Decimal("10000")) * price
     )
     return _DecisionCostEdges(
         spread_edge=float(spread_edge),

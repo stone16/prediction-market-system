@@ -16,6 +16,7 @@ async def test_runtime_continuity_counts_only_elapsed_healthy_days() -> None:
             Any,
             _Pool(
                 {
+                    "first_started_at": datetime(2026, 1, 1, 23, 29, tzinfo=UTC),
                     "first_observed_at": datetime(2026, 1, 1, 23, 30, tzinfo=UTC),
                     "last_observed_at": datetime(2026, 1, 31, 23, 29, tzinfo=UTC),
                     "heartbeat_count": 2,
@@ -28,7 +29,7 @@ async def test_runtime_continuity_counts_only_elapsed_healthy_days() -> None:
     continuity = await store.continuity(run_id="run-near-midnight")
 
     assert continuity is not None
-    assert continuity.healthy_days == 29
+    assert continuity.healthy_days == 30
 
 
 class _Pool:

@@ -6,7 +6,7 @@ const databaseUrl =
   'postgresql://postgres:postgres@localhost:5432/pms_test';
 
 const dashboardApiBaseUrlOverride = process.env.PMS_DASHBOARD_API_BASE_URL;
-const dashboardApiPort = process.env.PMS_DASHBOARD_API_PORT ?? '8000';
+const dashboardApiPort = validatedTcpPort(process.env.PMS_DASHBOARD_API_PORT ?? '8000');
 const localApiBaseUrl = `http://127.0.0.1:${dashboardApiPort}`;
 const shouldStartApiServer = dashboardApiBaseUrlOverride === undefined;
 const dashboardEnv = Object.fromEntries(
@@ -58,3 +58,14 @@ export default defineConfig({
     }
   ]
 });
+
+function validatedTcpPort(rawPort: string): string {
+  if (!/^\d+$/.test(rawPort)) {
+    throw new Error('PMS_DASHBOARD_API_PORT must be a numeric TCP port');
+  }
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error('PMS_DASHBOARD_API_PORT must be between 1 and 65535');
+  }
+  return String(port);
+}

@@ -177,6 +177,27 @@ async def test_paper_fill_consumes_multiple_levels_vwap() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paper_sell_preserves_requested_notional_when_fill_price_differs() -> None:
+    decision = _decision(notional_usdc=10.0, limit_price=0.45)
+    object.__setattr__(decision, "side", "SELL")
+    object.__setattr__(decision, "action", "SELL")
+    actuator = PaperActuator(
+        orderbooks={
+            "token-yes": {
+                "bids": [{"price": 0.50, "size": 30.0}],
+                "asks": [{"price": 0.52, "size": 30.0}],
+            }
+        }
+    )
+
+    state = await actuator.execute(decision, _portfolio())
+
+    assert state.requested_notional_usdc == pytest.approx(10.0)
+    assert state.filled_quantity == pytest.approx(10.0 / 0.45)
+    assert state.filled_notional_usdc == pytest.approx((10.0 / 0.45) * 0.50)
+
+
+@pytest.mark.asyncio
 async def test_paper_actuator_rejects_insufficient_notional_depth() -> None:
     actuator = PaperActuator(
         orderbooks={

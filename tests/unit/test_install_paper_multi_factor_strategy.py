@@ -117,9 +117,14 @@ async def test_install_paper_multi_factor_ensures_factor_catalog_before_populati
             events.append("registry")
             self.pool = pool
 
-        async def create_version(self, strategy: Any) -> StrategyVersion:
+        async def create_version(
+            self,
+            strategy: Any,
+            *,
+            activate: bool = True,
+        ) -> StrategyVersion:
             del strategy
-            events.append("create_version")
+            events.append(f"create_version:{'active' if activate else 'inactive'}")
             return StrategyVersion(
                 strategy_id="paper_multi_factor_v1",
                 strategy_version_id="version-456",
@@ -134,6 +139,14 @@ async def test_install_paper_multi_factor_ensures_factor_catalog_before_populati
         ) -> None:
             del strategy_id, strategy_version_id, steps
             events.append("populate_strategy_factors")
+
+        async def set_active(
+            self,
+            strategy_id: str,
+            strategy_version_id: str,
+        ) -> None:
+            del strategy_id, strategy_version_id
+            events.append("set_active")
 
     async def fake_create_pool(**kwargs: Any) -> FakePool:
         assert kwargs["dsn"] == "postgresql://example/pms"
@@ -171,8 +184,9 @@ async def test_install_paper_multi_factor_ensures_factor_catalog_before_populati
     assert events == [
         "create_pool",
         "registry",
-        "create_version",
         "ensure_factor_catalog",
+        "create_version:inactive",
         "populate_strategy_factors",
+        "set_active",
         "close_pool",
     ]

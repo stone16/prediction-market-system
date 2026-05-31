@@ -400,7 +400,7 @@ async def test_runner_converts_exit_signal_to_opposing_trade_decision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_does_not_exit_from_mismatched_token_signal() -> None:
+async def test_runner_exits_from_complementary_token_signal() -> None:
     executor = CapturingExecutor()
     signal = replace(
         _signal(yes_price=0.87, token_id="asset-no-token"),
@@ -438,4 +438,8 @@ async def test_runner_does_not_exit_from_mismatched_token_signal() -> None:
     finally:
         await runner.stop()
 
-    assert executor.decisions == []
+    assert len(executor.decisions) == 1
+    decision = executor.decisions[0]
+    assert decision.token_id == "asset-yes-token"
+    assert decision.stop_conditions == ["position_exit:stop_loss"]
+    assert decision.limit_price == pytest.approx(0.13)
