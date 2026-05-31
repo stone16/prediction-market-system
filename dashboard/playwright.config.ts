@@ -6,7 +6,9 @@ const databaseUrl =
   'postgresql://postgres:postgres@localhost:5432/pms_test';
 
 const dashboardApiBaseUrlOverride = process.env.PMS_DASHBOARD_API_BASE_URL;
-const shouldStartApiServer = dashboardApiBaseUrlOverride !== '';
+const dashboardApiPort = process.env.PMS_DASHBOARD_API_PORT ?? '8000';
+const localApiBaseUrl = `http://127.0.0.1:${dashboardApiPort}`;
+const shouldStartApiServer = dashboardApiBaseUrlOverride === undefined;
 const dashboardEnv = Object.fromEntries(
   Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
 );
@@ -18,7 +20,7 @@ if (dashboardApiBaseUrlOverride !== undefined) {
     dashboardEnv.PMS_API_BASE_URL = dashboardApiBaseUrlOverride;
   }
 } else {
-  dashboardEnv.PMS_API_BASE_URL = 'http://127.0.0.1:8000';
+  dashboardEnv.PMS_API_BASE_URL = localApiBaseUrl;
 }
 
 export default defineConfig({
@@ -36,12 +38,12 @@ export default defineConfig({
       ? [
           {
             command:
-              'bash -lc \'cd .. && uv run alembic upgrade head && uv run pms-api\'',
+              `bash -lc 'cd .. && uv run alembic upgrade head && uv run pms-api --port ${dashboardApiPort}'`,
             env: {
               ...process.env,
               DATABASE_URL: databaseUrl
             },
-            url: 'http://127.0.0.1:8000/status',
+            url: `${localApiBaseUrl}/status`,
             reuseExistingServer: false,
             timeout: 120_000
           }

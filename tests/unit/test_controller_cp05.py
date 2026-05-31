@@ -755,7 +755,7 @@ def test_llm_response_parsing_helpers_cover_json_text_and_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_controller_pipeline_suppresses_zero_size_decision_and_tracks_metric() -> None:
+async def test_controller_pipeline_rejects_tiny_edge_before_zero_size_metric() -> None:
     llm_client = FakeClaudeClient()
     llm_client.messages = FakeMessages(
         prob_estimate=0.401,
@@ -784,7 +784,12 @@ async def test_controller_pipeline_suppresses_zero_size_decision_and_tracks_metr
     emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
 
     assert emission is None
-    assert pipeline.suppressed_zero_size == 1
+    assert pipeline.suppressed_zero_size == 0
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.code == "decision_net_edge_not_positive"
+    assert diagnostic.metadata["gross_edge"] == pytest.approx(0.001)
+    assert diagnostic.metadata["net_edge_after_costs"] < 0.0
 
 
 @pytest.mark.asyncio

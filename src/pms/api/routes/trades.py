@@ -33,6 +33,7 @@ class TradeRow(BaseModel):
     strategy_version_id: str
     fee_bps: int | None = None
     fees: float | None = None
+    risk_group_id: str | None = None
 
 
 class TradesResponse(BaseModel):
@@ -68,6 +69,7 @@ async def list_trades(
                 strategy_version_id=row.strategy_version_id,
                 fee_bps=row.fee_bps,
                 fees=row.fees,
+                risk_group_id=row.risk_group_id,
             )
             for row in rows
         ],

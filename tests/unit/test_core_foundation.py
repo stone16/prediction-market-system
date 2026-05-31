@@ -205,6 +205,7 @@ def test_live_mode_validation_returns_redacted_credentials() -> None:
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_exit_criteria_ratified_by="operator",
         live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by="counsel",
@@ -285,11 +286,12 @@ def test_live_mode_loads_local_secret_file_before_env_credentials(
     config_path.write_text(
         "\n".join(
             [
-                "mode: live",
-                "secret_source: local_file",
-                f"local_secret_file: {secret_path}",
-                "live_trading_enabled: true",
-                "live_exit_criteria_ratified_by: operator",
+                    "mode: live",
+                    "secret_source: local_file",
+                    f"local_secret_file: {secret_path}",
+                    "live_trading_enabled: true",
+                    "api_token: live-api-token",
+                    "live_exit_criteria_ratified_by: operator",
                 "live_exit_criteria_ratified_at: 2026-05-25T00:00:00+00:00",
                 "live_compliance_reviewed_by: counsel",
                 "live_compliance_reviewed_at: 2026-05-25T00:00:00+00:00",

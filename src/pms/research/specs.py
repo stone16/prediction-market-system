@@ -207,8 +207,8 @@ class ExecutionModel:
     @classmethod
     def polymarket_live_estimate(cls) -> ExecutionModel:
         return cls(
-            # source: https://docs.polymarket.com/trading/fees Finance/Politics/Mentions/Tech taker fee; retrieved 2026-04-19T00:00:00+08:00
-            fee_rate=0.04,
+            # source: https://docs.polymarket.com/trading/fees highest published category taker fee; retrieved 2026-05-31T00:00:00+08:00
+            fee_rate=0.07,
             # source: S5 /metrics SQL median slippage_bps query on eval_records over the trailing 7 days; retrieved 2026-04-19T00:00:00+08:00
             slippage_bps=10.0,
             # source: conservative queue/adverse-selection placeholder until paper telemetry drift samples are exported; retrieved 2026-05-27T00:00:00+08:00

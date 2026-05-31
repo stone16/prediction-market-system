@@ -408,7 +408,14 @@ class MarketDataSensor:
         normalized = {
             key: value
             for key, value in metadata.items()
-            if key in {"risk_group_id", "category", "event_id"}
+            if key
+            in {
+                "risk_group_id",
+                "category",
+                "event_id",
+                "yes_token_id",
+                "no_token_id",
+            }
             and isinstance(value, str)
             and value.strip() != ""
         }
@@ -633,6 +640,13 @@ def _signal_from_state(
     external_signal = {"raw_event_type": event_type}
     if extra is not None:
         external_signal.update(extra)
+    token_outcome = _signal_token_outcome(
+        asset_id=state.asset_id,
+        yes_token_id=external_signal.get("yes_token_id"),
+        no_token_id=external_signal.get("no_token_id"),
+    )
+    if token_outcome is not None:
+        external_signal["signal_token_outcome"] = token_outcome
     return MarketSignal(
         market_id=state.market_id,
         token_id=state.asset_id,
@@ -646,6 +660,19 @@ def _signal_from_state(
         fetched_at=timestamp,
         market_status=MarketStatus.OPEN.value,
     )
+
+
+def _signal_token_outcome(
+    *,
+    asset_id: str,
+    yes_token_id: object,
+    no_token_id: object,
+) -> str | None:
+    if isinstance(yes_token_id, str) and asset_id == yes_token_id:
+        return "YES"
+    if isinstance(no_token_id, str) and asset_id == no_token_id:
+        return "NO"
+    return None
 
 
 def _signal_price(

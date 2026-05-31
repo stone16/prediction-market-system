@@ -255,6 +255,7 @@ class StoredTradeRow:
     strategy_version_id: str
     fee_bps: int | None = None
     fees: float | None = None
+    risk_group_id: str | None = None
 
 
 class _PositionAccumulator:
@@ -574,6 +575,7 @@ def _trade_from_row(row: asyncpg.Record) -> StoredTradeRow:
         strategy_version_id=cast(str, row["strategy_version_id"]),
         fee_bps=cast(int | None, payload.get("fee_bps")),
         fees=cast(float | None, payload.get("fees")),
+        risk_group_id=cast(str | None, payload.get("risk_group_id")),
     )
 
 

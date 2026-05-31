@@ -444,6 +444,7 @@ class PostgresMarketDataStore:
             markets.last_seen_at,
             markets.volume_24h,
             markets.liquidity,
+            markets.spread_bps,
             markets.active,
             markets.closed,
             markets.accepting_orders,
@@ -505,6 +506,7 @@ class PostgresMarketDataStore:
                             last_seen_at=cast(datetime, row["last_seen_at"]),
                             volume_24h=cast(float | None, row["volume_24h"]),
                             liquidity=_optional_float(row["liquidity"]),
+                            spread_bps=cast(int | None, _row_value(row, "spread_bps")),
                             active=cast(bool | None, _row_value(row, "active")),
                             closed=cast(bool | None, _row_value(row, "closed")),
                             accepting_orders=cast(
@@ -621,9 +623,17 @@ class PostgresMarketDataStore:
 
     async def read_market_signal_metadata(self, market_id: str) -> dict[str, str]:
         query = """
-        SELECT risk_group_id, category, event_id
+        SELECT
+            markets.risk_group_id,
+            markets.category,
+            markets.event_id,
+            MAX(CASE WHEN tokens.outcome = 'YES' THEN tokens.token_id END) AS yes_token_id,
+            MAX(CASE WHEN tokens.outcome = 'NO' THEN tokens.token_id END) AS no_token_id
         FROM markets
-        WHERE condition_id = $1
+        LEFT JOIN tokens
+            ON tokens.condition_id = markets.condition_id
+        WHERE markets.condition_id = $1
+        GROUP BY markets.risk_group_id, markets.category, markets.event_id
         """
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(query, market_id)
@@ -631,7 +641,13 @@ class PostgresMarketDataStore:
             return {}
 
         metadata: dict[str, str] = {}
-        for field_name in ("risk_group_id", "category", "event_id"):
+        for field_name in (
+            "risk_group_id",
+            "category",
+            "event_id",
+            "yes_token_id",
+            "no_token_id",
+        ):
             value = cast(str | None, _row_value(row, field_name))
             if value is not None and value.strip() != "":
                 metadata[field_name] = value

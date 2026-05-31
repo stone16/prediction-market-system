@@ -114,7 +114,7 @@ class MarketSelector:
 
         summary = await self._store.get_latest_book_summary(market.condition_id)
         if summary is None:
-            return False
+            return _market_passes_discovery_bootstrap_filters(market, spec)
         if spec.spread_max_bps is not None and summary.spread_bps > spec.spread_max_bps:
             return False
         if spec.depth_min_usdc is not None and summary.depth_usdc < spec.depth_min_usdc:
@@ -140,6 +140,21 @@ def _log_selector_funnel(discovered_count: int, selected_count: int) -> None:
     )
 
 
+def _market_passes_discovery_bootstrap_filters(
+    market: Market,
+    spec: MarketSelectionSpec,
+) -> bool:
+    if spec.spread_max_bps is not None:
+        if market.spread_bps is None or market.spread_bps > spec.spread_max_bps:
+            return False
+
+    if spec.depth_min_usdc is not None:
+        if market.liquidity is None or market.liquidity < spec.depth_min_usdc:
+            return False
+
+    return True
+
+
 def _asset_ids_from_eligible_markets(
     eligible_markets: Sequence[tuple[Market, Sequence[Token]]],
 ) -> frozenset[str]:
@@ -147,5 +162,5 @@ def _asset_ids_from_eligible_markets(
         token.token_id
         for _, tokens in eligible_markets
         for token in tokens
-        if token.outcome == "YES"
+        if token.outcome in {"YES", "NO"}
     )

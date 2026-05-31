@@ -629,6 +629,19 @@ CREATE TABLE IF NOT EXISTS backtest_live_comparisons (
 
 -- END INNER-RING PRODUCT SHELLS
 
+CREATE TABLE IF NOT EXISTS runtime_heartbeats (
+    heartbeat_id BIGSERIAL PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    strategy_fingerprint TEXT,
+    component_status_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_heartbeats_run_observed
+    ON runtime_heartbeats (run_id, observed_at);
+
 -- default strategy seed (Invariant 3 NULLABLE→seed pattern).
 -- load-bearing legacy bootstrap row: changing `default-v1` requires a coordinated
 -- migration of every existing inner-ring product row tagged by the pre-S5 runtime.

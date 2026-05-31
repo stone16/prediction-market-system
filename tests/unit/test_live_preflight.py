@@ -438,6 +438,7 @@ def _settings(
         mode=mode,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_exit_criteria_ratified_by="operator",
         live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by="counsel",

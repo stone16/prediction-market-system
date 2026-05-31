@@ -266,12 +266,12 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
                         external_signal={"fair_value": 0.7, "resolved_outcome": 1.0},
                     ),
                     _signal(
-                        market_id="paper-with-depth",
-                        token_id="depth-token",
-                        orderbook={
-                            "bids": [{"price": 0.39, "size": 250.0}],
-                            "asks": [{"price": 0.4, "size": 250.0}],
-                        },
+                            market_id="paper-with-depth",
+                            token_id="depth-token",
+                            orderbook={
+                                "bids": [{"price": 0.399, "size": 250.0}],
+                                "asks": [{"price": 0.401, "size": 250.0}],
+                            },
                         external_signal={"metaculus_prob": 0.9, "resolved_outcome": 1.0},
                     ),
                 ]

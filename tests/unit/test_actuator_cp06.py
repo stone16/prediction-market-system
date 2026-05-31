@@ -1043,6 +1043,7 @@ def _live_settings(
 ) -> PMSSettings:
     return PMSSettings(
         live_trading_enabled=True,
+        api_token="live-api-token",
         controller=ControllerSettings(time_in_force="IOC"),
         polymarket=PolymarketSettings(
             private_key="private-key",
@@ -1087,6 +1088,7 @@ def _true_live_settings_without_preflight_artifact(tmp_path: Path) -> PMSSetting
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_account_reconciliation_required=True,
         live_emergency_audit_path=str(approval_dir / "live-emergency-audit.jsonl"),
         live_first_order_audit_path=str(approval_dir / "first-order-audit.jsonl"),

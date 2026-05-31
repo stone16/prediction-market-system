@@ -28,6 +28,7 @@ class PositionRow(BaseModel):
     mark_age_seconds: float | None = None
     strategy_id: str
     strategy_version_id: str
+    risk_group_id: str | None = None
 
 
 class PositionsResponse(BaseModel):
@@ -51,6 +52,7 @@ async def list_positions(store: PositionsReader) -> PositionsResponse:
                 mark_age_seconds=position.mark_age_seconds,
                 strategy_id=position.strategy_id,
                 strategy_version_id=position.strategy_version_id,
+                risk_group_id=position.risk_group_id,
             )
             for position in positions
         ]

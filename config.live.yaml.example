@@ -74,7 +74,7 @@ strategies:
   flb_calibration_path: /secure/pms/flb-calibration.csv
   flb_min_calibration_samples: 100
   flb_entry_execution_cost_bps: 15.0
-  flb_fee_rate: 0.04
+  flb_fee_rate: 0.07
 
 discord:
   # Secret webhook URL intentionally omitted; stage it with

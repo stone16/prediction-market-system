@@ -68,7 +68,7 @@ def test_fly_live_capital_template_is_separate_from_paper_soak_app() -> None:
     )
     assert live_env["PMS_STRATEGIES__FLB_MIN_CALIBRATION_SAMPLES"] == "100"
     assert live_env["PMS_STRATEGIES__FLB_ENTRY_EXECUTION_COST_BPS"] == "15.0"
-    assert live_env["PMS_STRATEGIES__FLB_FEE_RATE"] == "0.04"
+    assert live_env["PMS_STRATEGIES__FLB_FEE_RATE"] == "0.07"
     assert live_env["PMS_POLYMARKET__OPERATOR_APPROVAL_MODE"] == "every_order"
     assert live_env["PMS_LLM__ENABLED"] == "false"
     assert "PMS_CONFIG_PATH" not in live_env
@@ -153,5 +153,5 @@ def test_fly_live_capital_template_env_values_parse_as_live_settings(
         "/secure/pms/flb-calibration.csv"
     )
     assert settings.strategies.flb_entry_execution_cost_bps == 15.0
-    assert settings.strategies.flb_fee_rate == 0.04
+    assert settings.strategies.flb_fee_rate == 0.07
     assert settings.polymarket.operator_approval_mode == "every_order"

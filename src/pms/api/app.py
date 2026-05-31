@@ -90,6 +90,7 @@ from pms.storage.schema_check import ensure_schema_current
 from pms.storage.decision_store import DecisionStore
 from pms.storage.market_data_store import PostgresMarketDataStore
 from pms.storage.market_subscription_store import PostgresMarketSubscriptionStore
+from pms.storage.runtime_heartbeat_store import RuntimeHeartbeatStore
 from pms.storage.live_reconciliation import (
     SubmissionUnknownReconciliationStore,
     normalize_submission_unknown_decision_id,
@@ -211,7 +212,7 @@ def create_app(
     app.state.runner = active_runner
     app.state.settings = active_runner.config
 
-    @app.get("/status")
+    @app.get("/status", dependencies=[Depends(require_api_token)])
     async def status(request: Request) -> dict[str, Any]:
         records = await active_runner.eval_store.all()
         unresolved_feedback = await list_feedback_items(
@@ -234,6 +235,7 @@ def create_app(
                 request.app.state, "autostart_attempted", False
             ),
             "autostart_error": getattr(request.app.state, "autostart_error", None),
+            "runtime_continuity": await _runtime_continuity_status(active_runner),
             "sensors": _sensor_statuses(active_runner),
             "controller": {
                 "decisions_total": len(active_runner.state.decisions),
@@ -242,15 +244,7 @@ def create_app(
                     active_runner.state.controller_diagnostics,
                 ),
             },
-            "actuator": {
-                "fills_total": len(active_runner.state.fills),
-                "mode": active_runner.state.mode.value,
-                "halt_recovery_cycles_7d": len(
-                    active_runner.actuator_executor.risk.halt_recovery_cycles_since(
-                        status_now - timedelta(days=7)
-                    )
-                ),
-            },
+            "actuator": _actuator_status(active_runner, now=status_now),
             "evaluator": {
                 "eval_records_total": len(records),
                 "brier_overall": metrics_snapshot.brier_overall,
@@ -289,14 +283,14 @@ def create_app(
         )
         return JSONResponse(status_code=code, content=payload)
 
-    @app.get("/signals")
+    @app.get("/signals", dependencies=[Depends(require_api_token)])
     async def signals(limit: int = 50) -> list[dict[str, Any]]:
         return [
             cast(dict[str, Any], _jsonable(signal))
             for signal in _latest(active_runner.state.signals, limit)
         ]
 
-    @app.get("/markets")
+    @app.get("/markets", dependencies=[Depends(require_api_token)])
     async def markets(
         limit: int = Query(default=20, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
@@ -334,7 +328,7 @@ def create_app(
         )
         return payload.model_dump(mode="json")
 
-    @app.get("/markets/{condition_id}")
+    @app.get("/markets/{condition_id}", dependencies=[Depends(require_api_token)])
     async def market_detail(condition_id: str) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
@@ -348,7 +342,10 @@ def create_app(
             raise HTTPException(status_code=404, detail="Market not found") from exc
         return payload.model_dump(mode="json")
 
-    @app.get("/markets/{condition_id}/price-history")
+    @app.get(
+        "/markets/{condition_id}/price-history",
+        dependencies=[Depends(require_api_token)],
+    )
     async def market_price_history(
         condition_id: str,
         since: datetime | None = None,
@@ -412,7 +409,7 @@ def create_app(
         payload = await list_trades_items(active_runner.fill_store, limit=limit)
         return payload.model_dump(mode="json")
 
-    @app.get("/signals/{market_id}/depth")
+    @app.get("/signals/{market_id}/depth", dependencies=[Depends(require_api_token)])
     async def signal_depth(
         market_id: str,
         limit: int = Query(default=20, ge=1, le=200),
@@ -510,7 +507,7 @@ def create_app(
             raise HTTPException(status_code=422, detail=exc.reason) from exc
         return payload.model_dump(mode="json")
 
-    @app.get("/metrics")
+    @app.get("/metrics", dependencies=[Depends(require_api_token)])
     async def metrics(
         since: datetime | None = Query(default=None),
         until: datetime | None = Query(default=None),
@@ -537,14 +534,14 @@ def create_app(
             capital_base_usdc=active_runner.config.risk.max_total_exposure,
         )
 
-    @app.get("/feedback")
+    @app.get("/feedback", dependencies=[Depends(require_api_token)])
     async def feedback(resolved: bool | None = None) -> list[dict[str, Any]]:
         return [
             cast(dict[str, Any], _jsonable(item))
             for item in await list_feedback_items(active_runner.feedback_store, resolved=resolved)
         ]
 
-    @app.get("/stream/events")
+    @app.get("/stream/events", dependencies=[Depends(require_api_token)])
     async def stream_events(
         request: Request,
         last_event_id: int | None = Query(default=None, ge=0),
@@ -578,7 +575,7 @@ def create_app(
             },
         )
 
-    @app.get("/subscriptions")
+    @app.get("/subscriptions", dependencies=[Depends(require_api_token)])
     async def subscriptions() -> dict[str, Any]:
         subscription_controller = active_runner.subscription_controller
         asset_ids = sorted(_current_subscription_asset_ids(active_runner))
@@ -593,19 +590,22 @@ def create_app(
         )
         return response.model_dump(mode="json")
 
-    @app.get("/strategies")
+    @app.get("/strategies", dependencies=[Depends(require_api_token)])
     async def strategies() -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_strategies_items(active_runner.pg_pool)
 
-    @app.get("/strategies/metrics")
+    @app.get("/strategies/metrics", dependencies=[Depends(require_api_token)])
     async def strategy_metrics() -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_strategy_metrics_items(active_runner.pg_pool)
 
-    @app.get("/strategies/{strategy_id}/decay-status")
+    @app.get(
+        "/strategies/{strategy_id}/decay-status",
+        dependencies=[Depends(require_api_token)],
+    )
     async def strategy_decay_status(
         strategy_id: str,
         strategy_version_id: str | None = None,
@@ -631,13 +631,13 @@ def create_app(
             raise HTTPException(status_code=404, detail=SHARE_NOT_FOUND_DETAIL)
         return payload.model_dump(mode="json")
 
-    @app.get("/factors/catalog")
+    @app.get("/factors/catalog", dependencies=[Depends(require_api_token)])
     async def factors_catalog() -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_factor_catalog(active_runner.pg_pool)
 
-    @app.get("/factors")
+    @app.get("/factors", dependencies=[Depends(require_api_token)])
     async def factors(
         factor_id: str,
         market_id: str,
@@ -666,13 +666,13 @@ def create_app(
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/research/backtest")
+    @app.get("/research/backtest", dependencies=[Depends(require_api_token)])
     async def get_backtest_runs(limit: int = Query(default=25, ge=1, le=100)) -> list[dict[str, Any]]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
         return await list_backtest_runs(active_runner.pg_pool, limit=limit)
 
-    @app.get("/research/backtest/{run_id}")
+    @app.get("/research/backtest/{run_id}", dependencies=[Depends(require_api_token)])
     async def get_backtest_run(run_id: str) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
@@ -681,7 +681,10 @@ def create_app(
             raise HTTPException(status_code=404, detail="Backtest run not found")
         return payload
 
-    @app.get("/research/backtest/{run_id}/strategies")
+    @app.get(
+        "/research/backtest/{run_id}/strategies",
+        dependencies=[Depends(require_api_token)],
+    )
     async def get_backtest_strategy_runs(run_id: str) -> list[dict[str, Any]]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
@@ -891,6 +894,49 @@ def _quote_calibration_payload(snapshot: QuoteMetricsSnapshot) -> dict[str, Any]
     }
 
 
+def _quote_mtm_pnl_series(
+    quote_records: Sequence[QuoteEvalRecord],
+) -> list[dict[str, Any]]:
+    cumulative_pnl = Decimal("0")
+    rows: list[dict[str, Any]] = []
+    ordered_records = sorted(
+        quote_records,
+        key=lambda record: (_coerce_aware_datetime(record.recorded_at), record.fill_id),
+    )
+    for record in ordered_records:
+        cumulative_pnl += Decimal(str(record.mtm_pnl))
+        rows.append(
+            {
+                "recorded_at": _coerce_aware_datetime(record.recorded_at).isoformat(),
+                "pnl": float(cumulative_pnl),
+                "source": "quote_mtm",
+            }
+        )
+    return rows
+
+
+def _quote_mtm_max_drawdown_pct(
+    quote_records: Sequence[QuoteEvalRecord],
+    *,
+    capital_base_usdc: float | None,
+) -> float | None:
+    if capital_base_usdc is None or capital_base_usdc <= 0.0:
+        return None
+
+    cumulative_pnl = Decimal("0")
+    peak_equity = Decimal("0")
+    max_drawdown = Decimal("0")
+    ordered_records = sorted(
+        quote_records,
+        key=lambda record: (_coerce_aware_datetime(record.recorded_at), record.fill_id),
+    )
+    for record in ordered_records:
+        cumulative_pnl += Decimal(str(record.mtm_pnl))
+        peak_equity = max(peak_equity, cumulative_pnl)
+        max_drawdown = max(max_drawdown, peak_equity - cumulative_pnl)
+    return float(max_drawdown / Decimal(str(capital_base_usdc)) * Decimal("100"))
+
+
 def _eval_records_since(
     records: Sequence[EvalRecord],
     *,
@@ -1012,6 +1058,11 @@ def _metrics_payload(
         else mark_to_market
     )
     payload["quote_calibration"] = _quote_calibration_payload(quote_snapshot)
+    payload["quote_calibration"]["pnl_series"] = _quote_mtm_pnl_series(quote_records)
+    payload["quote_calibration"]["max_drawdown_pct"] = _quote_mtm_max_drawdown_pct(
+        quote_records,
+        capital_base_usdc=capital_base_usdc,
+    )
     payload["quality"] = _quality_payload(
         records=records,
         metrics_snapshot=collector.global_ops_snapshot(),
@@ -1181,6 +1232,45 @@ def _request_metadata(request: Request) -> dict[str, object]:
         "request_method": request.method,
         "request_path": request.url.path,
     }
+
+
+def _actuator_status(runner: Runner, *, now: datetime) -> dict[str, Any]:
+    active_halt = runner.actuator_executor.risk.active_halt()
+    status: dict[str, Any] = {
+        "fills_total": len(runner.state.fills),
+        "mode": runner.state.mode.value,
+        "halt_recovery_cycles_7d": len(
+            runner.actuator_executor.risk.halt_recovery_cycles_since(
+                now - timedelta(days=7)
+            )
+        ),
+        "halted": active_halt is not None,
+        "halt_reason": None if active_halt is None else active_halt.reason,
+        "halt_trigger_kind": None if active_halt is None else active_halt.trigger_kind,
+        "halt_triggered_at": (
+            None if active_halt is None else _jsonable(active_halt.triggered_at)
+        ),
+    }
+    return status
+
+
+async def _runtime_continuity_status(runner: Runner) -> dict[str, Any] | None:
+    if runner.pg_pool is None or runner.state.runtime_run_id is None:
+        return None
+    continuity = await RuntimeHeartbeatStore(runner.pg_pool).continuity(
+        run_id=runner.state.runtime_run_id
+    )
+    if continuity is None:
+        return {
+            "run_id": runner.state.runtime_run_id,
+            "source": "postgres_runtime_heartbeats",
+            "first_observed_at": None,
+            "last_observed_at": None,
+            "heartbeat_count": 0,
+            "healthy_days": 0,
+            "max_gap_seconds": None,
+        }
+    return continuity.to_payload()
 
 
 def _sensor_statuses(

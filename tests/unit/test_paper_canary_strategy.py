@@ -24,7 +24,7 @@ def _signal(*, yes_price: float = 0.50, best_ask: float = 0.52) -> MarketSignal:
         volume_24h=1000.0,
         resolves_at=datetime(2026, 6, 1, tzinfo=UTC),
         orderbook={
-            "bids": [{"price": 0.48, "size": 100.0}],
+            "bids": [{"price": best_ask - 0.005, "size": 100.0}],
             "asks": [{"price": best_ask, "size": 100.0}],
         },
         external_signal={"raw_event_type": "book", "best_ask": best_ask},

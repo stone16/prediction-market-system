@@ -762,11 +762,18 @@ P0-1 was about activating the LLM forecaster — done; DeepSeek is producing pro
 - Emits a `quasi_eval_records` row (separate table, not `eval_records`).
 - Daily report computes "mid-quote Brier" and a "resolution Brier" — operator can see early signal without breaking the strict-Brier invariant.
 
-**Option B: Constrain market_selection to shorter-resolving markets (~30 min)**
-- Set `resolution_time_max_horizon_days: 7` in `paper_multi_factor_v1` strategy config.
+**Option B: Constrain market_selection to 30-day-soak-compatible markets**
+- Set `resolution_time_max_horizon_days: 31` in `paper_multi_factor_v1` strategy config.
 - MarketSelector filters out long-horizon markets (World Cup, presidential races).
-- Trades only weekly NFL / event markets that resolve in 7d → first Brier sample within 7 days of soak start.
+- Trades only markets expected to resolve inside the 30-day paper-soak window,
+  with a one-day UTC end-of-day buffer for markets resolving just after the
+  report cutoff.
 - Downside: smaller universe, possibly less diverse alpha.
+
+**Runtime update (2026-05-31):** a 7-day horizon produced no live
+opportunities in the current Polymarket discovery pool; the 31-day horizon
+retains near-term NHL markets and adds NBA Finals / MegaETH risk groups while
+excluding 49-day World Cup outrights.
 
 **Recommendation:** Do Option B first (zero infrastructure cost), evaluate edge after 14 days, then decide whether to invest in Option A.
 
@@ -817,7 +824,7 @@ The findings above translate into these concrete spec changes:
 2. **Split P0-1 → P0-1a / P0-1b / P0-1c** (per F-3) — LLM is done; Rules + Stats are not.
 3. **New P0-9: CLOB book staleness fix in `fill_store.py`** (per F-1) — quick win, ~1 day.
 4. **New P0-10: Wire `CalibrationSpec` into `paper_multi_factor_v1` config** (per F-2) — quickest win in the entire spec, ~1 hour.
-5. **Add Option B from F-6 mitigation to P0-6** — constrain paper soak universe to ≤ 7-day resolution horizon, so Gate 3 evidence is achievable in 30 days rather than 50+.
+5. **Add Option B from F-6 mitigation to P0-6** — constrain paper soak universe to ≤ 30-day resolution horizon, so Gate 3 evidence is achievable in 30 days rather than 50+.
 
 ## Updated LIVE Readiness Verdict (after F-1 through F-7)
 

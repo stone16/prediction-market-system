@@ -26,7 +26,7 @@ FAVORITE_YES_THRESHOLD = 0.90
 DEFAULT_FLB_CONFIDENCE = 0.65
 DEFAULT_FLB_CALIBRATION_MIN_SAMPLES = 100
 DEFAULT_FLB_ENTRY_EXECUTION_COST_BPS = 15.0
-DEFAULT_FLB_FEE_RATE = 0.04
+DEFAULT_FLB_FEE_RATE = 0.07
 FlbSignalName = Literal[
     "longshot_yes_overpriced_buy_no",
     "favorite_yes_underpriced_buy_yes",

@@ -365,3 +365,42 @@ def test_decision_evidence_records_secondary_baseline_probabilities() -> None:
     assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
     assert evidence["last_trade_baseline_prob_estimate"] == pytest.approx(0.43)
     assert evidence["category_prior_baseline_prob_estimate"] == pytest.approx(0.52)
+
+
+def test_decision_evidence_projects_direct_no_book_baselines_to_yes_probability() -> None:
+    signal = replace(
+        _signal(),
+        token_id="token-cp07-no",
+        yes_price=0.585,
+        orderbook={
+            "bids": [{"price": 0.58, "size": 20.0}],
+            "asks": [{"price": 0.60, "size": 25.0}],
+        },
+        external_signal={
+            "resolved_outcome": 1.0,
+            "book_age_ms": 75.0,
+            "last_trade_price": 0.57,
+        },
+    )
+    decision = replace(
+        _decision(),
+        token_id="token-cp07-no",
+        outcome="NO",
+        limit_price=0.60,
+    )
+
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at,
+    )
+
+    assert evidence["book_token_id"] == "token-cp07-no"
+    assert evidence["book_token_outcome"] == "NO"
+    assert evidence["yes_price"] == pytest.approx(0.415)
+    assert evidence["direct_token_price"] == pytest.approx(0.585)
+    assert evidence["market_implied_baseline_prob_estimate"] == pytest.approx(0.40)
+    assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
+    assert evidence["last_trade_baseline_prob_estimate"] == pytest.approx(0.43)

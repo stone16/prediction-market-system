@@ -26,6 +26,7 @@ def _eligible_market(
     venue: Venue = "polymarket",
     token_ids: tuple[str, ...] = ("yes", "no"),
     liquidity: float | None = None,
+    spread_bps: int | None = None,
     accepting_orders: bool | None = None,
 ) -> tuple[Market, list[Token]]:
     now = datetime(2026, 4, 18, 9, 0, tzinfo=UTC)
@@ -39,6 +40,7 @@ def _eligible_market(
             created_at=now - timedelta(days=2),
             last_seen_at=now,
             liquidity=liquidity,
+            spread_bps=spread_bps,
             accepting_orders=accepting_orders,
         ),
         [
@@ -224,12 +226,12 @@ async def test_market_selector_builds_strategy_sets_before_merging(
         strategy_market_set_cls(
             strategy_id="alpha",
             strategy_version_id="alpha-v1",
-            asset_ids=frozenset({"pm-yes"}),
+            asset_ids=frozenset({"pm-yes", "pm-no"}),
         ),
         strategy_market_set_cls(
             strategy_id="beta",
             strategy_version_id="beta-v2",
-            asset_ids=frozenset({"pm-b-yes"}),
+            asset_ids=frozenset({"pm-b-yes", "pm-b-no"}),
         ),
     ]
     assert result.asset_ids == ["pm-b-no", "pm-b-yes", "pm-no", "pm-yes"]
@@ -305,12 +307,12 @@ async def test_market_selector_select_per_strategy_returns_pre_merge_strategy_se
         strategy_market_set_cls(
             strategy_id="alpha",
             strategy_version_id="alpha-v1",
-            asset_ids=frozenset({"pm-yes"}),
+            asset_ids=frozenset({"pm-yes", "pm-no"}),
         ),
         strategy_market_set_cls(
             strategy_id="beta",
             strategy_version_id="beta-v2",
-            asset_ids=frozenset({"pm-yes"}),
+            asset_ids=frozenset({"pm-yes", "pm-no"}),
         ),
     ]
 
@@ -465,7 +467,97 @@ async def test_market_selector_applies_spread_depth_liquidity_and_status_filters
         strategy_market_set_cls(
             strategy_id="alpha",
             strategy_version_id="alpha-v1",
-            asset_ids=frozenset({"all-pass-yes"}),
+            asset_ids=frozenset({"all-pass-yes", "all-pass-no"}),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_market_selector_bootstraps_book_filters_from_discovery_snapshot() -> None:
+    selector_module = importlib.import_module("pms.market_selection.selector")
+    market_selector_cls = getattr(selector_module, "MarketSelector")
+    strategy_market_set_cls = _load_symbol(
+        "pms.market_selection.merge",
+        "StrategyMarketSet",
+    )
+
+    class FakeRegistry:
+        async def list_market_selections(
+            self,
+        ) -> list[tuple[str, str, MarketSelectionSpec]]:
+            return [
+                (
+                    "alpha",
+                    "alpha-v1",
+                    MarketSelectionSpec(
+                        venue="polymarket",
+                        resolution_time_max_horizon_days=7,
+                        volume_min_usdc=500.0,
+                        spread_max_bps=100.0,
+                        depth_min_usdc=250.0,
+                    ),
+                )
+            ]
+
+    class FakeStore:
+        async def read_eligible_markets(
+            self,
+            venue: str,
+            max_horizon_days: int | None,
+            min_volume_usdc: float,
+        ) -> list[tuple[Market, list[Token]]]:
+            del venue, max_horizon_days, min_volume_usdc
+            return [
+                _eligible_market(
+                    "bootstrap-pass",
+                    token_ids=("bootstrap-pass-yes", "bootstrap-pass-no"),
+                    liquidity=500.0,
+                    spread_bps=50,
+                ),
+                _eligible_market(
+                    "bootstrap-wide",
+                    token_ids=("bootstrap-wide-yes", "bootstrap-wide-no"),
+                    liquidity=500.0,
+                    spread_bps=150,
+                ),
+                _eligible_market(
+                    "bootstrap-shallow",
+                    token_ids=("bootstrap-shallow-yes", "bootstrap-shallow-no"),
+                    liquidity=200.0,
+                    spread_bps=50,
+                ),
+                _eligible_market(
+                    "bootstrap-missing-spread",
+                    token_ids=(
+                        "bootstrap-missing-spread-yes",
+                        "bootstrap-missing-spread-no",
+                    ),
+                    liquidity=500.0,
+                ),
+            ]
+
+        async def get_latest_book_summary(self, market_id: str) -> BookSummary | None:
+            del market_id
+            return None
+
+    class FailingMergePolicy:
+        def merge(self, selections: list[object]) -> object:
+            msg = f"select_per_strategy should not merge selections: {selections!r}"
+            raise AssertionError(msg)
+
+    selector = market_selector_cls(
+        store=FakeStore(),
+        registry=FakeRegistry(),
+        merge_policy=FailingMergePolicy(),
+    )
+
+    selections = await selector.select_per_strategy()
+
+    assert selections == [
+        strategy_market_set_cls(
+            strategy_id="alpha",
+            strategy_version_id="alpha-v1",
+            asset_ids=frozenset({"bootstrap-pass-yes", "bootstrap-pass-no"}),
         )
     ]
 
@@ -535,6 +627,6 @@ async def test_market_selector_bypasses_book_query_when_book_filters_are_disable
         strategy_market_set_cls(
             strategy_id="alpha",
             strategy_version_id="alpha-v1",
-            asset_ids=frozenset({"missing-book-yes"}),
+            asset_ids=frozenset({"missing-book-yes", "missing-book-no"}),
         )
     ]

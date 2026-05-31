@@ -7,11 +7,12 @@ from typing import Any
 
 import pytest
 
-from pms.config import PMSSettings
+from pms.config import PMSSettings, RiskSettings
 from pms.controller.factor_snapshot import FactorSnapshot
 from pms.controller.factory import ControllerPipelineFactory
+from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import RunMode
-from pms.core.models import MarketSignal, Portfolio
+from pms.core.models import MarketSignal, Portfolio, Position
 from pms.storage.strategy_registry import _strategy_from_config_json
 from pms.strategies.paper_multifactor import (
     PAPER_MULTI_FACTOR_STRATEGY_ID,
@@ -21,7 +22,10 @@ from pms.strategies.projections import FactorCompositionStep
 from pms.strategies.versioning import serialize_strategy_config_json
 
 
-def _signal() -> MarketSignal:
+def _signal(
+    *,
+    orderbook: dict[str, object] | None = None,
+) -> MarketSignal:
     return MarketSignal(
         market_id="phase-a-market",
         token_id="phase-a-token",
@@ -30,7 +34,8 @@ def _signal() -> MarketSignal:
         yes_price=0.50,
         volume_24h=1_000.0,
         resolves_at=datetime(2026, 6, 1, tzinfo=UTC),
-        orderbook={
+        orderbook=orderbook
+        or {
             "bids": [{"price": 0.49, "size": 100.0}],
             "asks": [{"price": 0.51, "size": 100.0}],
         },
@@ -40,12 +45,29 @@ def _signal() -> MarketSignal:
     )
 
 
-def _portfolio() -> Portfolio:
+def _portfolio(open_positions: list[Position] | None = None) -> Portfolio:
+    positions = [] if open_positions is None else open_positions
+    locked_usdc = sum(position.locked_usdc for position in positions)
     return Portfolio(
         total_usdc=1_000.0,
-        free_usdc=1_000.0,
-        locked_usdc=0.0,
-        open_positions=[],
+        free_usdc=1_000.0 - locked_usdc,
+        locked_usdc=locked_usdc,
+        open_positions=positions,
+    )
+
+
+def _position(*, locked_usdc: float = 0.0) -> Position:
+    return Position(
+        market_id="phase-a-market",
+        token_id="phase-a-token",
+        venue="polymarket",
+        side="BUY",
+        shares_held=locked_usdc / 0.50 if locked_usdc > 0.0 else 0.0,
+        avg_entry_price=0.50,
+        unrealized_pnl=0.0,
+        locked_usdc=locked_usdc,
+        strategy_id=PAPER_MULTI_FACTOR_STRATEGY_ID,
+        strategy_version_id="phase-a-v1",
     )
 
 
@@ -93,7 +115,7 @@ def test_paper_multi_factor_strategy_matches_phase_a_contract() -> None:
     assert strategy.eval_spec.metrics == ("brier", "pnl", "fill_rate")
     assert strategy.eval_spec.min_win_rate == pytest.approx(0.45)
     assert strategy.market_selection.venue == "polymarket"
-    assert strategy.market_selection.resolution_time_max_horizon_days == 90
+    assert strategy.market_selection.resolution_time_max_horizon_days == 31
     assert strategy.market_selection.volume_min_usdc == pytest.approx(100.0)
     assert strategy.forecaster.forecasters == (
         ("rules", (("threshold", "0.55"),)),
@@ -101,14 +123,20 @@ def test_paper_multi_factor_strategy_matches_phase_a_contract() -> None:
         ("llm", ()),
     )
     assert tuple(
-        (step.factor_id, step.role, step.threshold, step.required, step.enabled)
+        (
+            step.factor_id,
+            step.role,
+            step.weight,
+            step.threshold,
+            step.required,
+            step.enabled,
+        )
         for step in strategy.config.factor_composition
     ) == (
-        ("orderbook_imbalance", "threshold_edge", 0.10, True, True),
-        ("orderbook_imbalance", "weighted", None, False, True),
-        ("metaculus_prior", "rule_delta", None, False, True),
-        ("favorite_longshot_bias", "rule_delta", None, False, True),
-        ("rules", "blend_weighted", None, False, True),
+        ("orderbook_imbalance", "rule_delta", 0.25, 0.80, True, True),
+        ("metaculus_prior", "rule_delta", 0.3, None, False, True),
+        ("favorite_longshot_bias", "rule_delta", 0.2, None, False, True),
+        ("rules", "blend_weighted", 1.0, None, False, True),
     )
 
 
@@ -143,12 +171,26 @@ def test_paper_multi_factor_strategy_is_rejected_outside_paper_mode() -> None:
         )
 
 
+def test_controller_factory_does_not_let_strategy_min_order_undercut_runtime_risk() -> None:
+    strategy = build_paper_multi_factor_strategy()
+    pipeline = ControllerPipelineFactory(
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            risk=RiskSettings(min_order_usdc=1.0),
+        )
+    ).build(strategy.to_active(strategy_version_id="phase-a-v1"))
+
+    assert isinstance(pipeline.sizer, KellySizer)
+    assert pipeline.sizer.risk is not None
+    assert pipeline.sizer.risk.min_order_usdc == pytest.approx(1.0)
+
+
 @pytest.mark.asyncio
 async def test_paper_multi_factor_can_decide_from_orderbook_imbalance_only() -> None:
     strategy = build_paper_multi_factor_strategy()
     factor_reader = StaticFactorReader(
         FactorSnapshot(
-            values={("orderbook_imbalance", ""): 0.12},
+            values={("orderbook_imbalance", ""): 0.85},
             missing_factors=(),
             snapshot_hash="phase-a-snapshot",
         )
@@ -158,13 +200,85 @@ async def test_paper_multi_factor_can_decide_from_orderbook_imbalance_only() -> 
         factor_reader=factor_reader,
     ).build(strategy.to_active(strategy_version_id="phase-a-v1"))
 
-    decision = await pipeline.decide(_signal(), portfolio=_portfolio())
+    decision = await pipeline.decide(
+        _signal(
+            orderbook={
+                "bids": [{"price": 0.499, "size": 92.5}],
+                "asks": [{"price": 0.501, "size": 7.5}],
+            }
+        ),
+        portfolio=_portfolio(),
+    )
 
     assert decision is not None
     assert decision.strategy_id == PAPER_MULTI_FACTOR_STRATEGY_ID
     assert decision.outcome == "YES"
-    assert decision.limit_price == pytest.approx(0.51)
-    assert decision.prob_estimate == pytest.approx(0.5427309793504078)
-    assert decision.expected_edge == pytest.approx(0.03273097935040781)
+    assert decision.limit_price == pytest.approx(0.501)
+    assert 0.55 < decision.prob_estimate < 0.70
+    assert decision.expected_edge > 0.05
     assert decision.notional_usdc == pytest.approx(2.0)
     assert factor_reader.snapshot_calls
+
+
+@pytest.mark.asyncio
+async def test_paper_multi_factor_skips_remaining_capacity_below_runtime_min_order() -> None:
+    strategy = build_paper_multi_factor_strategy()
+    factor_reader = StaticFactorReader(
+        FactorSnapshot(
+            values={("orderbook_imbalance", ""): 0.85},
+            missing_factors=(),
+            snapshot_hash="phase-a-snapshot",
+        )
+    )
+    pipeline = ControllerPipelineFactory(
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            risk=RiskSettings(min_order_usdc=1.0),
+        ),
+        factor_reader=factor_reader,
+    ).build(strategy.to_active(strategy_version_id="phase-a-v1"))
+
+    decision = await pipeline.decide(
+        _signal(
+            orderbook={
+                "bids": [{"price": 0.499, "size": 92.5}],
+                "asks": [{"price": 0.501, "size": 7.5}],
+            }
+        ),
+        portfolio=_portfolio(open_positions=[_position(locked_usdc=1.31)]),
+    )
+
+    assert decision is None
+    assert pipeline.last_diagnostic is not None
+    assert pipeline.last_diagnostic.code == "market_position_capacity_below_minimum"
+
+
+@pytest.mark.asyncio
+async def test_paper_multi_factor_prefers_signal_local_orderbook_imbalance_over_stale_snapshot() -> None:
+    strategy = build_paper_multi_factor_strategy()
+    factor_reader = StaticFactorReader(
+        FactorSnapshot(
+            values={("orderbook_imbalance", ""): -1.0},
+            missing_factors=(),
+            stale_factors=(("orderbook_imbalance", ""),),
+            snapshot_hash="stale-imbalance-snapshot",
+        )
+    )
+    pipeline = ControllerPipelineFactory(
+        settings=PMSSettings(mode=RunMode.PAPER),
+        factor_reader=factor_reader,
+    ).build(strategy.to_active(strategy_version_id="phase-a-v1"))
+
+    decision = await pipeline.decide(
+        _signal(
+            orderbook={
+                "bids": [{"price": 0.499, "size": 92.5}],
+                "asks": [{"price": 0.501, "size": 7.5}],
+            }
+        ),
+        portfolio=_portfolio(),
+    )
+
+    assert decision is not None
+    assert decision.outcome == "YES"
+    assert decision.prob_estimate > 0.50

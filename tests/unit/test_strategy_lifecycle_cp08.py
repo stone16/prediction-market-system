@@ -240,6 +240,7 @@ def _settings() -> PMSSettings:
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_exit_criteria_ratified_by="test-operator",
         live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
         live_compliance_reviewed_by="test-compliance",

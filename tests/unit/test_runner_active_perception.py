@@ -205,6 +205,7 @@ def _settings(mode: RunMode) -> PMSSettings:
         mode=mode,
         secret_source="fly" if mode == RunMode.LIVE else None,
         live_trading_enabled=mode == RunMode.LIVE,
+        api_token="live-api-token" if mode == RunMode.LIVE else None,
         live_exit_criteria_ratified_by=(
             "test-operator" if mode == RunMode.LIVE else None
         ),
@@ -728,6 +729,7 @@ async def test_reselection_caps_subscription_asset_ids(
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_exit_criteria_ratified_by="test-operator",
         live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
         live_compliance_reviewed_by="test-compliance",
@@ -869,6 +871,7 @@ async def test_refresh_subscription_caps_asset_ids() -> None:
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_exit_criteria_ratified_by="test-operator",
         live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
         live_compliance_reviewed_by="test-compliance",
@@ -939,6 +942,7 @@ async def test_refresh_subscription_protects_open_position_tokens_under_cap() ->
             mode=RunMode.LIVE,
             secret_source="fly",
             live_trading_enabled=True,
+            api_token="live-api-token",
             auto_migrate_default_v2=False,
             database=DatabaseSettings(
                 dsn="postgresql://localhost/pms_test_runner",

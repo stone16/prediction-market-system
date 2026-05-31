@@ -304,7 +304,7 @@ async def test_on_signal_emits_diagnostic_when_composition_resolution_fails() ->
     strategy = _active_strategy(
         composition=(
             FactorCompositionStep(
-                factor_id="orderbook_imbalance",
+                factor_id="missing_weighted_factor",
                 role="weighted",
                 param="",
                 weight=1.0,
@@ -317,7 +317,7 @@ async def test_on_signal_emits_diagnostic_when_composition_resolution_fails() ->
         factor_reader=SnapshotReader(
             FactorSnapshot(
                 values={},
-                missing_factors=(("orderbook_imbalance", ""),),
+                missing_factors=(("missing_weighted_factor", ""),),
                 snapshot_hash="composition-unresolvable",
             )
         ),
@@ -452,7 +452,7 @@ def _live_settings(
     live_readiness_report_max_age_s: float = 7 * 24 * 60 * 60,
     local_secret_file: str | None = None,
     api_host: str = "127.0.0.1",
-    api_token: str | None = None,
+    api_token: str | None = "live-api-token",
 ) -> PMSSettings:
     attested_at = datetime(2026, 5, 25, tzinfo=UTC)
     first_order_audit_path = (
@@ -578,7 +578,12 @@ def test_live_mode_ready_rejects_live_trading_enabled_outside_live_mode() -> Non
 
 def test_live_mode_rejects_exposed_api_without_api_token() -> None:
     with pytest.raises(LiveTradingDisabledError, match="PMS_API_TOKEN"):
-        validate_live_mode_ready(_live_settings(api_host="0.0.0.0"))
+        validate_live_mode_ready(_live_settings(api_host="0.0.0.0", api_token=None))
+
+
+def test_live_mode_rejects_loopback_api_without_api_token() -> None:
+    with pytest.raises(LiveTradingDisabledError, match="PMS_API_TOKEN"):
+        validate_live_mode_ready(_live_settings(api_host="127.0.0.1", api_token=None))
 
 
 def test_live_mode_rejects_discord_alert_dir_inside_working_tree() -> None:
@@ -2610,6 +2615,7 @@ def test_live_mode_requires_passing_operator_rehearsal_report() -> None:
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         auto_migrate_default_v2=False,
         live_emergency_audit_path=str(
             approval_dir / "live-emergency-audit.jsonl"

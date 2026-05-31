@@ -344,3 +344,31 @@ async def test_paper_sell_slippage_band_admits_bid_below_limit() -> None:
     )
 
     assert state.fill_price == pytest.approx(0.298)
+
+
+@pytest.mark.asyncio
+async def test_paper_sell_notional_represents_limit_valued_target_quantity() -> None:
+    target_quantity = 4.0
+    limit_price = 0.125
+    actuator = PaperActuator(
+        orderbooks={
+            "token-yes": {
+                "bids": [{"price": 0.40, "size": 1_000.0}],
+                "asks": [{"price": 0.41, "size": 1_000.0}],
+            }
+        }
+    )
+
+    state = await actuator.execute(
+        _decision_with_slippage(
+            limit_price=limit_price,
+            max_slippage_bps=0,
+            side="SELL",
+            notional_usdc=target_quantity * limit_price,
+        ),
+        _portfolio(),
+    )
+
+    assert state.fill_price == pytest.approx(0.40)
+    assert state.filled_quantity == pytest.approx(target_quantity)
+    assert state.filled_notional_usdc == pytest.approx(target_quantity * 0.40)

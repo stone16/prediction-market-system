@@ -59,6 +59,8 @@ class DecisionRow(BaseModel):
     expires_at: str
     forecaster: str
     kelly_size: float
+    spread_bps_at_decision: int | None = None
+    risk_group_id: str | None = None
     decision_evidence: dict[str, Any]
     opportunity: OpportunityRow | None = None
 
@@ -259,6 +261,8 @@ def _decision_row(row: StoredDecisionLike) -> DecisionRow:
         expires_at=row.expires_at.isoformat(),
         forecaster=row.decision.model_id or "rules",
         kelly_size=row.decision.notional_usdc,
+        spread_bps_at_decision=row.decision.spread_bps_at_decision,
+        risk_group_id=row.decision.risk_group_id,
         decision_evidence=_decision_evidence(row),
         opportunity=(
             OpportunityRow(

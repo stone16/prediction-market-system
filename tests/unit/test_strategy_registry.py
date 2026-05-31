@@ -271,6 +271,27 @@ async def test_set_active_rejects_version_payload_that_does_not_match_id() -> No
 
 
 @pytest.mark.asyncio
+async def test_archive_strategy_clears_active_version_and_notifies_callbacks() -> None:
+    connection = FakeConnection()
+    observed: list[str] = []
+
+    async def on_strategy_change() -> None:
+        observed.append("changed")
+
+    registry = PostgresStrategyRegistry(FakePool(connection))
+    registry.register_change_callback(on_strategy_change)
+
+    await registry.archive_strategy("default")
+
+    assert len(connection.execute_calls) == 1
+    query, args = connection.execute_calls[0]
+    assert "archived = TRUE" in query
+    assert "active_version_id = NULL" in query
+    assert args == ("default",)
+    assert observed == ["changed"]
+
+
+@pytest.mark.asyncio
 async def test_get_by_id_round_trips_json_string_and_handles_missing_rows() -> None:
     strategy = _strategy()
     connection = FakeConnection(
@@ -349,6 +370,7 @@ async def test_list_active_strategies_returns_full_projection_rows() -> None:
             market_selection=strategy.market_selection,
         )
     ]
+    assert "strategies.archived IS NOT TRUE" in connection.fetch_calls[0][0]
 
 
 @pytest.mark.asyncio
@@ -403,6 +425,7 @@ async def test_list_market_selections_returns_projection_rows_for_active_version
     ]
     assert len(connection.fetch_calls) == 1
     assert "active_version_id IS NOT NULL" in connection.fetch_calls[0][0]
+    assert "strategies.archived IS NOT TRUE" in connection.fetch_calls[0][0]
 
 
 def test_ensure_utc_rejects_non_datetime_values() -> None:

@@ -20,6 +20,15 @@ from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import OrderStatus, RunMode
 from pms.core.models import MarketSignal, OrderState, Portfolio, TradeDecision
 from pms.runner import Runner
+from pms.strategies.projections import (
+    ActiveStrategy,
+    EvalSpec,
+    FactorCompositionStep,
+    ForecasterSpec,
+    MarketSelectionSpec,
+    RiskParams,
+    StrategyConfig,
+)
 from tests.support.fake_stores import InMemoryOpportunityStore
 
 
@@ -85,6 +94,17 @@ class NoNoTokenResolver:
         return OutcomeTokens(yes_token_id="runner-token", no_token_id=None)
 
 
+class YesAndNoTokenResolver:
+    async def resolve(
+        self,
+        *,
+        market_id: str,
+        signal_token_id: str | None,
+    ) -> OutcomeTokens:
+        del market_id
+        return OutcomeTokens(yes_token_id=signal_token_id, no_token_id="runner-no-token")
+
+
 def _signal() -> MarketSignal:
     return MarketSignal(
         market_id="runner-cp02",
@@ -108,6 +128,38 @@ def _settings() -> PMSSettings:
         risk=RiskSettings(
             max_position_per_market=1_000.0,
             max_total_exposure=10_000.0,
+        ),
+    )
+
+
+def _bearish_strategy() -> ActiveStrategy:
+    return ActiveStrategy(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        config=StrategyConfig(
+            strategy_id="alpha",
+            factor_composition=(
+                FactorCompositionStep(
+                    factor_id="snapshot_probability",
+                    role="runtime_probability",
+                    param="",
+                    weight=1.0,
+                    threshold=None,
+                ),
+            ),
+            metadata=(),
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=100.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier",)),
+        forecaster=ForecasterSpec(forecasters=(("rules", ()),)),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=100.0,
         ),
     )
 
@@ -201,51 +253,12 @@ async def test_runner_forwards_opportunity_id_to_actuator() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_records_structured_controller_diagnostics_for_skipped_bearish_signal() -> None:
-    from pms.strategies.projections import (
-        ActiveStrategy,
-        EvalSpec,
-        FactorCompositionStep,
-        ForecasterSpec,
-        MarketSelectionSpec,
-        RiskParams,
-        StrategyConfig,
-    )
-
-    strategy = ActiveStrategy(
-        strategy_id="alpha",
-        strategy_version_id="alpha-v1",
-        config=StrategyConfig(
-            strategy_id="alpha",
-            factor_composition=(
-                FactorCompositionStep(
-                    factor_id="snapshot_probability",
-                    role="runtime_probability",
-                    param="",
-                    weight=1.0,
-                    threshold=None,
-                ),
-            ),
-            metadata=(),
-        ),
-        risk=RiskParams(
-            max_position_notional_usdc=100.0,
-            max_daily_drawdown_pct=2.5,
-            min_order_size_usdc=1.0,
-        ),
-        eval_spec=EvalSpec(metrics=("brier",)),
-        forecaster=ForecasterSpec(forecasters=(("rules", ()),)),
-        market_selection=MarketSelectionSpec(
-            venue="polymarket",
-            resolution_time_max_horizon_days=7,
-            volume_min_usdc=100.0,
-        ),
-    )
     runner = Runner(
         config=_settings(),
         historical_data_path=FIXTURE_PATH,
         sensors=[IdleSensor()],
         controller=ControllerPipeline(
-            strategy=strategy,
+            strategy=_bearish_strategy(),
             factor_reader=RecordingFactorReader(),
             outcome_token_resolver=NoNoTokenResolver(),
             forecasters=[StaticLowForecaster()],
@@ -267,3 +280,77 @@ async def test_runner_records_structured_controller_diagnostics_for_skipped_bear
     assert runner.state.decisions == []
     assert runner.state.controller_diagnostics[0].code == "missing_no_token"
     assert runner.state.controller_diagnostics[0].metadata["signal_token_id"] == "runner-token"
+
+
+@pytest.mark.asyncio
+async def test_paper_runner_skips_buy_no_until_no_token_orderbook_is_seen() -> None:
+    captured_decisions: list[TradeDecision] = []
+
+    async def fake_execute(
+        decision: TradeDecision,
+        portfolio: Portfolio | None = None,
+        *,
+        dedup_acquired: bool = False,
+    ) -> OrderState:
+        del portfolio, dedup_acquired
+        captured_decisions.append(decision)
+        return OrderState(
+            order_id=f"order-{decision.decision_id}",
+            decision_id=decision.decision_id,
+            status=OrderStatus.MATCHED.value,
+            market_id=decision.market_id,
+            token_id=decision.token_id,
+            venue=decision.venue,
+            requested_notional_usdc=decision.notional_usdc,
+            filled_notional_usdc=decision.notional_usdc,
+            remaining_notional_usdc=0.0,
+            fill_price=decision.limit_price,
+            submitted_at=datetime(2026, 4, 19, tzinfo=UTC),
+            last_updated_at=datetime(2026, 4, 19, tzinfo=UTC),
+            raw_status="matched",
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            filled_quantity=decision.notional_usdc / decision.limit_price,
+        )
+
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            auto_migrate_default_v2=False,
+            risk=RiskSettings(
+                max_position_per_market=1_000.0,
+                max_total_exposure=10_000.0,
+            ),
+        ),
+        historical_data_path=FIXTURE_PATH,
+        sensors=[IdleSensor()],
+        controller=ControllerPipeline(
+            strategy=_bearish_strategy(),
+            factor_reader=RecordingFactorReader(),
+            outcome_token_resolver=YesAndNoTokenResolver(),
+            forecasters=[StaticLowForecaster()],
+            calibrator=NetcalCalibrator(),
+            sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+            router=Router(ControllerSettings(min_volume=100.0)),
+        ),
+        opportunity_store=cast(Any, InMemoryOpportunityStore()),
+    )
+    runner.actuator_executor = cast(
+        ActuatorExecutor,
+        SimpleNamespace(execute=fake_execute),
+    )
+
+    try:
+        await runner.start()
+        await runner.sensor_stream.queue.put(_signal())
+        await _wait_for_diagnostics(runner, 1)
+    finally:
+        await runner.stop()
+
+    assert captured_decisions == []
+    assert runner.state.opportunities == []
+    assert runner.state.decisions == []
+    diagnostic = runner.state.controller_diagnostics[0]
+    assert diagnostic.code == "paper_orderbook_missing_for_decision_token"
+    assert diagnostic.metadata["decision_outcome"] == "NO"
+    assert diagnostic.metadata["decision_token_id"] == "runner-no-token"

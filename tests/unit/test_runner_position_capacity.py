@@ -114,3 +114,37 @@ class TestWouldExceedPositionCapacity:
             ],
         )
         assert runner._would_exceed_position_capacity(_decision())
+
+    def test_pending_new_position_counts_against_limit(self) -> None:
+        runner = _runner(max_open_positions=2)
+        runner.portfolio = replace(
+            runner.portfolio,
+            open_positions=[_position()],
+        )
+        first = _decision(market_id="market-b", token_id="token-b")
+        second = replace(
+            _decision(market_id="market-c", token_id="token-c"),
+            decision_id="decision-cap-2",
+        )
+
+        assert not runner._would_exceed_position_capacity(first)
+        assert runner._reserve_position_capacity(first) is not None
+
+        assert runner._would_exceed_position_capacity(second)
+
+    def test_released_pending_position_no_longer_counts_against_limit(self) -> None:
+        runner = _runner(max_open_positions=2)
+        runner.portfolio = replace(
+            runner.portfolio,
+            open_positions=[_position()],
+        )
+        first = _decision(market_id="market-b", token_id="token-b")
+        second = replace(
+            _decision(market_id="market-c", token_id="token-c"),
+            decision_id="decision-cap-2",
+        )
+
+        assert runner._reserve_position_capacity(first) is not None
+        runner._release_position_capacity_reservation(first.decision_id)
+
+        assert not runner._would_exceed_position_capacity(second)

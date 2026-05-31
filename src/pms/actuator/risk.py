@@ -111,14 +111,13 @@ class RiskManager:
         if notional <= 0.0:
             return RiskDecision(False, "non_positive_size")
 
-        if notional < self.risk.min_order_usdc:
-            return RiskDecision(False, "min_order_usdc")
-
         reduction = _split_reduction_shares(portfolio, decision)
         if reduction.reducing_shares > 0.0 and reduction.residual_shares > 1e-9:
             return RiskDecision(False, "partial_reduction_unsupported")
         reduces_position = reduction.reducing_shares > 0.0
         residual_notional = 0.0 if reduces_position else notional
+        if residual_notional > 0.0 and notional < self.risk.min_order_usdc:
+            return RiskDecision(False, "min_order_usdc")
 
         if residual_notional > 0.0:
             market_exposure = (
@@ -131,11 +130,15 @@ class RiskManager:
             if total_exposure > self.risk.max_total_exposure:
                 return RiskDecision(False, "max_total_exposure")
 
-        if self.risk.max_exposure_per_risk_group is not None:
+        if (
+            residual_notional > 0.0
+            and self.risk.max_exposure_per_risk_group is not None
+        ):
             if decision.risk_group_id is None:
                 return RiskDecision(False, "missing_risk_group_id")
             if (
-                _risk_group_exposure(portfolio, decision.risk_group_id) + notional
+                _risk_group_exposure(portfolio, decision.risk_group_id)
+                + residual_notional
                 > self.risk.max_exposure_per_risk_group
             ):
                 return RiskDecision(False, "max_exposure_per_risk_group")
@@ -259,6 +262,11 @@ class RiskManager:
             triggered_at=checked_at,
             trigger_kind="none",
         )
+
+    def active_halt(self) -> HaltState | None:
+        if self._halt_state is not None and self._halt_state.halted:
+            return self._halt_state
+        return None
 
     def record_trade_result(self, result: RiskTradeResult) -> None:
         normalized = replace(result, filled_at=_coerce_aware(result.filled_at))

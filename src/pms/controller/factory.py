@@ -149,7 +149,10 @@ def _risk_settings(
         max_daily_loss_usdc=fallback.max_daily_loss_usdc,
         max_open_positions=fallback.max_open_positions,
         max_exposure_per_risk_group=fallback.max_exposure_per_risk_group,
-        min_order_usdc=strategy.risk.min_order_size_usdc,
+        min_order_usdc=max(
+            strategy.risk.min_order_size_usdc,
+            fallback.min_order_usdc,
+        ),
         slippage_threshold_bps=fallback.slippage_threshold_bps,
         max_quantity_shares=fallback.max_quantity_shares,
     )

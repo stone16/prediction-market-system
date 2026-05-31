@@ -129,11 +129,14 @@ cp config.live-soak.yaml config.local.live-soak.yaml
 #   - Adjust risk.max_total_exposure (proposed: $50)
 #   - Adjust risk.max_drawdown_pct (proposed: 20)
 
-# 5. Start paper soak (live data, no real orders)
+# 5. Start paper soak (live data, no real orders). Keep the token private;
+#    scripts/paper_report.py reads the same token from PMS_API_TOKEN.
+export PMS_API_TOKEN="$(openssl rand -hex 32)"
 uv run pms-api --config config.local.live-soak.yaml
 
 # 6. Monitor status
-curl http://127.0.0.1:8000/status
+curl -H "Authorization: Bearer $PMS_API_TOKEN" \
+  http://127.0.0.1:8000/status
 
 # 7. Generate daily paper soak report
 uv run python scripts/paper_report.py --date 2026-05-03
@@ -277,9 +280,16 @@ runtime connection.
 ## Runner lifecycle via the API
 
 ```bash
-curl -X POST http://127.0.0.1:8000/run/start   # begin ingesting signals
-curl       http://127.0.0.1:8000/status        # {running: true, ...}
-curl -X POST http://127.0.0.1:8000/run/stop    # graceful shutdown
+export PMS_API_TOKEN="$(openssl rand -hex 32)"
+
+curl -X POST \
+  -H "Authorization: Bearer $PMS_API_TOKEN" \
+  http://127.0.0.1:8000/run/start   # begin ingesting signals
+curl -H "Authorization: Bearer $PMS_API_TOKEN" \
+  http://127.0.0.1:8000/status      # {running: true, ...}
+curl -X POST \
+  -H "Authorization: Bearer $PMS_API_TOKEN" \
+  http://127.0.0.1:8000/run/stop    # graceful shutdown
 ```
 
 The `Overview` dashboard page includes a **Runner Controls**

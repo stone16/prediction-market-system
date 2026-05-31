@@ -128,6 +128,8 @@ def _decision() -> TradeDecision:
         limit_price=0.41,
         action=Side.BUY.value,
         model_id="model-cp08",
+        risk_group_id="event:cp08",
+        spread_bps_at_decision=75,
     )
 
 
@@ -352,6 +354,8 @@ async def test_get_decisions_include_opportunity_embeds_factor_payload() -> None
             "expires_at": "2026-04-23T10:15:00+00:00",
             "forecaster": "model-cp08",
             "kelly_size": 25.0,
+            "spread_bps_at_decision": 75,
+            "risk_group_id": "event:cp08",
             "decision_evidence": {
                 "book_hash": "book-hash-cp08",
                 "quote_source": "postgres_snapshot",

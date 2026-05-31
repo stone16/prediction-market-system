@@ -54,6 +54,7 @@ class QuoteScorer:
 
 def _mtm_pnl(fill: FillRecord, decision: TradeDecision, quote: BookSummary) -> float:
     action = decision.action if decision.action is not None else decision.side
+    fees = 0.0 if fill.fees is None else fill.fees
     if action == Side.SELL.value:
-        return (fill.fill_price - quote.best_ask) * fill.fill_quantity
-    return (quote.best_bid - fill.fill_price) * fill.fill_quantity
+        return (fill.fill_price - quote.best_ask) * fill.fill_quantity - fees
+    return (quote.best_bid - fill.fill_price) * fill.fill_quantity - fees

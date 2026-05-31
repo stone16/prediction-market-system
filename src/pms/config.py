@@ -34,6 +34,10 @@ _LOOPBACK_API_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"
 _REQUIRED_LIVE_PAPER_SOAK_GATE_CHECKS: tuple[str, ...] = (
     "soak_days",
     "fills",
+    "distinct_markets",
+    "distinct_risk_groups",
+    "max_market_fill_share",
+    "max_risk_group_fill_share",
     "fill_rate",
     "average_slippage_bps",
     "todays_pnl",
@@ -323,7 +327,7 @@ class StrategyRuntimeSettings(BaseModel):
         allow_inf_nan=False,
     )
     flb_fee_rate: float = Field(
-        default=0.04,
+        default=0.07,
         ge=0.0,
         le=1.0,
         allow_inf_nan=False,
@@ -620,13 +624,11 @@ def _require_live_api_control_plane_auth(settings: PMSSettings) -> None:
         msg = "LIVE api_token contains placeholder"
         raise LiveTradingDisabledError(msg)
 
-    if settings.api_host.strip().lower() in _LOOPBACK_API_HOSTS:
-        return
     if api_token is not None and api_token.strip() != "":
         return
     msg = (
-        "LIVE non-loopback API host requires PMS_API_TOKEN before real-money "
-        "startup"
+        "LIVE mode requires PMS_API_TOKEN before real-money startup, including "
+        "loopback control-plane binds"
     )
     raise LiveTradingDisabledError(msg)
 
@@ -1462,6 +1464,8 @@ def _live_paper_soak_gate_detail_semantic_errors(
     for check_name, minimum, strict in (
         ("soak_days", 30.0, False),
         ("fills", 10.0, False),
+        ("distinct_markets", 3.0, False),
+        ("distinct_risk_groups", 3.0, False),
         ("fill_rate", 0.0, True),
         ("cumulative_pnl", 0.0, True),
         ("brier_improvement", 0.0, True),
@@ -1480,6 +1484,8 @@ def _live_paper_soak_gate_detail_semantic_errors(
 
     for check_name, maximum in (
         ("average_slippage_bps", 50.0),
+        ("max_market_fill_share", 0.60),
+        ("max_risk_group_fill_share", 0.60),
         ("brier_score", 0.20),
     ):
         value, error = _paper_soak_numeric_gate_detail_value(rows, check_name)

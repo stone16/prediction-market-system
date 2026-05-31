@@ -65,7 +65,7 @@ strategies:
   flb_calibration_path: null
   flb_min_calibration_samples: 100
   flb_entry_execution_cost_bps: 15.0
-  flb_fee_rate: 0.04
+  flb_fee_rate: 0.07
 
 polymarket:
   host: https://clob.polymarket.com

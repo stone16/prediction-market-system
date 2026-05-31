@@ -69,6 +69,7 @@ exposure cap.
 Generate the daily soak report after each paper run:
 
 ```bash
+export PMS_API_TOKEN="<load from operator secret store>"
 uv run python scripts/paper_report.py --date 2026-05-03
 ```
 
@@ -76,8 +77,10 @@ Reports are written under `docs/paper-reports/YYYY-MM-DD.md` by default for
 daily review. The final LIVE go/no-go report must instead be regenerated at the
 exact private launch path referenced by `live_paper_soak_report_path`. Use
 `--output` for that final artifact and `--dry-run` to print the report in CI or
-during review. Add `--require-go` for the machine-checkable paper-soak gate; it
-returns exit code 1 until every gate row passes:
+during review. `scripts/paper_report.py` reads `PMS_API_TOKEN` from the same
+environment as `pms-api` and sends it as a bearer token when polling protected
+paper API endpoints. Add `--require-go` for the machine-checkable paper-soak
+gate; it returns exit code 1 until every gate row passes:
 
 ```bash
 export PAPER_SOAK_REPORT_DATE="$(date -u +%F)"  # use the completed soak report date
@@ -164,7 +167,9 @@ probability is outside `(0, 1)`. When configured, FLB uses the artifact
 probability and suppresses signals whose net edge is below `min_expected_edge`;
 when null, the old `limit_price + min_expected_edge` placeholder remains
 paper-plumbing only. Net edge subtracts `strategies.flb_entry_execution_cost_bps`
-and the configured `strategies.flb_fee_rate` fee estimate before sizing.
+and the configured `strategies.flb_fee_rate` fee estimate before sizing. Keep
+the static fee estimate conservative until per-market fee telemetry is wired;
+Polymarket fees are market/category specific and queryable per market.
 `pms-live preflight` validates this artifact before it writes a credentialed
 preflight JSON, so a missing or malformed FLB model cannot be discovered only
 after deploy startup. The credentialed preflight fingerprint also binds the
@@ -176,7 +181,7 @@ strategies:
   flb_calibration_path: /secure/pms/flb-calibration.csv
   flb_min_calibration_samples: 100
   flb_entry_execution_cost_bps: 15.0
-  flb_fee_rate: 0.04
+  flb_fee_rate: 0.07
 ```
 
 Replace the static cost fields with paper/live telemetry before promotion.

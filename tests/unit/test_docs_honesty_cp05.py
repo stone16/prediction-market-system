@@ -33,6 +33,14 @@ def test_readme_and_claude_explicitly_document_gated_polymarket_live_mode() -> N
     assert "operator gate" in claude_text
 
 
+def test_readme_paper_api_examples_use_bearer_token_when_token_is_configured() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert 'export PMS_API_TOKEN="$(openssl rand -hex 32)"' in readme_text
+    assert "Authorization: Bearer $PMS_API_TOKEN" in readme_text
+    assert "scripts/paper_report.py reads the same token" in readme_text
+
+
 def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_gate() -> None:
     runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
         encoding="utf-8"

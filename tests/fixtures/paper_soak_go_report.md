@@ -23,6 +23,10 @@
 |---|---|---|
 | soak_days | PASS | 30 >= 30 |
 | fills | PASS | 10 >= 10 |
+| distinct_markets | PASS | 3 >= 3 |
+| distinct_risk_groups | PASS | 3 >= 3 |
+| max_market_fill_share | PASS | 0.4000 <= 0.6000 |
+| max_risk_group_fill_share | PASS | 0.4000 <= 0.6000 |
 | fill_rate | PASS | 0.4000 > 0.0000 |
 | average_slippage_bps | PASS | 10.0000 <= 50.0000 |
 | todays_pnl | PASS | 0.0000 >= -20.0000 |

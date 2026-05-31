@@ -101,6 +101,8 @@ def evaluate_branch_probabilities(
     branch_probabilities: dict[str, float] = {}
 
     rules_probability = _apply_threshold_precedence(composition, factor_values)
+    if rules_probability is None:
+        rules_probability = _apply_rule_delta(composition, factor_values)
     if rules_probability is not None:
         branch_probabilities["rules"] = rules_probability
 
@@ -187,15 +189,55 @@ def _apply_threshold_precedence(
                 continue
             return _required_factor_value(factor_values, "subset_price", "") - edge
         if step.factor_id == "orderbook_imbalance":
-            if abs(edge) < threshold:
-                continue
-            yes_price = _required_factor_value(factor_values, "yes_price", "")
-            return _bounded_probability(yes_price + edge)
+            msg = (
+                "orderbook_imbalance is a raw depth factor, not a probability "
+                "edge; scale it through a strategy rule_delta step"
+            )
+            raise ValueError(msg)
         if abs(edge) < threshold:
             continue
         return edge
 
     return None
+
+
+def _apply_rule_delta(
+    composition: Sequence[FactorCompositionStep],
+    factor_values: Mapping[tuple[str, str], float],
+) -> float | None:
+    rule_steps = tuple(step for step in composition if step.role == "rule_delta")
+    if not rule_steps:
+        return None
+
+    yes_price = _required_factor_value(factor_values, "yes_price", "")
+    probability = yes_price
+    applied = False
+    for step in rule_steps:
+        factor_value = factor_values.get((step.factor_id, step.param))
+        if factor_value is None:
+            continue
+        delta = _rule_delta(step.factor_id, factor_value, market_price=yes_price)
+        if step.threshold is not None and abs(delta) < step.threshold:
+            continue
+        probability += step.weight * delta
+        applied = True
+
+    if not applied:
+        return None
+    return _bounded_probability(probability)
+
+
+def _rule_delta(
+    factor_id: str,
+    factor_value: float,
+    *,
+    market_price: float,
+) -> float:
+    if factor_id == "metaculus_prior":
+        return factor_value - market_price
+    if factor_id == "subset_pricing_violation":
+        return -factor_value
+    return factor_value
 
 
 def _first_runtime_probability(

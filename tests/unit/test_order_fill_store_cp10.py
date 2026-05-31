@@ -473,6 +473,7 @@ async def test_fill_store_read_trades_maps_joined_market_rows_and_skips_missing_
                 "status": "filled",
                 "fee_bps": 10,
                 "fees": 0.1,
+                "risk_group_id": "event:unit-cp10",
             },
         },
         {
@@ -513,6 +514,7 @@ async def test_fill_store_read_trades_maps_joined_market_rows_and_skips_missing_
             strategy_version_id="default-v2",
             fee_bps=10,
             fees=0.1,
+            risk_group_id="event:unit-cp10",
         )
     ]
     assert connection.fetch_calls[0][1] == (10,)

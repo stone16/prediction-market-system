@@ -329,6 +329,7 @@ def _settings(mode: RunMode) -> PMSSettings:
         mode=mode,
         secret_source="fly" if mode == RunMode.LIVE else None,
         live_trading_enabled=mode == RunMode.LIVE,
+        api_token="live-api-token" if mode == RunMode.LIVE else None,
         live_exit_criteria_ratified_by=(
             "test-operator" if mode == RunMode.LIVE else None
         ),
@@ -477,7 +478,8 @@ async def test_set_active_fires_callback_after_acquire_exit() -> None:
         (
             """
         UPDATE strategies
-        SET active_version_id = $2
+        SET active_version_id = $2,
+            archived = FALSE
         WHERE strategy_id = $1
           AND EXISTS (
               SELECT 1
@@ -733,6 +735,7 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_exit_criteria_ratified_by="test-operator",
         live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
         live_compliance_reviewed_by="test-compliance",

@@ -38,7 +38,7 @@ def test_live_soak_config_loads_tight_first_live_risk_caps() -> None:
     assert settings.risk.min_order_usdc == 1.0
     assert settings.risk.slippage_threshold_bps == 50.0
     assert settings.strategies.flb_entry_execution_cost_bps == 15.0
-    assert settings.strategies.flb_fee_rate == 0.04
+    assert settings.strategies.flb_fee_rate == 0.07
 
 
 def test_live_soak_config_relaxes_paper_factor_gate_for_phase_a() -> None:
@@ -174,7 +174,7 @@ def test_live_config_example_is_non_secret_and_uses_soak_risk_envelope() -> None
         "flb_calibration_path": "/secure/pms/flb-calibration.csv",
         "flb_min_calibration_samples": 100,
         "flb_entry_execution_cost_bps": 15.0,
-        "flb_fee_rate": 0.04,
+        "flb_fee_rate": 0.07,
     }
     assert payload["llm"] == {
         "enabled": False,

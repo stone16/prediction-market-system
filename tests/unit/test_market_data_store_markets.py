@@ -436,6 +436,8 @@ async def test_read_market_signal_metadata_returns_nonblank_fields() -> None:
                 "risk_group_id": "event:2028-us-presidential-election",
                 "category": "Politics",
                 "event_id": "",
+                "yes_token_id": "yes-token",
+                "no_token_id": "no-token",
             }
         ]
     )
@@ -446,6 +448,8 @@ async def test_read_market_signal_metadata_returns_nonblank_fields() -> None:
     assert metadata == {
         "risk_group_id": "event:2028-us-presidential-election",
         "category": "Politics",
+        "yes_token_id": "yes-token",
+        "no_token_id": "no-token",
     }
     assert connection.fetchrow_calls[0][1] == ("m-election-risk",)
 

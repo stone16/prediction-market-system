@@ -195,7 +195,7 @@ async def test_paper_runner_fills_against_signal_orderbook_depth(
                         market_id="paper-with-depth",
                         yes_price=0.41,
                         orderbook={
-                            "bids": [{"price": 0.39, "size": 250.0}],
+                            "bids": [{"price": 0.409, "size": 250.0}],
                             "asks": [{"price": 0.41, "size": 250.0}],
                     },
                     external_signal={"metaculus_prob": 0.9, "resolved_outcome": 1.0},
@@ -248,8 +248,8 @@ async def test_runner_start_resets_in_memory_session_state(
                 _signal(
                     market_id="paper-state-reset",
                     orderbook={
-                        "bids": [{"price": 0.39, "size": 250.0}],
-                        "asks": [{"price": 0.41, "size": 250.0}],
+                        "bids": [{"price": 0.399, "size": 250.0}],
+                        "asks": [{"price": 0.401, "size": 250.0}],
                     },
                     external_signal={"metaculus_prob": 0.9, "resolved_outcome": 1.0},
                 )

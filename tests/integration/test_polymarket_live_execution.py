@@ -179,6 +179,7 @@ def _live_settings() -> PMSSettings:
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_emergency_audit_path=str(
             Path(approval_path).parent / "live-emergency-audit.jsonl"
         ),

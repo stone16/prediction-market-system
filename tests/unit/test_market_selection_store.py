@@ -50,6 +50,7 @@ def _row(
     last_seen_at: datetime,
     volume_24h: float | None = 1000.0,
     liquidity: float | None = None,
+    spread_bps: int | None = None,
     token_id: str | None,
     outcome: str | None,
 ) -> dict[str, object]:
@@ -63,6 +64,7 @@ def _row(
         "last_seen_at": last_seen_at,
         "volume_24h": volume_24h,
         "liquidity": liquidity,
+        "spread_bps": spread_bps,
         "token_id": token_id,
         "outcome": outcome,
     }
@@ -82,6 +84,8 @@ async def test_read_eligible_markets_groups_joined_tokens_and_keeps_zero_token_m
                     resolves_at=resolves_at,
                     created_at=created_at,
                     last_seen_at=created_at,
+                    liquidity=1_000.0,
+                    spread_bps=75,
                     token_id="token-yes",
                     outcome="YES",
                 ),
@@ -116,6 +120,8 @@ async def test_read_eligible_markets_groups_joined_tokens_and_keeps_zero_token_m
     assert [token.token_id for token in markets[0][1]] == ["token-yes", "token-no"]
     assert markets[1][1] == []
     assert markets[0][0].volume_24h == 1000.0
+    assert markets[0][0].liquidity == 1000.0
+    assert markets[0][0].spread_bps == 75
     assert len(connection.fetch_calls) == 1
     _, args = connection.fetch_calls[0]
     assert args[0] == "polymarket"

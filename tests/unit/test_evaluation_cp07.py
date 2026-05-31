@@ -8,7 +8,14 @@ from typing import cast
 import pytest
 
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side, TimeInForce
-from pms.core.models import BookSummary, EvalRecord, Feedback, FillRecord, TradeDecision
+from pms.core.models import (
+    BookSide,
+    BookSummary,
+    EvalRecord,
+    Feedback,
+    FillRecord,
+    TradeDecision,
+)
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
 from pms.evaluation.metrics import (
@@ -28,6 +35,7 @@ def _decision(
     decision_id: str = "d-cp07",
     prob: float = 0.7,
     price: float = 0.4,
+    side: BookSide = Side.BUY.value,
     strategy_id: str = "default",
     strategy_version_id: str = "default-v1",
 ) -> TradeDecision:
@@ -36,7 +44,7 @@ def _decision(
         market_id="m-cp07",
         token_id="t-yes",
         venue="polymarket",
-        side=Side.BUY.value,
+        side=side,
         limit_price=price,
         notional_usdc=price * 10.0,
         order_type="limit",
@@ -58,6 +66,8 @@ def _fill(
     resolved_outcome: float | None = 1.0,
     fill_price: float = 0.42,
     status: str = OrderStatus.MATCHED.value,
+    side: str = Side.BUY.value,
+    fees: float | None = None,
     strategy_id: str = "default",
     strategy_version_id: str = "default-v1",
 ) -> FillRecord:
@@ -69,7 +79,7 @@ def _fill(
         market_id="m-cp07",
         token_id="t-yes",
         venue="polymarket",
-        side=Side.BUY.value,
+        side=side,
         fill_price=fill_price,
         fill_notional_usdc=fill_price * 10.0,
         fill_quantity=10.0,
@@ -80,6 +90,7 @@ def _fill(
         strategy_id=strategy_id,
         strategy_version_id=strategy_version_id,
         resolved_outcome=resolved_outcome,
+        fees=fees,
     )
 
 
@@ -194,6 +205,62 @@ def test_quote_scorer_uses_midpoint_for_calibration_and_bid_for_buy_mtm() -> Non
     assert record.quote_score == pytest.approx((0.70 - 0.64) ** 2)
     assert record.mtm_pnl == pytest.approx((0.62 - 0.50) * 10.0)
     assert record.category == "model-a"
+
+
+def test_quote_scorer_subtracts_fill_fees_from_buy_mtm() -> None:
+    quote = BookSummary(
+        best_bid=0.62,
+        best_ask=0.66,
+        spread_bps=625.0,
+        depth_usdc=250.0,
+        timestamp=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    record = QuoteScorer().score(
+        _fill(
+            decision_id="d-quote-fee",
+            resolved_outcome=None,
+            fill_price=0.50,
+            fees=0.15,
+        ),
+        _decision(decision_id="d-quote-fee", prob=0.70, price=0.50),
+        quote,
+        quote_lag_seconds=3600,
+        recorded_at=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    assert record.mtm_pnl == pytest.approx((0.62 - 0.50) * 10.0 - 0.15)
+
+
+def test_quote_scorer_subtracts_fill_fees_from_sell_mtm() -> None:
+    quote = BookSummary(
+        best_bid=0.62,
+        best_ask=0.66,
+        spread_bps=625.0,
+        depth_usdc=250.0,
+        timestamp=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    record = QuoteScorer().score(
+        _fill(
+            decision_id="d-quote-sell-fee",
+            resolved_outcome=None,
+            fill_price=0.70,
+            side=Side.SELL.value,
+            fees=0.12,
+        ),
+        _decision(
+            decision_id="d-quote-sell-fee",
+            prob=0.30,
+            price=0.70,
+            side=Side.SELL.value,
+        ),
+        quote,
+        quote_lag_seconds=3600,
+        recorded_at=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    assert record.mtm_pnl == pytest.approx((0.70 - 0.66) * 10.0 - 0.12)
 
 
 def test_scorer_scores_secondary_baselines_from_decision_evidence() -> None:

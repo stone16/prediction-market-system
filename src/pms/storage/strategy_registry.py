@@ -115,7 +115,8 @@ class PostgresStrategyRegistry:
         """
         update_strategy_query = """
         UPDATE strategies
-        SET active_version_id = $2
+        SET active_version_id = $2,
+            archived = FALSE
         WHERE strategy_id = $1
         """
         async with self._pool.acquire() as connection:
@@ -246,6 +247,7 @@ class PostgresStrategyRegistry:
             ON versions.strategy_id = strategies.strategy_id
            AND versions.strategy_version_id = strategies.active_version_id
         WHERE strategies.active_version_id IS NOT NULL
+          AND strategies.archived IS NOT TRUE
         ORDER BY strategies.strategy_id ASC
         """
         async with self._pool.acquire() as connection:
@@ -282,6 +284,7 @@ class PostgresStrategyRegistry:
             ON versions.strategy_id = strategies.strategy_id
            AND versions.strategy_version_id = strategies.active_version_id
         WHERE strategies.active_version_id IS NOT NULL
+          AND strategies.archived IS NOT TRUE
         ORDER BY strategies.strategy_id ASC
         """
         async with self._pool.acquire() as connection:
@@ -325,7 +328,8 @@ class PostgresStrategyRegistry:
         """
         update_strategy_query = """
         UPDATE strategies
-        SET active_version_id = $2
+        SET active_version_id = $2,
+            archived = FALSE
         WHERE strategy_id = $1
           AND EXISTS (
               SELECT 1
@@ -372,6 +376,17 @@ class PostgresStrategyRegistry:
                 f"strategy_id={strategy_id!r}, strategy_version_id={strategy_version_id!r}"
             )
             raise LookupError(msg)
+        await self._notify_strategy_change()
+
+    async def archive_strategy(self, strategy_id: str) -> None:
+        query = """
+        UPDATE strategies
+        SET archived = TRUE,
+            active_version_id = NULL
+        WHERE strategy_id = $1
+        """
+        async with self._pool.acquire() as connection:
+            await connection.execute(query, strategy_id)
         await self._notify_strategy_change()
 
     async def populate_strategy_factors(
