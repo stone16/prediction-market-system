@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
 import importlib
 import logging
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -96,6 +96,42 @@ def test_union_merge_policy_returns_sorted_union_without_conflicts() -> None:
     )
 
     assert result.asset_ids == ["asset-a", "asset-b", "asset-c"]
+    assert result.conflicts == []
+
+
+def test_union_merge_policy_preserves_ranked_strategy_asset_order() -> None:
+    strategy_market_set_cls = _load_symbol(
+        "pms.market_selection.merge",
+        "StrategyMarketSet",
+    )
+    union_merge_policy_cls = _load_symbol(
+        "pms.market_selection.merge",
+        "UnionMergePolicy",
+    )
+
+    result = union_merge_policy_cls().merge(
+        [
+            strategy_market_set_cls(
+                strategy_id="alpha",
+                strategy_version_id="alpha-v1",
+                asset_ids=frozenset({"market-a-no", "market-a-yes"}),
+                ranked_asset_ids=("market-a-no", "market-a-yes"),
+            ),
+            strategy_market_set_cls(
+                strategy_id="beta",
+                strategy_version_id="beta-v2",
+                asset_ids=frozenset({"market-b-no", "market-b-yes", "market-a-no"}),
+                ranked_asset_ids=("market-b-no", "market-b-yes", "market-a-no"),
+            ),
+        ]
+    )
+
+    assert result.asset_ids == [
+        "market-a-no",
+        "market-a-yes",
+        "market-b-no",
+        "market-b-yes",
+    ]
     assert result.conflicts == []
 
 
@@ -236,6 +272,15 @@ async def test_market_selector_builds_strategy_sets_before_merging(
             asset_ids=frozenset({"pm-b-yes", "pm-b-no"}),
         ),
     ]
+    assert merge_policy.selections is not None
+    assert cast(Any, merge_policy.selections[0]).ranked_asset_ids == (
+        "pm-no",
+        "pm-yes",
+    )
+    assert cast(Any, merge_policy.selections[1]).ranked_asset_ids == (
+        "pm-b-no",
+        "pm-b-yes",
+    )
     assert result.asset_ids == ["pm-b-no", "pm-b-yes", "pm-no", "pm-yes"]
     assert result.conflicts == []
 

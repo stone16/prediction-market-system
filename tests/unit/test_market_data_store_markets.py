@@ -119,6 +119,25 @@ async def _read_markets_query(
 
 
 @pytest.mark.asyncio
+async def test_read_eligible_markets_prioritizes_volume_and_liquidity_in_sql() -> None:
+    connection = FakeConnection(fetch_results=[[]])
+    store = PostgresMarketDataStore(FakePool(connection))
+
+    await store.read_eligible_markets(
+        venue="polymarket",
+        max_horizon_days=31,
+        min_volume_usdc=100.0,
+    )
+
+    query, _ = connection.fetch_calls[0]
+    assert "COALESCE(markets.volume_24h, 0) DESC" in query
+    assert "COALESCE(markets.liquidity, 0) DESC" in query
+    assert query.index("COALESCE(markets.volume_24h, 0) DESC") < query.index(
+        "markets.condition_id ASC"
+    )
+
+
+@pytest.mark.asyncio
 async def test_read_markets_returns_rows_total_and_filters_to_active_markets_in_sql() -> None:
     updated_at = datetime(2026, 4, 23, 9, 30, tzinfo=UTC)
     connection = FakeConnection(

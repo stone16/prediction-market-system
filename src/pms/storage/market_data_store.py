@@ -487,6 +487,8 @@ class PostgresMarketDataStore:
                 )
           )
         ORDER BY
+            COALESCE(markets.volume_24h, 0) DESC,
+            COALESCE(markets.liquidity, 0) DESC,
             markets.condition_id ASC,
             CASE tokens.outcome WHEN 'YES' THEN 0 WHEN 'NO' THEN 1 ELSE 2 END,
             tokens.token_id ASC

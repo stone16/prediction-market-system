@@ -24,6 +24,7 @@ class MissingPolymarketCredentialsError(LiveTradingDisabledError):
 
 SecretSource = Literal["fly", "local_file"]
 OperatorApprovalMode = Literal["first_order", "every_order"]
+DiscoveryOrder = Literal["volume24hr", "volumeNum", "liquidityNum", "createdAt"]
 
 
 _LIVE_PAPER_REPORT_GENERATOR = "scripts/paper_report.py"
@@ -318,6 +319,8 @@ class SensorSettings(BaseModel):
     discovery_page_limit: int = Field(default=500, ge=1, le=500)
     discovery_max_pages: int = Field(default=1, ge=1)
     discovery_pagination_mode: Literal["keyset", "offset"] = "keyset"
+    discovery_order: DiscoveryOrder | None = None
+    discovery_ascending: bool = False
     discovery_http_timeout_s: float = Field(default=10.0, gt=0.0)
     discovery_http_pool_timeout_s: float = Field(default=10.0, gt=0.0)
     discovery_http_max_connections: int = Field(default=10, ge=1)

@@ -984,6 +984,8 @@ class Runner:
                 page_limit=self.config.sensor.discovery_page_limit,
                 max_pages=self.config.sensor.discovery_max_pages,
                 pagination_mode=self.config.sensor.discovery_pagination_mode,
+                order=self.config.sensor.discovery_order,
+                ascending=self.config.sensor.discovery_ascending,
                 persist_price_snapshots=(
                     self.config.sensor.persist_discovery_price_snapshots
                 ),

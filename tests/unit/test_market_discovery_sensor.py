@@ -407,6 +407,8 @@ async def test_market_discovery_sensor_keyset_paginates_until_empty_cursor() -> 
         params = dict(request.url.params)
         assert "offset" not in params
         assert "cursor" not in params
+        assert params.get("order") == "volume24hr"
+        assert params.get("ascending") == "false"
         captured_cursors.append(params.get("after_cursor"))
         if params.get("after_cursor") is None:
             payload = {
@@ -442,6 +444,8 @@ async def test_market_discovery_sensor_keyset_paginates_until_empty_cursor() -> 
         page_limit=100,
         max_pages=5,
         pagination_mode="keyset",
+        order="volume24hr",
+        ascending=False,
     )
 
     await sensor.poll_once()

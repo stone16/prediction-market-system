@@ -40,6 +40,8 @@ class MarketDiscoverySensor:
     page_limit: int = 500
     max_pages: int = 1
     pagination_mode: Literal["keyset", "offset"] = "offset"
+    order: str | None = None
+    ascending: bool = False
     persist_price_snapshots: bool = False
     on_poll_complete: Callable[[], Awaitable[None]] | None = None
 
@@ -171,6 +173,9 @@ class MarketDiscoverySensor:
             "closed": "false",
             "limit": str(self.page_limit),
         }
+        if self.order is not None and self.order.strip() != "":
+            params["order"] = self.order
+            params["ascending"] = _bool_param(self.ascending)
         if cursor is not None:
             params["after_cursor"] = cursor
         response = await self.http_client.get(
@@ -191,14 +196,16 @@ class MarketDiscoverySensor:
         return rows, len(raw_markets), next_cursor
 
     async def _fetch_page(self, page_index: int) -> tuple[list[dict[str, Any]], int]:
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": str(self.page_limit),
+            "offset": str(page_index * self.page_limit),
+        }
+        params.update(_pagination_sort_params(self.order, self.ascending))
         response = await self.http_client.get(
             "/markets",
-            params={
-                "active": "true",
-                "closed": "false",
-                "limit": str(self.page_limit),
-                "offset": str(page_index * self.page_limit),
-            },
+            params=params,
         )
         response.raise_for_status()
         payload = response.json()
@@ -507,6 +514,19 @@ def _record_price_fields_populated_ratio(markets: list[Market]) -> None:
     )
     total = len(markets) * _DISCOVERY_PRICE_FIELD_COUNT
     set_metric(SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC, populated / total)
+
+
+def _pagination_sort_params(order: str | None, ascending: bool) -> dict[str, str]:
+    if order is None or order.strip() == "":
+        return {}
+    return {
+        "order": order,
+        "ascending": _bool_param(ascending),
+    }
+
+
+def _bool_param(value: bool) -> str:
+    return "true" if value else "false"
 
 
 async def _record_snapshot_lag_seconds_max(store: PostgresMarketDataStore) -> None:

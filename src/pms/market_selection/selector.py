@@ -75,11 +75,13 @@ class MarketSelector:
             )
             self._last_discovered_count += len(eligible_markets)
             filtered_markets = await self._filter_markets(eligible_markets, spec)
+            ranked_asset_ids = _asset_ids_from_eligible_markets(filtered_markets)
             selections.append(
                 StrategyMarketSet(
                     strategy_id=strategy_id,
                     strategy_version_id=strategy_version_id,
-                    asset_ids=_asset_ids_from_eligible_markets(filtered_markets),
+                    asset_ids=frozenset(ranked_asset_ids),
+                    ranked_asset_ids=ranked_asset_ids,
                 )
             )
         return selections
@@ -167,10 +169,16 @@ def _market_passes_discovery_bootstrap_filters(
 
 def _asset_ids_from_eligible_markets(
     eligible_markets: Sequence[tuple[Market, Sequence[Token]]],
-) -> frozenset[str]:
-    return frozenset(
-        token.token_id
-        for _, tokens in eligible_markets
-        for token in tokens
-        if token.outcome in {"YES", "NO"}
-    )
+) -> tuple[str, ...]:
+    ordered_asset_ids: list[str] = []
+    seen: set[str] = set()
+    for _, tokens in eligible_markets:
+        market_asset_ids = sorted(
+            token.token_id for token in tokens if token.outcome in {"YES", "NO"}
+        )
+        for asset_id in market_asset_ids:
+            if asset_id in seen:
+                continue
+            seen.add(asset_id)
+            ordered_asset_ids.append(asset_id)
+    return tuple(ordered_asset_ids)
