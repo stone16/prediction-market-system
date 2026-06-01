@@ -1099,21 +1099,21 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
     assert metrics.average_slippage_bps == pytest.approx(20.0)
     assert metrics.average_fee_bps == pytest.approx(2.5)
     assert metrics.average_edge_bps == pytest.approx(350.0)
-    assert metrics.average_net_edge_bps == pytest.approx(252.5)
+    assert metrics.average_net_edge_bps == pytest.approx(288.2375)
     assert metrics.trade_costs == (
         TradeCostBreakdown(
             decision_id="d-1",
             market_id="m-1",
             gross_edge=0.04,
-            spread_cost=0.01,
-            net_edge=0.03,
+            spread_cost=0.006,
+            net_edge=0.034,
         ),
         TradeCostBreakdown(
             decision_id="d-2",
             market_id="m-2",
             gross_edge=0.03,
-            spread_cost=0.005,
-            net_edge=0.024999999999999998,
+            spread_cost=0.00345,
+            net_edge=0.026549999999999997,
         ),
     )
     assert metrics.rejection_reasons == (
@@ -1641,7 +1641,7 @@ def test_metrics_from_api_payloads_counts_downstream_statuses_as_accepted() -> N
             "runtime_continuity": _runtime_continuity_status(),
             "sensors": [],
             "controller": {
-                "decisions_total": 7,
+                "decisions_total": 8,
                 "diagnostics_total": 5,
                 "diagnostic_counts": {"decision_net_edge_not_positive": 5},
             },
@@ -1685,6 +1685,11 @@ def test_metrics_from_api_payloads_counts_downstream_statuses_as_accepted() -> N
                 "decision_id": "decision-open",
                 "status": "pending",
                 "created_at": "2026-05-30T07:00:00+00:00",
+            },
+            {
+                "decision_id": "exit-stop_loss-filled",
+                "status": "filled",
+                "created_at": "2026-05-30T08:00:00+00:00",
             },
         ],
         trades={"trades": []},
@@ -2942,6 +2947,59 @@ def test_metrics_from_api_payloads_flags_missing_required_baseline_evidence() ->
     ) in metrics.risk_events
 
 
+def test_secondary_baseline_scores_are_not_due_before_resolved_eval_samples() -> None:
+    report_date = date(2026, 5, 30)
+    metrics = metrics_from_api_payloads(
+        report_date=report_date,
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {
+                "eval_records_total": 0,
+                "brier_14d": None,
+                "baseline_brier_14d": None,
+                "brier_improvement_14d": None,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(report_date)},
+        decisions=[
+            {
+                "decision_id": "d-no-resolved-eval",
+                "market_id": "m-no-resolved-eval",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "decision_evidence": {
+                    "market_implied_baseline_prob_estimate": 0.60,
+                    "mid_quote_baseline_prob_estimate": 0.59,
+                },
+            },
+        ],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert not any(
+        trigger == "secondary baseline score incomplete"
+        for _event_time, trigger, _status in metrics.risk_events
+    )
+
+
 def test_paper_soak_gate_fails_when_covered_secondary_baseline_lacks_score() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
@@ -4136,7 +4194,7 @@ def test_paper_soak_gate_fails_when_decision_payload_contains_non_finite_edge_va
         ),
     )
 
-    assert metrics.average_net_edge_bps == pytest.approx(430.0)
+    assert metrics.average_net_edge_bps == pytest.approx(465.0)
     assert (
         "report generation",
         "non-finite numeric evidence",
@@ -4367,7 +4425,7 @@ def test_paper_report_renders_calibration_and_cost_diagnostics() -> None:
     assert "| [10%-20%) | 3 | insufficient data |" in report
     assert "| [50%-60%) | 5 | 60.0% |" in report
     assert "## Spread Cost Decomposition" in report
-    assert "| d-cost-1 | m-cost | 12.0% | 0.8% | 11.2% |" in report
+    assert "| d-cost-1 | m-cost | 12.0% | 0.4% | 11.6% |" in report
     assert "## Extreme Probability Rejections" in report
     assert "| m-extreme | 2 |" in report
     assert "## Selection Funnel" in report

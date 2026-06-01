@@ -45,7 +45,11 @@ def _position(
     )
 
 
-def _signal(*, yes_price: float = 0.50, token_id: str = "exit-token") -> MarketSignal:
+def _signal(
+    *,
+    yes_price: float = 0.50,
+    token_id: str | None = "exit-token",
+) -> MarketSignal:
     return MarketSignal(
         market_id="exit-market",
         token_id=token_id,
@@ -154,7 +158,7 @@ def test_position_exit_monitor_disabled_triggers_never_fire() -> None:
     assert monitor.evaluate(_position(pnl_pct=-99.0, opened_days_ago=30), now=NOW) is None
 
 
-def test_mark_position_from_yes_signal_marks_no_token_position() -> None:
+def test_mark_position_from_opposite_token_signal_is_skipped() -> None:
     from pms.actuator.exit_monitor import mark_position_from_signal
 
     position = _position(token_id="exit-token-no", current_price=0.40)
@@ -162,11 +166,7 @@ def test_mark_position_from_yes_signal_marks_no_token_position() -> None:
 
     marked = mark_position_from_signal(position, signal)
 
-    assert marked is not None
-    assert marked.token_id == "exit-token-no"
-    assert marked.current_price == pytest.approx(0.24)
-    assert marked.unrealized_pnl == pytest.approx((0.24 - 0.50) * 100.0)
-    assert marked.mark_source == "signal"
+    assert marked is None
 
 
 def test_exit_decision_from_no_signal_preserves_yes_token_outcome() -> None:
@@ -177,7 +177,7 @@ def test_exit_decision_from_no_signal_preserves_yes_token_outcome() -> None:
     )
     from pms.core.enums import TimeInForce
 
-    position = _position(token_id="asset-yes-token", current_price=0.40)
+    position = _position(token_id="asset-yes-token", current_price=0.74)
     signal = _signal(yes_price=0.25, token_id="asset-no-token")
     signal = replace(
         signal,
@@ -187,15 +187,13 @@ def test_exit_decision_from_no_signal_preserves_yes_token_outcome() -> None:
         },
     )
 
-    marked = mark_position_from_signal(position, signal)
-    assert marked is not None
-    assert marked.current_price == pytest.approx(0.74)
+    assert mark_position_from_signal(position, signal) is None
 
     decision = build_exit_decision(
         signal,
         PositionExitSignal(
             trigger="profit_take",
-            position=marked,
+            position=position,
             pnl_pct=48.0,
             held_days=1.0,
             current_price=0.74,
@@ -226,6 +224,14 @@ def test_mark_position_from_unpriced_signal_is_skipped() -> None:
     )
 
     assert mark_position_from_signal(_position(), signal) is None
+
+
+def test_mark_position_from_tokenless_signal_skips_tokenized_position() -> None:
+    from pms.actuator.exit_monitor import mark_position_from_signal
+
+    signal = _signal(yes_price=0.14, token_id=None)
+
+    assert mark_position_from_signal(_position(token_id="exit-token"), signal) is None
 
 
 def test_position_exit_monitor_priority_order() -> None:
@@ -401,7 +407,7 @@ async def test_runner_converts_exit_signal_to_opposing_trade_decision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_exits_from_complementary_token_signal() -> None:
+async def test_runner_skips_exit_from_complementary_token_signal() -> None:
     executor = CapturingExecutor()
     signal = replace(
         _signal(yes_price=0.87, token_id="asset-no-token"),
@@ -439,8 +445,4 @@ async def test_runner_exits_from_complementary_token_signal() -> None:
     finally:
         await runner.stop()
 
-    assert len(executor.decisions) == 1
-    decision = executor.decisions[0]
-    assert decision.token_id == "asset-yes-token"
-    assert decision.stop_conditions == ["position_exit:stop_loss"]
-    assert decision.limit_price == pytest.approx(0.13)
+    assert executor.decisions == []

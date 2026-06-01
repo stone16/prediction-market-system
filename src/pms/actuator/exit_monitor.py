@@ -171,6 +171,14 @@ def _limit_order_price(current_price: float) -> float:
 
 
 def _mark_price_for_position(position: Position, signal: MarketSignal) -> float | None:
+    if (
+        position.token_id is not None
+        and signal.token_id is not None
+        and position.token_id != signal.token_id
+    ):
+        return None
+    if position.token_id is not None and signal.token_id is None:
+        return None
     bid = _best_book_price(signal.orderbook.get("bids"), side="bid")
     ask = _best_book_price(signal.orderbook.get("asks"), side="ask")
     if (

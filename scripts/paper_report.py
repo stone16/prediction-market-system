@@ -317,13 +317,14 @@ def metrics_from_api_payloads(
     events.extend(_non_finite_decision_risk_events(decision_rows))
     baseline_evidence = _baseline_evidence_coverage(decision_rows)
     events.extend(_baseline_evidence_risk_events(decision_rows))
-    events.extend(
-        _baseline_evidence_score_risk_events(
-            baseline_evidence,
-            baseline_brier_by_source=baseline_brier_by_source,
-            brier_improvement_by_source=brier_improvement_by_source,
+    if _secondary_baseline_scores_are_due(metric_rows, evaluator):
+        events.extend(
+            _baseline_evidence_score_risk_events(
+                baseline_evidence,
+                baseline_brier_by_source=baseline_brier_by_source,
+                brier_improvement_by_source=brier_improvement_by_source,
+            )
         )
-    )
     trade_rows = _trade_rows_in_soak_window(
         _list_value(trades, "trades"),
         started_at=started_at,
@@ -1401,7 +1402,10 @@ def _trade_costs(decisions: Sequence[TradeDecision]) -> tuple[TradeCostBreakdown
         if decision.spread_bps_at_decision is None:
             continue
         gross_edge = decision.prob_estimate - decision.limit_price
-        spread_cost = decision.spread_bps_at_decision / 10_000.0
+        spread_cost = _price_space_cost(
+            bps=decision.spread_bps_at_decision,
+            price=decision.limit_price,
+        )
         costs.append(
             TradeCostBreakdown(
                 decision_id=decision.decision_id,
@@ -1423,7 +1427,10 @@ def _trade_costs_from_decision_rows(
         gross_edge = _decision_edge(row)
         if spread_bps is None or gross_edge is None:
             continue
-        spread_cost = spread_bps / 10_000.0
+        spread_cost = _price_space_cost(
+            bps=spread_bps,
+            price=_decision_price(row),
+        )
         costs.append(
             TradeCostBreakdown(
                 decision_id=_string_from_mapping(row, "decision_id", "unknown"),
@@ -1991,6 +1998,32 @@ def _secondary_baseline_score_risk_events(
     return events
 
 
+def _secondary_baseline_scores_are_due(
+    metrics: dict[str, Any],
+    evaluator: Mapping[str, Any],
+) -> bool:
+    metric_record_count = _int_value(metrics.get("record_count"))
+    if metric_record_count is not None:
+        return metric_record_count > 0
+    evaluator_record_count = _int_value(evaluator.get("eval_records_total"))
+    if evaluator_record_count is not None:
+        return evaluator_record_count > 0
+    return (
+        _optional_float_from_dict_first(
+            evaluator,
+            (
+                "brier_14d",
+                "brier_overall",
+                "baseline_brier_14d",
+                "baseline_brier_overall",
+                "brier_improvement_14d",
+                "brier_improvement_overall",
+            ),
+        )
+        is not None
+    )
+
+
 def _daily_pnl_from_metrics(
     metrics: dict[str, Any],
     *,
@@ -2126,7 +2159,7 @@ def _accepted_decision_count(
 ) -> int:
     accepted_decision_ids = {
         decision_id
-        for row in decision_rows
+        for row in _entry_decision_rows(decision_rows)
         if (decision_id := _string_from_mapping(row, "decision_id", ""))
         and _decision_status_is_accepted(row.get("status"))
     }
@@ -2715,39 +2748,26 @@ def _average_edge_bps(decisions: Sequence[Mapping[str, object]]) -> float | None
 
 
 def _average_fee_bps(trades: Sequence[Mapping[str, object]]) -> float | None:
-    fee_values = [_optional_float_from_mapping(row, "fees") for row in trades]
-    total_notional = sum(
-        _optional_float_from_mapping(row, "fill_notional_usdc") or 0.0
-        for row in trades
-    )
-    if total_notional > 0.0 and fee_values and all(
-        value is not None for value in fee_values
-    ):
-        total_fees = sum(value for value in fee_values if value is not None)
-        return total_fees / total_notional * 10_000.0
-
-    fee_bps_values = [
-        fee_bps
-        for row in trades
-        if (fee_bps := _optional_float_from_mapping(row, "fee_bps")) is not None
-    ]
-    if not fee_bps_values:
-        return None
-    return sum(fee_bps_values) / len(fee_bps_values)
+    fee_notional_bps = _average_fee_notional_bps_from_amounts(trades)
+    if fee_notional_bps is not None:
+        return fee_notional_bps
+    return _average_fee_rate_bps_from_trades(trades)
 
 
 def _average_spread_cost_bps(
     decisions: Sequence[Mapping[str, object]],
 ) -> float | None:
-    spreads = [
-        spread_bps
+    spread_costs = [
+        spread_cost * 10_000.0
         for row in _entry_decision_rows(decisions)
-        if (spread_bps := _optional_float_from_mapping(row, "spread_bps_at_decision"))
+        if (
+            spread_cost := _spread_cost_for_decision(row)
+        )
         is not None
     ]
-    if not spreads:
+    if not spread_costs:
         return None
-    return sum(spreads) / len(spreads)
+    return sum(spread_costs) / len(spread_costs)
 
 
 def _average_net_edge_bps(
@@ -2758,15 +2778,164 @@ def _average_net_edge_bps(
 ) -> float | None:
     average_edge = _average_edge_bps(decisions)
     average_spread_cost = _average_spread_cost_bps(decisions)
-    average_fee = _average_fee_bps(_entry_trade_rows(trade_rows))
+    average_slippage_cost = _average_slippage_cost_bps(
+        decisions,
+        average_slippage_bps=average_slippage_bps,
+    )
+    average_fee = _average_fee_edge_bps(decisions, _entry_trade_rows(trade_rows))
     if (
         average_edge is None
         or average_spread_cost is None
-        or average_slippage_bps is None
+        or average_slippage_cost is None
         or average_fee is None
     ):
         return None
-    return average_edge - average_spread_cost - average_slippage_bps - average_fee
+    return average_edge - average_spread_cost - average_slippage_cost - average_fee
+
+
+def _spread_cost_for_decision(row: Mapping[str, object]) -> float | None:
+    spread_bps = _optional_float_from_mapping(row, "spread_bps_at_decision")
+    if spread_bps is None:
+        return None
+    return _price_space_cost(bps=spread_bps, price=_decision_price(row))
+
+
+def _average_slippage_cost_bps(
+    decisions: Sequence[Mapping[str, object]],
+    *,
+    average_slippage_bps: float | None,
+) -> float | None:
+    if average_slippage_bps is None:
+        return None
+    if average_slippage_bps == 0.0:
+        return 0.0
+    prices = [
+        price
+        for row in _entry_decision_rows(decisions)
+        if (price := _decision_price(row)) is not None
+    ]
+    if not prices:
+        return average_slippage_bps
+    return sum(average_slippage_bps * price for price in prices) / len(prices)
+
+
+def _average_fee_edge_bps(
+    decisions: Sequence[Mapping[str, object]],
+    trade_rows: Sequence[Mapping[str, object]],
+) -> float | None:
+    price_by_decision = {
+        decision_id: price
+        for row in _entry_decision_rows(decisions)
+        if (decision_id := _string_from_mapping(row, "decision_id", ""))
+        and (price := _decision_price(row)) is not None
+    }
+    fee_costs = [
+        fee_cost
+        for row in trade_rows
+        if (
+            fee_cost := _fee_edge_bps_for_trade(
+                row,
+                decision_price=price_by_decision.get(
+                    _string_from_mapping(row, "decision_id", "")
+                ),
+            )
+        )
+        is not None
+    ]
+    if fee_costs:
+        return sum(fee_costs) / len(fee_costs)
+
+    fee_notional_bps = _average_fee_notional_bps_from_amounts(trade_rows)
+    average_price = _average_decision_price(decisions)
+    if fee_notional_bps is not None:
+        if average_price is None:
+            return fee_notional_bps
+        return fee_notional_bps * average_price
+
+    fee_rate_bps = _average_fee_rate_bps_from_trades(trade_rows)
+    if fee_rate_bps is not None:
+        if average_price is None:
+            return fee_rate_bps
+        return fee_rate_bps * (1.0 - average_price)
+    return None
+
+
+def _fee_edge_bps_for_trade(
+    row: Mapping[str, object],
+    *,
+    decision_price: float | None,
+) -> float | None:
+    fees = _optional_float_from_mapping(row, "fees")
+    if fees is not None:
+        fill_quantity = _optional_float_from_mapping(row, "fill_quantity")
+        if fill_quantity is not None and fill_quantity > 0.0:
+            return fees / fill_quantity * 10_000.0
+        fill_notional = _optional_float_from_mapping(row, "fill_notional_usdc")
+        fill_price = _optional_float_from_mapping(row, "fill_price") or decision_price
+        if fill_notional is not None and fill_notional > 0.0 and fill_price is not None:
+            return fees / fill_notional * fill_price * 10_000.0
+
+    fee_rate_bps = _optional_float_from_mapping(row, "fee_bps")
+    fill_price = _optional_float_from_mapping(row, "fill_price") or decision_price
+    if fee_rate_bps is not None and fill_price is not None:
+        return fee_rate_bps * (1.0 - fill_price)
+    return None
+
+
+def _average_fee_notional_bps_from_amounts(
+    trades: Sequence[Mapping[str, object]],
+) -> float | None:
+    fee_values = [_optional_float_from_mapping(row, "fees") for row in trades]
+    total_notional = sum(
+        _optional_float_from_mapping(row, "fill_notional_usdc") or 0.0
+        for row in trades
+    )
+    if total_notional > 0.0 and fee_values and all(
+        value is not None for value in fee_values
+    ):
+        total_fees = sum(value for value in fee_values if value is not None)
+        return total_fees / total_notional * 10_000.0
+    return None
+
+
+def _average_fee_rate_bps_from_trades(
+    trades: Sequence[Mapping[str, object]],
+) -> float | None:
+    fee_bps_values = [
+        fee_bps
+        for row in trades
+        if (fee_bps := _optional_float_from_mapping(row, "fee_bps")) is not None
+    ]
+    if not fee_bps_values:
+        return None
+    return sum(fee_bps_values) / len(fee_bps_values)
+
+
+def _average_decision_price(
+    decisions: Sequence[Mapping[str, object]],
+) -> float | None:
+    prices = [
+        price
+        for row in _entry_decision_rows(decisions)
+        if (price := _decision_price(row)) is not None
+    ]
+    if not prices:
+        return None
+    return sum(prices) / len(prices)
+
+
+def _decision_price(row: Mapping[str, object]) -> float | None:
+    for key in ("limit_price", "decision_price"):
+        value = _optional_float_from_mapping(row, key)
+        if value is not None and value > 0.0:
+            return value
+    return None
+
+
+def _price_space_cost(*, bps: float, price: float | None) -> float:
+    if price is None:
+        return bps / 10_000.0
+    return (bps / 10_000.0) * price
 
 
 def _entry_decision_rows(
