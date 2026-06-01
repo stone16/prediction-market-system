@@ -708,6 +708,11 @@ async def test_actuator_loop_quarantines_reentry_after_position_exit_fill() -> N
         side=Side.SELL.value,
         action=Side.SELL.value,
     )
+    reducing_book_key = reducing_decision.token_id or reducing_decision.market_id
+    runner._paper_orderbooks[reducing_book_key] = {  # noqa: SLF001
+        "bids": [{"price": 0.41, "size": 100.0}],
+        "asks": [{"price": 0.41, "size": 100.0}],
+    }
     assert runner._pre_actuator_diagnostic(  # noqa: SLF001
         reducing_decision,
         signal,
@@ -749,6 +754,29 @@ def test_pre_actuator_diagnostic_rejects_unfillable_paper_orderbook() -> None:
     assert diagnostic.code == "paper_orderbook_insufficient_liquidity"
     assert diagnostic.metadata["decision_notional_usdc"] == pytest.approx(20.5)
     assert "executable depth is insufficient" in str(diagnostic.metadata["failure"])
+
+
+def test_pre_actuator_diagnostic_rejects_unfillable_paper_exit_orderbook() -> None:
+    runner = _runner()
+    market_id = "thin-paper-exit-book"
+    signal = _signal(market_id=market_id)
+    decision = replace(
+        _decision(market_id=market_id, notional_usdc=20.5),
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+    )
+    book_key = decision.token_id or decision.market_id
+    runner._paper_orderbooks[book_key] = {  # noqa: SLF001
+        "bids": [],
+        "asks": [{"price": 0.41, "size": 100.0}],
+    }
+
+    diagnostic = runner._pre_actuator_diagnostic(decision, signal)  # noqa: SLF001
+
+    assert diagnostic is not None
+    assert diagnostic.code == "paper_orderbook_insufficient_liquidity"
+    assert diagnostic.metadata["decision_notional_usdc"] == pytest.approx(20.5)
+    assert diagnostic.metadata["failure"] == "bids depth is empty"
 
 
 @pytest.mark.asyncio

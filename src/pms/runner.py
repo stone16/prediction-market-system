@@ -2036,7 +2036,7 @@ class Runner:
         signal: MarketSignal,
     ) -> ControllerDiagnostic | None:
         action = decision.action or decision.side
-        if action != Side.BUY.value:
+        if action not in {Side.BUY.value, Side.SELL.value}:
             return None
         orderbook = _paper_orderbook_for_decision(self._paper_orderbooks, decision)
         if orderbook is None:
