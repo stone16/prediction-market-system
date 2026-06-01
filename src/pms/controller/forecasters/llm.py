@@ -57,6 +57,10 @@ class LLMTransientError(RuntimeError):
     """Wraps SDK transient errors such as rate limit, 5xx, and network errors."""
 
 
+class LLMProviderUnavailableError(RuntimeError):
+    """Raised when an enabled LLM forecaster cannot load its provider SDK."""
+
+
 class LLMParseError(RuntimeError):
     """Raised when a provider response cannot satisfy the forecast contract."""
 
@@ -74,6 +78,33 @@ class LLMForecastResult(tuple[float, float, str]):
         instance = super().__new__(cls, (prob_estimate, confidence, rationale))
         instance.model_id = model_id
         return instance
+
+
+def validate_llm_runtime_dependencies(config: LLMSettings) -> None:
+    if not config.enabled:
+        return
+    provider = config.provider
+    if provider is None:
+        return
+    package_name, client_factory_name = _provider_runtime(provider)
+    try:
+        provider_module = import_module(package_name)
+    except ImportError as exc:
+        msg = (
+            f"LLM provider package {package_name!r} is required when "
+            f"llm.enabled=true and llm.provider={provider!r}; install with "
+            "`uv sync --extra llm` or disable llm.enabled."
+        )
+        raise LLMProviderUnavailableError(msg) from exc
+    client_factory = getattr(provider_module, client_factory_name, None)
+    if callable(client_factory):
+        return
+    msg = (
+        f"LLM provider package {package_name!r} does not expose callable "
+        f"{client_factory_name}; reinstall the provider SDK or disable "
+        "llm.enabled."
+    )
+    raise LLMProviderUnavailableError(msg)
 
 
 @dataclass
@@ -362,6 +393,14 @@ class LLMForecaster:
                 tracker = _BudgetTracker()
                 _BUDGET_TRACKERS[key] = (ref(self.config), tracker)
             return tracker
+
+
+def _provider_runtime(provider: str) -> tuple[str, str]:
+    if provider == "anthropic":
+        return "anthropic", "Anthropic"
+    if provider == "openai":
+        return "openai", "OpenAI"
+    raise LLMProviderUnavailableError(f"unsupported LLM provider: {provider!r}")
 
 
 def _safe_import(name: str) -> object | None:

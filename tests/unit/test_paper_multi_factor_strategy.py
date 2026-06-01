@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from pms.config import PMSSettings, RiskSettings
+from pms.config import LLMSettings, PMSSettings, RiskSettings
 from pms.controller.factor_snapshot import FactorSnapshot
 from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.sizers.kelly import KellySizer
@@ -207,6 +207,36 @@ def test_paper_multi_factor_strategy_is_rejected_outside_paper_mode() -> None:
     strategy = build_paper_multi_factor_strategy()
 
     with pytest.raises(ValueError, match="paper_multi_factor_v1 is PAPER-only"):
+        ControllerPipelineFactory(settings=settings).build(
+            strategy.to_active(strategy_version_id="phase-a-v1")
+        )
+
+
+def test_paper_multi_factor_llm_enabled_requires_provider_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy = build_paper_multi_factor_strategy()
+
+    def missing_provider(module_name: str) -> object:
+        raise ImportError(module_name)
+
+    monkeypatch.setattr(
+        "pms.controller.forecasters.llm.import_module",
+        missing_provider,
+    )
+    settings = PMSSettings(
+        mode=RunMode.PAPER,
+        llm=LLMSettings(
+            enabled=True,
+            provider="anthropic",
+            api_key="test-key",
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="LLM provider package 'anthropic' is required",
+    ):
         ControllerPipelineFactory(settings=settings).build(
             strategy.to_active(strategy_version_id="phase-a-v1")
         )

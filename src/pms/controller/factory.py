@@ -9,7 +9,10 @@ from pms.controller.factor_snapshot import (
     FactorSnapshotReader,
     NullFactorSnapshotReader,
 )
-from pms.controller.forecasters.llm import LLMForecaster
+from pms.controller.forecasters.llm import (
+    LLMForecaster,
+    validate_llm_runtime_dependencies,
+)
 from pms.controller.forecasters.paper_canary import PaperCanaryForecaster
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
@@ -122,6 +125,7 @@ def _build_forecaster(
                 f"{raw_params!r}"
             )
             raise ValueError(msg)
+        validate_llm_runtime_dependencies(llm_settings)
         return LLMForecaster(config=llm_settings)
     if name == "paper_canary":
         if mode != RunMode.PAPER:
