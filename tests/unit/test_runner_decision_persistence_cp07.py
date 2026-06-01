@@ -396,6 +396,25 @@ def test_decision_evidence_drops_non_finite_orderbook_values() -> None:
     json.dumps(evidence, allow_nan=False)
 
 
+def test_decision_evidence_computes_book_age_for_live_market_data_signal() -> None:
+    signal = replace(
+        _signal(),
+        external_signal={"raw_event_type": "book", "book_received_at": "local-clock"},
+    )
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=_decision(),
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at + timedelta(milliseconds=1250),
+    )
+
+    assert evidence["book_age_ms"] == pytest.approx(1250.0)
+    external_signal_keys = evidence["external_signal_keys"]
+    assert isinstance(external_signal_keys, list)
+    assert "book_received_at" in external_signal_keys
+
+
 def test_decision_evidence_records_submitted_token_when_buy_no_uses_yes_book() -> None:
     signal = replace(_signal(), token_id="token-cp07-yes")
     decision = replace(

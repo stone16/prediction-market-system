@@ -3514,7 +3514,10 @@ def _decision_evidence_from_signal(
         "category_prior_baseline_prob_estimate": (
             _category_prior_baseline_prob_estimate(signal)
         ),
-        "book_age_ms": _optional_float(signal.external_signal.get("book_age_ms")),
+        "book_age_ms": _decision_evidence_book_age_ms(
+            signal,
+            decision_created_at=decision_created_at,
+        ),
         "decision_latency_ms": _signal_to_decision_latency_ms(
             signal,
             decision_created_at=decision_created_at,
@@ -3539,6 +3542,28 @@ def _decision_evidence_signal_for_decision(
     if candidate is None or candidate.market_id != signal.market_id:
         return signal
     return candidate
+
+
+def _decision_evidence_book_age_ms(
+    signal: MarketSignal,
+    *,
+    decision_created_at: datetime,
+) -> float | None:
+    explicit_age = _optional_float(signal.external_signal.get("book_age_ms"))
+    if explicit_age is not None:
+        return explicit_age
+    if "book_received_at" not in signal.external_signal:
+        return None
+    age_ms = (
+        _aware_utc(decision_created_at) - _aware_utc(signal.fetched_at)
+    ).total_seconds() * 1000.0
+    return max(0.0, age_ms)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _category_prior_estimator_from_settings(
