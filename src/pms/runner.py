@@ -4,6 +4,7 @@ import asyncio
 import json
 import inspect
 import logging
+from copy import deepcopy
 from math import isfinite
 from hashlib import sha256
 from collections.abc import Iterator, Mapping, Sequence
@@ -233,6 +234,7 @@ class ActuatorWorkItem:
     signal: MarketSignal | None
     dedup_acquired: bool = False
     decision_evidence: Mapping[str, object] = field(default_factory=dict)
+    paper_orderbook: Mapping[str, Any] | None = None
 
     def __iter__(self) -> Iterator[TradeDecision | MarketSignal | None]:
         yield self.decision
@@ -1434,6 +1436,7 @@ class Runner:
                     decision,
                     self.portfolio,
                     dedup_acquired=work_item.dedup_acquired,
+                    paper_orderbook=work_item.paper_orderbook,
                 )
                 _append_bounded(self.state.orders, order_state)
                 try:
@@ -1672,6 +1675,15 @@ class Runner:
                     signal=signal,
                     dedup_acquired=dedup_acquired,
                     decision_evidence=decision_evidence or {},
+                    paper_orderbook=(
+                        _paper_orderbook_snapshot_for_decision(
+                            decision,
+                            signal,
+                            latest_signals_by_token=self._latest_signal_by_token,
+                        )
+                        if self.config.mode == RunMode.PAPER
+                        else None
+                    ),
                 )
             )
             return True
@@ -3417,7 +3429,13 @@ async def _execute_actuator_work_item(
     portfolio: Portfolio,
     *,
     dedup_acquired: bool,
+    paper_orderbook: Mapping[str, Any] | None = None,
 ) -> OrderState:
+    executor = _executor_with_paper_orderbook_snapshot(
+        executor,
+        decision,
+        paper_orderbook,
+    )
     if dedup_acquired and _executor_accepts_dedup_acquired(executor):
         return cast(
             OrderState,
@@ -3428,6 +3446,34 @@ async def _execute_actuator_work_item(
             ),
         )
     return cast(OrderState, await executor.execute(decision, portfolio))
+
+
+def _executor_with_paper_orderbook_snapshot(
+    executor: Any,
+    decision: TradeDecision,
+    paper_orderbook: Mapping[str, Any] | None,
+) -> Any:
+    if (
+        paper_orderbook is None
+        or not isinstance(executor, ActuatorExecutor)
+        or not isinstance(executor.adapter, PaperActuator)
+    ):
+        return executor
+    return replace(
+        executor,
+        adapter=PaperActuator(
+            orderbooks={
+                _paper_orderbook_key(decision): cast(
+                    dict[str, Any],
+                    deepcopy(paper_orderbook),
+                )
+            }
+        ),
+    )
+
+
+def _paper_orderbook_key(decision: TradeDecision) -> str:
+    return decision.token_id or decision.market_id
 
 
 def _executor_accepts_dedup_acquired(executor: Any) -> bool:
@@ -3542,6 +3588,23 @@ def _decision_evidence_signal_for_decision(
     if candidate is None or candidate.market_id != signal.market_id:
         return signal
     return candidate
+
+
+def _paper_orderbook_snapshot_for_decision(
+    decision: TradeDecision,
+    signal: MarketSignal | None,
+    *,
+    latest_signals_by_token: Mapping[str, MarketSignal],
+) -> dict[str, Any] | None:
+    if signal is None:
+        return None
+    source_signal = signal
+    if decision.token_id is not None and decision.token_id != signal.token_id:
+        candidate = latest_signals_by_token.get(decision.token_id)
+        if candidate is None or candidate.market_id != decision.market_id:
+            return None
+        source_signal = candidate
+    return deepcopy(source_signal.orderbook)
 
 
 def _decision_evidence_book_age_ms(

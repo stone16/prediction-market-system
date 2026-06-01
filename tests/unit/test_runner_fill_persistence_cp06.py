@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -412,6 +413,50 @@ async def test_actuator_loop_persists_fill_after_appending_runner_state() -> Non
     evidence = cast(_EvaluatorSpoolDouble, runner._evaluator_spool).decision_evidence
     assert evidence is not None
     assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.405)
+
+
+@pytest.mark.asyncio
+async def test_paper_actuator_uses_queued_target_token_orderbook_snapshot() -> None:
+    runner = _runner()
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _RecordingOrderStore(runner))
+    runner.fill_store = cast(Any, _RecordingFillStore(runner))
+    _mark_controller_done(runner)
+    market_id = "market-paper-snapshot"
+    no_token_id = f"{market_id}-no"
+    yes_signal = _signal(market_id=market_id)
+    no_signal = replace(
+        _signal(market_id=market_id),
+        token_id=no_token_id,
+        orderbook={
+            "bids": [{"price": 0.40, "size": 100.0}],
+            "asks": [{"price": 0.41, "size": 100.0}],
+        },
+    )
+    decision = replace(
+        _decision(market_id=market_id),
+        token_id=no_token_id,
+        outcome="NO",
+        limit_price=0.41,
+    )
+    runner._remember_signal_for_decision_evidence(no_signal)  # noqa: SLF001
+    runner._remember_paper_orderbook(no_signal)  # noqa: SLF001
+
+    enqueued = await runner._enqueue_decision(  # noqa: SLF001
+        decision,
+        signal=yes_signal,
+        queued_at=yes_signal.fetched_at,
+    )
+    runner._paper_orderbooks[no_token_id] = {  # noqa: SLF001
+        "bids": [{"price": 0.40, "size": 100.0}],
+        "asks": [{"price": 0.45, "size": 100.0}],
+    }
+
+    await _run_actuator_loop(runner)
+
+    assert enqueued is True
+    assert [fill.fill_price for fill in runner.state.fills] == [pytest.approx(0.41)]
+    assert runner.state.orders[0].status == OrderStatus.MATCHED.value
 
 
 @pytest.mark.asyncio

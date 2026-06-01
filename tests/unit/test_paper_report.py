@@ -1085,7 +1085,7 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
 
     assert metrics.strategy == "default@default-v2"
     assert metrics.day_of_soak == 2
-    assert metrics.decisions_made == 17
+    assert metrics.decisions_made == 2
     assert metrics.decisions_rejected == 3
     assert metrics.fills == 2
     assert metrics.open_positions == 2
@@ -2568,7 +2568,7 @@ def test_paper_soak_gate_fails_when_decision_payload_is_incomplete() -> None:
         ),
     )
 
-    assert metrics.decisions_made == 2
+    assert metrics.decisions_made == 1
     assert metrics.baseline_evidence is not None
     assert metrics.baseline_evidence.decisions == 1
     assert (
@@ -2578,6 +2578,23 @@ def test_paper_soak_gate_fails_when_decision_payload_is_incomplete() -> None:
     ) in metrics.risk_events
     assert gate.ok is False
     assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_metrics_from_api_payloads_uses_durable_decision_rows_for_decisions_made() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 1,
+            "diagnostics_total": 0,
+            "diagnostic_counts": {},
+        },
+        decision_payload_count=3,
+    )
+
+    assert metrics.decisions_made == 3
+    assert not any(
+        trigger == "decision payload incomplete"
+        for _event_time, trigger, _status in metrics.risk_events
+    )
 
 
 def test_metrics_from_api_payloads_surfaces_secondary_baseline_scores() -> None:

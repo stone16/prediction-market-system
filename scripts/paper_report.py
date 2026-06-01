@@ -306,11 +306,12 @@ def metrics_from_api_payloads(
         started_at=started_at,
         report_date=report_date,
     )
-    decisions_made = _int_from_dict(controller, "decisions_total")
+    status_decisions_made = _int_from_dict(controller, "decisions_total")
+    decisions_made = len(decision_rows)
     events.extend(
         _decision_payload_completeness_risk_events(
             decision_rows,
-            decisions_made=decisions_made,
+            status_decisions_made=status_decisions_made,
         )
     )
     events.extend(_non_finite_decision_risk_events(decision_rows))
@@ -2256,16 +2257,16 @@ def _non_finite_decision_risk_events(
 def _decision_payload_completeness_risk_events(
     decision_rows: Sequence[Mapping[str, object]],
     *,
-    decisions_made: int,
+    status_decisions_made: int,
 ) -> list[tuple[str, str, str]]:
-    if decisions_made <= len(decision_rows):
+    if status_decisions_made <= len(decision_rows):
         return []
     return [
         (
             "report generation",
             "decision payload incomplete",
             f"/decisions returned {len(decision_rows)} row(s), "
-            f"but /status.controller.decisions_total reports {decisions_made}",
+            f"but /status.controller.decisions_total reports {status_decisions_made}",
         )
     ]
 
