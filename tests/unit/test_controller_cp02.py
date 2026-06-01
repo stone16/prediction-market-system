@@ -1008,6 +1008,46 @@ async def test_best_ask_strategy_rejects_orderbook_spread_above_configured_limit
 
 
 @pytest.mark.asyncio
+async def test_best_ask_strategy_uses_orderbook_spread_over_stale_external_quote() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=100.0)),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                min_volume=100.0,
+                max_spread_bps=100.0,
+                max_slippage_bps=50,
+            ),
+        ),
+    )
+    signal = replace(
+        _signal(),
+        external_signal={
+            **_signal().external_signal,
+            "best_bid": 0.397,
+            "best_ask": 0.400,
+        },
+        orderbook={
+            "bids": [{"price": 0.30, "size": 100.0}],
+            "asks": [{"price": 0.40, "size": 100.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.code == "router_gate:spread_too_wide"
+    assert diagnostic.metadata["spread_bps_at_decision"] == 2857
+    assert diagnostic.metadata["max_spread_bps"] == 100.0
+
+
+@pytest.mark.asyncio
 async def test_on_signal_emits_diagnostic_when_order_size_below_minimum() -> None:
     pipeline = ControllerPipeline(
         strategy_id="alpha",
