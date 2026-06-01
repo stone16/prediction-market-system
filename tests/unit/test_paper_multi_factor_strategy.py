@@ -117,7 +117,7 @@ def test_paper_multi_factor_strategy_matches_phase_a_contract() -> None:
     assert strategy.market_selection.venue == "polymarket"
     assert strategy.market_selection.resolution_time_max_horizon_days == 31
     assert strategy.market_selection.volume_min_usdc == pytest.approx(100.0)
-    assert strategy.market_selection.spread_max_bps == pytest.approx(100.0)
+    assert strategy.market_selection.spread_max_bps is None
     assert strategy.market_selection.yes_price_min == pytest.approx(0.02)
     assert strategy.market_selection.yes_price_max == pytest.approx(0.98)
     assert strategy.forecaster.forecasters == (
@@ -156,7 +156,7 @@ def test_paper_multi_factor_config_json_round_trips_enabled_calibration() -> Non
     assert payload["calibration"]["extreme_clamp_low"] == pytest.approx(0.08)
     assert payload["calibration"]["extreme_clamp_high"] == pytest.approx(0.92)
     assert payload["calibration"]["min_resolved_for_extreme"] == 20
-    assert payload["market_selection"]["spread_max_bps"] == pytest.approx(100.0)
+    assert payload["market_selection"]["spread_max_bps"] is None
     assert payload["market_selection"]["yes_price_min"] == pytest.approx(0.02)
     assert payload["market_selection"]["yes_price_max"] == pytest.approx(0.98)
     assert round_tripped.calibration.enabled is True
@@ -165,7 +165,7 @@ def test_paper_multi_factor_config_json_round_trips_enabled_calibration() -> Non
     assert round_tripped.calibration.extreme_clamp_low == pytest.approx(0.08)
     assert round_tripped.calibration.extreme_clamp_high == pytest.approx(0.92)
     assert round_tripped.calibration.min_resolved_for_extreme == 20
-    assert round_tripped.market_selection.spread_max_bps == pytest.approx(100.0)
+    assert round_tripped.market_selection.spread_max_bps is None
     assert round_tripped.market_selection.yes_price_min == pytest.approx(0.02)
     assert round_tripped.market_selection.yes_price_max == pytest.approx(0.98)
 
