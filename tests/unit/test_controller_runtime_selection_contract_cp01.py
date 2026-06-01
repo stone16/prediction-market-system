@@ -271,11 +271,16 @@ def test_controller_pipeline_factory_passes_strategy_and_factor_reader() -> None
         factor_snapshot_cls(values={}, missing_factors=(), snapshot_hash="snapshot")
     )
 
-    factory = factory_cls(factor_reader=factor_reader)
+    direct_book_reader = object()
+    factory = factory_cls(
+        factor_reader=factor_reader,
+        direct_book_reader=direct_book_reader,
+    )
     pipeline = factory.build(strategy)
 
     assert pipeline.strategy == strategy
     assert pipeline.factor_reader is factor_reader
+    assert pipeline.direct_book_reader is direct_book_reader
 
 
 def test_snapshot_hash_distinguishes_missing_factors_and_strategy_identity() -> None:

@@ -18,7 +18,7 @@ from pms.controller.outcome_tokens import (
     NullOutcomeTokenResolver,
     OutcomeTokenResolver,
 )
-from pms.controller.pipeline import ControllerPipeline
+from pms.controller.pipeline import ControllerPipeline, DirectBookSnapshotReader
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.interfaces import IForecaster
@@ -34,6 +34,7 @@ class ControllerPipelineFactory:
     outcome_token_resolver: OutcomeTokenResolver = field(
         default_factory=NullOutcomeTokenResolver
     )
+    direct_book_reader: DirectBookSnapshotReader | None = None
 
     def build_many(
         self,
@@ -52,6 +53,7 @@ class ControllerPipelineFactory:
             strategy_version_id=strategy.strategy_version_id,
             factor_reader=self.factor_reader,
             outcome_token_resolver=self.outcome_token_resolver,
+            direct_book_reader=self.direct_book_reader,
             forecasters=self._build_forecasters(strategy),
             calibrator=NetcalCalibrator(),
             sizer=KellySizer(

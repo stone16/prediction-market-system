@@ -13,7 +13,7 @@ from pms.controller.pipeline import ControllerPipeline, _decision_cost_edges
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import RunMode
-from pms.core.models import MarketSignal, Portfolio, Position
+from pms.core.models import BookLevel, BookSnapshot, MarketSignal, Portfolio, Position
 from pms.strategies.projections import (
     ActiveStrategy,
     EvalSpec,
@@ -74,6 +74,59 @@ class StaticOutcomeTokenResolver:
     ) -> OutcomeTokens:
         del market_id, signal_token_id
         return OutcomeTokens(yes_token_id="token-yes", no_token_id="token-no")
+
+
+class StaticDirectBookReader:
+    def __init__(
+        self,
+        *,
+        token_id: str,
+        bids: list[tuple[float, float]],
+        asks: list[tuple[float, float]],
+        ts: datetime | None = None,
+    ) -> None:
+        self.token_id = token_id
+        self.snapshot = BookSnapshot(
+            id=101,
+            market_id="market-cp02",
+            token_id=token_id,
+            ts=ts or datetime.now(tz=UTC),
+            hash="direct-book",
+            source="subscribe",
+        )
+        self.levels = [
+            *(
+                BookLevel(
+                    snapshot_id=self.snapshot.id,
+                    market_id="market-cp02",
+                    side="BUY",
+                    price=price,
+                    size=size,
+                )
+                for price, size in bids
+            ),
+            *(
+                BookLevel(
+                    snapshot_id=self.snapshot.id,
+                    market_id="market-cp02",
+                    side="SELL",
+                    price=price,
+                    size=size,
+                )
+                for price, size in asks
+            ),
+        ]
+
+    async def read_latest_snapshot(
+        self,
+        market_id: str,
+        token_id: str,
+    ) -> BookSnapshot | None:
+        del market_id
+        return self.snapshot if token_id == self.token_id else None
+
+    async def read_levels_for_snapshot(self, snapshot_id: int) -> list[BookLevel]:
+        return list(self.levels) if snapshot_id == self.snapshot.id else []
 
 
 class NullForecaster:
@@ -377,6 +430,53 @@ async def test_best_ask_strategy_skips_synthetic_no_decision_without_direct_no_b
     assert diagnostic.metadata["decision_outcome"] == "NO"
     assert diagnostic.metadata["signal_token_id"] == "token-yes"
     assert diagnostic.metadata["decision_token_id"] == "token-no"
+
+
+@pytest.mark.asyncio
+async def test_best_ask_strategy_uses_cached_direct_no_book_for_bearish_yes_signal() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[BearishForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=1_000.0)),
+        outcome_token_resolver=StaticOutcomeTokenResolver(),
+        direct_book_reader=StaticDirectBookReader(
+            token_id="token-no",
+            bids=[(0.40, 1_000.0)],
+            asks=[(0.41, 1_000.0)],
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(max_spread_bps=1_000.0),
+        ),
+    )
+    signal = replace(
+        _signal(),
+        token_id="token-yes",
+        yes_price=0.585,
+        external_signal={
+            **_signal().external_signal,
+            "yes_token_id": "token-yes",
+            "no_token_id": "token-no",
+        },
+        orderbook={
+            "bids": [{"price": 0.58, "size": 1_000.0}],
+            "asks": [{"price": 0.59, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is not None
+    opportunity, decision = emission
+    assert opportunity.side == "no"
+    assert decision.outcome == "NO"
+    assert decision.token_id == "token-no"
+    assert decision.limit_price == pytest.approx(0.41)
+    assert decision.prob_estimate == pytest.approx(0.53)
+    assert decision.expected_edge == pytest.approx(0.12)
+    assert decision.spread_bps_at_decision == pytest.approx(247)
 
 
 @pytest.mark.asyncio

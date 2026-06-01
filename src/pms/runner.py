@@ -1105,6 +1105,7 @@ class Runner:
                 settings=self.config,
                 factor_reader=PostgresFactorSnapshotReader(self._pg_pool),
                 outcome_token_resolver=MarketDataOutcomeTokenResolver(market_data_store),
+                direct_book_reader=market_data_store,
             )
         if isinstance(self.eval_store, EvalStore):
             self.eval_store.bind_pool(self._pg_pool)

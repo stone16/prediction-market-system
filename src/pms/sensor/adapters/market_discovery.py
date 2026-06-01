@@ -151,6 +151,12 @@ class MarketDiscoverySensor:
         written_markets: list[Market],
     ) -> None:
         for row in payload:
+            if _is_non_binary_gamma_market(row):
+                logger.debug(
+                    "skipping non-binary Gamma market row: %s",
+                    row.get("conditionId") or row.get("condition_id"),
+                )
+                continue
             try:
                 market = _gamma_market_to_market(row, fetched_at)
                 tokens = _gamma_market_to_tokens(row, market.condition_id)
@@ -507,6 +513,20 @@ def _gamma_market_outcomes(row: dict[str, Any]) -> tuple[Outcome, Outcome]:
         msg = "Gamma market row must expose exactly YES/NO outcomes"
         raise ValueError(msg)
     return cast(tuple[Outcome, Outcome], normalized)
+
+
+def _is_non_binary_gamma_market(row: dict[str, Any]) -> bool:
+    raw_outcomes = row.get("outcomes")
+    if raw_outcomes in {None, ""}:
+        return False
+    try:
+        loaded = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(loaded, list):
+        return False
+    normalized = tuple(str(outcome).strip().upper() for outcome in loaded)
+    return len(normalized) != 2 or set(normalized) != {"YES", "NO"}
 
 
 def _optional_datetime(value: object) -> datetime | None:

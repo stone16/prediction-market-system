@@ -9,7 +9,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 from pms.config import PMSSettings
 from pms.controller._price_utils import best_ask, spread_bps_at_decision
@@ -35,7 +35,14 @@ from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import RunMode, TimeInForce
 from pms.core.interfaces import ICalibrator, IForecaster, IPreCalibrator, ISizer
-from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
+from pms.core.models import (
+    BookLevel,
+    BookSnapshot,
+    MarketSignal,
+    Opportunity,
+    Portfolio,
+    TradeDecision,
+)
 from pms.factors.base import EMPTY_OUTER_RING
 from pms.factors.composition import apply_composition, evaluate_branch_probabilities
 from pms.factors.definitions.orderbook_imbalance import OrderbookImbalance
@@ -57,6 +64,16 @@ class _SignalOutcomeContext:
     signal_outcome: Literal["YES", "NO"]
 
 
+class DirectBookSnapshotReader(Protocol):
+    async def read_latest_snapshot(
+        self,
+        market_id: str,
+        token_id: str,
+    ) -> BookSnapshot | None: ...
+
+    async def read_levels_for_snapshot(self, snapshot_id: int) -> list[BookLevel]: ...
+
+
 @dataclass
 class ControllerPipeline:
     strategy_id: str = "default"
@@ -68,6 +85,7 @@ class ControllerPipeline:
     outcome_token_resolver: OutcomeTokenResolver = field(
         default_factory=NullOutcomeTokenResolver
     )
+    direct_book_reader: DirectBookSnapshotReader | None = None
     forecasters: Sequence[IForecaster] | None = None
     calibrator: ICalibrator | None = None
     sizer: ISizer | None = None
@@ -410,6 +428,7 @@ class ControllerPipeline:
         decision_probability = yes_probability
         decision_price = yes_reference_price
         decision_edge = yes_edge
+        execution_signal = signal
         if yes_edge < 0.0:
             if signal_outcome.no_token_id is None:
                 resolved_tokens = await self.outcome_token_resolver.resolve(
@@ -459,32 +478,62 @@ class ControllerPipeline:
         if (
             _strategy_metadata(self.strategy).get("price_reference") == "best_ask"
             and not _decision_uses_signal_orderbook(
-                signal,
+                execution_signal,
                 token_id=decision_token_id,
                 outcome=decision_outcome,
             )
         ):
-            self._set_drop_diagnostic(
+            direct_signal = await self._read_direct_outcome_execution_signal(
                 signal,
-                code="direct_outcome_orderbook_required",
-                message=(
-                    "Skipping decision because best-ask execution pricing "
-                    "requires a direct orderbook for the selected outcome token."
-                ),
-                metadata={
-                    "signal_token_id": signal.token_id,
-                    "decision_token_id": decision_token_id,
-                    "decision_outcome": decision_outcome,
-                    "yes_reference_price": yes_reference_price,
-                    "synthetic_decision_price": decision_price,
-                },
+                token_id=decision_token_id,
+                outcome=decision_outcome,
             )
-            _log_pipeline_funnel(
-                signal,
-                forecasted_count=len(probabilities),
-                traded_count=0,
-            )
-            return None
+            if direct_signal is None:
+                self._set_drop_diagnostic(
+                    signal,
+                    code="direct_outcome_orderbook_required",
+                    message=(
+                        "Skipping decision because best-ask execution pricing "
+                        "requires a direct orderbook for the selected outcome token."
+                    ),
+                    metadata={
+                        "signal_token_id": signal.token_id,
+                        "decision_token_id": decision_token_id,
+                        "decision_outcome": decision_outcome,
+                        "yes_reference_price": yes_reference_price,
+                        "synthetic_decision_price": decision_price,
+                    },
+                )
+                _log_pipeline_funnel(
+                    signal,
+                    forecasted_count=len(probabilities),
+                    traded_count=0,
+                )
+                return None
+            execution_signal = direct_signal
+            direct_price = best_ask(execution_signal)
+            if direct_price is None:
+                self._set_drop_diagnostic(
+                    signal,
+                    code="direct_outcome_orderbook_required",
+                    message=(
+                        "Skipping decision because the selected outcome direct "
+                        "orderbook has no executable ask."
+                    ),
+                    metadata={
+                        "signal_token_id": signal.token_id,
+                        "decision_token_id": decision_token_id,
+                        "decision_outcome": decision_outcome,
+                    },
+                )
+                _log_pipeline_funnel(
+                    signal,
+                    forecasted_count=len(probabilities),
+                    traded_count=0,
+                )
+                return None
+            decision_price = direct_price
+            decision_edge = decision_probability - decision_price
         if decision_edge <= 0.0:
             self._set_drop_diagnostic(
                 signal,
@@ -507,7 +556,7 @@ class ControllerPipeline:
             )
             return None
         decision_spread_bps = spread_bps_at_decision(
-            signal,
+            execution_signal,
             token_id=decision_token_id,
             outcome=decision_outcome,
             yes_token_id=decision_yes_token_id,
@@ -619,7 +668,7 @@ class ControllerPipeline:
             return None
         size = min(size, remaining_market_capacity_usdc)
         executable_depth_usdc = _executable_buy_depth_usdc(
-            signal.orderbook,
+            execution_signal.orderbook,
             limit_price=decision_price,
             max_slippage_bps=self.settings.controller.max_slippage_bps,
         )
@@ -628,7 +677,7 @@ class ControllerPipeline:
             and self.settings.mode != RunMode.BACKTEST
             and _strategy_metadata(self.strategy).get("price_reference") == "best_ask"
             and _decision_uses_signal_orderbook(
-                signal,
+                execution_signal,
                 token_id=decision_token_id,
                 outcome=decision_outcome,
             )
@@ -790,6 +839,65 @@ class ControllerPipeline:
             risk_group_id=_risk_group_id(signal),
             spread_bps_at_decision=decision_spread_bps,
         )
+
+    async def _read_direct_outcome_execution_signal(
+        self,
+        signal: MarketSignal,
+        *,
+        token_id: str | None,
+        outcome: Literal["YES", "NO"],
+    ) -> MarketSignal | None:
+        if token_id is None or self.direct_book_reader is None:
+            return None
+        try:
+            snapshot = await self.direct_book_reader.read_latest_snapshot(
+                signal.market_id,
+                token_id,
+            )
+            if snapshot is None:
+                return None
+            snapshot_ts = _aware_utc(snapshot.ts)
+            age_ms = max(
+                0.0,
+                (datetime.now(tz=UTC) - snapshot_ts).total_seconds() * 1000.0,
+            )
+            if age_ms > self.settings.controller.max_book_age_ms:
+                return None
+            levels = await self.direct_book_reader.read_levels_for_snapshot(snapshot.id)
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "direct outcome book read failed for %s/%s: %s",
+                signal.market_id,
+                token_id,
+                error,
+            )
+            return None
+
+        orderbook = _orderbook_from_levels(levels)
+        if orderbook is None:
+            return None
+        external_signal: dict[str, Any] = {
+            **signal.external_signal,
+            "signal_token_outcome": outcome,
+            "book_age_ms": age_ms,
+            "direct_outcome_book_source": snapshot.source,
+        }
+        direct_signal = replace(
+            signal,
+            token_id=token_id,
+            orderbook=orderbook,
+            external_signal=external_signal,
+        )
+        spread_bps = spread_bps_at_decision(direct_signal)
+        if spread_bps is not None:
+            external_signal["spread_bps"] = spread_bps
+        best_bid = _best_level(orderbook, "bids")
+        if best_bid is not None:
+            external_signal["best_bid"] = best_bid
+        direct_best_ask = _best_level(orderbook, "asks")
+        if direct_best_ask is not None:
+            external_signal["best_ask"] = direct_best_ask
+        return replace(direct_signal, external_signal=external_signal)
 
     async def decide(
         self,
@@ -1013,6 +1121,44 @@ def _decision_uses_signal_orderbook(
     if token_id is None:
         return outcome == "YES"
     return token_id == signal.token_id
+
+
+def _orderbook_from_levels(levels: Sequence[BookLevel]) -> dict[str, list[dict[str, float]]] | None:
+    bids = [
+        {"price": level.price, "size": level.size}
+        for level in levels
+        if level.side == "BUY" and level.price > 0.0 and level.size > 0.0
+    ]
+    asks = [
+        {"price": level.price, "size": level.size}
+        for level in levels
+        if level.side == "SELL" and level.price > 0.0 and level.size > 0.0
+    ]
+    if not bids or not asks:
+        return None
+    return {"bids": bids, "asks": asks}
+
+
+def _best_level(orderbook: Mapping[str, Any], side: Literal["bids", "asks"]) -> float | None:
+    raw_levels = orderbook.get(side)
+    if not isinstance(raw_levels, list):
+        return None
+    prices = [
+        _decimal_or_none(level.get("price"))
+        for level in raw_levels
+        if isinstance(level, Mapping)
+    ]
+    valid_prices = [price for price in prices if price is not None and price > 0]
+    if not valid_prices:
+        return None
+    selected = max(valid_prices) if side == "bids" else min(valid_prices)
+    return float(selected)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _executable_buy_depth_usdc(

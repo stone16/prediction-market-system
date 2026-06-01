@@ -735,6 +735,47 @@ async def test_market_discovery_sensor_skips_malformed_tokens_before_market_writ
 
 
 @pytest.mark.asyncio
+async def test_market_discovery_sensor_skips_non_binary_gamma_markets_without_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    payload = [
+        _gamma_market(
+            "multi-outcome-row",
+            token_ids=["a-token", "b-token", "c-token"],
+            outcomes=["A", "B", "C"],
+        ),
+        _gamma_market(
+            "binary-row",
+            token_ids=["yes-token", "no-token"],
+            outcomes=["Yes", "No"],
+        ),
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await sensor.poll_once()
+    await sensor.aclose()
+
+    assert store_mock.write_market_mock.await_count == 1
+    assert store_mock.write_token_mock.await_count == 2
+    assert "Gamma market row must expose exactly YES/NO outcomes" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_market_discovery_sensor_backoff_on_http_429(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
