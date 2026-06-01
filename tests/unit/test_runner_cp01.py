@@ -212,7 +212,7 @@ def _settings() -> PMSSettings:
             max_daily_loss_usdc=20.0,
             max_open_positions=5,
             max_exposure_per_risk_group=5_000.0,
-            max_quantity_shares=500.0,
+            max_quantity_shares=10_000.0,
         ),
         controller=ControllerSettings(time_in_force="IOC", quote_source="dual"),
         discord=DiscordSettings(
@@ -559,7 +559,7 @@ def _signal() -> MarketSignal:
         volume_24h=1_000.0,
         resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
         orderbook={"bids": [], "asks": []},
-        external_signal={"fair_value": 0.55},
+        external_signal={"event_id": "runner-cp01-event", "fair_value": 0.55},
         fetched_at=datetime(2026, 4, 19, tzinfo=UTC),
         market_status="open",
     )

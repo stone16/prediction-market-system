@@ -1614,6 +1614,26 @@ class Runner:
                 reason="max_open_positions_capacity",
             )
             return False
+        risk_rejection_reason = self._risk_rejection_reason(decision)
+        if risk_rejection_reason is not None:
+            if signal is not None:
+                _append_bounded(
+                    self.state.controller_diagnostics,
+                    self._risk_rejection_diagnostic(
+                        decision,
+                        signal,
+                        reason=risk_rejection_reason,
+                    ),
+                )
+            await self._reject_unqueued_decision(
+                decision,
+                dedup_acquired=dedup_acquired,
+                updated_at=(
+                    queued_at or (signal.fetched_at if signal is not None else None)
+                ),
+                reason=risk_rejection_reason,
+            )
+            return False
         reserved_key = self._reserve_position_capacity(decision)
         try:
             await self._update_decision_status_if_supported(
@@ -1820,7 +1840,58 @@ class Runner:
             )
         if self._would_exceed_position_capacity(decision):
             return self._position_capacity_diagnostic(decision, signal)
+        risk_rejection_reason = self._risk_rejection_reason(decision)
+        if risk_rejection_reason is not None:
+            return self._risk_rejection_diagnostic(
+                decision,
+                signal,
+                reason=risk_rejection_reason,
+            )
         return None
+
+    def _risk_rejection_reason(self, decision: TradeDecision) -> str | None:
+        risk = getattr(self.actuator_executor, "risk", None)
+        check = getattr(risk, "check", None)
+        if not callable(check):
+            return None
+        risk_decision = check(decision, self.portfolio)
+        if risk_decision.approved:
+            return None
+        return str(risk_decision.reason)
+
+    def _risk_rejection_diagnostic(
+        self,
+        decision: TradeDecision,
+        signal: MarketSignal,
+        *,
+        reason: str,
+    ) -> ControllerDiagnostic:
+        estimated_quantity = _estimated_decision_quantity(decision)
+        metadata: dict[str, object] = {
+            "risk_reason": reason,
+            "decision_notional_usdc": decision.notional_usdc,
+            "decision_limit_price": decision.limit_price,
+            "decision_token_id": decision.token_id,
+            "decision_outcome": decision.outcome,
+            "signal_token_id": signal.token_id,
+        }
+        if estimated_quantity is not None:
+            metadata["estimated_quantity_shares"] = estimated_quantity
+        if self.config.risk.max_quantity_shares is not None:
+            metadata["max_quantity_shares"] = self.config.risk.max_quantity_shares
+        return ControllerDiagnostic(
+            code=reason,
+            message=(
+                "Skipping decision because the risk envelope would reject it "
+                "before actuator execution."
+            ),
+            market_id=decision.market_id,
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            token_id=decision.token_id,
+            severity="warning",
+            metadata=metadata,
+        )
 
     def _position_capacity_diagnostic(
         self,
@@ -2996,6 +3067,12 @@ def _open_position_keys(portfolio: Portfolio) -> set[PositionSlotKey]:
         _position_key_from_position(position)
         for position in portfolio.open_positions
     }
+
+
+def _estimated_decision_quantity(decision: TradeDecision) -> float | None:
+    if decision.limit_price <= 0.0:
+        return None
+    return decision.notional_usdc / decision.limit_price
 
 
 def _position_key_from_position(position: Position) -> PositionSlotKey:

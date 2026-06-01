@@ -8,7 +8,7 @@ import pytest
 
 from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import TimeInForce
-from pms.core.models import Position, TradeDecision, Venue
+from pms.core.models import MarketSignal, Position, TradeDecision, Venue
 from pms.runner import Runner
 
 
@@ -61,9 +61,32 @@ def _decision(
     )
 
 
+def _signal(
+    *,
+    market_id: str = "market-b",
+    token_id: str = "token-b",
+) -> MarketSignal:
+    return MarketSignal(
+        market_id=market_id,
+        token_id=token_id,
+        venue="polymarket",
+        title="Will runner reject oversize share quantity?",
+        yes_price=0.001,
+        volume_24h=1_000.0,
+        resolves_at=datetime(2026, 6, 30, tzinfo=UTC),
+        orderbook={"bids": [], "asks": []},
+        external_signal={},
+        fetched_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+        market_status="open",
+    )
+
+
 def _runner(*, max_open_positions: int | None = 2) -> Runner:
     settings = PMSSettings(
-        risk=RiskSettings(max_open_positions=max_open_positions),
+        risk=RiskSettings(
+            max_open_positions=max_open_positions,
+            max_quantity_shares=500.0,
+        ),
     )
     return Runner(config=settings, historical_data_path=FIXTURE_PATH)
 
@@ -194,6 +217,25 @@ class TestWouldExceedPositionCapacity:
 
         assert runner._reserve_position_capacity(second) is None
 
+    def test_pre_actuator_diagnostic_rejects_max_quantity_before_queue(self) -> None:
+        runner = _runner(max_open_positions=50)
+        signal = _signal()
+        runner._remember_paper_orderbook(signal)
+        decision = replace(
+            _decision(),
+            notional_usdc=1.0,
+            limit_price=0.001,
+        )
+
+        diagnostic = runner._pre_actuator_diagnostic(decision, signal)
+
+        assert diagnostic is not None
+        assert diagnostic.code == "max_quantity_shares"
+        assert diagnostic.metadata["estimated_quantity_shares"] == pytest.approx(
+            1000.0
+        )
+        assert diagnostic.metadata["max_quantity_shares"] == pytest.approx(500.0)
+
     @pytest.mark.asyncio
     async def test_enqueue_rechecks_capacity_before_queuing(self) -> None:
         runner = _runner(max_open_positions=2)
@@ -247,3 +289,31 @@ class TestWouldExceedPositionCapacity:
             ("decision-cap-2", "accepted", "rejected", queued_at)
         ]
         assert dedup_store.release_calls == [("decision-cap-2", "rejected")]
+
+    @pytest.mark.asyncio
+    async def test_enqueue_rejects_and_releases_risk_rejected_decision(self) -> None:
+        runner = _runner(max_open_positions=50)
+        queued_at = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        decision_store = _RecordingDecisionStore()
+        dedup_store = _RecordingDedupStore()
+        runner.decision_store = decision_store  # type: ignore[assignment]
+        runner.actuator_executor.dedup_store = dedup_store  # type: ignore[assignment]
+        decision = replace(
+            _decision(),
+            notional_usdc=1.0,
+            limit_price=0.001,
+        )
+
+        enqueued = await runner._enqueue_decision(
+            decision,
+            signal=None,
+            dedup_acquired=True,
+            queued_at=queued_at,
+        )
+
+        assert enqueued is False
+        assert runner._decision_queue.empty()
+        assert decision_store.transitions == [
+            ("decision-cap", "accepted", "rejected", queued_at)
+        ]
+        assert dedup_store.release_calls == [("decision-cap", "rejected")]
