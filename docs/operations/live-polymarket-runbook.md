@@ -8,9 +8,9 @@ passphrases into chat, issues, PRs, logs, or config files.
 1. Start from the first-live soak config:
    `cp config.live-soak.yaml config.local.live-soak.yaml`.
 2. Confirm the risk envelope before every soak run:
-   `max_position_per_market=$5`, `max_total_exposure=$50`,
+   `max_position_per_market=$1`, `max_total_exposure=$50`,
    `max_drawdown_pct=20%`, `max_daily_loss_usdc=$20`,
-   `max_open_positions=5`, `max_exposure_per_risk_group=$15`,
+   `max_open_positions=50`, `max_exposure_per_risk_group=$15`,
    `max_quantity_shares=500`, and `slippage_threshold_bps=50`.
 3. Run PAPER mode against live market data with the soak config:
    `uv run pms-api --config config.live-soak.yaml`.

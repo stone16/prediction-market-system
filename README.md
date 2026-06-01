@@ -38,10 +38,10 @@ Five things remain between paper soak and real capital:
    api_passphrase, funder_address, signature_type). For local LIVE, stage them
    in the chmod 600 `local_secret_file` outside the working tree; never put
    them in shell exports, `.env`, or config files.
-2. **Confirm risk envelope** — Ratified defaults from
-   `config.live-soak.yaml`: `max_position_per_market=$5`,
+2. **Confirm risk envelope** — Ratified PAPER soak defaults from
+   `config.live-soak.yaml`: `max_position_per_market=$1`,
    `max_total_exposure=$50`, `max_drawdown_pct=20%`,
-   `max_daily_loss_usdc=$20`, `max_open_positions=5`,
+   `max_daily_loss_usdc=$20`, `max_open_positions=50`,
    `max_exposure_per_risk_group=$15`, `min_order_usdc=$1`,
    `slippage_threshold_bps=50`, `max_quantity_shares=500`.
 3. **30-day paper soak** — Run with live Polymarket data and require the
@@ -125,7 +125,7 @@ uv run alembic upgrade head
 # 4. Copy and customize the paper soak config
 cp config.live-soak.yaml config.local.live-soak.yaml
 # Edit config.local.live-soak.yaml:
-#   - Adjust risk.max_position_per_market (proposed: $5)
+#   - Adjust risk.max_position_per_market (paper default: $1)
 #   - Adjust risk.max_total_exposure (proposed: $50)
 #   - Adjust risk.max_drawdown_pct (proposed: 20)
 
