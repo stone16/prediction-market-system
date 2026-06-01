@@ -136,6 +136,10 @@ from pms.strategies.flb.source import (
     load_flb_calibration_csv,
 )
 from pms.strategies.intents import StrategyContext
+from pms.strategies.paper_multifactor import (
+    PAPER_MULTI_FACTOR_STRATEGY_ID,
+    build_paper_multi_factor_strategy,
+)
 from pms.strategies.projections import (
     ActiveStrategy,
     CalibrationSpec,
@@ -546,6 +550,7 @@ class Runner:
                     await self._assert_no_unresolved_submission_unknown_incidents()
                     await self._assert_live_market_data_freshness()
                 await self._ensure_default_v2_version()
+                await self._ensure_paper_soak_strategy()
                 if self._pg_pool is None:
                     msg = "Runner PostgreSQL pool is not initialized"
                     raise RuntimeError(msg)
@@ -1099,6 +1104,41 @@ class Runner:
             "default",
             version.strategy_version_id,
             _raw_factor_steps(migrated_strategy.config.factor_composition),
+        )
+
+    async def _ensure_paper_soak_strategy(self) -> None:
+        if self.config.mode != RunMode.PAPER:
+            return
+        if self.config.paper_soak_strategy_id is None:
+            return
+        registry = self._strategy_registry
+        if registry is None:
+            msg = "Runner strategy registry is not initialized"
+            raise RuntimeError(msg)
+        if self.config.paper_soak_strategy_id != PAPER_MULTI_FACTOR_STRATEGY_ID:
+            msg = (
+                "Unsupported paper_soak_strategy_id: "
+                f"{self.config.paper_soak_strategy_id!r}"
+            )
+            raise ValueError(msg)
+
+        strategy = build_paper_multi_factor_strategy()
+        version = await registry.create_version(strategy, activate=False)
+        await registry.populate_strategy_factors(
+            strategy.config.strategy_id,
+            version.strategy_version_id,
+            _raw_factor_steps(strategy.config.factor_composition),
+        )
+        if self.config.paper_soak_archive_default:
+            try:
+                await registry.archive_strategy("default")
+            except LookupError:
+                logger.info(
+                    "default strategy missing while activating paper soak strategy"
+                )
+        await registry.set_active(
+            strategy.config.strategy_id,
+            version.strategy_version_id,
         )
 
     def _bind_runtime_stores(self) -> None:

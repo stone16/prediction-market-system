@@ -47,6 +47,13 @@ def test_live_soak_config_relaxes_paper_factor_gate_for_phase_a() -> None:
     assert settings.controller.strict_factor_gates is False
 
 
+def test_live_soak_config_uses_tradeable_paper_strategy() -> None:
+    settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
+
+    assert settings.paper_soak_strategy_id == "paper_multi_factor_v1"
+    assert settings.paper_soak_archive_default is True
+
+
 def test_live_soak_config_has_no_dead_top_level_calibration_section() -> None:
     yaml_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")

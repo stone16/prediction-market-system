@@ -7,6 +7,8 @@ live_trading_enabled: false
 live_account_reconciliation_required: true
 live_emergency_audit_path: .data/live-emergency-audit.jsonl
 live_first_order_audit_path: .data/first-order-audit.jsonl
+paper_soak_strategy_id: paper_multi_factor_v1
+paper_soak_archive_default: true
 
 risk:
   max_position_per_market: 1.0
