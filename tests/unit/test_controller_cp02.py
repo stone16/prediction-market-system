@@ -488,6 +488,70 @@ async def test_best_ask_strategy_accepts_freshly_received_live_orderbook_with_ol
 
 
 @pytest.mark.asyncio
+async def test_best_ask_strategy_rechecks_live_orderbook_age_before_emission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(
+            ControllerSettings(
+                min_volume=100.0,
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            )
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            ),
+        ),
+    )
+    age_samples_ms = [900.0, 1_100.0]
+
+    def fake_decision_time_book_age_ms(
+        signal: MarketSignal,
+        *,
+        allowed_clock_skew_ms: float,
+        now: datetime | None = None,
+    ) -> float:
+        del signal, allowed_clock_skew_ms, now
+        return age_samples_ms.pop(0) if age_samples_ms else 1_100.0
+
+    monkeypatch.setattr(
+        "pms.controller.pipeline._decision_time_book_age_ms",
+        fake_decision_time_book_age_ms,
+    )
+    now = datetime.now(tz=UTC)
+    signal = replace(
+        _signal(fetched_at=now),
+        resolves_at=now + timedelta(days=1),
+        external_signal={
+            **_signal().external_signal,
+            "raw_event_type": "book",
+            "book_received_at": now.isoformat(),
+        },
+        orderbook={
+            "bids": [{"price": 0.39, "size": 1_000.0}],
+            "asks": [{"price": 0.40, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.code == "router_gate:book_too_stale"
+    assert diagnostic.metadata["phase"] == "pre_emit"
+    assert diagnostic.metadata["book_age_ms"] == pytest.approx(1_100.0)
+
+
+@pytest.mark.asyncio
 async def test_best_ask_strategy_skips_synthetic_no_decision_without_direct_no_book() -> None:
     pipeline = ControllerPipeline(
         strategy=_best_ask_strategy(),

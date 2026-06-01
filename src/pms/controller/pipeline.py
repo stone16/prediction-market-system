@@ -434,7 +434,6 @@ class ControllerPipeline:
         yes_edge = yes_probability - yes_reference_price
         active_portfolio = portfolio or _default_portfolio()
         sizer = _required(self.sizer, "sizer")
-        now = datetime.now(tz=UTC)
         opportunity_side: Literal["yes", "no"] = "yes"
         decision_token_id = signal_outcome.yes_token_id or signal_token_id
         decision_yes_token_id: str | None = signal_outcome.yes_token_id or signal_token_id
@@ -779,6 +778,43 @@ class ControllerPipeline:
                 traded_count=0,
             )
             return None
+        decision_created_at = datetime.now(tz=UTC)
+        final_book_age_ms = _execution_book_age_ms_at_decision_time(
+            execution_signal,
+            settings=self.settings,
+            decision_created_at=decision_created_at,
+        )
+        if final_book_age_ms is not None:
+            if final_book_age_ms > router.controller.max_book_age_ms:
+                self._set_drop_diagnostic(
+                    signal,
+                    code="router_gate:book_too_stale",
+                    message=(
+                        "Skipping decision because the selected outcome "
+                        "orderbook became too stale before emission."
+                    ),
+                    metadata={
+                        "gate_reason": "book_too_stale",
+                        "phase": "pre_emit",
+                        "book_age_ms": final_book_age_ms,
+                        "max_book_age_ms": router.controller.max_book_age_ms,
+                        "decision_outcome": decision_outcome,
+                        "decision_token_id": decision_token_id,
+                    },
+                )
+                _log_pipeline_funnel(
+                    signal,
+                    forecasted_count=len(probabilities),
+                    traded_count=0,
+                )
+                return None
+            execution_signal = replace(
+                execution_signal,
+                external_signal={
+                    **execution_signal.external_signal,
+                    "book_age_ms": final_book_age_ms,
+                },
+            )
         self._last_decision_emitted_at[cooldown_key] = signal.timestamp
         _log_pipeline_funnel(
             signal,
@@ -798,7 +834,7 @@ class ControllerPipeline:
             staleness_policy="market_signal_freshness",
             strategy_id=self.strategy_id,
             strategy_version_id=self.strategy_version_id,
-            created_at=now,
+            created_at=decision_created_at,
             factor_snapshot_hash=factor_snapshot_hash,
             composition_trace={
                 **composition_trace,
@@ -900,6 +936,7 @@ class ControllerPipeline:
             **signal.external_signal,
             "signal_token_outcome": outcome,
             "book_age_ms": age_ms,
+            "book_received_at": snapshot_ts.isoformat(),
             "direct_outcome_book_source": snapshot.source,
         }
         direct_signal = replace(
@@ -1167,10 +1204,28 @@ def _with_decision_time_book_age(
     )
 
 
+def _execution_book_age_ms_at_decision_time(
+    signal: MarketSignal,
+    *,
+    settings: PMSSettings,
+    decision_created_at: datetime,
+) -> float | None:
+    if settings.mode == RunMode.BACKTEST:
+        return None
+    if "book_received_at" not in signal.external_signal:
+        return None
+    return _decision_time_book_age_ms(
+        signal,
+        allowed_clock_skew_ms=settings.controller.allowed_book_clock_skew_ms,
+        now=decision_created_at,
+    )
+
+
 def _decision_time_book_age_ms(
     signal: MarketSignal,
     *,
     allowed_clock_skew_ms: float,
+    now: datetime | None = None,
 ) -> float:
     book_received_at = _external_signal_datetime(
         signal.external_signal.get("book_received_at")
@@ -1178,7 +1233,7 @@ def _decision_time_book_age_ms(
     if book_received_at is None:
         return float("inf")
     age_ms = (
-        datetime.now(tz=UTC) - _aware_utc(book_received_at)
+        _aware_utc(now or datetime.now(tz=UTC)) - _aware_utc(book_received_at)
     ).total_seconds() * 1000.0
     if age_ms < -allowed_clock_skew_ms:
         return float("inf")
