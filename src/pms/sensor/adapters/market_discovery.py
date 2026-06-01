@@ -172,7 +172,7 @@ class MarketDiscoverySensor:
             "limit": str(self.page_limit),
         }
         if cursor is not None:
-            params["cursor"] = cursor
+            params["after_cursor"] = cursor
         response = await self.http_client.get(
             "/markets/keyset",
             params=params,

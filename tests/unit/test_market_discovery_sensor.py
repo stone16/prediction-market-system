@@ -406,8 +406,9 @@ async def test_market_discovery_sensor_keyset_paginates_until_empty_cursor() -> 
         assert request.url.path == "/markets/keyset"
         params = dict(request.url.params)
         assert "offset" not in params
-        captured_cursors.append(params.get("cursor"))
-        if params.get("cursor") is None:
+        assert "cursor" not in params
+        captured_cursors.append(params.get("after_cursor"))
+        if params.get("after_cursor") is None:
             payload = {
                 "markets": [
                     _gamma_market(
