@@ -403,6 +403,7 @@ async def test_market_data_sensor_bounds_websocket_close_timeout(
 
     assert signal.market_id == "m-close-timeout"
     assert captured_kwargs["close_timeout"] == 1.0
+    assert captured_kwargs["max_size"] == 8 * 1024 * 1024
     assert captured_kwargs["proxy"] is None
 
 
@@ -1254,5 +1255,6 @@ async def test_runner_builds_market_discovery_and_market_data_sensors_for_non_ba
     assert isinstance(sensors[0], MarketDiscoverySensor)
     assert isinstance(sensors[1], MarketDataSensor)
     assert sensors[1].max_reconnect_interval_s == 9.0
+    assert sensors[1].max_message_size_bytes == 8 * 1024 * 1024
     await sensors[0].aclose()
     await sensors[1].aclose()

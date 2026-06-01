@@ -315,6 +315,7 @@ class PositionExitSettings(BaseModel):
 class SensorSettings(BaseModel):
     poll_interval_s: float = 5.0
     max_reconnect_interval_s: float = 60.0
+    market_data_ws_max_size_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
     max_subscription_asset_ids: int | None = Field(default=100, ge=1)
     discovery_page_limit: int = Field(default=500, ge=1, le=500)
     discovery_max_pages: int = Field(default=1, ge=1)

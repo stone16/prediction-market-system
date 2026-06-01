@@ -60,6 +60,7 @@ class MarketDataSensor:
     _PONG_TIMEOUT_S = 15.0
     _WATCHDOG_TIMEOUT_S = 120.0
     _CLOSE_TIMEOUT_S = 1.0
+    _DEFAULT_MAX_MESSAGE_SIZE_BYTES = 8 * 1024 * 1024
 
     def __init__(
         self,
@@ -77,6 +78,7 @@ class MarketDataSensor:
         self._websocket: Any = None
         self._send_lock = asyncio.Lock()
         self._max_reconnect_interval_s = self._DEFAULT_MAX_RECONNECT_INTERVAL_S
+        self._max_message_size_bytes = self._DEFAULT_MAX_MESSAGE_SIZE_BYTES
         self._heartbeat_interval_s = self._HEARTBEAT_INTERVAL_S
         self._pong_timeout_s = self._PONG_TIMEOUT_S
         self._connection_book_source: BookSource | None = None
@@ -103,6 +105,17 @@ class MarketDataSensor:
     @max_reconnect_interval_s.setter
     def max_reconnect_interval_s(self, value: float) -> None:
         self._max_reconnect_interval_s = value
+
+    @property
+    def max_message_size_bytes(self) -> int:
+        return self._max_message_size_bytes
+
+    @max_message_size_bytes.setter
+    def max_message_size_bytes(self, value: int) -> None:
+        if value < 1:
+            msg = "max_message_size_bytes must be positive"
+            raise ValueError(msg)
+        self._max_message_size_bytes = value
 
     @property
     def watchdog_timeout_count(self) -> int:
@@ -432,8 +445,15 @@ class MarketDataSensor:
 
     def _connect(self) -> Any:
         connect_kwargs: tuple[dict[str, Any], ...] = (
-            {"close_timeout": self._CLOSE_TIMEOUT_S, "proxy": None},
-            {"close_timeout": self._CLOSE_TIMEOUT_S},
+            {
+                "close_timeout": self._CLOSE_TIMEOUT_S,
+                "max_size": self._max_message_size_bytes,
+                "proxy": None,
+            },
+            {
+                "close_timeout": self._CLOSE_TIMEOUT_S,
+                "max_size": self._max_message_size_bytes,
+            },
             {},
         )
         for kwargs in connect_kwargs:

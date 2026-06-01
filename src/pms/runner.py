@@ -18,7 +18,7 @@ from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 import asyncpg
 import httpx
 from pms.actuator.adapters.backtest import BacktestActuator
-from pms.actuator.adapters.paper import PaperActuator
+from pms.actuator.adapters.paper import PaperActuator, paper_orderbook_fill_failure
 from pms.actuator.adapters.polymarket import (
     DenyFirstLiveOrderGate,
     FileFirstLiveOrderGate,
@@ -52,7 +52,7 @@ from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
 from pms.controller.outcome_tokens import MarketDataOutcomeTokenResolver
 from pms.controller.sizers.kelly import KellySizer
-from pms.core.enums import OrderStatus, RunMode, TimeInForce
+from pms.core.enums import OrderStatus, RunMode, Side, TimeInForce
 from pms.core.interfaces import (
     DiscoveryPollCompleteSensor,
     IController,
@@ -975,6 +975,9 @@ class Runner:
         )
         market_data_sensor.max_reconnect_interval_s = (
             self.config.sensor.max_reconnect_interval_s
+        )
+        market_data_sensor.max_message_size_bytes = (
+            self.config.sensor.market_data_ws_max_size_bytes
         )
         return (
             MarketDiscoverySensor(
@@ -1927,6 +1930,13 @@ class Runner:
                     "known_orderbook_ids": sorted(self._paper_orderbooks.keys()),
                 },
             )
+        if self.config.mode == RunMode.PAPER:
+            paper_liquidity_diagnostic = self._paper_liquidity_diagnostic(
+                decision,
+                signal,
+            )
+            if paper_liquidity_diagnostic is not None:
+                return paper_liquidity_diagnostic
         if self._would_exceed_position_capacity(decision):
             return self._position_capacity_diagnostic(decision, signal)
         risk_rejection_reason = self._risk_rejection_reason(decision)
@@ -2018,6 +2028,43 @@ class Runner:
         return (
             (decision.outcome == "YES" or decision.token_id is None)
             and decision.market_id in self._paper_orderbooks
+        )
+
+    def _paper_liquidity_diagnostic(
+        self,
+        decision: TradeDecision,
+        signal: MarketSignal,
+    ) -> ControllerDiagnostic | None:
+        action = decision.action or decision.side
+        if action != Side.BUY.value:
+            return None
+        orderbook = _paper_orderbook_for_decision(self._paper_orderbooks, decision)
+        if orderbook is None:
+            return None
+        failure = paper_orderbook_fill_failure(orderbook, decision)
+        if failure is None:
+            return None
+        return ControllerDiagnostic(
+            code="paper_orderbook_insufficient_liquidity",
+            message=(
+                "Skipping paper decision because the observed paper orderbook "
+                "cannot fill the target notional within the configured limit "
+                "and slippage."
+            ),
+            market_id=decision.market_id,
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            token_id=decision.token_id,
+            severity="warning",
+            metadata={
+                "decision_outcome": decision.outcome,
+                "decision_token_id": decision.token_id,
+                "signal_token_id": signal.token_id,
+                "decision_notional_usdc": decision.notional_usdc,
+                "decision_limit_price": decision.limit_price,
+                "max_slippage_bps": decision.max_slippage_bps,
+                "failure": failure,
+            },
         )
 
     def _release_position_exit_key(self, decision_id: str) -> None:
@@ -3610,6 +3657,20 @@ def _executor_with_paper_orderbook_snapshot(
 
 def _paper_orderbook_key(decision: TradeDecision) -> str:
     return decision.token_id or decision.market_id
+
+
+def _paper_orderbook_for_decision(
+    orderbooks: Mapping[str, dict[str, Any]],
+    decision: TradeDecision,
+) -> dict[str, Any] | None:
+    if decision.token_id is not None and decision.token_id in orderbooks:
+        return orderbooks[decision.token_id]
+    if (
+        (decision.outcome == "YES" or decision.token_id is None)
+        and decision.market_id in orderbooks
+    ):
+        return orderbooks[decision.market_id]
+    return None
 
 
 def _executor_accepts_dedup_acquired(executor: Any) -> bool:

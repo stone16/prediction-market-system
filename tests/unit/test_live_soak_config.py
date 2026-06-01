@@ -70,6 +70,7 @@ def test_live_soak_config_tunes_gamma_discovery_http_pool() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
     assert settings.sensor.poll_interval_s == pytest.approx(60.0)
+    assert settings.sensor.market_data_ws_max_size_bytes == 8_388_608
     assert settings.sensor.discovery_page_limit == 100
     assert settings.sensor.discovery_max_pages == 30
     assert settings.sensor.discovery_pagination_mode == "keyset"

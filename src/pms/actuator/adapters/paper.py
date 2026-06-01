@@ -36,6 +36,17 @@ class PaperActuator:
         )
 
 
+def paper_orderbook_fill_failure(
+    orderbook: dict[str, Any],
+    decision: TradeDecision,
+) -> str | None:
+    try:
+        _vwap_fill(orderbook, decision)
+    except InsufficientLiquidityError as error:
+        return str(error)
+    return None
+
+
 def _orderbook_for_decision(
     orderbooks: Mapping[str, dict[str, Any]],
     decision: TradeDecision,

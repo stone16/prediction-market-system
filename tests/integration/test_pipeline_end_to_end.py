@@ -156,7 +156,7 @@ async def test_backtest_end_to_end_fixture_produces_decisions_and_eval_records(
 
 
 @pytest.mark.asyncio
-async def test_paper_runner_records_liquidity_rejections_in_order_state(
+async def test_paper_runner_suppresses_unfillable_entry_before_actuator(
     tmp_path: Path,
 ) -> None:
     runner = Runner(
@@ -178,9 +178,12 @@ async def test_paper_runner_records_liquidity_rejections_in_order_state(
     await asyncio.wait_for(runner.wait_until_idle(), timeout=5.0)
     await asyncio.wait_for(runner.stop(), timeout=5.0)
 
-    assert len(runner.state.orders) == 1
-    assert runner.state.orders[0].raw_status == "insufficient_liquidity"
+    assert runner.state.orders == []
     assert runner.state.fills == []
+    assert any(
+        diagnostic.code == "paper_orderbook_insufficient_liquidity"
+        for diagnostic in runner.state.controller_diagnostics
+    )
 
 
 @pytest.mark.asyncio

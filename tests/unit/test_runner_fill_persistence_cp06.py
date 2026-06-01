@@ -733,6 +733,24 @@ async def test_actuator_loop_quarantines_reentry_after_position_exit_fill() -> N
     assert runner._pre_actuator_diagnostic(next_entry, signal) is None  # noqa: SLF001
 
 
+def test_pre_actuator_diagnostic_rejects_unfillable_paper_orderbook() -> None:
+    runner = _runner()
+    market_id = "thin-paper-book"
+    signal = _signal(market_id=market_id)
+    decision = _decision(market_id=market_id, notional_usdc=20.5)
+    runner._paper_orderbooks[decision.token_id or decision.market_id] = {  # noqa: SLF001
+        "bids": [{"price": 0.40, "size": 100.0}],
+        "asks": [{"price": 0.41, "size": 1.0}],
+    }
+
+    diagnostic = runner._pre_actuator_diagnostic(decision, signal)  # noqa: SLF001
+
+    assert diagnostic is not None
+    assert diagnostic.code == "paper_orderbook_insufficient_liquidity"
+    assert diagnostic.metadata["decision_notional_usdc"] == pytest.approx(20.5)
+    assert "executable depth is insufficient" in str(diagnostic.metadata["failure"])
+
+
 @pytest.mark.asyncio
 async def test_live_order_persistence_failure_suspends_trading(
     tmp_path: Path,
