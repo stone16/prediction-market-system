@@ -3121,11 +3121,11 @@ def _optional_float_from_dict(payload: dict[str, Any], key: str) -> float | None
 
 
 def _optional_float_from_dict_first(
-    payload: dict[str, Any],
+    payload: Mapping[str, Any],
     keys: Sequence[str],
 ) -> float | None:
     for key in keys:
-        value = _optional_float_from_dict(payload, key)
+        value = _optional_float_from_mapping(payload, key)
         if value is not None:
             return value
     return None
