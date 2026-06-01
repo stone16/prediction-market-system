@@ -74,6 +74,13 @@ class DirectBookSnapshotReader(Protocol):
     async def read_levels_for_snapshot(self, snapshot_id: int) -> list[BookLevel]: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _DirectBookRead:
+    signal: MarketSignal | None
+    failure: str | None = None
+    age_ms: float | None = None
+
+
 @dataclass
 class ControllerPipeline:
     strategy_id: str = "default"
@@ -179,6 +186,7 @@ class ControllerPipeline:
             signal_token_id=signal_token_id,
         )
         signal = _canonical_yes_signal(signal, signal_outcome)
+        signal = _with_decision_time_book_age(signal, self.settings)
         # Call gate() (rather than gate_reason() twice) so the router funnel
         # log is emitted exactly once per signal. gate() returns a bool; we
         # re-derive the specific reason only on failure so we can attach it
@@ -186,6 +194,12 @@ class ControllerPipeline:
         if not router.gate(signal):
             gate_reason = router.gate_reason(signal)
             _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
+            gate_metadata: dict[str, object] = {
+                "gate_reason": gate_reason or "unknown"
+            }
+            if gate_reason == "book_too_stale":
+                gate_metadata["book_age_ms"] = signal.external_signal.get("book_age_ms")
+                gate_metadata["max_book_age_ms"] = router.controller.max_book_age_ms
             self.last_diagnostic = ControllerDiagnostic(
                 code=f"router_gate:{gate_reason}",
                 message=(
@@ -197,7 +211,7 @@ class ControllerPipeline:
                 strategy_version_id=self.strategy_version_id,
                 token_id=signal.token_id,
                 severity="info",
-                metadata={"gate_reason": gate_reason or "unknown"},
+                metadata=gate_metadata,
             )
             return None
 
@@ -483,12 +497,23 @@ class ControllerPipeline:
                 outcome=decision_outcome,
             )
         ):
-            direct_signal = await self._read_direct_outcome_execution_signal(
+            direct_read = await self._read_direct_outcome_execution_signal(
                 signal,
                 token_id=decision_token_id,
                 outcome=decision_outcome,
             )
-            if direct_signal is None:
+            if direct_read.signal is None:
+                direct_metadata: dict[str, object] = {
+                    "signal_token_id": signal.token_id,
+                    "decision_token_id": decision_token_id,
+                    "decision_outcome": decision_outcome,
+                    "yes_reference_price": yes_reference_price,
+                    "synthetic_decision_price": decision_price,
+                }
+                if direct_read.failure is not None:
+                    direct_metadata["direct_book_failure"] = direct_read.failure
+                if direct_read.age_ms is not None:
+                    direct_metadata["direct_book_age_ms"] = direct_read.age_ms
                 self._set_drop_diagnostic(
                     signal,
                     code="direct_outcome_orderbook_required",
@@ -496,13 +521,7 @@ class ControllerPipeline:
                         "Skipping decision because best-ask execution pricing "
                         "requires a direct orderbook for the selected outcome token."
                     ),
-                    metadata={
-                        "signal_token_id": signal.token_id,
-                        "decision_token_id": decision_token_id,
-                        "decision_outcome": decision_outcome,
-                        "yes_reference_price": yes_reference_price,
-                        "synthetic_decision_price": decision_price,
-                    },
+                    metadata=direct_metadata,
                 )
                 _log_pipeline_funnel(
                     signal,
@@ -510,7 +529,7 @@ class ControllerPipeline:
                     traded_count=0,
                 )
                 return None
-            execution_signal = direct_signal
+            execution_signal = direct_read.signal
             direct_price = best_ask(execution_signal)
             if direct_price is None:
                 self._set_drop_diagnostic(
@@ -846,23 +865,24 @@ class ControllerPipeline:
         *,
         token_id: str | None,
         outcome: Literal["YES", "NO"],
-    ) -> MarketSignal | None:
+    ) -> _DirectBookRead:
         if token_id is None or self.direct_book_reader is None:
-            return None
+            failure = "missing_token_id" if token_id is None else "reader_unavailable"
+            return _DirectBookRead(signal=None, failure=failure)
         try:
             snapshot = await self.direct_book_reader.read_latest_snapshot(
                 signal.market_id,
                 token_id,
             )
             if snapshot is None:
-                return None
+                return _DirectBookRead(signal=None, failure="snapshot_missing")
             snapshot_ts = _aware_utc(snapshot.ts)
             age_ms = max(
                 0.0,
                 (datetime.now(tz=UTC) - snapshot_ts).total_seconds() * 1000.0,
             )
             if age_ms > self.settings.controller.max_book_age_ms:
-                return None
+                return _DirectBookRead(signal=None, failure="stale", age_ms=age_ms)
             levels = await self.direct_book_reader.read_levels_for_snapshot(snapshot.id)
         except Exception as error:  # noqa: BLE001
             logger.warning(
@@ -871,11 +891,11 @@ class ControllerPipeline:
                 token_id,
                 error,
             )
-            return None
+            return _DirectBookRead(signal=None, failure="read_failed")
 
         orderbook = _orderbook_from_levels(levels)
         if orderbook is None:
-            return None
+            return _DirectBookRead(signal=None, failure="levels_missing", age_ms=age_ms)
         external_signal: dict[str, Any] = {
             **signal.external_signal,
             "signal_token_outcome": outcome,
@@ -897,7 +917,10 @@ class ControllerPipeline:
         direct_best_ask = _best_level(orderbook, "asks")
         if direct_best_ask is not None:
             external_signal["best_ask"] = direct_best_ask
-        return replace(direct_signal, external_signal=external_signal)
+        return _DirectBookRead(
+            signal=replace(direct_signal, external_signal=external_signal),
+            age_ms=age_ms,
+        )
 
     async def decide(
         self,
@@ -1121,6 +1144,40 @@ def _decision_uses_signal_orderbook(
     if token_id is None:
         return outcome == "YES"
     return token_id == signal.token_id
+
+
+def _with_decision_time_book_age(
+    signal: MarketSignal,
+    settings: PMSSettings,
+) -> MarketSignal:
+    if settings.mode == RunMode.BACKTEST:
+        return signal
+    if "book_received_at" not in signal.external_signal:
+        return signal
+    age_ms = _decision_time_book_age_ms(
+        signal,
+        allowed_clock_skew_ms=settings.controller.allowed_book_clock_skew_ms,
+    )
+    return replace(
+        signal,
+        external_signal={
+            **signal.external_signal,
+            "book_age_ms": age_ms,
+        },
+    )
+
+
+def _decision_time_book_age_ms(
+    signal: MarketSignal,
+    *,
+    allowed_clock_skew_ms: float,
+) -> float:
+    age_ms = (
+        datetime.now(tz=UTC) - _aware_utc(signal.fetched_at)
+    ).total_seconds() * 1000.0
+    if age_ms < -allowed_clock_skew_ms:
+        return float("inf")
+    return max(0.0, age_ms)
 
 
 def _orderbook_from_levels(levels: Sequence[BookLevel]) -> dict[str, list[dict[str, float]]] | None:

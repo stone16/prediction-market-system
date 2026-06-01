@@ -279,6 +279,7 @@ async def test_market_data_sensor_enriches_signals_with_market_risk_metadata() -
     assert signal.external_signal["yes_token_id"] == "asset-election-risk-yes"
     assert signal.external_signal["no_token_id"] == "asset-election-risk"
     assert signal.external_signal["signal_token_outcome"] == "NO"
+    assert isinstance(signal.external_signal["book_received_at"], str)
     store_mock.read_market_signal_metadata_mock.assert_awaited_once_with(
         "m-election-risk"
     )

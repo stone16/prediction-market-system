@@ -637,7 +637,10 @@ def _signal_from_state(
             for level_price, level_size in sorted(state.asks.items(), key=lambda item: item[0])
         ],
     }
-    external_signal = {"raw_event_type": event_type}
+    external_signal = {
+        "raw_event_type": event_type,
+        "book_received_at": datetime.now(tz=UTC).isoformat(),
+    }
     if extra is not None:
         external_signal.update(extra)
     token_outcome = _signal_token_outcome(

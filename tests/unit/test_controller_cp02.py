@@ -398,6 +398,52 @@ async def test_controller_pipeline_skips_when_executable_depth_below_minimum() -
 
 
 @pytest.mark.asyncio
+async def test_best_ask_strategy_rejects_stale_live_signal_orderbook() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(
+            ControllerSettings(
+                min_volume=100.0,
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            )
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            ),
+        ),
+    )
+    signal = replace(
+        _signal(fetched_at=datetime.now(tz=UTC) - timedelta(seconds=5)),
+        resolves_at=datetime.now(tz=UTC) + timedelta(days=1),
+        external_signal={
+            **_signal().external_signal,
+            "raw_event_type": "book",
+            "book_received_at": datetime.now(tz=UTC).isoformat(),
+        },
+        orderbook={
+            "bids": [{"price": 0.39, "size": 1_000.0}],
+            "asks": [{"price": 0.40, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.code == "router_gate:book_too_stale"
+    assert diagnostic.metadata["gate_reason"] == "book_too_stale"
+    assert diagnostic.metadata["book_age_ms"] > 1_000.0
+
+
+@pytest.mark.asyncio
 async def test_best_ask_strategy_skips_synthetic_no_decision_without_direct_no_book() -> None:
     pipeline = ControllerPipeline(
         strategy=_best_ask_strategy(),
@@ -430,6 +476,57 @@ async def test_best_ask_strategy_skips_synthetic_no_decision_without_direct_no_b
     assert diagnostic.metadata["decision_outcome"] == "NO"
     assert diagnostic.metadata["signal_token_id"] == "token-yes"
     assert diagnostic.metadata["decision_token_id"] == "token-no"
+
+
+@pytest.mark.asyncio
+async def test_best_ask_strategy_reports_stale_direct_book_reason() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[BearishForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=1_000.0)),
+        outcome_token_resolver=StaticOutcomeTokenResolver(),
+        direct_book_reader=StaticDirectBookReader(
+            token_id="token-no",
+            bids=[(0.40, 1_000.0)],
+            asks=[(0.41, 1_000.0)],
+            ts=datetime.now(tz=UTC) - timedelta(seconds=5),
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            ),
+        ),
+    )
+    signal = replace(
+        _signal(fetched_at=datetime.now(tz=UTC)),
+        resolves_at=datetime.now(tz=UTC) + timedelta(days=1),
+        token_id="token-yes",
+        yes_price=0.585,
+        external_signal={
+            **_signal().external_signal,
+            "yes_token_id": "token-yes",
+            "no_token_id": "token-no",
+            "raw_event_type": "book",
+            "book_received_at": datetime.now(tz=UTC).isoformat(),
+        },
+        orderbook={
+            "bids": [{"price": 0.58, "size": 1_000.0}],
+            "asks": [{"price": 0.59, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.code == "direct_outcome_orderbook_required"
+    assert diagnostic.metadata["direct_book_failure"] == "stale"
+    assert diagnostic.metadata["direct_book_age_ms"] > 1_000.0
 
 
 @pytest.mark.asyncio
