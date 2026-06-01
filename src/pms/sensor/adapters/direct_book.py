@@ -218,7 +218,7 @@ def _book_levels_from_payload_side(
                 size=size,
             )
         )
-    return levels
+    return sorted(levels, key=lambda level: level.price, reverse=side == "BUY")
 
 
 def _finite_float(value: object, *, field_name: str) -> float:

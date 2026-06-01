@@ -148,8 +148,16 @@ def test_venue_book_from_clob_payload_parses_public_book_response() -> None:
         {
             "asset_id": "token-yes",
             "hash": "book-hash",
-            "bids": [{"price": "0.49", "size": "10.5"}],
-            "asks": [{"price": "0.51", "size": "9.5"}],
+            "bids": [
+                {"price": "0.01", "size": "1.0"},
+                {"price": "0.49", "size": "10.5"},
+                {"price": "0.25", "size": "2.0"},
+            ],
+            "asks": [
+                {"price": "0.99", "size": "1.0"},
+                {"price": "0.51", "size": "9.5"},
+                {"price": "0.75", "size": "2.0"},
+            ],
         },
         market_id="market-1",
         token_id="token-yes",
@@ -160,8 +168,16 @@ def test_venue_book_from_clob_payload_parses_public_book_response() -> None:
     assert book.token_id == "token-yes"
     assert book.ts == observed_at
     assert book.hash == "book-hash"
-    assert book.bids == (BookLevel(0, "market-1", "BUY", 0.49, 10.5),)
-    assert book.asks == (BookLevel(0, "market-1", "SELL", 0.51, 9.5),)
+    assert book.bids == (
+        BookLevel(0, "market-1", "BUY", 0.49, 10.5),
+        BookLevel(0, "market-1", "BUY", 0.25, 2.0),
+        BookLevel(0, "market-1", "BUY", 0.01, 1.0),
+    )
+    assert book.asks == (
+        BookLevel(0, "market-1", "SELL", 0.51, 9.5),
+        BookLevel(0, "market-1", "SELL", 0.75, 2.0),
+        BookLevel(0, "market-1", "SELL", 0.99, 1.0),
+    )
 
 
 def test_venue_book_from_clob_payload_rejects_token_mismatch() -> None:

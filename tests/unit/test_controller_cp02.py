@@ -493,6 +493,68 @@ async def test_best_ask_strategy_refreshes_stale_signal_book_before_router_gate(
 
 
 @pytest.mark.asyncio
+async def test_best_ask_strategy_sorts_refreshed_direct_book_levels() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(
+            ControllerSettings(
+                min_volume=100.0,
+                max_book_age_ms=1_000.0,
+                max_spread_bps=10_000.0,
+            )
+        ),
+        direct_book_reader=StaticDirectBookReader(
+            token_id="token-cp02",
+            bids=[(0.01, 10.0), (0.39, 1_000.0), (0.25, 20.0)],
+            asks=[(0.99, 10.0), (0.40, 1_000.0), (0.75, 20.0)],
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                max_book_age_ms=1_000.0,
+                max_spread_bps=10_000.0,
+            ),
+        ),
+    )
+    now = datetime.now(tz=UTC)
+    signal = replace(
+        _signal(fetched_at=now),
+        resolves_at=now + timedelta(days=1),
+        external_signal={
+            **_signal().external_signal,
+            "raw_event_type": "book",
+            "book_received_at": (now - timedelta(seconds=5)).isoformat(),
+        },
+        orderbook={
+            "bids": [{"price": 0.01, "size": 10.0}],
+            "asks": [{"price": 0.99, "size": 10.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is not None
+    _, decision = emission
+    assert decision.limit_price == pytest.approx(0.40)
+    assert pipeline.last_execution_signal is not None
+    assert pipeline.last_execution_signal.orderbook == {
+        "bids": [
+            {"price": 0.39, "size": 1_000.0},
+            {"price": 0.25, "size": 20.0},
+            {"price": 0.01, "size": 10.0},
+        ],
+        "asks": [
+            {"price": 0.40, "size": 1_000.0},
+            {"price": 0.75, "size": 20.0},
+            {"price": 0.99, "size": 10.0},
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_best_ask_strategy_accepts_freshly_received_live_orderbook_with_old_venue_timestamp() -> None:
     pipeline = ControllerPipeline(
         strategy=_best_ask_strategy(),

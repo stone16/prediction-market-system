@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import UTC, datetime
 from typing import cast
 
@@ -460,19 +459,17 @@ async def test_eval_spool_enqueue_is_non_blocking_and_scores_in_background(
     spool = EvalSpool(store=store, scorer=Scorer())
     await spool.start()
     try:
-        started_at = time.perf_counter()
         for index in range(100):
             spool.enqueue(
                 _fill(decision_id=f"d-{index}", resolved_outcome=1.0),
                 _decision(prob=0.7),
             )
-        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        assert await cast(InMemoryEvalStore, store).all() == []
 
         await spool.join()
     finally:
         await spool.stop()
 
-    assert elapsed_ms < 100
     assert len(await cast(InMemoryEvalStore, store).all()) == 100
 
 

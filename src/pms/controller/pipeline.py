@@ -1297,6 +1297,8 @@ def _orderbook_from_levels(levels: Sequence[BookLevel]) -> dict[str, list[dict[s
     ]
     if not bids or not asks:
         return None
+    bids.sort(key=lambda level: level["price"], reverse=True)
+    asks.sort(key=lambda level: level["price"])
     return {"bids": bids, "asks": asks}
 
 
