@@ -419,13 +419,14 @@ async def test_best_ask_strategy_rejects_stale_live_signal_orderbook() -> None:
             ),
         ),
     )
+    now = datetime.now(tz=UTC)
     signal = replace(
-        _signal(fetched_at=datetime.now(tz=UTC) - timedelta(seconds=5)),
-        resolves_at=datetime.now(tz=UTC) + timedelta(days=1),
+        _signal(fetched_at=now),
+        resolves_at=now + timedelta(days=1),
         external_signal={
             **_signal().external_signal,
             "raw_event_type": "book",
-            "book_received_at": datetime.now(tz=UTC).isoformat(),
+            "book_received_at": (now - timedelta(seconds=5)).isoformat(),
         },
         orderbook={
             "bids": [{"price": 0.39, "size": 1_000.0}],
@@ -441,6 +442,49 @@ async def test_best_ask_strategy_rejects_stale_live_signal_orderbook() -> None:
     assert diagnostic.code == "router_gate:book_too_stale"
     assert diagnostic.metadata["gate_reason"] == "book_too_stale"
     assert diagnostic.metadata["book_age_ms"] > 1_000.0
+
+
+@pytest.mark.asyncio
+async def test_best_ask_strategy_accepts_freshly_received_live_orderbook_with_old_venue_timestamp() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(
+            ControllerSettings(
+                min_volume=100.0,
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            )
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            ),
+        ),
+    )
+    now = datetime.now(tz=UTC)
+    signal = replace(
+        _signal(fetched_at=now - timedelta(seconds=5)),
+        resolves_at=now + timedelta(days=1),
+        external_signal={
+            **_signal().external_signal,
+            "raw_event_type": "book",
+            "book_received_at": now.isoformat(),
+        },
+        orderbook={
+            "bids": [{"price": 0.39, "size": 1_000.0}],
+            "asks": [{"price": 0.40, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is not None
+    assert pipeline.last_diagnostic is None
 
 
 @pytest.mark.asyncio

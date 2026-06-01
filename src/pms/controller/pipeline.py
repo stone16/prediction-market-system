@@ -1172,12 +1172,33 @@ def _decision_time_book_age_ms(
     *,
     allowed_clock_skew_ms: float,
 ) -> float:
+    book_received_at = _external_signal_datetime(
+        signal.external_signal.get("book_received_at")
+    )
+    if book_received_at is None:
+        return float("inf")
     age_ms = (
-        datetime.now(tz=UTC) - _aware_utc(signal.fetched_at)
+        datetime.now(tz=UTC) - _aware_utc(book_received_at)
     ).total_seconds() * 1000.0
     if age_ms < -allowed_clock_skew_ms:
         return float("inf")
     return max(0.0, age_ms)
+
+
+def _external_signal_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    raw_value = value.strip()
+    if not raw_value:
+        return None
+    if raw_value.endswith("Z"):
+        raw_value = f"{raw_value[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
 
 
 def _orderbook_from_levels(levels: Sequence[BookLevel]) -> dict[str, list[dict[str, float]]] | None:

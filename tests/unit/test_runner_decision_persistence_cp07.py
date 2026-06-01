@@ -397,9 +397,13 @@ def test_decision_evidence_drops_non_finite_orderbook_values() -> None:
 
 
 def test_decision_evidence_computes_book_age_for_live_market_data_signal() -> None:
+    book_received_at = _signal().fetched_at + timedelta(milliseconds=400)
     signal = replace(
         _signal(),
-        external_signal={"raw_event_type": "book", "book_received_at": "local-clock"},
+        external_signal={
+            "raw_event_type": "book",
+            "book_received_at": book_received_at.isoformat(),
+        },
     )
     evidence = _decision_evidence_from_signal(
         signal,
@@ -409,7 +413,7 @@ def test_decision_evidence_computes_book_age_for_live_market_data_signal() -> No
         decision_created_at=signal.fetched_at + timedelta(milliseconds=1250),
     )
 
-    assert evidence["book_age_ms"] == pytest.approx(1250.0)
+    assert evidence["book_age_ms"] == pytest.approx(850.0)
     external_signal_keys = evidence["external_signal_keys"]
     assert isinstance(external_signal_keys, list)
     assert "book_received_at" in external_signal_keys

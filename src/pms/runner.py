@@ -3552,10 +3552,13 @@ def _decision_evidence_book_age_ms(
     explicit_age = _optional_float(signal.external_signal.get("book_age_ms"))
     if explicit_age is not None:
         return explicit_age
-    if "book_received_at" not in signal.external_signal:
+    book_received_at = _external_signal_datetime(
+        signal.external_signal.get("book_received_at")
+    )
+    if book_received_at is None:
         return None
     age_ms = (
-        _aware_utc(decision_created_at) - _aware_utc(signal.fetched_at)
+        _aware_utc(decision_created_at) - _aware_utc(book_received_at)
     ).total_seconds() * 1000.0
     return max(0.0, age_ms)
 
@@ -3564,6 +3567,22 @@ def _aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _external_signal_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    raw_value = value.strip()
+    if not raw_value:
+        return None
+    if raw_value.endswith("Z"):
+        raw_value = f"{raw_value[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
 
 
 def _category_prior_estimator_from_settings(
