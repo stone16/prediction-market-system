@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import asyncpg
 from pydantic import BaseModel, field_serializer
@@ -44,9 +45,17 @@ class StrategyMetricsRowResponse(BaseModel):
     baseline_brier_overall: float | None
     brier_improvement_overall: float | None
     pnl: float
+    pnl_source: Literal["final_eval", "quote_mtm", "none"]
     fill_rate: float
     slippage_bps: float
     drawdown: float
+    decision_count: int
+    fill_count: int
+    execution_fill_rate: float
+    executed_notional_usdc: float
+    quote_record_count: int
+    quote_score_overall: float | None
+    quote_mtm_pnl: float
 
     @field_serializer("created_at")
     def _serialize_created_at(self, created_at: datetime) -> str:
@@ -55,6 +64,22 @@ class StrategyMetricsRowResponse(BaseModel):
 
 class StrategyMetricsResponse(BaseModel):
     strategies: list[StrategyMetricsRowResponse]
+
+
+@dataclass(frozen=True)
+class StrategyExecutionSnapshot:
+    decision_count: int
+    fill_count: int
+    executed_notional_usdc: float
+    quote_record_count: int
+    quote_score_overall: float | None
+    quote_mtm_pnl: float
+
+    @property
+    def execution_fill_rate(self) -> float:
+        if self.decision_count <= 0:
+            return 0.0
+        return self.fill_count / self.decision_count
 
 
 async def list_strategies(pg_pool: asyncpg.Pool) -> dict[str, Any]:
@@ -79,6 +104,7 @@ async def list_strategy_metrics(pg_pool: asyncpg.Pool) -> dict[str, Any]:
     ]
     eval_store = EvalStore(pg_pool)
     records_by_strategy = await _load_records_by_strategy(eval_store, strategy_rows)
+    execution_by_strategy = await _load_execution_snapshots(pg_pool)
     grouped_snapshots = MetricsCollector(
         record
         for strategy_records in records_by_strategy.values()
@@ -94,6 +120,10 @@ async def list_strategy_metrics(pg_pool: asyncpg.Pool) -> dict[str, Any]:
                     [],
                 ),
                 grouped_snapshots,
+                execution_by_strategy.get(
+                    (row.strategy_id, _active_version_id(row)),
+                    _empty_execution_snapshot(),
+                ),
             )
             for row in strategy_rows
         ]
@@ -121,13 +151,116 @@ async def _load_records_by_strategy(
     return dict(zip(keys, results, strict=True))
 
 
+async def _load_execution_snapshots(
+    pg_pool: asyncpg.Pool,
+) -> dict[StrategyVersionKey, StrategyExecutionSnapshot]:
+    async with pg_pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            WITH active_strategies AS (
+                SELECT strategy_id, active_version_id AS strategy_version_id
+                FROM strategies
+                WHERE active_version_id IS NOT NULL
+            ),
+            decision_stats AS (
+                SELECT strategy_id, strategy_version_id, COUNT(*)::integer AS decision_count
+                FROM decisions
+                GROUP BY strategy_id, strategy_version_id
+            ),
+            fill_stats AS (
+                SELECT
+                    strategy_id,
+                    strategy_version_id,
+                    COUNT(*)::integer AS fill_count,
+                    COALESCE(SUM(fill_notional_usdc), 0.0)::double precision
+                        AS executed_notional_usdc
+                FROM fills
+                GROUP BY strategy_id, strategy_version_id
+            ),
+            quote_stats AS (
+                SELECT
+                    strategy_id,
+                    strategy_version_id,
+                    COUNT(*)::integer AS quote_record_count,
+                    AVG(quote_score)::double precision AS quote_score_overall,
+                    COALESCE(SUM(mtm_pnl), 0.0)::double precision AS quote_mtm_pnl
+                FROM quote_eval_records
+                GROUP BY strategy_id, strategy_version_id
+            )
+            SELECT
+                active_strategies.strategy_id,
+                active_strategies.strategy_version_id,
+                COALESCE(decision_stats.decision_count, 0)::integer AS decision_count,
+                COALESCE(fill_stats.fill_count, 0)::integer AS fill_count,
+                COALESCE(fill_stats.executed_notional_usdc, 0.0)::double precision
+                    AS executed_notional_usdc,
+                COALESCE(quote_stats.quote_record_count, 0)::integer AS quote_record_count,
+                quote_stats.quote_score_overall,
+                COALESCE(quote_stats.quote_mtm_pnl, 0.0)::double precision AS quote_mtm_pnl
+            FROM active_strategies
+            LEFT JOIN decision_stats
+                ON decision_stats.strategy_id = active_strategies.strategy_id
+               AND decision_stats.strategy_version_id = active_strategies.strategy_version_id
+            LEFT JOIN fill_stats
+                ON fill_stats.strategy_id = active_strategies.strategy_id
+               AND fill_stats.strategy_version_id = active_strategies.strategy_version_id
+            LEFT JOIN quote_stats
+                ON quote_stats.strategy_id = active_strategies.strategy_id
+               AND quote_stats.strategy_version_id = active_strategies.strategy_version_id
+            ORDER BY active_strategies.strategy_id ASC
+            """
+        )
+    return {
+        (str(row["strategy_id"]), str(row["strategy_version_id"])): (
+            StrategyExecutionSnapshot(
+                decision_count=int(row["decision_count"]),
+                fill_count=int(row["fill_count"]),
+                executed_notional_usdc=float(row["executed_notional_usdc"]),
+                quote_record_count=int(row["quote_record_count"]),
+                quote_score_overall=(
+                    None
+                    if row["quote_score_overall"] is None
+                    else float(row["quote_score_overall"])
+                ),
+                quote_mtm_pnl=float(row["quote_mtm_pnl"]),
+            )
+        )
+        for row in rows
+    }
+
+
+def _empty_execution_snapshot() -> StrategyExecutionSnapshot:
+    return StrategyExecutionSnapshot(
+        decision_count=0,
+        fill_count=0,
+        executed_notional_usdc=0.0,
+        quote_record_count=0,
+        quote_score_overall=None,
+        quote_mtm_pnl=0.0,
+    )
+
+
 def _strategy_metrics_row(
     row: StrategyRow,
     records: list[EvalRecord],
     grouped_snapshots: Mapping[StrategyVersionKey, StrategyMetricsSnapshot],
+    execution: StrategyExecutionSnapshot,
 ) -> StrategyMetricsRowResponse:
     strategy_version_id = _active_version_id(row)
     snapshot = grouped_snapshots.get((row.strategy_id, strategy_version_id))
+    pnl_source: Literal["final_eval", "quote_mtm", "none"] = "none"
+    pnl = 0.0
+    if snapshot is not None:
+        pnl_source = "final_eval"
+        pnl = snapshot.pnl
+    elif execution.quote_record_count > 0:
+        pnl_source = "quote_mtm"
+        pnl = execution.quote_mtm_pnl
+    fill_rate = (
+        snapshot.fill_rate
+        if snapshot is not None
+        else execution.execution_fill_rate
+    )
     return StrategyMetricsRowResponse(
         strategy_id=row.strategy_id,
         strategy_version_id=strategy_version_id,
@@ -141,10 +274,18 @@ def _strategy_metrics_row(
         brier_improvement_overall=(
             None if snapshot is None else snapshot.brier_improvement_overall
         ),
-        pnl=0.0 if snapshot is None else snapshot.pnl,
-        fill_rate=0.0 if snapshot is None else snapshot.fill_rate,
+        pnl=pnl,
+        pnl_source=pnl_source,
+        fill_rate=fill_rate,
         slippage_bps=0.0 if snapshot is None else snapshot.slippage_bps,
         drawdown=_max_drawdown(records),
+        decision_count=execution.decision_count,
+        fill_count=execution.fill_count,
+        execution_fill_rate=execution.execution_fill_rate,
+        executed_notional_usdc=execution.executed_notional_usdc,
+        quote_record_count=execution.quote_record_count,
+        quote_score_overall=execution.quote_score_overall,
+        quote_mtm_pnl=execution.quote_mtm_pnl,
     )
 
 
