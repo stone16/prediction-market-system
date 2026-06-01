@@ -187,6 +187,11 @@ class ControllerPipeline:
         )
         signal = _canonical_yes_signal(signal, signal_outcome)
         signal = _with_decision_time_book_age(signal, self.settings)
+        if router.gate_reason(signal) == "book_too_stale":
+            signal = await self._refresh_signal_book_before_router_gate(
+                signal,
+                outcome=signal_outcome.signal_outcome,
+            )
         # Call gate() (rather than gate_reason() twice) so the router funnel
         # log is emitted exactly once per signal. gate() returns a bool; we
         # re-derive the specific reason only on failure so we can attach it
@@ -490,18 +495,43 @@ class ControllerPipeline:
             decision_edge = decision_probability - decision_price
         if (
             _strategy_metadata(self.strategy).get("price_reference") == "best_ask"
-            and not _decision_uses_signal_orderbook(
+        ):
+            direct_required = not _decision_uses_signal_orderbook(
                 execution_signal,
                 token_id=decision_token_id,
                 outcome=decision_outcome,
             )
-        ):
             direct_read = await self._read_direct_outcome_execution_signal(
                 signal,
                 token_id=decision_token_id,
                 outcome=decision_outcome,
             )
-            if direct_read.signal is None:
+            if direct_read.signal is not None:
+                execution_signal = direct_read.signal
+                direct_price = best_ask(execution_signal)
+                if direct_price is None:
+                    self._set_drop_diagnostic(
+                        signal,
+                        code="direct_outcome_orderbook_required",
+                        message=(
+                            "Skipping decision because the selected outcome direct "
+                            "orderbook has no executable ask."
+                        ),
+                        metadata={
+                            "signal_token_id": signal.token_id,
+                            "decision_token_id": decision_token_id,
+                            "decision_outcome": decision_outcome,
+                        },
+                    )
+                    _log_pipeline_funnel(
+                        signal,
+                        forecasted_count=len(probabilities),
+                        traded_count=0,
+                    )
+                    return None
+                decision_price = direct_price
+                decision_edge = decision_probability - decision_price
+            elif direct_required:
                 direct_metadata: dict[str, object] = {
                     "signal_token_id": signal.token_id,
                     "decision_token_id": decision_token_id,
@@ -528,30 +558,6 @@ class ControllerPipeline:
                     traded_count=0,
                 )
                 return None
-            execution_signal = direct_read.signal
-            direct_price = best_ask(execution_signal)
-            if direct_price is None:
-                self._set_drop_diagnostic(
-                    signal,
-                    code="direct_outcome_orderbook_required",
-                    message=(
-                        "Skipping decision because the selected outcome direct "
-                        "orderbook has no executable ask."
-                    ),
-                    metadata={
-                        "signal_token_id": signal.token_id,
-                        "decision_token_id": decision_token_id,
-                        "decision_outcome": decision_outcome,
-                    },
-                )
-                _log_pipeline_funnel(
-                    signal,
-                    forecasted_count=len(probabilities),
-                    traded_count=0,
-                )
-                return None
-            decision_price = direct_price
-            decision_edge = decision_probability - decision_price
         if decision_edge <= 0.0:
             self._set_drop_diagnostic(
                 signal,
@@ -894,6 +900,25 @@ class ControllerPipeline:
             risk_group_id=_risk_group_id(signal),
             spread_bps_at_decision=decision_spread_bps,
         )
+
+    async def _refresh_signal_book_before_router_gate(
+        self,
+        signal: MarketSignal,
+        *,
+        outcome: Literal["YES", "NO"],
+    ) -> MarketSignal:
+        if (
+            self.settings.mode == RunMode.BACKTEST
+            or self.direct_book_reader is None
+            or _strategy_metadata(self.strategy).get("price_reference") != "best_ask"
+        ):
+            return signal
+        direct_read = await self._read_direct_outcome_execution_signal(
+            signal,
+            token_id=signal.token_id,
+            outcome=outcome,
+        )
+        return signal if direct_read.signal is None else direct_read.signal
 
     async def _read_direct_outcome_execution_signal(
         self,

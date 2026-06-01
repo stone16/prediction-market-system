@@ -286,6 +286,64 @@ async def test_controller_pipeline_persists_and_enqueues_decision() -> None:
 
 
 @pytest.mark.asyncio
+async def test_controller_pipeline_coalesces_superseded_token_signals_before_forecast() -> None:
+    runner = _paper_runner_with_strict_book_age()
+    controller = _OpportunityAwareControllerDouble()
+    queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
+    runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        controller=cast(Any, controller),
+        asset_ids=None,
+    )
+    runner._controller_signal_queues["default"] = queue  # noqa: SLF001
+    runner.opportunity_store = cast(Any, _RecordingOpportunityStore(runner))
+    runner.decision_store = cast(Any, _RecordingDecisionStore(runner))
+    runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+    await runner._controller_task
+    now = datetime.now(tz=UTC)
+    older = replace(
+        _signal(),
+        market_id="market-superseded-cp07",
+        token_id="token-cp07-yes",
+        fetched_at=now,
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.41, "size": 100.0}],
+        },
+        external_signal={
+            **_signal().external_signal,
+            "book_received_at": now.isoformat(),
+        },
+    )
+    newer = replace(
+        _signal(),
+        market_id="market-latest-cp07",
+        token_id="token-cp07-yes",
+        fetched_at=now + timedelta(milliseconds=10),
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.41, "size": 100.0}],
+        },
+        external_signal={
+            **_signal().external_signal,
+            "book_received_at": (now + timedelta(milliseconds=10)).isoformat(),
+        },
+    )
+    runner._remember_paper_orderbook(newer)  # noqa: SLF001
+    await queue.put(older)
+    await queue.put(newer)
+
+    await asyncio.wait_for(
+        runner._controller_pipeline_loop("default"),  # noqa: SLF001
+        timeout=1.0,
+    )
+
+    assert controller.calls == ["market-latest-cp07"]
+    assert runner.state.controller_diagnostics == []
+
+
+@pytest.mark.asyncio
 async def test_controller_pipeline_drops_stale_queued_book_signal_before_controller() -> None:
     runner = _paper_runner_with_strict_book_age()
     controller = _OpportunityAwareControllerDouble()
@@ -336,6 +394,50 @@ async def test_controller_pipeline_drops_stale_queued_book_signal_before_control
     assert stale_diagnostic.market_id == "market-stale-cp07"
     assert stale_diagnostic.metadata["phase"] == "queue_dequeue"
     assert stale_diagnostic.metadata["max_book_age_ms"] == 1_000.0
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_allows_stale_queued_signal_when_controller_can_refresh_book() -> None:
+    runner = _paper_runner_with_strict_book_age()
+    controller = _OpportunityAwareControllerDouble()
+    setattr(controller, "direct_book_reader", object())
+    queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
+    runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        controller=cast(Any, controller),
+        asset_ids=None,
+    )
+    runner._controller_signal_queues["default"] = queue  # noqa: SLF001
+    runner.opportunity_store = cast(Any, _RecordingOpportunityStore(runner))
+    runner.decision_store = cast(Any, _RecordingDecisionStore(runner))
+    runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+    await runner._controller_task
+    now = datetime.now(tz=UTC)
+    stale_refreshable = replace(
+        _signal(),
+        market_id="market-refreshable-cp07",
+        token_id="token-cp07-yes",
+        fetched_at=now,
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.41, "size": 100.0}],
+        },
+        external_signal={
+            **_signal().external_signal,
+            "book_received_at": (now - timedelta(seconds=5)).isoformat(),
+        },
+    )
+    runner._remember_paper_orderbook(stale_refreshable)  # noqa: SLF001
+    await queue.put(stale_refreshable)
+
+    await asyncio.wait_for(
+        runner._controller_pipeline_loop("default"),  # noqa: SLF001
+        timeout=1.0,
+    )
+
+    assert controller.calls == ["market-refreshable-cp07"]
+    assert runner.state.controller_diagnostics == []
 
 
 @pytest.mark.asyncio

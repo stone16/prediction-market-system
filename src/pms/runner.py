@@ -169,6 +169,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BACKTEST_FIXTURE = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
 RUNNER_STATE_LIMIT = 1000
+CONTROLLER_SIGNAL_COOLESCE_LIMIT = 1_000
 RESELECTION_INTERVAL_S = 300.0
 DECISION_PENDING_TTL = timedelta(minutes=15)
 DECISION_SWEEP_INTERVAL_S = 5.0
@@ -1270,6 +1271,34 @@ class Runner:
         if signal.token_id is not None:
             self._latest_signal_by_token[signal.token_id] = signal
 
+    def _coalesce_controller_signal_batch(
+        self,
+        signal: MarketSignal,
+        *,
+        queue: asyncio.Queue[MarketSignal],
+    ) -> MarketSignal:
+        selected_key = _controller_signal_coalesce_key(signal)
+        selected_signal = signal
+        deferred_signals: list[MarketSignal] = []
+        drained = 0
+        while drained < CONTROLLER_SIGNAL_COOLESCE_LIMIT:
+            try:
+                queued_signal = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            drained += 1
+            key = _controller_signal_coalesce_key(queued_signal)
+            if key == selected_key:
+                if _is_newer_controller_signal(queued_signal, selected_signal):
+                    selected_signal = queued_signal
+            else:
+                deferred_signals.append(queued_signal)
+            queue.task_done()
+
+        for deferred_signal in deferred_signals:
+            queue.put_nowait(deferred_signal)
+        return selected_signal
+
     def _enrich_signal_with_controller_baselines(
         self,
         signal: MarketSignal,
@@ -1325,6 +1354,10 @@ class Runner:
                     continue
 
                 try:
+                    signal = self._coalesce_controller_signal_batch(
+                        signal,
+                        queue=queue,
+                    )
                     stale_signal_diagnostic = self._stale_queued_signal_diagnostic(
                         signal,
                         runtime,
@@ -1973,6 +2006,8 @@ class Runner:
             signal.external_signal.get("book_received_at")
         )
         if book_received_at is None:
+            return None
+        if _controller_can_refresh_queued_book(runtime.controller):
             return None
         max_book_age_ms = self.config.controller.max_book_age_ms
         raw_age_ms = (
@@ -3890,6 +3925,31 @@ def _decision_evidence_book_age_ms(
         _aware_utc(decision_created_at) - _aware_utc(book_received_at)
     ).total_seconds() * 1000.0
     return max(0.0, age_ms)
+
+
+def _controller_signal_coalesce_key(signal: MarketSignal) -> tuple[str, str]:
+    signal_id = signal.token_id if signal.token_id is not None else signal.market_id
+    return signal.venue, signal_id
+
+
+def _is_newer_controller_signal(
+    candidate: MarketSignal,
+    current: MarketSignal,
+) -> bool:
+    return _controller_signal_event_time(candidate) >= _controller_signal_event_time(
+        current
+    )
+
+
+def _controller_signal_event_time(signal: MarketSignal) -> datetime:
+    book_received_at = _external_signal_datetime(
+        signal.external_signal.get("book_received_at")
+    )
+    return _aware_utc(book_received_at or signal.fetched_at)
+
+
+def _controller_can_refresh_queued_book(controller: object) -> bool:
+    return getattr(controller, "direct_book_reader", None) is not None
 
 
 def _aware_utc(value: datetime) -> datetime:
