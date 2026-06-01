@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, Protocol
 
@@ -100,6 +101,7 @@ class DecisionsReader(Protocol):
         offset: int = 0,
         status: str | None = None,
         include_opportunity: bool = False,
+        until: datetime | None = None,
     ) -> Sequence[StoredDecisionLike]: ...
 
     async def get_decision(
@@ -157,12 +159,14 @@ async def list_decisions(
     offset: int = 0,
     status: str | None = None,
     include_opportunity: bool = False,
+    until: datetime | None = None,
 ) -> list[DecisionRow]:
     rows = await store.read_decisions(
         limit=limit,
         offset=offset,
         status=status,
         include_opportunity=include_opportunity,
+        until=until,
     )
     return [_decision_row(row) for row in rows]
 
@@ -206,34 +210,56 @@ async def accept_decision(
     if not acquired:
         return _accepted_response(row.decision.decision_id)
 
-    risk_decision = risk.check(row.decision, portfolio)
-    if not risk_decision.approved:
-        await store.update_status(
+    lease_released = False
+    lease_transferred = False
+    try:
+        risk_decision = risk.check(row.decision, portfolio)
+        if not risk_decision.approved:
+            await store.update_status(
+                row.decision.decision_id,
+                current_status="pending",
+                next_status="rejected",
+                updated_at=datetime.now(tz=UTC),
+            )
+            await dedup_store.release(row.decision.decision_id, "invalid")
+            lease_released = True
+            raise DecisionRiskRejectedError(risk_decision.reason)
+
+        updated = await store.update_status(
             row.decision.decision_id,
             current_status="pending",
-            next_status="rejected",
+            next_status="accepted",
             updated_at=datetime.now(tz=UTC),
         )
-        await dedup_store.release(row.decision.decision_id, "invalid")
-        raise DecisionRiskRejectedError(risk_decision.reason)
-
-    updated = await store.update_status(
-        row.decision.decision_id,
-        current_status="pending",
-        next_status="accepted",
-        updated_at=datetime.now(tz=UTC),
-    )
-    if not updated:
-        refreshed = await store.get_decision(
-            row.decision.decision_id,
-            include_opportunity=False,
-        )
-        if refreshed is None or refreshed.status != "accepted":
-            raise DecisionNotFoundError("Decision not found")
-    enqueued = await enqueue(row.decision)
-    if enqueued is False:
-        raise DecisionEnqueueRejectedError("max_open_positions_capacity")
-    return _accepted_response(row.decision.decision_id)
+        if not updated:
+            refreshed = await store.get_decision(
+                row.decision.decision_id,
+                include_opportunity=False,
+            )
+            if refreshed is None or refreshed.status != "accepted":
+                raise DecisionNotFoundError("Decision not found")
+        enqueued = await enqueue(row.decision)
+        if enqueued is False:
+            refreshed = await store.get_decision(
+                row.decision.decision_id,
+                include_opportunity=False,
+            )
+            if refreshed is None or refreshed.status != "rejected":
+                await store.update_status(
+                    row.decision.decision_id,
+                    current_status="accepted",
+                    next_status="rejected",
+                    updated_at=datetime.now(tz=UTC),
+                )
+                await dedup_store.release(row.decision.decision_id, "rejected")
+            lease_released = True
+            raise DecisionEnqueueRejectedError("max_open_positions_capacity")
+        lease_transferred = True
+        return _accepted_response(row.decision.decision_id)
+    finally:
+        if not lease_transferred and not lease_released:
+            with suppress(Exception):
+                await dedup_store.release(row.decision.decision_id, "invalid")
 
 
 def _accepted_response(decision_id: str) -> AcceptDecisionResponse:

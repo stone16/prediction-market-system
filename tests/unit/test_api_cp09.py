@@ -116,7 +116,7 @@ def _live_transition_settings(
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-api-live-transition-reports-"
     )
-    attested_at = datetime(2026, 5, 25, 12, 0, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     return PMSSettings(
         mode=RunMode.PAPER,
         live_trading_enabled=True,

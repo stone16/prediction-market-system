@@ -409,7 +409,7 @@ def _settings(
     mode: RunMode = RunMode.LIVE,
     live_emergency_audit_path: Path | None = None,
 ) -> PMSSettings:
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-live-preflight-reports-"
     )
@@ -493,7 +493,9 @@ def _write_valid_paper_backtest_diff_json(path: Path) -> None:
             {
                 "generated_by": "scripts/paper_backtest_execution_diff.py",
                 "artifact_mode": "paper_backtest_execution_diff",
-                "generated_at": datetime(2026, 5, 25, tzinfo=UTC).isoformat(),
+                "generated_at": (
+                    datetime.now(tz=UTC) - timedelta(seconds=60)
+                ).isoformat(),
                 "final_go_no_go_valid": True,
                 "thresholds": {
                     "min_matched_decisions": 10,
@@ -7003,6 +7005,8 @@ def test_live_preflight_artifact_rejects_preflight_before_emergency_audit_record
     readiness_generated_at = now - timedelta(seconds=30)
     preflight_generated_at = now - timedelta(seconds=20)
     emergency_audit_at = now - timedelta(seconds=10)
+    settings.live_exit_criteria_ratified_at = preflight_generated_at - timedelta(seconds=1)
+    settings.live_compliance_reviewed_at = preflight_generated_at - timedelta(seconds=1)
     for raw_path in (
         settings.live_execution_model_path,
         settings.live_paper_backtest_diff_path,

@@ -15,6 +15,7 @@ class TradesReader(Protocol):
         *,
         limit: int,
         offset: int = 0,
+        until: datetime | None = None,
     ) -> Sequence[StoredTradeRow]: ...
 
 
@@ -52,8 +53,9 @@ async def list_trades(
     *,
     limit: int,
     offset: int = 0,
+    until: datetime | None = None,
 ) -> TradesResponse:
-    rows = await store.read_trades(limit=limit, offset=offset)
+    rows = await store.read_trades(limit=limit, offset=offset, until=until)
     return TradesResponse(
         trades=[
             TradeRow(

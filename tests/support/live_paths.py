@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pms.config import PMSSettings
@@ -29,11 +29,16 @@ def make_live_report_paths(*, prefix: str = "pms-live-reports-") -> tuple[str, s
     root.chmod(0o700)
     paper_report_path = root / "paper-soak-go-report.md"
     rehearsal_report_path = root / "operator-rehearsal-pass-report.md"
+    generated_at = datetime.now(tz=UTC) - timedelta(seconds=60)
+    generated_at_line = f"| generated_at | {generated_at.isoformat()} |"
     paper_report_text = (
         ROOT / "tests" / "fixtures" / "paper_soak_go_report.md"
     ).read_text(encoding="utf-8")
     paper_report_path.write_text(
         paper_report_text.replace(
+            "| generated_at | 2026-05-25T00:00:00+00:00 |",
+            generated_at_line,
+        ).replace(
             "| output_path | docs/paper-reports/2026-05-25.md |",
             f"| output_path | {paper_report_path} |",
         ),
@@ -44,6 +49,9 @@ def make_live_report_paths(*, prefix: str = "pms-live-reports-") -> tuple[str, s
     ).read_text(encoding="utf-8")
     rehearsal_report_path.write_text(
         rehearsal_report_text.replace(
+            "| generated_at | 2026-05-25T00:00:00+00:00 |",
+            generated_at_line,
+        ).replace(
             "| output_path | docs/live/operator-rehearsal-report.md |",
             f"| output_path | {rehearsal_report_path} |",
         ),

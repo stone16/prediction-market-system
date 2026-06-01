@@ -9,11 +9,11 @@ live_emergency_audit_path: .data/live-emergency-audit.jsonl
 live_first_order_audit_path: .data/first-order-audit.jsonl
 
 risk:
-  max_position_per_market: 5.0
+  max_position_per_market: 1.0
   max_total_exposure: 50.0
   max_drawdown_pct: 20.0
   max_daily_loss_usdc: 20.0
-  max_open_positions: 5
+  max_open_positions: 50
   max_exposure_per_risk_group: 15.0
   min_order_usdc: 1.0
   slippage_threshold_bps: 50.0
@@ -28,7 +28,7 @@ position_exit:
 sensor:
   poll_interval_s: 5.0
   max_reconnect_interval_s: 60.0
-  max_subscription_asset_ids: 100
+  max_subscription_asset_ids: 150
   discovery_http_timeout_s: 10.0
   discovery_http_pool_timeout_s: 10.0
   discovery_http_max_connections: 10

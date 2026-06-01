@@ -278,7 +278,7 @@ async def test_decision_store_read_decisions_rehydrates_payload_and_opportunity(
     query, args = connection.fetch_calls[0]
     assert "FROM decisions" in query
     assert "LEFT JOIN opportunities" in query
-    assert args == ("pending", 5, 0)
+    assert args == ("pending", None, 5, 0)
 
 
 @pytest.mark.asyncio

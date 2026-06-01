@@ -28,11 +28,11 @@ def stub_llm_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_live_soak_config_loads_tight_first_live_risk_caps() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
-    assert settings.risk.max_position_per_market == 5.0
+    assert settings.risk.max_position_per_market == 1.0
     assert settings.risk.max_total_exposure == 50.0
     assert settings.risk.max_drawdown_pct == 20.0
     assert settings.risk.max_daily_loss_usdc == 20.0
-    assert settings.risk.max_open_positions == 5
+    assert settings.risk.max_open_positions == 50
     assert settings.risk.max_exposure_per_risk_group == 15.0
     assert settings.risk.max_quantity_shares == 500.0
     assert settings.risk.min_order_usdc == 1.0
@@ -66,6 +66,7 @@ def test_live_soak_config_tunes_gamma_discovery_http_pool() -> None:
     assert settings.sensor.discovery_http_max_connections == 10
     assert settings.sensor.discovery_http_max_keepalive_connections == 5
     assert settings.sensor.discovery_http_keepalive_expiry_s == pytest.approx(120.0)
+    assert settings.sensor.max_subscription_asset_ids == 150
 
 
 def test_live_soak_config_uses_distinct_audit_sinks() -> None:

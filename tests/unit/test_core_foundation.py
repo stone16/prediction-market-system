@@ -196,7 +196,7 @@ def test_live_mode_validation_requires_all_polymarket_credentials() -> None:
 
 
 def test_live_mode_validation_returns_redacted_credentials() -> None:
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     approval_path, audit_path = make_private_live_paths(prefix="pms-core-live-")
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-core-live-reports-"
@@ -292,9 +292,9 @@ def test_live_mode_loads_local_secret_file_before_env_credentials(
                     "live_trading_enabled: true",
                     "api_token: live-api-token",
                     "live_exit_criteria_ratified_by: operator",
-                "live_exit_criteria_ratified_at: 2026-05-25T00:00:00+00:00",
+                f"live_exit_criteria_ratified_at: {datetime.now(tz=UTC).isoformat()}",
                 "live_compliance_reviewed_by: counsel",
-                "live_compliance_reviewed_at: 2026-05-25T00:00:00+00:00",
+                f"live_compliance_reviewed_at: {datetime.now(tz=UTC).isoformat()}",
                 "live_compliance_jurisdiction: US-operator-approved",
                 f"live_paper_soak_report_path: {paper_report_path}",
                 f"live_operator_rehearsal_report_path: {rehearsal_report_path}",

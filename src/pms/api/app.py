@@ -407,6 +407,7 @@ def create_app(
     async def trades(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
+        until: datetime | None = Query(default=None),
     ) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
@@ -414,6 +415,7 @@ def create_app(
             active_runner.fill_store,
             limit=limit,
             offset=offset,
+            until=until,
         )
         return payload.model_dump(mode="json")
 
@@ -441,6 +443,7 @@ def create_app(
         offset: int = Query(default=0, ge=0),
         status: str | None = None,
         include: str | None = None,
+        until: datetime | None = Query(default=None),
     ) -> list[dict[str, Any]]:
         include_opportunity = include == "opportunity"
         if _should_use_durable_decisions(active_runner):
@@ -450,6 +453,7 @@ def create_app(
                 offset=offset,
                 status=status,
                 include_opportunity=include_opportunity,
+                until=until,
             )
             return [item.model_dump(mode="json") for item in rows]
 

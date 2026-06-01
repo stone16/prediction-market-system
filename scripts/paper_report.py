@@ -388,7 +388,7 @@ def metrics_from_api_payloads(
         strategy=_strategy_label(status=status, strategies=strategies or {}),
         day_of_soak=day_of_soak,
         decisions_made=decisions_made,
-        decisions_accepted=_accepted_decision_count(decision_rows, trade_rows),
+        decisions_accepted=_accepted_decision_count(decision_rows, entry_trade_rows),
         decisions_rejected=_int_from_dict(controller, "diagnostics_total"),
         fills=len(entry_trade_rows),
         fill_rate=None if fill_rate is None else float(fill_rate),
@@ -475,11 +475,14 @@ def load_live_metrics(
         )
 
     events: list[tuple[str, str, str]] = []
+    snapshot_cutoff = datetime.now(tz=UTC).isoformat()
+    snapshot_query: Mapping[str, object] = {"until": snapshot_cutoff}
     trade_rows, trades_error = _fetch_api_list_pages(
         api_base_url=api_base_url,
         path="/trades",
         api_token=api_token,
         payload_key="trades",
+        query=snapshot_query,
     )
     if trades_error is not None:
         events.append(("report generation", "/trades unavailable", trades_error))
@@ -500,6 +503,7 @@ def load_live_metrics(
         api_base_url=api_base_url,
         path="/decisions",
         api_token=api_token,
+        query=snapshot_query,
     )
     if decisions_error is not None:
         events.append(("report generation", "/decisions unavailable", decisions_error))
@@ -2117,7 +2121,7 @@ def _max_drawdown_pct_from_metrics(metrics: Mapping[str, Any]) -> float | None:
 
 def _accepted_decision_count(
     decision_rows: Sequence[Mapping[str, object]],
-    trade_rows: Sequence[Mapping[str, object]],
+    entry_trade_rows: Sequence[Mapping[str, object]],
 ) -> int:
     accepted_decision_ids = {
         decision_id
@@ -2130,18 +2134,26 @@ def _accepted_decision_count(
 
     trade_decision_ids = {
         decision_id
-        for row in trade_rows
+        for row in entry_trade_rows
         if (decision_id := _string_from_mapping(row, "decision_id", ""))
+        and not _is_exit_decision_id(decision_id)
     }
     if trade_decision_ids:
         return len(trade_decision_ids)
-    return len(trade_rows)
+    return len(entry_trade_rows)
 
 
 def _decision_status_is_accepted(raw_status: object) -> bool:
     if not isinstance(raw_status, str):
         return False
-    return raw_status.lower() in {"accepted", "filled", "matched"}
+    return raw_status.lower() in {
+        "accepted",
+        "queued",
+        "submitted",
+        "partially_filled",
+        "filled",
+        "matched",
+    }
 
 
 def _is_empty_sequence(value: object) -> bool:
@@ -2419,14 +2431,16 @@ def _fetch_api_list_pages(
     path: str,
     api_token: str | None,
     payload_key: str | None = None,
+    query: Mapping[str, object] | None = None,
 ) -> tuple[list[object], str | None]:
     rows: list[object] = []
     offset = 0
     previous_page: list[object] | None = None
     while True:
-        page_path = (
-            f"{path}?{urlencode({'limit': _API_PAGE_SIZE, 'offset': offset})}"
-        )
+        page_query: dict[str, object] = {"limit": _API_PAGE_SIZE, "offset": offset}
+        if query is not None:
+            page_query.update(query)
+        page_path = f"{path}?{urlencode(page_query)}"
         payload, error = _fetch_api_payload(
             api_base_url=api_base_url,
             path=page_path,

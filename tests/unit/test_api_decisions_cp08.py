@@ -32,7 +32,7 @@ class _StoredDecisionRow:
 class _DecisionStoreDouble:
     def __init__(self, row: _StoredDecisionRow | None) -> None:
         self.row = row
-        self.read_calls: list[tuple[int, int, str | None, bool]] = []
+        self.read_calls: list[tuple[int, int, str | None, bool, datetime | None]] = []
         self.get_calls: list[tuple[str, bool]] = []
         self.update_calls: list[tuple[str, str, str]] = []
 
@@ -43,8 +43,9 @@ class _DecisionStoreDouble:
         offset: int = 0,
         status: str | None = None,
         include_opportunity: bool = False,
+        until: datetime | None = None,
     ) -> list[_StoredDecisionRow]:
-        self.read_calls.append((limit, offset, status, include_opportunity))
+        self.read_calls.append((limit, offset, status, include_opportunity, until))
         if self.row is None:
             return []
         if status is not None and self.row.status != status:
@@ -375,6 +376,32 @@ async def test_accept_decision_rejects_when_capacity_fills_before_enqueue() -> N
 
 
 @pytest.mark.asyncio
+async def test_accept_decision_rolls_back_when_enqueue_rejects_after_accept() -> None:
+    store = _DecisionStoreDouble(_stored_decision_row())
+    runner, dedup_store, enqueue = _runner(store)
+    enqueue.return_value = False
+    app = create_app(runner, auto_start=False)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/decisions/decision-cp08/accept",
+            json={"factor_snapshot_hash": "snapshot-cp08"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "max_open_positions_capacity"}
+    assert dedup_store.acquire_calls == ["decision-cp08"]
+    assert dedup_store.release_calls == [("decision-cp08", "rejected")]
+    assert store.update_calls == [
+        ("decision-cp08", "pending", "accepted"),
+        ("decision-cp08", "accepted", "rejected"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_get_decisions_include_opportunity_embeds_factor_payload() -> None:
     store = _DecisionStoreDouble(_stored_decision_row())
     runner, _, _ = _runner(store)
@@ -440,4 +467,4 @@ async def test_get_decisions_include_opportunity_embeds_factor_payload() -> None
             },
         }
     ]
-    assert store.read_calls == [(1, 0, None, True)]
+    assert store.read_calls == [(1, 0, None, True, None)]

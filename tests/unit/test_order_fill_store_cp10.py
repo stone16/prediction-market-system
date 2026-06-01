@@ -517,4 +517,4 @@ async def test_fill_store_read_trades_maps_joined_market_rows_and_skips_missing_
             risk_group_id="event:unit-cp10",
         )
     ]
-    assert connection.fetch_calls[0][1] == (10, 0)
+    assert connection.fetch_calls[0][1] == (None, 10, 0)

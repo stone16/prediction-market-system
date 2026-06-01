@@ -191,7 +191,7 @@ def _portfolio() -> Portfolio:
 
 
 def _live_settings(**overrides: object) -> PMSSettings:
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     approval_path, audit_path = make_private_live_paths(prefix="pms-live-safety-")
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-live-safety-reports-"

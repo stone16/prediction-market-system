@@ -200,6 +200,7 @@ class FillStore:
         *,
         limit: int,
         offset: int = 0,
+        until: datetime | None = None,
     ) -> list["StoredTradeRow"]:
         async with self._pool().acquire() as connection:
             await _ensure_fill_payloads_table(connection)
@@ -221,10 +222,12 @@ class FillStore:
                     ON fill_payloads.fill_id = fills.fill_id
                 LEFT JOIN markets
                     ON markets.condition_id = fills.market_id
+                WHERE ($1::timestamptz IS NULL OR fills.ts <= $1)
                 ORDER BY fills.ts DESC, fills.fill_id DESC
-                LIMIT $1
-                OFFSET $2
+                LIMIT $2
+                OFFSET $3
                 """,
+                until,
                 limit,
                 offset,
             )

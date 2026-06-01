@@ -1083,7 +1083,7 @@ def _true_live_settings_without_preflight_artifact(tmp_path: Path) -> PMSSetting
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-actuator-live-preflight-reports-"
     )
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     return PMSSettings(
         mode=RunMode.LIVE,
         secret_source="fly",
@@ -2116,6 +2116,8 @@ async def test_polymarket_actuator_rejects_preflight_before_emergency_audit_for_
     _stage_readiness_fingerprint_files(settings, artifact_path.parent)
     generated_at = datetime.now(UTC) - timedelta(seconds=20)
     emergency_audit_at = datetime.now(UTC) - timedelta(seconds=10)
+    settings.live_exit_criteria_ratified_at = generated_at - timedelta(seconds=1)
+    settings.live_compliance_reviewed_at = generated_at - timedelta(seconds=1)
     Path(settings.live_emergency_audit_path).write_text(
         json.dumps(
             {
@@ -2201,6 +2203,8 @@ async def test_polymarket_actuator_rechecks_preflight_artifact_after_runner_star
     _stage_readiness_fingerprint_files(settings, artifact_path.parent)
     generated_at = datetime.now(UTC) - timedelta(seconds=20)
     emergency_audit_at = datetime.now(UTC) - timedelta(seconds=10)
+    settings.live_exit_criteria_ratified_at = generated_at - timedelta(seconds=1)
+    settings.live_compliance_reviewed_at = generated_at - timedelta(seconds=1)
     _write_final_live_preflight_artifact(
         settings,
         artifact_path,

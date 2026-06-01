@@ -109,13 +109,13 @@ def test_paper_multi_factor_strategy_matches_phase_a_contract() -> None:
         "live_allowed": "false",
         "requires_strict_factor_gates": "false",
     }
-    assert strategy.risk.max_position_notional_usdc == pytest.approx(2.0)
+    assert strategy.risk.max_position_notional_usdc == pytest.approx(1.0)
     assert strategy.risk.max_daily_drawdown_pct == pytest.approx(50.0)
-    assert strategy.risk.min_order_size_usdc == pytest.approx(0.50)
+    assert strategy.risk.min_order_size_usdc == pytest.approx(1.0)
     assert strategy.eval_spec.metrics == ("brier", "pnl", "fill_rate")
     assert strategy.eval_spec.min_win_rate == pytest.approx(0.45)
     assert strategy.market_selection.venue == "polymarket"
-    assert strategy.market_selection.resolution_time_max_horizon_days == 31
+    assert strategy.market_selection.resolution_time_max_horizon_days == 60
     assert strategy.market_selection.volume_min_usdc == pytest.approx(100.0)
     assert strategy.forecaster.forecasters == (
         ("rules", (("threshold", "0.55"),)),
@@ -216,7 +216,7 @@ async def test_paper_multi_factor_can_decide_from_orderbook_imbalance_only() -> 
     assert decision.limit_price == pytest.approx(0.501)
     assert 0.55 < decision.prob_estimate < 0.70
     assert decision.expected_edge > 0.05
-    assert decision.notional_usdc == pytest.approx(2.0)
+    assert decision.notional_usdc == pytest.approx(1.0)
     assert factor_reader.snapshot_calls
 
 

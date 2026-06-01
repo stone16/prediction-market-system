@@ -48,7 +48,10 @@ from pms.core.models import (
     TradeDecision,
 )
 from pms.factors.composition import evaluate_branch_probabilities
-from pms.live_preflight_artifact import live_preflight_settings_fingerprint
+from pms.live_preflight_artifact import (
+    live_preflight_readiness_reports_fingerprint,
+    live_preflight_settings_fingerprint,
+)
 from pms.runner import ActuatorWorkItem, Runner
 from pms.storage.dedup_store import InMemoryDedupStore
 from pms.storage.feedback_store import FeedbackStore
@@ -454,7 +457,7 @@ def _live_settings(
     api_host: str = "127.0.0.1",
     api_token: str | None = "live-api-token",
 ) -> PMSSettings:
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     first_order_audit_path = (
         str(_LIVE_PATH_ROOT / "first-order-audit.jsonl")
         if live_first_order_audit_path is None
@@ -1646,7 +1649,11 @@ def test_live_mode_rejects_paper_soak_provenance_row_with_extra_cells() -> None:
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| generated_at | 2026-05-25T00:00:00+00:00 |",
+            next(
+                line
+                for line in report_path.read_text(encoding="utf-8").splitlines()
+                if line.startswith("| generated_at |")
+            ),
             "| generated_at | 2026-05-25T00:00:00+00:00 | TODO: hidden extra cell |",
         ),
         encoding="utf-8",
@@ -2612,6 +2619,7 @@ def test_live_mode_rejects_paper_soak_report_date_after_generated_at() -> None:
 def test_live_mode_requires_passing_operator_rehearsal_report() -> None:
     approval_dir = _LIVE_PATH_ROOT / "missing-rehearsal"
     approval_dir.mkdir(mode=0o700, exist_ok=True)
+    attested_at = datetime.now(tz=UTC)
     settings = PMSSettings(
         mode=RunMode.LIVE,
         secret_source="fly",
@@ -2626,9 +2634,9 @@ def test_live_mode_requires_passing_operator_rehearsal_report() -> None:
             approval_dir / "credentialed-preflight.json"
         ),
         live_exit_criteria_ratified_by="operator",
-        live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by="counsel",
-        live_compliance_reviewed_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_reviewed_at=attested_at,
         live_compliance_jurisdiction="US-operator-approved",
         live_paper_soak_report_path=PAPER_SOAK_GO_REPORT,
         risk=RiskSettings(
@@ -3634,14 +3642,35 @@ async def test_live_runner_rejects_stale_preflight_artifact(
         )
     )
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-    artifact["generated_at"] = (
-        datetime.now(tz=UTC) - timedelta(hours=2, seconds=1)
-    ).isoformat()
+    stale_generated_at = datetime.now(tz=UTC) - timedelta(hours=2, seconds=1)
+    artifact["generated_at"] = stale_generated_at.isoformat()
     artifact_path.write_text(
         json.dumps(artifact, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     settings.live_preflight_artifact_path = str(artifact_path)
+    readiness_report_generated_at = stale_generated_at - timedelta(seconds=60)
+    operator_attested_at = stale_generated_at - timedelta(seconds=30)
+    _replace_report_provenance_field(
+        cast(str, settings.live_paper_soak_report_path),
+        field_name="generated_at",
+        value=readiness_report_generated_at.isoformat(),
+    )
+    _replace_report_provenance_field(
+        cast(str, settings.live_operator_rehearsal_report_path),
+        field_name="generated_at",
+        value=readiness_report_generated_at.isoformat(),
+    )
+    settings.live_exit_criteria_ratified_at = operator_attested_at
+    settings.live_compliance_reviewed_at = operator_attested_at
+    artifact["settings_fingerprint"] = live_preflight_settings_fingerprint(settings)
+    artifact["readiness_reports_fingerprint"] = (
+        live_preflight_readiness_reports_fingerprint(settings)
+    )
+    artifact_path.write_text(
+        json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     runner = Runner(config=settings)
 
     async def fail_if_database_boots() -> None:

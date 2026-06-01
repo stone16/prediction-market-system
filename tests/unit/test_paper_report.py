@@ -1632,7 +1632,7 @@ def test_metrics_from_api_payloads_prefers_final_pnl_series_over_quote_mtm() -> 
     assert metrics.pnl_source == "final_eval"
 
 
-def test_metrics_from_api_payloads_counts_filled_decisions_as_accepted() -> None:
+def test_metrics_from_api_payloads_counts_downstream_statuses_as_accepted() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
         status={
@@ -1641,37 +1641,57 @@ def test_metrics_from_api_payloads_counts_filled_decisions_as_accepted() -> None
             "runtime_continuity": _runtime_continuity_status(),
             "sensors": [],
             "controller": {
-                "decisions_total": 3,
+                "decisions_total": 7,
                 "diagnostics_total": 5,
                 "diagnostic_counts": {"decision_net_edge_not_positive": 5},
             },
-            "actuator": {"fills_total": 2},
+            "actuator": {"fills_total": 6},
             "evaluator": {},
             "supervision": {"unresolved_feedback_total": 0},
         },
         metrics={"pnl_series": _pnl_series(date(2026, 5, 30), pnl=1.0)},
         decisions=[
             {
-                "decision_id": "decision-filled-1",
-                "status": "filled",
+                "decision_id": "decision-accepted",
+                "status": "accepted",
                 "created_at": "2026-05-30T01:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-queued",
+                "status": "queued",
+                "created_at": "2026-05-30T02:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-submitted",
+                "status": "submitted",
+                "created_at": "2026-05-30T03:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-partial",
+                "status": "partially_filled",
+                "created_at": "2026-05-30T04:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-filled",
+                "status": "filled",
+                "created_at": "2026-05-30T05:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-matched",
+                "status": "matched",
+                "created_at": "2026-05-30T06:00:00+00:00",
             },
             {
                 "decision_id": "decision-open",
                 "status": "pending",
-                "created_at": "2026-05-30T02:00:00+00:00",
-            },
-            {
-                "decision_id": "decision-filled-2",
-                "status": "filled",
-                "created_at": "2026-05-30T03:00:00+00:00",
+                "created_at": "2026-05-30T07:00:00+00:00",
             },
         ],
         trades={"trades": []},
         positions={"positions": []},
     )
 
-    assert metrics.decisions_accepted == 2
+    assert metrics.decisions_accepted == 6
 
 
 def test_metrics_from_api_payloads_counts_entry_fills_for_sample_gate() -> None:
@@ -1729,6 +1749,7 @@ def test_metrics_from_api_payloads_counts_entry_fills_for_sample_gate() -> None:
     )
 
     assert metrics.fills == 1
+    assert metrics.decisions_accepted == 1
 
 
 def test_metrics_from_api_payloads_flags_concentrated_entry_fill_sample() -> None:
@@ -3238,6 +3259,7 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fetched_json_paths: list[str] = []
+    paginated_until_values: list[str] = []
 
     def fake_fetch_api_json(
         *,
@@ -3303,7 +3325,13 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
     ) -> tuple[object, str | None]:
         assert api_base_url == "http://api.test"
         assert api_token == "token"
-        if path == "/trades?limit=200&offset=0":
+        parsed = urlsplit(path)
+        query = parse_qs(parsed.query)
+        assert query["limit"] == ["200"]
+        assert query["offset"] == ["0"]
+        assert len(query["until"]) == 1
+        paginated_until_values.append(query["until"][0])
+        if parsed.path == "/trades":
             return (
                 {
                     "trades": [
@@ -3318,7 +3346,7 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
                 },
                 None,
             )
-        assert path == "/decisions?limit=200&offset=0"
+        assert parsed.path == "/decisions"
         return (
             [
                 {
@@ -3349,6 +3377,8 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
         "since": ["2026-04-30T00:00:00+00:00"],
         "until": ["2026-05-31T00:00:00+00:00"],
     }
+    assert "/strategies/metrics" in fetched_json_paths
+    assert len(set(paginated_until_values)) == 1
     assert metrics.average_slippage_bps == pytest.approx(10.0)
 
 
@@ -3385,6 +3415,47 @@ def test_fetch_api_list_pages_follows_limit_offset_pages(
     assert paths == [
         "/decisions?limit=200&offset=0",
         "/decisions?limit=200&offset=200",
+    ]
+
+
+def test_fetch_api_list_pages_handles_envelope_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    def fake_fetch_api_payload(
+        *,
+        api_base_url: str,
+        path: str,
+        api_token: str | None,
+    ) -> tuple[object, str | None]:
+        assert api_base_url == "http://api.test"
+        assert api_token == "token"
+        paths.append(path)
+        if path == "/trades?limit=200&offset=0":
+            return (
+                {"trades": [{"trade_id": f"t-{index}"} for index in range(200)]},
+                None,
+            )
+        if path == "/trades?limit=200&offset=200":
+            return ({"trades": [{"trade_id": "t-200"}]}, None)
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr("scripts.paper_report._fetch_api_payload", fake_fetch_api_payload)
+
+    rows, error = _fetch_api_list_pages(
+        api_base_url="http://api.test",
+        path="/trades",
+        api_token="token",
+        payload_key="trades",
+    )
+
+    assert error is None
+    assert len(rows) == 201
+    assert rows[-1] == {"trade_id": "t-200"}
+    assert paths == [
+        "/trades?limit=200&offset=0",
+        "/trades?limit=200&offset=200",
     ]
 
 

@@ -217,6 +217,7 @@ class DecisionStore:
         offset: int = 0,
         status: str | None = None,
         include_opportunity: bool = False,
+        until: datetime | None = None,
     ) -> Sequence[StoredDecisionRow]:
         if self.pool is None or not hasattr(self.pool, "acquire"):
             return []
@@ -228,11 +229,13 @@ class DecisionStore:
                 _DECISION_SELECT
                 + """
                 WHERE ($1::text IS NULL OR decisions.status = $1)
+                  AND ($2::timestamptz IS NULL OR decisions.created_at <= $2)
                 ORDER BY decisions.created_at DESC, decisions.decision_id DESC
-                LIMIT $2
-                OFFSET $3
+                LIMIT $3
+                OFFSET $4
                 """,
                 normalized_status,
+                until,
                 limit,
                 offset,
             )

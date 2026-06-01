@@ -175,6 +175,7 @@ def _live_settings() -> PMSSettings:
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-live-integration-reports-"
     )
+    attested_at = datetime.now(tz=UTC)
     return PMSSettings(
         mode=RunMode.LIVE,
         secret_source="fly",
@@ -185,9 +186,9 @@ def _live_settings() -> PMSSettings:
         ),
         live_first_order_audit_path=audit_path,
         live_exit_criteria_ratified_by="test-operator",
-        live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by="test-compliance",
-        live_compliance_reviewed_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_reviewed_at=attested_at,
         live_compliance_jurisdiction="US",
         live_paper_soak_report_path=paper_report_path,
         live_operator_rehearsal_report_path=rehearsal_report_path,

@@ -15,7 +15,7 @@ PAPER_MULTI_FACTOR_STRATEGY_ID = "paper_multi_factor_v1"
 _FACTOR_FRESHNESS_S = 300.0
 _ORDERBOOK_IMBALANCE_MIN_ABS = 0.80
 _ORDERBOOK_IMBALANCE_EDGE_SCALE = 0.25
-_RESOLUTION_HORIZON_DAYS = 31
+_RESOLUTION_HORIZON_DAYS = 60
 
 
 def build_paper_multi_factor_strategy() -> Strategy:
@@ -76,9 +76,9 @@ def build_paper_multi_factor_strategy() -> Strategy:
             ),
         ),
         risk=RiskParams(
-            max_position_notional_usdc=2.0,
+            max_position_notional_usdc=1.0,
             max_daily_drawdown_pct=50.0,
-            min_order_size_usdc=0.50,
+            min_order_size_usdc=1.0,
         ),
         eval_spec=EvalSpec(
             metrics=("brier", "pnl", "fill_rate"),
