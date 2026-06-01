@@ -2285,10 +2285,24 @@ class Runner:
             }
 
         active_strategies = await self._strategy_registry.list_active_strategies()
-        return {
+        eval_specs = {
             (strategy.strategy_id, strategy.strategy_version_id): strategy.eval_spec
             for strategy in active_strategies
         }
+        if self._controller_runtimes:
+            default_eval_spec = _default_active_strategy(self.config).eval_spec
+            for runtime in self._controller_runtimes.values():
+                eval_specs.setdefault(
+                    (runtime.strategy_id, runtime.strategy_version_id),
+                    default_eval_spec,
+                )
+        if not self._should_build_strategy_registry_controllers():
+            default_strategy = _default_active_strategy(self.config)
+            eval_specs.setdefault(
+                (default_strategy.strategy_id, default_strategy.strategy_version_id),
+                default_strategy.eval_spec,
+            )
+        return eval_specs
 
     def _should_stop_controller(self) -> bool:
         if self._stop_event.is_set() and self.sensor_stream.queue.empty():

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Mapping
 import os
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
 
 from pms.config import ControllerSettings, DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode
-from pms.core.models import Market, MarketSignal
+from pms.core.models import Market, MarketSignal, Token
 from pms.runner import Runner
 from pms.strategies.aggregate import Strategy
 from pms.strategies.projections import (
@@ -80,6 +80,7 @@ def _signal(
     orderbook: dict[str, object],
     external_signal: dict[str, object],
 ) -> MarketSignal:
+    fetched_at = datetime.now(tz=UTC)
     return MarketSignal(
         market_id=market_id,
         token_id=token_id,
@@ -87,10 +88,10 @@ def _signal(
         title="Will CP06 default-tag runtime writes?",
         yes_price=0.4,
         volume_24h=1000.0,
-        resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
+        resolves_at=fetched_at + timedelta(days=7),
         orderbook=orderbook,
         external_signal=external_signal,
-        fetched_at=datetime(2026, 4, 17, tzinfo=UTC),
+        fetched_at=fetched_at,
         market_status=MarketStatus.OPEN.value,
     )
 
@@ -223,19 +224,28 @@ async def _strategy_pairs(
 async def _seed_market_shells(
     pg_pool: asyncpg.Pool,
     *,
-    market_ids: tuple[str, ...],
+    market_tokens: Mapping[str, str],
 ) -> None:
     store = PostgresMarketDataStore(pg_pool)
-    for market_id in market_ids:
+    observed_at = datetime.now(tz=UTC)
+    for market_id, token_id in market_tokens.items():
         await store.write_market(
             Market(
                 condition_id=market_id,
                 slug=market_id,
                 question=f"Will {market_id} persist runtime rows?",
                 venue="polymarket",
-                resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
-                created_at=datetime(2026, 4, 17, tzinfo=UTC),
-                last_seen_at=datetime(2026, 4, 17, tzinfo=UTC),
+                resolves_at=observed_at + timedelta(days=7),
+                created_at=observed_at,
+                last_seen_at=observed_at,
+                volume_24h=1000.0,
+            )
+        )
+        await store.write_token(
+            Token(
+                token_id=token_id,
+                condition_id=market_id,
+                outcome="YES",
             )
         )
 
@@ -251,7 +261,10 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
         await seed_factor_catalog(connection)
     await _seed_market_shells(
         pg_pool,
-        market_ids=("paper-empty-book", "paper-with-depth"),
+        market_tokens={
+            "paper-empty-book": "empty-token",
+            "paper-with-depth": "depth-token",
+        },
     )
 
     runner = Runner(
@@ -266,13 +279,13 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
                         external_signal={"fair_value": 0.7, "resolved_outcome": 1.0},
                     ),
                     _signal(
-                            market_id="paper-with-depth",
-                            token_id="depth-token",
-                            orderbook={
-                                "bids": [{"price": 0.399, "size": 250.0}],
-                                "asks": [{"price": 0.401, "size": 250.0}],
-                            },
-                        external_signal={"metaculus_prob": 0.9, "resolved_outcome": 1.0},
+                        market_id="paper-with-depth",
+                        token_id="depth-token",
+                        orderbook={
+                            "bids": [{"price": 0.399, "size": 250.0}],
+                            "asks": [{"price": 0.401, "size": 250.0}],
+                        },
+                        external_signal={"metaculus_prob": 0.9, "resolved_outcome": 0.0},
                     ),
                 ]
             )
