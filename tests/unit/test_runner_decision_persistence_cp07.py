@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 
-from pms.config import PMSSettings, RiskSettings
+from pms.config import ControllerSettings, PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode, Side, TimeInForce
 from pms.core.models import (
     MarketSignal,
@@ -45,6 +45,21 @@ def _settings() -> PMSSettings:
 def _runner() -> Runner:
     return Runner(
         config=_settings(),
+        historical_data_path=FIXTURE_PATH,
+    )
+
+
+def _paper_runner_with_strict_book_age() -> Runner:
+    return Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            auto_migrate_default_v2=False,
+            controller=ControllerSettings(max_book_age_ms=1_000.0),
+            risk=RiskSettings(
+                max_position_per_market=1000.0,
+                max_total_exposure=10_000.0,
+            ),
+        ),
         historical_data_path=FIXTURE_PATH,
     )
 
@@ -268,6 +283,59 @@ async def test_controller_pipeline_persists_and_enqueues_decision() -> None:
         2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC
     )
     assert decision_store.expires_at == datetime(2026, 4, 23, 10, 15, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_drops_stale_queued_book_signal_before_controller() -> None:
+    runner = _paper_runner_with_strict_book_age()
+    controller = _OpportunityAwareControllerDouble()
+    queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
+    runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        controller=cast(Any, controller),
+        asset_ids=None,
+    )
+    runner._controller_signal_queues["default"] = queue  # noqa: SLF001
+    runner.opportunity_store = cast(Any, _RecordingOpportunityStore(runner))
+    runner.decision_store = cast(Any, _RecordingDecisionStore(runner))
+    runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+    await runner._controller_task
+    now = datetime.now(tz=UTC)
+    stale = replace(
+        _signal(),
+        market_id="market-stale-cp07",
+        token_id="token-stale-cp07",
+        fetched_at=now,
+        external_signal={
+            **_signal().external_signal,
+            "book_received_at": (now - timedelta(seconds=5)).isoformat(),
+        },
+    )
+    fresh = replace(
+        _signal(),
+        market_id="market-fresh-cp07",
+        token_id="token-fresh-cp07",
+        fetched_at=now,
+        external_signal={
+            **_signal().external_signal,
+            "book_received_at": (now + timedelta(milliseconds=100)).isoformat(),
+        },
+    )
+    await queue.put(stale)
+    await queue.put(fresh)
+
+    await asyncio.wait_for(
+        runner._controller_pipeline_loop("default"),  # noqa: SLF001
+        timeout=1.0,
+    )
+
+    assert controller.calls == ["market-fresh-cp07"]
+    stale_diagnostic = runner.state.controller_diagnostics[0]
+    assert stale_diagnostic.code == "router_gate:book_too_stale"
+    assert stale_diagnostic.market_id == "market-stale-cp07"
+    assert stale_diagnostic.metadata["phase"] == "queue_dequeue"
+    assert stale_diagnostic.metadata["max_book_age_ms"] == 1_000.0
 
 
 @pytest.mark.asyncio

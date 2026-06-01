@@ -1325,6 +1325,16 @@ class Runner:
                     continue
 
                 try:
+                    stale_signal_diagnostic = self._stale_queued_signal_diagnostic(
+                        signal,
+                        runtime,
+                    )
+                    if stale_signal_diagnostic is not None:
+                        _append_bounded(
+                            self.state.controller_diagnostics,
+                            stale_signal_diagnostic,
+                        )
+                        continue
                     signal = self._enrich_signal_with_controller_baselines(signal)
                     opportunity: Opportunity | None = None
                     decision: TradeDecision | None = None
@@ -1951,6 +1961,47 @@ class Runner:
                 reason=risk_rejection_reason,
             )
         return None
+
+    def _stale_queued_signal_diagnostic(
+        self,
+        signal: MarketSignal,
+        runtime: StrategyControllerRuntime,
+    ) -> ControllerDiagnostic | None:
+        if self.config.mode == RunMode.BACKTEST:
+            return None
+        book_received_at = _external_signal_datetime(
+            signal.external_signal.get("book_received_at")
+        )
+        if book_received_at is None:
+            return None
+        max_book_age_ms = self.config.controller.max_book_age_ms
+        raw_age_ms = (
+            _aware_utc(datetime.now(tz=UTC)) - _aware_utc(book_received_at)
+        ).total_seconds() * 1000.0
+        if raw_age_ms < -self.config.controller.allowed_book_clock_skew_ms:
+            book_age_ms = float("inf")
+        else:
+            book_age_ms = max(0.0, raw_age_ms)
+        if book_age_ms <= max_book_age_ms:
+            return None
+        return ControllerDiagnostic(
+            code="router_gate:book_too_stale",
+            message=(
+                "Skipping queued signal because the orderbook was already stale "
+                "before controller processing."
+            ),
+            market_id=signal.market_id,
+            strategy_id=runtime.strategy_id,
+            strategy_version_id=runtime.strategy_version_id,
+            token_id=signal.token_id,
+            severity="info",
+            metadata={
+                "gate_reason": "book_too_stale",
+                "phase": "queue_dequeue",
+                "book_age_ms": book_age_ms,
+                "max_book_age_ms": max_book_age_ms,
+            },
+        )
 
     def _risk_rejection_reason(self, decision: TradeDecision) -> str | None:
         risk = getattr(self.actuator_executor, "risk", None)
