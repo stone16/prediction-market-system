@@ -205,10 +205,20 @@ class MarketDataSensor:
             await self._sleep(self._POOL_RETRY_BACKOFF_S)
             await self._probe_pool_latency()
 
-        await self._send_subscription_update(
-            previous_asset_ids=self._subscribed_asset_ids,
-            next_asset_ids=next_asset_ids,
-        )
+        try:
+            await self._send_subscription_update(
+                previous_asset_ids=self._subscribed_asset_ids,
+                next_asset_ids=next_asset_ids,
+            )
+        except (ConnectionClosed, ConnectionError, OSError, TimeoutError) as error:
+            _log_reconnectable_error(error)
+            with suppress(Exception):
+                await self._websocket.close()
+            self._websocket = None
+            self._connection_book_source = None
+            self._subscribed_asset_ids = frozenset()
+            self._pending_reconnect_assets = set()
+            return
         self._subscribed_asset_ids = frozenset(next_asset_ids)
 
     async def aclose(self) -> None:

@@ -110,6 +110,12 @@ class FakeWebSocket:
         return self._messages.pop(0)
 
 
+class ClosingSendWebSocket(FakeWebSocket):
+    async def send(self, payload: str) -> None:
+        del payload
+        raise ConnectionClosedError(None, Close(1000, ""))
+
+
 class FakeConnect:
     def __init__(self, websocket: Any) -> None:
         self.websocket = websocket
@@ -529,6 +535,26 @@ async def test_market_data_sensor_dynamic_update_sends_subscribe_and_unsubscribe
         },
     ]
     assert sensor._subscribed_asset_ids == frozenset({"asset-b", "asset-c"})
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_accepts_subscription_update_when_socket_closes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sensor = MarketDataSensor(store=_store_mock(), asset_ids=["asset-a"])
+    fake_websocket = ClosingSendWebSocket([])
+    sensor._websocket = cast(Any, fake_websocket)
+    sensor._subscribed_asset_ids = frozenset({"asset-a"})
+
+    with caplog.at_level(logging.WARNING):
+        await sensor.update_subscription(["asset-b"])
+
+    assert sensor._asset_ids == ["asset-b"]
+    assert fake_websocket.closed is True
+    assert sensor._websocket is None
+    assert sensor._subscribed_asset_ids == frozenset()
+    assert "market data sensor websocket closed; reconnecting" in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
 
 
 @pytest.mark.asyncio
