@@ -247,12 +247,14 @@ class _Connection:
         latest_book_snapshot_age_s: float | None = 30.0,
         latest_usable_book_snapshot_age_s: float | None = 30.0,
         missing_market_risk_metadata_count: int = 0,
+        missing_subscribed_usable_token_count: int = 0,
         active_strategy_rows: tuple[dict[str, object], ...] | None = None,
     ) -> None:
         self.unresolved_submission_unknown = unresolved_submission_unknown
         self.latest_book_snapshot_age_s = latest_book_snapshot_age_s
         self.latest_usable_book_snapshot_age_s = latest_usable_book_snapshot_age_s
         self.missing_market_risk_metadata_count = missing_market_risk_metadata_count
+        self.missing_subscribed_usable_token_count = missing_subscribed_usable_token_count
         self.active_strategy_rows = (
             active_strategy_rows
             if active_strategy_rows is not None
@@ -267,6 +269,8 @@ class _Connection:
             return EXPECTED_SCHEMA_HEAD
         if "outcome = 'submission_unknown'" in query:
             return self.unresolved_submission_unknown
+        if "missing_subscribed_usable_tokens" in query:
+            return self.missing_subscribed_usable_token_count
         if "missing_market_risk_metadata" in query:
             return self.missing_market_risk_metadata_count
         if "usable_book_snapshots" in query:
@@ -321,6 +325,13 @@ class _LiveOpenOrderConnection(_Connection):
     async def fetchval(self, query: str, *args: object) -> object:
         if "FROM orders" in query and "remaining_notional_usdc" in query:
             return self.live_open_order_count
+        return await super().fetchval(query, *args)
+
+
+class _OpenStatusLiveOrderConnection(_Connection):
+    async def fetchval(self, query: str, *args: object) -> object:
+        if "FROM orders" in query and "remaining_notional_usdc" in query:
+            return 1 if "'open'" in query else 0
         return await super().fetchval(query, *args)
 
 
@@ -8133,6 +8144,50 @@ async def test_live_preflight_fails_when_persisted_live_open_order_exists(
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_treats_persisted_open_status_as_live_order(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    pool = _Pool(_OpenStatusLiveOrderConnection())
+
+    result = await run_live_preflight(
+        _settings(approval_path=approval_dir / "first-order.json"),
+        pool=cast(asyncpg.Pool, pool),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_open_orders_check = result.require_check("live_open_orders")
+    assert result.ok is False
+    assert live_open_orders_check.ok is False
+    assert "durable live open-order ledger" in live_open_orders_check.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_emergency_audit_jsonl_is_malformed(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    emergency_audit_path = approval_dir / "live-emergency-audit.jsonl"
+    emergency_audit_path.write_text("{not valid json}\n", encoding="utf-8")
+
+    result = await run_live_preflight(
+        _settings(
+            approval_path=approval_dir / "first-order.json",
+            live_emergency_audit_path=emergency_audit_path,
+        ),
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    emergency_check = result.require_check("emergency_audit")
+    assert result.ok is False
+    assert emergency_check.ok is False
+    assert "emergency audit record invalid" in emergency_check.detail
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_when_no_book_snapshots_exist(
     tmp_path: Path,
 ) -> None:
@@ -8256,6 +8311,30 @@ async def test_live_preflight_fails_when_fresh_usable_market_lacks_risk_group_me
     assert market_data_check.ok is False
     assert "risk_group_id" in market_data_check.detail
     assert "1 fresh usable market" in market_data_check.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_subscribed_token_lacks_fresh_usable_depth(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+
+    result = await run_live_preflight(
+        _settings(approval_path=approval_dir / "first-order.json"),
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(_Connection(missing_subscribed_usable_token_count=1)),
+        ),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+        skip_venue=True,
+    )
+
+    market_data_check = result.require_check("market_data_freshness")
+    assert result.ok is False
+    assert market_data_check.ok is False
+    assert "1 subscribed token" in market_data_check.detail
+    assert "fresh usable book depth" in market_data_check.detail
 
 
 @pytest.mark.asyncio

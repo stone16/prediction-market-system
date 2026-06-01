@@ -54,6 +54,9 @@ def test_fly_live_capital_template_is_separate_from_paper_soak_app() -> None:
     assert live_env["PMS_SECRET_SOURCE"] == "fly"
     assert live_env["PMS_LIVE_TRADING_ENABLED"] == "true"
     assert live_env["PMS_LIVE_ACCOUNT_RECONCILIATION_REQUIRED"] == "true"
+    assert live_env["PMS_LIVE_PAPER_SOAK_REPORT_PATH"] == (
+        "/secure/pms/paper-soak-go-report.md"
+    )
     assert live_env["PMS_AUTO_START"] == "1"
     assert live_env["PMS_API_HOST"] == "0.0.0.0"
     assert live_env["PMS_CONTROLLER__TIME_IN_FORCE"] == "IOC"
@@ -144,6 +147,9 @@ def test_fly_live_capital_template_env_values_parse_as_live_settings(
     assert settings.controller.quote_source == "dual"
     assert settings.controller.category_prior_observations_path == (
         "/secure/pms/category-prior-observations.csv"
+    )
+    assert settings.live_paper_soak_report_path == (
+        "/secure/pms/paper-soak-go-report.md"
     )
     assert settings.live_execution_model_path == "/secure/pms/execution-model.json"
     assert settings.live_paper_backtest_diff_path == (

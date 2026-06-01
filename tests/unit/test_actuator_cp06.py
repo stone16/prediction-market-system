@@ -3273,6 +3273,38 @@ async def test_executor_releases_mapped_outcome_from_returned_order_state(
 
 
 @pytest.mark.asyncio
+async def test_executor_tracks_open_status_as_live_order_lifecycle() -> None:
+    store = cast(FeedbackStore, InMemoryFeedbackStore())
+    decision = _decision(decision_id="d-open-lifecycle")
+    returned_state = _order_state(
+        decision,
+        status="open",
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+    risk = RiskManager(
+        RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
+    )
+    dedup_store = RecordingDedupStore()
+    actuator = executor.ActuatorExecutor(
+        adapter=StaticAdapter(returned_state),
+        risk=risk,
+        feedback=ActuatorFeedback(store),
+        dedup_store=dedup_store,
+    )
+
+    await actuator.execute(decision, _portfolio())
+
+    halt_state = risk.check_auto_halt(
+        _portfolio(),
+        now=returned_state.submitted_at + timedelta(minutes=31),
+    )
+    assert halt_state.halted is True
+    assert halt_state.trigger_kind == "order_without_fill"
+    assert dedup_store.release_calls == []
+
+
+@pytest.mark.asyncio
 async def test_executor_releases_invalid_for_risk_rejection() -> None:
     store = cast(FeedbackStore, InMemoryFeedbackStore())
     dedup_store = RecordingDedupStore()
@@ -3870,6 +3902,41 @@ async def test_polymarket_sdk_parses_partial_fill_response(
     assert result.fill_price == pytest.approx(0.5)
     assert result.remaining_notional_usdc == pytest.approx(6.0)
     assert result.status == "live"
+
+
+@pytest.mark.asyncio
+async def test_polymarket_sdk_normalizes_open_status_to_live_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "sdk-open-resting-1",
+            "status": "open",
+            "success": True,
+            "errorMsg": "",
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        PolymarketOrderRequest(
+            market_id="m-cp06",
+            token_id="t-yes",
+            side=Side.BUY.value,
+            price=0.5,
+            size=20.0,
+            notional_usdc=10.0,
+            estimated_quantity=20.0,
+            order_type="limit",
+            time_in_force=TimeInForce.IOC.value,
+            max_slippage_bps=50,
+        ),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert result.status == OrderStatus.LIVE.value
+    assert result.raw_status == "open"
+    assert result.remaining_notional_usdc == pytest.approx(10.0)
 
 
 def test_fill_from_order_emits_fill_for_partial_status() -> None:

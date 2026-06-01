@@ -1318,6 +1318,7 @@ class _Connection:
         self.latest_book_snapshot_age_s: float | None = 30.0
         self.latest_usable_book_snapshot_age_s: float | None = 30.0
         self.missing_market_risk_metadata_count = 0
+        self.missing_subscribed_usable_token_count = 0
         self.fetchrow_result: dict[str, object] | None = None
         self.decision_submission_unknown_exists = True
         self.order_intent_submission_unknown_exists = True
@@ -1329,6 +1330,8 @@ class _Connection:
 
     async def fetchval(self, query: str, *args: object) -> object:
         self.fetchval_calls.append((query, args))
+        if "missing_subscribed_usable_tokens" in query:
+            return self.missing_subscribed_usable_token_count
         if "missing_market_risk_metadata" in query:
             return self.missing_market_risk_metadata_count
         if "usable_book_snapshots" in query:

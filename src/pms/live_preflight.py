@@ -1964,6 +1964,15 @@ def _emergency_audit_check(settings: PMSSettings) -> LivePreflightCheck:
             non_regular_detail,
         )
 
+    try:
+        _latest_live_emergency_audit_timestamp(str(path))
+    except LiveTradingDisabledError as exc:
+        return LivePreflightCheck(
+            "emergency_audit",
+            False,
+            str(exc),
+        )
+
     return LivePreflightCheck(
         "emergency_audit",
         True,
@@ -2158,6 +2167,35 @@ async def _market_data_freshness_check(
             ),
         )
 
+    try:
+        missing_subscribed_usable_token_count = (
+            await _fresh_usable_subscribed_token_missing_count(
+                pool,
+                max_age_s=max_age_s,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        return LivePreflightCheck(
+            "market_data_freshness",
+            False,
+            redact_live_error(str(exc), settings),
+        )
+    if missing_subscribed_usable_token_count > 0:
+        noun = (
+            "token"
+            if missing_subscribed_usable_token_count == 1
+            else "tokens"
+        )
+        return LivePreflightCheck(
+            "market_data_freshness",
+            False,
+            (
+                f"{missing_subscribed_usable_token_count} subscribed {noun} "
+                "lack fresh usable book depth; live launch subscription "
+                "freshness is not proven"
+            ),
+        )
+
     if settings.risk.max_exposure_per_risk_group is not None:
         try:
             missing_risk_metadata_count = (
@@ -2252,6 +2290,55 @@ async def _latest_usable_book_snapshot_age_s(pool: asyncpg.Pool) -> float | None
     if value is None:
         return None
     return max(0.0, float(value))
+
+
+async def _fresh_usable_subscribed_token_missing_count(
+    pool: asyncpg.Pool,
+    *,
+    max_age_s: float,
+) -> int:
+    async with pool.acquire() as connection:
+        value = await connection.fetchval(
+            """
+            WITH subscribed_tokens AS (
+                SELECT token_id
+                FROM market_subscriptions
+                WHERE source = 'user'
+            ),
+            latest_usable_subscribed_tokens AS (
+                SELECT book_snapshots.token_id, MAX(book_snapshots.ts) AS latest_ts
+                FROM book_snapshots
+                JOIN subscribed_tokens
+                    ON subscribed_tokens.token_id = book_snapshots.token_id
+                JOIN book_levels AS bid_levels
+                    ON bid_levels.snapshot_id = book_snapshots.id
+                   AND bid_levels.side = 'BUY'
+                   AND bid_levels.size > 0.0
+                   AND bid_levels.price > 0.0
+                JOIN book_levels AS ask_levels
+                    ON ask_levels.snapshot_id = book_snapshots.id
+                   AND ask_levels.side = 'SELL'
+                   AND ask_levels.size > 0.0
+                   AND ask_levels.price > 0.0
+                WHERE book_snapshots.ts IS NOT NULL
+                  AND book_snapshots.ts >= (
+                      NOW() - ($1::double precision * INTERVAL '1 second')
+                  )
+                GROUP BY book_snapshots.token_id
+            ),
+            missing_subscribed_usable_tokens AS (
+                SELECT subscribed_tokens.token_id
+                FROM subscribed_tokens
+                LEFT JOIN latest_usable_subscribed_tokens
+                    ON latest_usable_subscribed_tokens.token_id = subscribed_tokens.token_id
+                WHERE latest_usable_subscribed_tokens.token_id IS NULL
+            )
+            SELECT COUNT(*)::bigint
+            FROM missing_subscribed_usable_tokens
+            """,
+            max_age_s,
+        )
+    return int(value or 0)
 
 
 async def _fresh_usable_book_market_missing_risk_metadata_count(
@@ -2371,7 +2458,7 @@ async def _persisted_live_open_order_count(pool: asyncpg.Pool) -> int:
             SELECT COUNT(*)
             FROM orders
             WHERE venue = 'polymarket'
-              AND LOWER(COALESCE(status, '')) IN ('live', 'unmatched', 'partial')
+              AND LOWER(COALESCE(status, '')) IN ('live', 'open', 'unmatched', 'partial')
               AND remaining_notional_usdc > 1e-9
             """
         )

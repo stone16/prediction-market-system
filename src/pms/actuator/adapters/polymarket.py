@@ -1595,7 +1595,7 @@ def _order_state_from_result(
 ) -> OrderState:
     _validate_order_result_accounting(decision, result)
     now = datetime.now(tz=UTC)
-    status = result.status or OrderStatus.LIVE.value
+    status = _canonical_polymarket_order_status(result.status or OrderStatus.LIVE.value)
     return OrderState(
         order_id=_concrete_result_order_id(result),
         decision_id=decision.decision_id,
@@ -2296,7 +2296,10 @@ def _order_result_from_sdk_response(
         msg = "Polymarket live order rejected by venue; venue error redacted"
         raise LiveTradingDisabledError(msg)
 
-    status = str(_response_value(response, "status") or OrderStatus.LIVE.value).lower()
+    raw_status = str(
+        _response_value(response, "status") or OrderStatus.LIVE.value
+    ).strip().lower()
+    status = _canonical_polymarket_order_status(raw_status)
 
     # Parse explicit partial-fill data from the SDK response. Polymarket
     # can return positive `filled_notional` with status != MATCHED (e.g.
@@ -2476,12 +2479,21 @@ def _order_result_from_sdk_response(
     return PolymarketOrderResult(
         order_id=order_id,
         status=status,
-        raw_status=status,
+        raw_status=raw_status,
         filled_notional_usdc=filled_notional_usdc,
         remaining_notional_usdc=remaining_notional_usdc,
         fill_price=fill_price,
         filled_quantity=filled_quantity,
     )
+
+
+def _canonical_polymarket_order_status(status: str) -> str:
+    normalized = status.strip().lower()
+    if normalized == "open":
+        return OrderStatus.LIVE.value
+    if normalized == "canceled":
+        return OrderStatus.CANCELLED.value
+    return normalized
 
 
 def _sdk_response_order_id(response: object) -> str:

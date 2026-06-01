@@ -74,6 +74,7 @@ class FakeConnection:
     latest_book_snapshot_age_s: float | None = 30.0
     latest_usable_book_snapshot_age_s: float | None = 30.0
     missing_market_risk_metadata_count: int = 0
+    missing_subscribed_usable_token_count: int = 0
     execute_results: list[str] = field(default_factory=list)
     execute_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
     fetchval_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
@@ -89,6 +90,8 @@ class FakeConnection:
 
     async def fetchval(self, query: str, *args: object) -> object:
         self.fetchval_calls.append((query, args))
+        if "missing_subscribed_usable_tokens" in query:
+            return self.missing_subscribed_usable_token_count
         if "missing_market_risk_metadata" in query:
             return self.missing_market_risk_metadata_count
         if "usable_book_snapshots" in query:

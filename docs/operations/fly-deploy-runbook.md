@@ -86,10 +86,21 @@ fly volumes create pms_live_secure --region iad -c fly.live.toml
 fly secrets import -c fly.live.toml
 ```
 
-Then copy the final paper-soak report, operator rehearsal report, and
-credentialed preflight artifact to `/secure/pms` on the mounted volume before
-starting the runner. The live template intentionally omits `PMS_CONFIG_PATH`;
-all launch-critical non-secret values come from `fly.live.toml`, and all
+Then copy the full non-secret launch artifact set to `/secure/pms` on the
+mounted volume before starting the runner:
+
+- `/secure/pms/paper-soak-go-report.md`
+- `/secure/pms/operator-rehearsal-report.md`
+- `/secure/pms/execution-model.json`
+- `/secure/pms/paper-backtest-execution-diff.json`
+- `/secure/pms/category-prior-observations.csv`
+- `/secure/pms/flb-calibration.csv`
+- `/secure/pms/credentialed-preflight.json`
+
+The paper-soak report path must match
+`PMS_LIVE_PAPER_SOAK_REPORT_PATH=/secure/pms/paper-soak-go-report.md` in
+`fly.live.toml`. The live template intentionally omits `PMS_CONFIG_PATH`; all
+launch-critical non-secret values come from `fly.live.toml`, and all
 credential-bearing values come from Fly secrets. This prevents the LIVE app
 from accidentally booting with the PAPER soak config.
 
