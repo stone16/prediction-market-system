@@ -47,6 +47,15 @@ def test_live_soak_config_relaxes_paper_factor_gate_for_phase_a() -> None:
     assert settings.controller.strict_factor_gates is False
 
 
+def test_live_soak_config_uses_paper_snapshot_freshness_window() -> None:
+    settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
+
+    assert settings.mode == "paper"
+    assert settings.live_trading_enabled is False
+    assert settings.controller.quote_source == "postgres_snapshot"
+    assert settings.controller.max_book_age_ms == pytest.approx(15_000.0)
+
+
 def test_live_soak_config_uses_tradeable_paper_strategy() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
@@ -81,7 +90,7 @@ def test_live_soak_config_tunes_gamma_discovery_http_pool() -> None:
     assert settings.sensor.discovery_http_max_connections == 10
     assert settings.sensor.discovery_http_max_keepalive_connections == 5
     assert settings.sensor.discovery_http_keepalive_expiry_s == pytest.approx(120.0)
-    assert settings.sensor.max_subscription_asset_ids == 400
+    assert settings.sensor.max_subscription_asset_ids == 100
 
 
 def test_live_soak_config_uses_distinct_audit_sinks() -> None:
