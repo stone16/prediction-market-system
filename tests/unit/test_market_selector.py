@@ -27,6 +27,7 @@ def _eligible_market(
     token_ids: tuple[str, ...] = ("yes", "no"),
     liquidity: float | None = None,
     spread_bps: int | None = None,
+    yes_price: float | None = None,
     accepting_orders: bool | None = None,
 ) -> tuple[Market, list[Token]]:
     now = datetime(2026, 4, 18, 9, 0, tzinfo=UTC)
@@ -39,6 +40,7 @@ def _eligible_market(
             resolves_at=now + timedelta(days=3),
             created_at=now - timedelta(days=2),
             last_seen_at=now,
+            yes_price=yes_price,
             liquidity=liquidity,
             spread_bps=spread_bps,
             accepting_orders=accepting_orders,
@@ -468,6 +470,90 @@ async def test_market_selector_applies_spread_depth_liquidity_and_status_filters
             strategy_id="alpha",
             strategy_version_id="alpha-v1",
             asset_ids=frozenset({"all-pass-yes", "all-pass-no"}),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_market_selector_applies_yes_price_band_before_book_lookup() -> None:
+    selector_module = importlib.import_module("pms.market_selection.selector")
+    market_selector_cls = getattr(selector_module, "MarketSelector")
+    strategy_market_set_cls = _load_symbol(
+        "pms.market_selection.merge",
+        "StrategyMarketSet",
+    )
+
+    class FakeRegistry:
+        async def list_market_selections(
+            self,
+        ) -> list[tuple[str, str, MarketSelectionSpec]]:
+            return [
+                (
+                    "alpha",
+                    "alpha-v1",
+                    MarketSelectionSpec(
+                        venue="polymarket",
+                        resolution_time_max_horizon_days=7,
+                        volume_min_usdc=500.0,
+                        spread_max_bps=None,
+                        depth_min_usdc=None,
+                        yes_price_min=0.02,
+                        yes_price_max=0.98,
+                    ),
+                )
+            ]
+
+    class FakeStore:
+        async def read_eligible_markets(
+            self,
+            venue: str,
+            max_horizon_days: int | None,
+            min_volume_usdc: float,
+        ) -> list[tuple[Market, list[Token]]]:
+            del venue, max_horizon_days, min_volume_usdc
+            return [
+                _eligible_market(
+                    "inside-band",
+                    token_ids=("inside-yes", "inside-no"),
+                    yes_price=0.50,
+                ),
+                _eligible_market(
+                    "below-band",
+                    token_ids=("below-yes", "below-no"),
+                    yes_price=0.01,
+                ),
+                _eligible_market(
+                    "above-band",
+                    token_ids=("above-yes", "above-no"),
+                    yes_price=0.99,
+                ),
+                _eligible_market(
+                    "missing-price",
+                    token_ids=("missing-price-yes", "missing-price-no"),
+                ),
+            ]
+
+        async def get_latest_book_summary(self, market_id: str) -> BookSummary | None:
+            raise AssertionError(f"book summary should not be queried for {market_id}")
+
+    class FailingMergePolicy:
+        def merge(self, selections: list[object]) -> object:
+            msg = f"select_per_strategy should not merge selections: {selections!r}"
+            raise AssertionError(msg)
+
+    selector = market_selector_cls(
+        store=FakeStore(),
+        registry=FakeRegistry(),
+        merge_policy=FailingMergePolicy(),
+    )
+
+    selections = await selector.select_per_strategy()
+
+    assert selections == [
+        strategy_market_set_cls(
+            strategy_id="alpha",
+            strategy_version_id="alpha-v1",
+            asset_ids=frozenset({"inside-yes", "inside-no"}),
         )
     ]
 

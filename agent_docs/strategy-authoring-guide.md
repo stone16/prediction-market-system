@@ -618,9 +618,11 @@ in `factor_composition` controls the weighted blend.
 | `venue` | yes | `"polymarket"` (only adapter shipped). Kalshi is reserved but not implemented. |
 | `resolution_time_max_horizon_days` | yes (nullable) | Excludes markets resolving farther out. Tighter horizons reduce universe size dramatically. |
 | `volume_min_usdc` | yes | Excludes thin markets. `100.0` is a reasonable starting floor. |
-| `spread_max_bps` | no | Optional max bid-ask spread filter |
+| `spread_max_bps` | no | Optional max bid-ask spread filter in midpoint-relative bps |
 | `depth_min_usdc` | no | Optional min top-of-book depth filter |
 | `liquidity_min_usdc` | no | Optional composite liquidity threshold |
+| `yes_price_min` | no | Optional minimum YES price. Use this to avoid subscribing to markets the router will reject as out of price band. |
+| `yes_price_max` | no | Optional maximum YES price. Use this to avoid subscribing to markets the router will reject as out of price band. |
 | `accepting_orders` | no (default `true`) | Filter to markets currently accepting orders |
 
 Tighter filters = smaller subscription = lower bandwidth = faster

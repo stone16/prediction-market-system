@@ -965,6 +965,8 @@ class Runner:
                 store=PostgresMarketDataStore(self._pg_pool),
                 http_client=_build_discovery_http_client(self.config),
                 poll_interval_s=self.config.sensor.poll_interval_s,
+                page_limit=self.config.sensor.discovery_page_limit,
+                max_pages=self.config.sensor.discovery_max_pages,
                 persist_price_snapshots=(
                     self.config.sensor.persist_discovery_price_snapshots
                 ),

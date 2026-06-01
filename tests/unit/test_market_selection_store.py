@@ -49,10 +49,19 @@ def _row(
     created_at: datetime,
     last_seen_at: datetime,
     volume_24h: float | None = 1000.0,
+    risk_group_id: str | None = None,
+    category: str | None = None,
+    event_id: str | None = None,
+    yes_price: float | None = None,
+    no_price: float | None = None,
+    best_bid: float | None = None,
+    best_ask: float | None = None,
+    last_trade_price: float | None = None,
     liquidity: float | None = None,
     spread_bps: int | None = None,
-    token_id: str | None,
-    outcome: str | None,
+    price_updated_at: datetime | None = None,
+    token_id: str | None = None,
+    outcome: str | None = None,
 ) -> dict[str, object]:
     return {
         "condition_id": condition_id,
@@ -63,8 +72,17 @@ def _row(
         "created_at": created_at,
         "last_seen_at": last_seen_at,
         "volume_24h": volume_24h,
+        "risk_group_id": risk_group_id,
+        "category": category,
+        "event_id": event_id,
+        "yes_price": yes_price,
+        "no_price": no_price,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "last_trade_price": last_trade_price,
         "liquidity": liquidity,
         "spread_bps": spread_bps,
+        "price_updated_at": price_updated_at,
         "token_id": token_id,
         "outcome": outcome,
     }
@@ -84,8 +102,17 @@ async def test_read_eligible_markets_groups_joined_tokens_and_keeps_zero_token_m
                     resolves_at=resolves_at,
                     created_at=created_at,
                     last_seen_at=created_at,
+                    risk_group_id="sports",
+                    category="soccer",
+                    event_id="world-cup",
+                    yes_price=0.62,
+                    no_price=0.38,
+                    best_bid=0.61,
+                    best_ask=0.63,
+                    last_trade_price=0.62,
                     liquidity=1_000.0,
                     spread_bps=75,
+                    price_updated_at=created_at,
                     token_id="token-yes",
                     outcome="YES",
                 ),
@@ -120,8 +147,17 @@ async def test_read_eligible_markets_groups_joined_tokens_and_keeps_zero_token_m
     assert [token.token_id for token in markets[0][1]] == ["token-yes", "token-no"]
     assert markets[1][1] == []
     assert markets[0][0].volume_24h == 1000.0
+    assert markets[0][0].risk_group_id == "sports"
+    assert markets[0][0].category == "soccer"
+    assert markets[0][0].event_id == "world-cup"
+    assert markets[0][0].yes_price == 0.62
+    assert markets[0][0].no_price == 0.38
+    assert markets[0][0].best_bid == 0.61
+    assert markets[0][0].best_ask == 0.63
+    assert markets[0][0].last_trade_price == 0.62
     assert markets[0][0].liquidity == 1000.0
     assert markets[0][0].spread_bps == 75
+    assert markets[0][0].price_updated_at == created_at
     assert len(connection.fetch_calls) == 1
     _, args = connection.fetch_calls[0]
     assert args[0] == "polymarket"

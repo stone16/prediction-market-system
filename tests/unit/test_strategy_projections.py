@@ -69,6 +69,8 @@ EXPECTED_FIELD_TYPES: dict[str, dict[str, Any]] = {
         "depth_min_usdc": float | None,
         "liquidity_min_usdc": float | None,
         "accepting_orders": bool,
+        "yes_price_min": float | None,
+        "yes_price_max": float | None,
     },
 }
 
@@ -135,6 +137,8 @@ def _sample_projection_values() -> dict[str, Any]:
             depth_min_usdc=250.0,
             liquidity_min_usdc=None,
             accepting_orders=True,
+            yes_price_min=0.02,
+            yes_price_max=0.98,
         ),
     }
 
@@ -230,6 +234,65 @@ def test_calibration_spec_defaults_are_part_of_projection_contract() -> None:
     assert calibration.extreme_clamp_low == 0.08
     assert calibration.extreme_clamp_high == 0.92
     assert calibration.min_resolved_for_extreme == 500
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    (
+        ("yes_price_min", -0.01),
+        ("yes_price_min", 1.01),
+        ("yes_price_min", float("nan")),
+        ("yes_price_min", True),
+        ("yes_price_max", -0.01),
+        ("yes_price_max", 1.01),
+        ("yes_price_max", float("inf")),
+        ("yes_price_max", False),
+    ),
+)
+def test_market_selection_rejects_invalid_yes_price_bounds(
+    field_name: str,
+    field_value: float,
+) -> None:
+    module = _load_projections_module()
+
+    with pytest.raises(ValueError, match=field_name):
+        module.MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+            **{field_name: field_value},
+        )
+
+
+def test_market_selection_rejects_inverted_yes_price_bounds() -> None:
+    module = _load_projections_module()
+
+    with pytest.raises(ValueError, match="yes_price_min must be <= yes_price_max"):
+        module.MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=500.0,
+            yes_price_min=0.80,
+            yes_price_max=0.20,
+        )
+
+
+def test_market_selection_keeps_legacy_positional_accepting_orders_slot() -> None:
+    module = _load_projections_module()
+
+    selection = module.MarketSelectionSpec(
+        "polymarket",
+        7,
+        500.0,
+        100.0,
+        250.0,
+        None,
+        False,
+    )
+
+    assert selection.accepting_orders is False
+    assert selection.yes_price_min is None
+    assert selection.yes_price_max is None
 
 
 def test_active_strategy_carries_default_calibration_projection() -> None:

@@ -109,6 +109,16 @@ class MarketSelector:
         ):
             return False
 
+        if spec.yes_price_min is not None and (
+            market.yes_price is None or market.yes_price < spec.yes_price_min
+        ):
+            return False
+
+        if spec.yes_price_max is not None and (
+            market.yes_price is None or market.yes_price > spec.yes_price_max
+        ):
+            return False
+
         if spec.spread_max_bps is None and spec.depth_min_usdc is None:
             return True
 

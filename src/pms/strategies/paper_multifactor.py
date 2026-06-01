@@ -15,7 +15,10 @@ PAPER_MULTI_FACTOR_STRATEGY_ID = "paper_multi_factor_v1"
 _FACTOR_FRESHNESS_S = 300.0
 _ORDERBOOK_IMBALANCE_MIN_ABS = 0.80
 _ORDERBOOK_IMBALANCE_EDGE_SCALE = 0.25
-_RESOLUTION_HORIZON_DAYS = 60
+_RESOLUTION_HORIZON_DAYS = 31
+_ROUTER_MIN_YES_PRICE = 0.02
+_ROUTER_MAX_YES_PRICE = 0.98
+_SPREAD_MAX_BPS = 100.0
 
 
 def build_paper_multi_factor_strategy() -> Strategy:
@@ -97,6 +100,9 @@ def build_paper_multi_factor_strategy() -> Strategy:
             venue="polymarket",
             resolution_time_max_horizon_days=_RESOLUTION_HORIZON_DAYS,
             volume_min_usdc=100.0,
+            spread_max_bps=_SPREAD_MAX_BPS,
+            yes_price_min=_ROUTER_MIN_YES_PRICE,
+            yes_price_max=_ROUTER_MAX_YES_PRICE,
         ),
         calibration=CalibrationSpec(
             enabled=True,

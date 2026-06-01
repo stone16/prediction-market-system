@@ -37,6 +37,8 @@ class MarketDiscoverySensor:
     store: PostgresMarketDataStore
     http_client: httpx.AsyncClient
     poll_interval_s: float = 60.0
+    page_limit: int = 500
+    max_pages: int = 1
     persist_price_snapshots: bool = False
     on_poll_complete: Callable[[], Awaitable[None]] | None = None
 
@@ -97,21 +99,58 @@ class MarketDiscoverySensor:
                 backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)
 
     async def poll_once(self) -> None:
+        fetched_at = datetime.now(tz=UTC)
+        written_markets: list[Market] = []
+        exhausted_page_cap = False
+        for page_index in range(self.max_pages):
+            page_payload, raw_page_count = await self._fetch_page(page_index)
+            if raw_page_count == 0:
+                break
+            if page_payload:
+                await self._write_payload_page(
+                    payload=page_payload,
+                    fetched_at=fetched_at,
+                    written_markets=written_markets,
+                )
+            if raw_page_count < self.page_limit:
+                break
+            exhausted_page_cap = page_index == self.max_pages - 1
+        if exhausted_page_cap:
+            logger.warning(
+                "discovery reached configured page cap max_pages=%d page_limit=%d; "
+                "Gamma universe may be truncated",
+                self.max_pages,
+                self.page_limit,
+            )
+
+        _record_price_fields_populated_ratio(written_markets)
+        await _record_snapshot_lag_seconds_max(self.store)
+
+    async def _fetch_page(self, page_index: int) -> tuple[list[dict[str, Any]], int]:
         response = await self.http_client.get(
             "/markets",
-            params={"active": "true", "closed": "false", "limit": "500"},
+            params={
+                "active": "true",
+                "closed": "false",
+                "limit": str(self.page_limit),
+                "offset": str(page_index * self.page_limit),
+            },
         )
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list):
             msg = "Expected Gamma API /markets response to be a list"
             raise ValueError(msg)
+        return [row for row in payload if isinstance(row, dict)], len(payload)
 
-        fetched_at = datetime.now(tz=UTC)
-        written_markets: list[Market] = []
+    async def _write_payload_page(
+        self,
+        *,
+        payload: list[dict[str, Any]],
+        fetched_at: datetime,
+        written_markets: list[Market],
+    ) -> None:
         for row in payload:
-            if not isinstance(row, dict):
-                continue
             try:
                 market = _gamma_market_to_market(row, fetched_at)
                 tokens = _gamma_market_to_tokens(row, market.condition_id)
@@ -167,9 +206,6 @@ class MarketDiscoverySensor:
                         error,
                     )
                     continue
-
-        _record_price_fields_populated_ratio(written_markets)
-        await _record_snapshot_lag_seconds_max(self.store)
 
     async def aclose(self) -> None:
         await self.http_client.aclose()
@@ -366,7 +402,14 @@ def _strict_float(value: object) -> float:
 def _spread_bps(*, best_bid: float | None, best_ask: float | None) -> int | None:
     if best_bid is None or best_ask is None:
         return None
-    spread = (Decimal(str(best_ask)) - Decimal(str(best_bid))) * Decimal("10000")
+    bid = Decimal(str(best_bid))
+    ask = Decimal(str(best_ask))
+    if ask < bid:
+        return None
+    midpoint = (ask + bid) / Decimal("2")
+    if midpoint <= 0:
+        return None
+    spread = ((ask - bid) / midpoint) * Decimal("10000")
     return int(round(spread))
 
 

@@ -532,6 +532,8 @@ def test_strategy_from_config_json_validates_nested_fields() -> None:
 
 def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None:
     payload = json.loads(serialize_strategy_config_json(*_strategy().snapshot()))
+    assert "yes_price_min" not in payload["market_selection"]
+    assert "yes_price_max" not in payload["market_selection"]
     del payload["market_selection"]["spread_max_bps"]
     del payload["market_selection"]["depth_min_usdc"]
     payload["calibration"] = {}
@@ -541,6 +543,8 @@ def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None
     assert selection.spread_max_bps == 100.0
     assert selection.depth_min_usdc == 250.0
     assert selection.liquidity_min_usdc is None
+    assert selection.yes_price_min is None
+    assert selection.yes_price_max is None
     assert selection.accepting_orders is True
     assert calibration.enabled is True
     assert calibration.shrinkage_factor == 0.35
@@ -559,6 +563,8 @@ def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None
             "spread_max_bps": 80.0,
             "depth_min_usdc": 300.0,
             "liquidity_min_usdc": 500.0,
+            "yes_price_min": 0.02,
+            "yes_price_max": 0.98,
             "accepting_orders": False,
         }
     )
@@ -569,6 +575,8 @@ def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None
     assert selection.spread_max_bps == 80.0
     assert selection.depth_min_usdc == 300.0
     assert selection.liquidity_min_usdc == 500.0
+    assert selection.yes_price_min == 0.02
+    assert selection.yes_price_max == 0.98
     assert selection.accepting_orders is False
     assert calibration.shrinkage_factor == 0.2
     assert calibration.shrinkage_bias == -0.1

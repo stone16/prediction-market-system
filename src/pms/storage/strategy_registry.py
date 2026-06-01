@@ -587,6 +587,14 @@ def _market_selection_from_payload(
             market_selection_payload.get("liquidity_min_usdc"),
             "market_selection.liquidity_min_usdc",
         ),
+        yes_price_min=_json_optional_float(
+            market_selection_payload.get("yes_price_min"),
+            "market_selection.yes_price_min",
+        ),
+        yes_price_max=_json_optional_float(
+            market_selection_payload.get("yes_price_max"),
+            "market_selection.yes_price_max",
+        ),
         accepting_orders=_json_optional_bool(
             market_selection_payload.get("accepting_orders"),
             "market_selection.accepting_orders",
