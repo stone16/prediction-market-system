@@ -21,6 +21,8 @@ async def test_runtime_continuity_counts_only_elapsed_healthy_days() -> None:
                     "last_observed_at": datetime(2026, 1, 31, 23, 29, tzinfo=UTC),
                     "heartbeat_count": 2,
                     "max_gap_seconds": 60.0,
+                    "unhealthy_heartbeat_count": 0,
+                    "min_controller_runtimes": 1,
                 }
             ),
         )
@@ -41,6 +43,8 @@ async def test_runtime_continuity_query_counts_initial_heartbeat_gap() -> None:
             "last_observed_at": datetime(2026, 1, 31, 0, 0, tzinfo=UTC),
             "heartbeat_count": 1,
             "max_gap_seconds": 2_592_000.0,
+            "unhealthy_heartbeat_count": 0,
+            "min_controller_runtimes": 1,
         }
     )
     store = RuntimeHeartbeatStore(pool=cast(Any, pool))
@@ -51,6 +55,29 @@ async def test_runtime_continuity_query_counts_initial_heartbeat_gap() -> None:
     assert continuity.healthy_days == 30
     assert continuity.max_gap_seconds == 2_592_000.0
     assert "MIN(observed_at) - MIN(started_at)" in pool.last_query
+
+
+@pytest.mark.asyncio
+async def test_runtime_continuity_reports_unhealthy_controller_heartbeats() -> None:
+    pool = _Pool(
+        {
+            "first_started_at": datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            "first_observed_at": datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+            "last_observed_at": datetime(2026, 1, 31, 0, 0, tzinfo=UTC),
+            "heartbeat_count": 30,
+            "max_gap_seconds": 60.0,
+            "unhealthy_heartbeat_count": 1,
+            "min_controller_runtimes": 0,
+        }
+    )
+    store = RuntimeHeartbeatStore(pool=cast(Any, pool))
+
+    continuity = await store.continuity(run_id="run-controller-gap")
+
+    assert continuity is not None
+    assert continuity.unhealthy_heartbeat_count == 1
+    assert continuity.min_controller_runtimes == 0
+    assert "controller_runtimes" in pool.last_query
 
 
 class _Pool:

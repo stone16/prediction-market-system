@@ -385,6 +385,7 @@ async def test_api_routes_expose_mock_runner_state() -> None:
         "task_done",
     }
     assert status["controller"] == {
+        "current_runtimes_total": 0,
         "decisions_total": 1,
         "diagnostics_total": 0,
         "diagnostic_counts": {},

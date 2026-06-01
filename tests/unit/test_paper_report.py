@@ -2184,6 +2184,55 @@ def test_paper_soak_gate_fails_without_persisted_runtime_continuity_evidence() -
     assert gate.require_check("risk_events").detail == "1 risk event(s)"
 
 
+def test_paper_soak_gate_fails_when_current_controller_runtime_is_unavailable() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={"current_runtimes_total": 0}
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "controller",
+        "controller runtime unavailable",
+        "status.controller.current_runtimes_total=0",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_runtime_heartbeat_observed_detachment() -> None:
+    continuity = _runtime_continuity_status()
+    continuity["unhealthy_heartbeat_count"] = 1
+    continuity["min_controller_runtimes"] = 0
+    metrics = _passing_metrics_from_api_payloads(runtime_continuity=continuity)
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "runtime",
+        "unhealthy runtime heartbeats",
+        "unhealthy_heartbeat_count=1",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
 def test_paper_soak_gate_fails_when_daily_pnl_evidence_is_missing() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
@@ -4519,6 +4568,8 @@ def _runtime_continuity_status() -> dict[str, object]:
         "source": "postgres_runtime_heartbeats",
         "healthy_days": 30,
         "max_gap_seconds": 60.0,
+        "unhealthy_heartbeat_count": 0,
+        "min_controller_runtimes": 1,
     }
 
 
@@ -4548,9 +4599,11 @@ def _passing_metrics_from_api_payloads(
     include_decision_evidence: bool = True,
     decision_payload_count: int | None = None,
     include_runtime_continuity: bool = True,
+    runtime_continuity: dict[str, object] | None = None,
 ) -> PaperReportMetrics:
     report_date = date(2026, 5, 30)
     controller_payload: dict[str, object] = {
+        "current_runtimes_total": 1,
         "decisions_total": 1,
         "diagnostics_total": 0,
         "diagnostic_counts": {},
@@ -4598,11 +4651,11 @@ def _passing_metrics_from_api_payloads(
         "supervision": {"unresolved_feedback_total": 0},
     }
     if include_runtime_continuity:
-        status_payload["runtime_continuity"] = {
-            "source": "postgres_runtime_heartbeats",
-            "healthy_days": 30,
-            "max_gap_seconds": 60.0,
-        }
+        status_payload["runtime_continuity"] = (
+            _runtime_continuity_status()
+            if runtime_continuity is None
+            else runtime_continuity
+        )
 
     return metrics_from_api_payloads(
         report_date=report_date,

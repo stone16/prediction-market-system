@@ -480,6 +480,10 @@ class Runner:
         return self._subscription_controller
 
     @property
+    def controller_runtime_count(self) -> int:
+        return len(self._controller_runtimes)
+
+    @property
     def strategy_registry(self) -> PostgresStrategyRegistry | None:
         return self._strategy_registry
 

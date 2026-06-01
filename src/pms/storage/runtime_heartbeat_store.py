@@ -17,6 +17,8 @@ class RuntimeContinuity:
     heartbeat_count: int
     healthy_days: int
     max_gap_seconds: float
+    unhealthy_heartbeat_count: int
+    min_controller_runtimes: int
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -27,6 +29,8 @@ class RuntimeContinuity:
             "heartbeat_count": self.heartbeat_count,
             "healthy_days": self.healthy_days,
             "max_gap_seconds": self.max_gap_seconds,
+            "unhealthy_heartbeat_count": self.unhealthy_heartbeat_count,
+            "min_controller_runtimes": self.min_controller_runtimes,
         }
 
 
@@ -72,6 +76,7 @@ class RuntimeHeartbeatStore:
                     SELECT
                         started_at,
                         observed_at,
+                        component_status_json,
                         LAG(observed_at) OVER (ORDER BY observed_at ASC) AS prev_observed_at
                     FROM runtime_heartbeats
                     WHERE run_id = $1
@@ -82,6 +87,18 @@ class RuntimeHeartbeatStore:
                         MIN(observed_at) AS first_observed_at,
                         MAX(observed_at) AS last_observed_at,
                         COUNT(*) AS heartbeat_count,
+                        COUNT(*) FILTER (
+                            WHERE
+                                COALESCE((component_status_json->>'running')::boolean, false) IS NOT TRUE
+                                OR COALESCE((component_status_json->>'sensor_tasks')::integer, 0) <= 0
+                                OR COALESCE((component_status_json->>'controller_runtimes')::integer, 0) <= 0
+                        ) AS unhealthy_heartbeat_count,
+                        MIN(
+                            COALESCE(
+                                (component_status_json->>'controller_runtimes')::integer,
+                                0
+                            )
+                        ) AS min_controller_runtimes,
                         GREATEST(
                             0,
                             COALESCE(
@@ -100,6 +117,8 @@ class RuntimeHeartbeatStore:
                     first_observed_at,
                     last_observed_at,
                     heartbeat_count,
+                    unhealthy_heartbeat_count,
+                    min_controller_runtimes,
                     max_gap_seconds
                 FROM aggregate
                 WHERE heartbeat_count > 0
@@ -119,6 +138,8 @@ class RuntimeHeartbeatStore:
             heartbeat_count=int(cast(int, row["heartbeat_count"])),
             healthy_days=_elapsed_whole_days(first_started_at, last_observed_at),
             max_gap_seconds=float(row["max_gap_seconds"]),
+            unhealthy_heartbeat_count=int(cast(int, row["unhealthy_heartbeat_count"])),
+            min_controller_runtimes=int(cast(int, row["min_controller_runtimes"])),
         )
 
 

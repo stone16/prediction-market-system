@@ -298,6 +298,7 @@ def metrics_from_api_payloads(
     actuator = _dict_value(status, "actuator")
     evaluator = _dict_value(status, "evaluator")
     supervision = _dict_value(status, "supervision")
+    events.extend(_current_controller_runtime_risk_events(controller))
     rejection_reasons = _diagnostic_counts(controller)
     events.extend(_diagnostic_evidence_risk_events(controller, rejection_reasons))
     decision_rows = _rows_in_soak_window(
@@ -1802,6 +1803,23 @@ def _sensor_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
     return events
 
 
+def _current_controller_runtime_risk_events(
+    controller: Mapping[str, Any],
+) -> list[tuple[str, str, str]]:
+    runtime_count = _int_value(controller.get("current_runtimes_total"))
+    if runtime_count is None:
+        return []
+    if runtime_count > 0:
+        return []
+    return [
+        (
+            "controller",
+            "controller runtime unavailable",
+            f"status.controller.current_runtimes_total={runtime_count}",
+        )
+    ]
+
+
 def _runtime_continuity_risk_events(
     status: dict[str, Any],
     *,
@@ -1846,6 +1864,30 @@ def _runtime_continuity_risk_events(
                 "report generation",
                 "runtime continuity gap too large",
                 f"max_gap_seconds={0.0 if max_gap_seconds is None else max_gap_seconds:.1f} > 300.0",
+            )
+        ]
+    unhealthy_heartbeat_count = _int_value(continuity.get("unhealthy_heartbeat_count"))
+    if unhealthy_heartbeat_count is None or unhealthy_heartbeat_count > 0:
+        return [
+            (
+                "runtime",
+                "unhealthy runtime heartbeats",
+                (
+                    "unhealthy_heartbeat_count="
+                    f"{0 if unhealthy_heartbeat_count is None else unhealthy_heartbeat_count}"
+                ),
+            )
+        ]
+    min_controller_runtimes = _int_value(continuity.get("min_controller_runtimes"))
+    if min_controller_runtimes is None or min_controller_runtimes <= 0:
+        return [
+            (
+                "controller",
+                "controller runtime detached during soak",
+                (
+                    "min_controller_runtimes="
+                    f"{0 if min_controller_runtimes is None else min_controller_runtimes}"
+                ),
             )
         ]
     return []

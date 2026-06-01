@@ -239,6 +239,7 @@ def create_app(
             "runtime_continuity": await _runtime_continuity_status(active_runner),
             "sensors": _sensor_statuses(active_runner),
             "controller": {
+                "current_runtimes_total": active_runner.controller_runtime_count,
                 "decisions_total": len(active_runner.state.decisions),
                 "diagnostics_total": len(active_runner.state.controller_diagnostics),
                 "diagnostic_counts": _controller_diagnostic_counts(
@@ -1292,6 +1293,8 @@ async def _runtime_continuity_status(runner: Runner) -> dict[str, Any] | None:
             "heartbeat_count": 0,
             "healthy_days": 0,
             "max_gap_seconds": None,
+            "unhealthy_heartbeat_count": 0,
+            "min_controller_runtimes": 0,
         }
     return continuity.to_payload()
 
