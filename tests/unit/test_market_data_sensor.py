@@ -126,7 +126,7 @@ class HeartbeatWebSocket:
         self,
         messages: Sequence[str | bytes],
         *,
-        ping_outcomes: Sequence[float | None] | None = None,
+        ping_outcomes: Sequence[float | None | BaseException] | None = None,
         message_delays_s: Sequence[float] | None = None,
     ) -> None:
         self._messages = list(messages)
@@ -146,6 +146,8 @@ class HeartbeatWebSocket:
             min(self.ping_count, len(self._ping_outcomes) - 1)
         ]
         self.ping_count += 1
+        if isinstance(outcome, BaseException):
+            raise outcome
         future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
         if outcome is not None:
             future.set_result(outcome)
@@ -1035,6 +1037,63 @@ async def test_market_data_sensor_reconnects_when_pong_is_missing(
     snapshot = store_mock.write_book_snapshot_mock.await_args.args[0]
     assert snapshot.source == "reconnect"
     assert reconnect_signal.market_id == "m-pong"
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_logs_heartbeat_connection_close_as_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    first_websocket = HeartbeatWebSocket(
+        [],
+        ping_outcomes=[ConnectionClosedError(None, Close(1000, ""))],
+    )
+    second_websocket = HeartbeatWebSocket(
+        [
+            json.dumps(
+                {
+                    "event_type": "book",
+                    "market": "m-heartbeat-close",
+                    "asset_id": "asset-heartbeat-close",
+                    "timestamp": "1757908892351",
+                    "hash": "book-reconnect",
+                    "bids": [{"price": "0.44", "size": "11"}],
+                    "asks": [{"price": "0.56", "size": "7"}],
+                    "last_trade_price": "0.45",
+                }
+            )
+        ],
+        ping_outcomes=[0.0],
+    )
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.connect",
+        ConnectSequence([first_websocket, second_websocket]),
+    )
+    sensor = MarketDataSensor(
+        store=store,
+        ws_url="ws://market-data.example.test",
+        asset_ids=["asset-heartbeat-close"],
+    )
+    sensor._heartbeat_interval_s = 0.01
+    sensor._pong_timeout_s = 0.02
+    sensor._watchdog.timeout_s = 1.0
+    iterator = cast(Any, sensor.__aiter__())
+
+    with caplog.at_level(logging.WARNING):
+        reconnect_signal = await asyncio.wait_for(anext(iterator), timeout=0.5)
+
+    await iterator.aclose()
+    await sensor.aclose()
+
+    assert first_websocket.closed is True
+    assert store_mock.write_book_snapshot_mock.await_args is not None
+    assert reconnect_signal.market_id == "m-heartbeat-close"
+    assert "market data sensor websocket closed; reconnecting" in caplog.text
+    assert "market data sensor heartbeat failed" not in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
 
 
 @pytest.mark.asyncio

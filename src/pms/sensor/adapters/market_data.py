@@ -524,7 +524,10 @@ class MarketDataSensor:
                 await websocket.close()
                 return
             except Exception as error:
-                logger.error("market data sensor heartbeat failed: %s", error)
+                if isinstance(error, ConnectionClosed):
+                    _log_reconnectable_error(error)
+                else:
+                    logger.error("market data sensor heartbeat failed: %s", error)
                 await websocket.close()
                 return
 
