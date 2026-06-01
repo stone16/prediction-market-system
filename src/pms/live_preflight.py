@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import asyncpg
+from pydantic import SecretStr
 
 from pms.controller.factory import ControllerPipelineFactory
 from pms.config import (
@@ -168,9 +169,10 @@ def live_preflight_result_is_final_go_no_go_valid(
     result: LivePreflightResult,
     *,
     skip_venue: bool,
+    skip_credentials: bool = False,
     database_url_override_used: bool,
 ) -> bool:
-    if not result.ok or skip_venue or database_url_override_used:
+    if not result.ok or skip_venue or skip_credentials or database_url_override_used:
         return False
     if (
         result.active_strategies_fingerprint is None
@@ -205,16 +207,23 @@ async def run_live_preflight(
     pool: asyncpg.Pool | None = None,
     venue_reconciler: PolymarketVenueAccountReconciler | None = None,
     skip_venue: bool = False,
+    skip_credentials: bool = False,
 ) -> LivePreflightResult:
     checks: list[LivePreflightCheck] = []
     credentials_ok = False
+    non_venue_config_ok = False
     active_strategies_fingerprint: str | None = None
 
     try:
         if settings.mode != RunMode.LIVE:
             msg = f"mode must be live, got {settings.mode.value}"
             raise ValueError(msg)
-        validate_live_mode_ready(settings)
+        validation_settings = (
+            _settings_with_diagnostic_credentials(settings)
+            if skip_credentials
+            else settings
+        )
+        validate_live_mode_ready(validation_settings)
         _validate_live_strategy_artifacts(settings)
     except Exception as exc:  # noqa: BLE001
         checks.append(
@@ -225,8 +234,15 @@ async def run_live_preflight(
             )
         )
     else:
-        credentials_ok = True
-        checks.append(LivePreflightCheck("live_config", True, "LIVE config validates"))
+        non_venue_config_ok = True
+        credentials_ok = not skip_credentials
+        detail = (
+            "LIVE config validates with diagnostic credentials; final preflight "
+            "still requires real credentials"
+            if skip_credentials
+            else "LIVE config validates"
+        )
+        checks.append(LivePreflightCheck("live_config", True, detail))
 
     checks.append(_runtime_dependencies_check(settings))
     checks.append(_operator_approval_check(settings))
@@ -281,8 +297,10 @@ async def run_live_preflight(
                 settings,
                 active_pool,
                 venue_reconciler=venue_reconciler,
-                skip_venue=skip_venue,
-                credentials_ok=credentials_ok,
+                skip_venue=skip_venue or skip_credentials,
+                credentials_ok=(
+                    credentials_ok or (skip_credentials and non_venue_config_ok)
+                ),
             )
         )
     finally:
@@ -292,6 +310,49 @@ async def run_live_preflight(
     return LivePreflightResult(
         tuple(checks),
         active_strategies_fingerprint=active_strategies_fingerprint,
+    )
+
+
+def _settings_with_diagnostic_credentials(settings: PMSSettings) -> PMSSettings:
+    """Fill secret-shaped fields only to keep non-credential checks running."""
+    polymarket = settings.polymarket.model_copy(
+        update={
+            "private_key": "diagnostic-polymarket-private-key",
+            "api_key": "diagnostic-polymarket-api-key",
+            "api_secret": "diagnostic-polymarket-api-secret",
+            "api_passphrase": "diagnostic-polymarket-api-passphrase",
+            "signature_type": 1,
+            "funder_address": "0x1111111111111111111111111111111111111111",
+        }
+    )
+    llm = settings.llm
+    if llm.enabled and (llm.api_key is None or llm.api_key.strip() == ""):
+        llm = llm.model_copy(update={"api_key": "diagnostic-llm-api-key"})
+    discord = settings.discord
+    if discord.webhook_url is None:
+        discord = discord.model_copy(
+            update={
+                "webhook_url": SecretStr(
+                    "https://discord.example/webhooks/diagnostic/preflight"
+                )
+            }
+        )
+    api_token = settings.api_token
+    if (
+        api_token is None
+        or api_token.strip() == ""
+        or _looks_like_preflight_placeholder_detail(api_token)
+    ):
+        api_token = "diagnostic-api-token"
+    return settings.model_copy(
+        update={
+            "secret_source": "fly",
+            "local_secret_file": None,
+            "api_token": api_token,
+            "polymarket": polymarket,
+            "llm": llm,
+            "discord": discord,
+        }
     )
 
 
@@ -484,6 +545,9 @@ def _validate_live_preflight_artifact(
         raise LiveTradingDisabledError(msg)
     if artifact.get("skip_venue") is not False:
         msg = "LIVE credentialed preflight artifact must not skip venue reconciliation"
+        raise LiveTradingDisabledError(msg)
+    if artifact.get("skip_credentials") is True:
+        msg = "LIVE credentialed preflight artifact must not skip credential validation"
         raise LiveTradingDisabledError(msg)
     if artifact.get("database_url_override_used") is not False:
         msg = (

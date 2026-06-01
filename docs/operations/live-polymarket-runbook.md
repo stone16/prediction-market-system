@@ -624,12 +624,14 @@ than accepting unknown or non-finite cash evidence.
 `risk.max_total_exposure` value, so a passing preflight and the actual LIVE
 startup reconcile against the same cash budget.
 
-`--skip-venue` is only for local config/debugging when credentials or venue
-network access are unavailable. It intentionally produces an incomplete
-preflight result and nonzero CLI exit. If `--output` is used with
-`--skip-venue`, the artifact is marked `artifact_mode: incomplete_preflight`
-and `final_go_no_go_valid: false`. A final go/no-go preflight must include the
-venue check.
+`--skip-credentials` is only for local non-secret readiness audits: it fills
+diagnostic placeholder secrets so config, artifact, strategy, database, and
+market-data checks can still surface non-credential blockers. It intentionally
+skips venue reconciliation, returns a nonzero CLI exit, and can only write
+`artifact_mode: incomplete_preflight` with `final_go_no_go_valid: false`.
+`--skip-venue` is likewise only for local config/debugging when venue network
+access is unavailable. A final go/no-go preflight must use real credentials and
+must include the venue check.
 
 ## Operator Approval Gate
 

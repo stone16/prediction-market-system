@@ -73,6 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the read-only venue account snapshot; not valid for final go/no-go.",
     )
+    preflight.add_argument(
+        "--skip-credentials",
+        action="store_true",
+        help=(
+            "Use diagnostic placeholder secrets so non-credential checks can run; "
+            "not valid for final go/no-go."
+        ),
+    )
     preflight.add_argument("--json", action="store_true")
     preflight.add_argument(
         "--output",
@@ -149,7 +157,10 @@ def build_parser() -> argparse.ArgumentParser:
 async def _main_async(args: argparse.Namespace) -> int:
     if args.command == "preflight":
         try:
-            settings = _load_cli_settings(cast(str | None, args.config))
+            settings = _load_cli_settings(
+                cast(str | None, args.config),
+                skip_local_secret_file=cast(bool, args.skip_credentials),
+            )
         except Exception as exc:  # noqa: BLE001
             result = LivePreflightResult(
                 (
@@ -173,6 +184,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         result = await run_live_preflight(
             settings,
             skip_venue=cast(bool, args.skip_venue),
+            skip_credentials=cast(bool, args.skip_credentials),
         )
         artifact_final_go_no_go_valid: bool | None = None
         if args.output:
@@ -185,6 +197,7 @@ async def _main_async(args: argparse.Namespace) -> int:
                         cast(str | None, args.config)
                     ),
                     skip_venue=cast(bool, args.skip_venue),
+                    skip_credentials=cast(bool, args.skip_credentials),
                     database_url_override_used=bool(args.database_url),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -192,6 +205,8 @@ async def _main_async(args: argparse.Namespace) -> int:
                 result = _append_preflight_artifact_write_failure(result, exc)
         _print_preflight_result(result, as_json=cast(bool, args.json))
         if artifact_final_go_no_go_valid is False:
+            return 1
+        if args.skip_venue or args.skip_credentials:
             return 1
         return 0 if result.ok else 1
 
@@ -400,10 +415,17 @@ async def _main_async(args: argparse.Namespace) -> int:
     _unreachable(args.command)
 
 
-def _load_cli_settings(config_path: str | None) -> PMSSettings:
+def _load_cli_settings(
+    config_path: str | None,
+    *,
+    skip_local_secret_file: bool = False,
+) -> PMSSettings:
     if config_path is None:
-        return load_settings()
-    return PMSSettings.load(config_path)
+        return load_settings(load_local_secret_file=not skip_local_secret_file)
+    return PMSSettings.load(
+        config_path,
+        load_local_secret_file=not skip_local_secret_file,
+    )
 
 
 def _effective_cli_config_path(config_path: str | None) -> str:
@@ -788,11 +810,13 @@ def _write_preflight_artifact(
     output_path: Path,
     config_path: str | None,
     skip_venue: bool,
+    skip_credentials: bool = False,
     database_url_override_used: bool,
 ) -> bool:
     final_go_no_go_valid = live_preflight_result_is_final_go_no_go_valid(
         result,
         skip_venue=skip_venue,
+        skip_credentials=skip_credentials,
         database_url_override_used=database_url_override_used,
     )
     require_preflight_artifact_concrete_path(output_path)
@@ -817,6 +841,7 @@ def _write_preflight_artifact(
         ),
         "final_go_no_go_valid": final_go_no_go_valid,
         "skip_venue": skip_venue,
+        "skip_credentials": skip_credentials,
         "config_path": config_path,
         "database_url_override_used": database_url_override_used,
         "settings_fingerprint": live_preflight_settings_fingerprint(settings),

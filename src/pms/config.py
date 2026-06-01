@@ -417,7 +417,12 @@ class PMSSettings(BaseSettings):
     strategies: StrategyRuntimeSettings = Field(default_factory=StrategyRuntimeSettings)
 
     @classmethod
-    def load(cls, config_path: str | Path | None = "config.yaml") -> Self:
+    def load(
+        cls,
+        config_path: str | Path | None = "config.yaml",
+        *,
+        load_local_secret_file: bool = True,
+    ) -> Self:
         config_data: dict[str, Any] = {}
         path: Path | None = None
 
@@ -446,7 +451,8 @@ class PMSSettings(BaseSettings):
 
         _reject_inline_polymarket_credentials(config_data)
         _reject_inline_llm_api_key(config_data)
-        config_data = _merge_local_secret_file(config_data)
+        if load_local_secret_file:
+            config_data = _merge_local_secret_file(config_data)
         settings = cls(**config_data)
         if path is not None:
             _require_live_config_file_distinct_from_protected_paths(
@@ -456,11 +462,18 @@ class PMSSettings(BaseSettings):
         return settings
 
 
-def load_settings(config_path: str | Path | None = None) -> PMSSettings:
+def load_settings(
+    config_path: str | Path | None = None,
+    *,
+    load_local_secret_file: bool = True,
+) -> PMSSettings:
     configured_path = config_path
     if configured_path is None:
         configured_path = os.environ.get("PMS_CONFIG_PATH") or "config.yaml"
-    return PMSSettings.load(configured_path)
+    return PMSSettings.load(
+        configured_path,
+        load_local_secret_file=load_local_secret_file,
+    )
 
 
 def validate_live_mode_ready(

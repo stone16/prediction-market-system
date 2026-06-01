@@ -682,6 +682,7 @@ def test_pms_live_cli_parses_preflight_command() -> None:
             "--database-url",
             "postgresql://localhost/pms_live",
             "--skip-venue",
+            "--skip-credentials",
             "--json",
             "--output",
             "docs/live/preflight.json",
@@ -692,8 +693,67 @@ def test_pms_live_cli_parses_preflight_command() -> None:
     assert args.config == "config.live.yaml"
     assert args.database_url == "postgresql://localhost/pms_live"
     assert args.skip_venue is True
+    assert args.skip_credentials is True
     assert args.json is True
     assert args.output == "docs/live/preflight.json"
+
+
+@pytest.mark.asyncio
+async def test_pms_live_preflight_skip_credentials_skips_local_secret_file_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.live.yaml"
+    missing_secret_path = tmp_path / "missing" / "polymarket.local-secrets.yaml"
+    config_path.write_text(
+        "\n".join(
+            (
+                "mode: live",
+                "secret_source: local_file",
+                f"local_secret_file: {missing_secret_path}",
+                "live_trading_enabled: true",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_run_live_preflight(
+        settings: PMSSettings,
+        *,
+        skip_venue: bool,
+        skip_credentials: bool,
+    ) -> LivePreflightResult:
+        assert settings.local_secret_file == str(missing_secret_path)
+        assert skip_venue is False
+        assert skip_credentials is True
+        return LivePreflightResult(
+            (
+                LivePreflightCheck(
+                    "live_config",
+                    True,
+                    "LIVE config validates with diagnostic credentials",
+                ),
+            )
+        )
+
+    monkeypatch.setattr(live_cli, "run_live_preflight", fake_run_live_preflight)
+    args = build_parser().parse_args(
+        [
+            "preflight",
+            "--config",
+            str(config_path),
+            "--skip-credentials",
+            "--json",
+        ]
+    )
+
+    exit_code = await live_cli._main_async(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["checks"][0]["name"] == "live_config"
+    assert payload["checks"][0]["ok"] is True
 
 
 def test_pms_live_cli_parses_live_order_reconcile_command() -> None:
@@ -1126,9 +1186,11 @@ async def test_pms_live_preflight_cli_rejects_env_config_file_output_path(
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         assert settings.live_preflight_artifact_path == str(configured_preflight_path)
         assert skip_venue is False
+        assert skip_credentials is False
         return LivePreflightResult(
             (
                 LivePreflightCheck(
@@ -2107,9 +2169,11 @@ async def test_pms_live_preflight_cli_reports_artifact_write_failure_without_tra
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         del settings
         assert skip_venue is False
+        assert skip_credentials is False
         return _final_preflight_result()
 
     monkeypatch.setattr(live_cli, "run_live_preflight", fake_run_live_preflight)
@@ -2154,9 +2218,11 @@ async def test_pms_live_preflight_output_marks_database_url_override_as_not_fina
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         assert settings.database.dsn == "postgresql://user:secret@db.example/pms_live"
         observed_skip_venue.append(skip_venue)
+        assert skip_credentials is False
         return LivePreflightResult(
             (
                 LivePreflightCheck(
@@ -2217,9 +2283,11 @@ async def test_pms_live_preflight_output_marks_skip_venue_as_not_final(
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         del settings
         assert skip_venue is True
+        assert skip_credentials is False
         return LivePreflightResult(
             (
                 LivePreflightCheck(
@@ -2249,7 +2317,51 @@ async def test_pms_live_preflight_output_marks_skip_venue_as_not_final(
     assert artifact["artifact_mode"] == "incomplete_preflight"
     assert artifact["final_go_no_go_valid"] is False
     assert artifact["skip_venue"] is True
+    assert artifact["skip_credentials"] is False
     assert artifact["result"]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_pms_live_preflight_output_marks_skip_credentials_as_not_final(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_path = tmp_path / "preflight-debug.json"
+    config_path = tmp_path / "config.live.yaml"
+    config_path.write_text("mode: live\n", encoding="utf-8")
+
+    async def fake_run_live_preflight(
+        settings: PMSSettings,
+        *,
+        skip_venue: bool,
+        skip_credentials: bool,
+    ) -> LivePreflightResult:
+        del settings
+        assert skip_venue is False
+        assert skip_credentials is True
+        return _final_preflight_result()
+
+    monkeypatch.setattr(live_cli, "run_live_preflight", fake_run_live_preflight)
+    args = build_parser().parse_args(
+        [
+            "preflight",
+            "--config",
+            str(config_path),
+            "--skip-credentials",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    exit_code = await live_cli._main_async(args)
+
+    artifact = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert artifact["artifact_mode"] == "incomplete_preflight"
+    assert artifact["final_go_no_go_valid"] is False
+    assert artifact["skip_venue"] is False
+    assert artifact["skip_credentials"] is True
+    assert artifact["result"]["ok"] is True
 
 
 @pytest.mark.asyncio
@@ -2265,9 +2377,11 @@ async def test_pms_live_preflight_output_marks_missing_required_checks_as_not_fi
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         del settings
         assert skip_venue is False
+        assert skip_credentials is False
         return LivePreflightResult(
             (
                 LivePreflightCheck(
@@ -2311,9 +2425,11 @@ async def test_pms_live_preflight_output_records_active_strategy_fingerprint(
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         del settings
         assert skip_venue is False
+        assert skip_credentials is False
         return LivePreflightResult(
             (
                 LivePreflightCheck(
@@ -2380,9 +2496,11 @@ async def test_pms_live_preflight_output_requires_active_strategy_fingerprint_fo
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         del settings
         assert skip_venue is False
+        assert skip_credentials is False
         return LivePreflightResult(
             tuple(
                 LivePreflightCheck(
@@ -5309,6 +5427,66 @@ async def test_live_preflight_passes_with_live_config_schema_incidents_and_venue
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_skip_credentials_runs_non_credential_checks(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    settings.polymarket.private_key = None
+    settings.polymarket.api_key = None
+    settings.polymarket.api_secret = None
+    settings.polymarket.api_passphrase = None
+    settings.polymarket.signature_type = None
+    settings.polymarket.funder_address = None
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+        skip_credentials=True,
+    )
+
+    live_config = result.require_check("live_config")
+    venue_check = result.require_check("venue_reconciliation")
+    assert result.ok is False
+    assert live_config.ok is True
+    assert "diagnostic credentials" in live_config.detail
+    assert "Missing Polymarket credential" not in live_config.detail
+    assert venue_check.ok is False
+    assert "skipped by operator flag" in venue_check.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_skip_credentials_surfaces_strategy_artifact_errors(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    settings.polymarket.private_key = None
+    settings.polymarket.api_key = None
+    settings.polymarket.api_secret = None
+    settings.polymarket.api_passphrase = None
+    settings.polymarket.signature_type = None
+    settings.polymarket.funder_address = None
+    settings.strategies.flb_calibration_path = None
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+        skip_credentials=True,
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert "FLB calibration artifact path is required" in live_config.detail
+    assert "Missing Polymarket credential" not in live_config.detail
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_without_flb_calibration_artifact_path(
     tmp_path: Path,
 ) -> None:
@@ -7434,6 +7612,34 @@ def test_live_preflight_artifact_rejects_duplicate_json_keys(
     with pytest.raises(
         LiveTradingDisabledError,
         match="duplicate JSON key: final_go_no_go_valid",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_rejects_skip_credentials(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    artifact_path = Path(
+        make_live_preflight_artifact_path(
+            prefix="pms-live-preflight-skip-credentials-",
+            settings=settings,
+        )
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["skip_credentials"] = True
+    artifact_path.write_text(
+        json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    settings.live_preflight_artifact_path = str(artifact_path)
+    validator = getattr(live_preflight_module, "require_live_preflight_artifact")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="must not skip credential validation",
     ):
         validator(settings)
 
