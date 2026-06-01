@@ -26,6 +26,7 @@ position_exit:
   stop_loss_pct: 30.0
   profit_take_pct: 50.0
   max_holding_days: 7
+  reentry_cooldown_s: 3600.0
 
 sensor:
   poll_interval_s: 60.0

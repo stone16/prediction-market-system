@@ -361,6 +361,7 @@ def test_live_soak_config_sets_position_exit_policy() -> None:
     assert position_exit["stop_loss_pct"] == pytest.approx(30.0)
     assert position_exit["profit_take_pct"] == pytest.approx(50.0)
     assert position_exit["max_holding_days"] == 7
+    assert position_exit["reentry_cooldown_s"] == pytest.approx(3600.0)
 
 
 @pytest.mark.asyncio

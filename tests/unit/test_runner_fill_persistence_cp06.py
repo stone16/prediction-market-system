@@ -4,14 +4,20 @@ import asyncio
 import json
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from pms.actuator.adapters.polymarket import PolymarketSubmissionUnknownError
-from pms.config import ControllerSettings, PMSSettings, PolymarketSettings, RiskSettings
+from pms.config import (
+    ControllerSettings,
+    PMSSettings,
+    PolymarketSettings,
+    PositionExitSettings,
+    RiskSettings,
+)
 from pms.core.enums import MarketStatus, OrderStatus, RunMode, Side, TimeInForce
 from pms.core.models import FillRecord, MarketSignal, OrderState, Portfolio, Position
 from pms.core.models import TradeDecision
@@ -30,6 +36,18 @@ def _settings() -> PMSSettings:
             max_total_exposure=10_000.0,
         ),
     )
+
+
+def _settings_with_exit_reentry_cooldown(*, cooldown_s: float) -> PMSSettings:
+    settings = _settings()
+    settings.position_exit = PositionExitSettings(
+        enabled=True,
+        stop_loss_pct=30.0,
+        profit_take_pct=50.0,
+        max_holding_days=7,
+        reentry_cooldown_s=cooldown_s,
+    )
+    return settings
 
 
 def _live_settings(tmp_path: Path) -> PMSSettings:
@@ -602,6 +620,117 @@ async def test_actuator_loop_releases_position_exit_key_after_rejected_order() -
 
     assert key not in runner._emitted_position_exit_keys  # noqa: SLF001
     assert decision.decision_id not in runner._position_exit_keys_by_decision  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_actuator_loop_quarantines_reentry_after_position_exit_fill() -> None:
+    runner = Runner(
+        config=_settings_with_exit_reentry_cooldown(cooldown_s=1_800.0),
+        historical_data_path=FIXTURE_PATH,
+    )
+    runner.actuator_executor = cast(Any, _ExecutorDouble())
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _RecordingOrderStore(runner))
+    runner.fill_store = cast(Any, _RecordingFillStore(runner))
+    _mark_controller_done(runner)
+
+    market_id = "market-exit-reentry"
+    exit_decision = replace(
+        _decision(market_id=market_id),
+        decision_id=f"exit-stop_loss-{market_id}",
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+        stop_conditions=["position_exit:stop_loss"],
+        risk_group_id="event:exit-reentry",
+    )
+    signal = _signal(market_id=market_id)
+    runner.portfolio = Portfolio(
+        total_usdc=1_000.0,
+        free_usdc=979.5,
+        locked_usdc=20.5,
+        open_positions=[
+            Position(
+                market_id=market_id,
+                token_id=exit_decision.token_id,
+                venue="polymarket",
+                side=Side.BUY.value,
+                shares_held=50.0,
+                avg_entry_price=0.41,
+                unrealized_pnl=0.0,
+                locked_usdc=20.5,
+                strategy_id=exit_decision.strategy_id,
+                strategy_version_id=exit_decision.strategy_version_id,
+                risk_group_id=exit_decision.risk_group_id,
+            )
+        ],
+    )
+
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(exit_decision, signal)
+    )
+
+    await _run_actuator_loop(runner)
+
+    next_entry = replace(
+        _decision(market_id=market_id),
+        risk_group_id="event:exit-reentry",
+    )
+    diagnostic = runner._pre_actuator_diagnostic(next_entry, signal)  # noqa: SLF001
+
+    assert diagnostic is not None
+    assert diagnostic.code == "position_exit_reentry_cooldown"
+    assert diagnostic.metadata["cooldown_s"] == pytest.approx(1_800.0)
+    assert diagnostic.metadata["seconds_remaining"] == pytest.approx(1_800.0)
+
+    runner.portfolio = Portfolio(
+        total_usdc=1_000.0,
+        free_usdc=999.0,
+        locked_usdc=1.0,
+        open_positions=[
+            Position(
+                market_id=market_id,
+                token_id=next_entry.token_id,
+                venue="polymarket",
+                side=Side.BUY.value,
+                shares_held=2.0,
+                avg_entry_price=0.50,
+                unrealized_pnl=0.0,
+                locked_usdc=1.0,
+                strategy_id=next_entry.strategy_id,
+                strategy_version_id=next_entry.strategy_version_id,
+                risk_group_id=next_entry.risk_group_id,
+            )
+        ],
+    )
+    reducing_decision = replace(
+        next_entry,
+        decision_id="manual-risk-reducing-exit",
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+    )
+    assert runner._pre_actuator_diagnostic(  # noqa: SLF001
+        reducing_decision,
+        signal,
+    ) is None
+    runner.portfolio = Portfolio(
+        total_usdc=1_000.0,
+        free_usdc=1_000.0,
+        locked_usdc=0.0,
+        open_positions=[],
+    )
+
+    key = (
+        next_entry.strategy_id,
+        next_entry.strategy_version_id,
+        next_entry.market_id,
+        next_entry.token_id,
+        next_entry.risk_group_id,
+    )
+    runner._position_exit_reentry_quarantine_until[key] = (  # noqa: SLF001
+        signal.fetched_at - timedelta(seconds=1)
+    )
+
+    assert runner._pre_actuator_diagnostic(next_entry, signal) is None  # noqa: SLF001
 
 
 @pytest.mark.asyncio

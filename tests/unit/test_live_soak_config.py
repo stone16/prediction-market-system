@@ -63,6 +63,7 @@ def test_live_soak_config_has_no_dead_top_level_calibration_section() -> None:
     assert settings.position_exit.stop_loss_pct == pytest.approx(30.0)
     assert settings.position_exit.profit_take_pct == pytest.approx(50.0)
     assert settings.position_exit.max_holding_days == 7
+    assert settings.position_exit.reentry_cooldown_s == pytest.approx(3600.0)
 
 
 def test_live_soak_config_tunes_gamma_discovery_http_pool() -> None:

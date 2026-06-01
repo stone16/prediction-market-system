@@ -189,6 +189,7 @@ REGISTERED_FACTOR_IDS = frozenset(factor_cls.factor_id for factor_cls in REGISTE
 DEFAULT_V2_FACTOR_COMPOSITION = DEFAULT_STRATEGY_COMPOSITION
 T = TypeVar("T")
 PositionSlotKey = tuple[str, str | None, str, str, str, str]
+PositionExitReentryKey = tuple[str, str, str, str | None, str | None]
 
 
 class LivePersistenceFailureError(RuntimeError):
@@ -363,6 +364,9 @@ class Runner:
         init=False,
         default_factory=dict,
     )
+    _position_exit_reentry_quarantine_until: dict[
+        PositionExitReentryKey, datetime
+    ] = field(init=False, default_factory=dict)
     _category_prior_estimator: CategoryPriorBaselineEstimator | None = field(
         init=False,
         default=None,
@@ -521,6 +525,7 @@ class Runner:
         self._emitted_position_exit_keys.clear()
         self._position_exit_keys_by_decision.clear()
         self._pending_open_position_keys_by_decision.clear()
+        self._position_exit_reentry_quarantine_until.clear()
         started_at = datetime.now(tz=UTC)
         self.state = RunnerState(
             mode=self.config.mode,
@@ -1515,6 +1520,7 @@ class Runner:
                             )
                         logger.warning("fill persistence failed: %s", error)
                     self.portfolio = _portfolio_with_fill(self.portfolio, fill)
+                    self._record_position_exit_reentry_quarantine(fill, decision)
                     decision_evidence = work_item.decision_evidence
                     if not decision_evidence and signal is not None:
                         evidence_signal = _decision_evidence_signal_for_decision(
@@ -1890,6 +1896,12 @@ class Runner:
         decision: TradeDecision,
         signal: MarketSignal,
     ) -> ControllerDiagnostic | None:
+        reentry_diagnostic = self._position_exit_reentry_diagnostic(
+            decision,
+            signal,
+        )
+        if reentry_diagnostic is not None:
+            return reentry_diagnostic
         if (
             self.config.mode == RunMode.PAPER
             and not self._paper_orderbook_ready_for_decision(decision)
@@ -2009,6 +2021,68 @@ class Runner:
         key = self._position_exit_keys_by_decision.pop(decision_id, None)
         if key is not None:
             self._emitted_position_exit_keys.discard(key)
+
+    def _record_position_exit_reentry_quarantine(
+        self,
+        fill: FillRecord,
+        decision: TradeDecision,
+    ) -> None:
+        cooldown_s = self.config.position_exit.reentry_cooldown_s
+        if cooldown_s <= 0.0 or not _is_position_exit_decision(decision):
+            return
+        key = _position_exit_reentry_key_from_decision(decision)
+        self._position_exit_reentry_quarantine_until[key] = (
+            fill.filled_at + timedelta(seconds=cooldown_s)
+        )
+
+    def _position_exit_reentry_diagnostic(
+        self,
+        decision: TradeDecision,
+        signal: MarketSignal,
+    ) -> ControllerDiagnostic | None:
+        cooldown_s = self.config.position_exit.reentry_cooldown_s
+        if cooldown_s <= 0.0 or _is_position_exit_decision(decision):
+            return None
+        if _decision_reduces_existing_position(self.portfolio, decision):
+            return None
+        now = signal.timestamp
+        self._drop_expired_position_exit_reentry_quarantines(now)
+        key = _position_exit_reentry_key_from_decision(decision)
+        quarantined_until = self._position_exit_reentry_quarantine_until.get(key)
+        if quarantined_until is None or quarantined_until <= now:
+            return None
+        seconds_remaining = (quarantined_until - now).total_seconds()
+        return ControllerDiagnostic(
+            code="position_exit_reentry_cooldown",
+            message=(
+                "Skipping decision because the same market/token is cooling down "
+                "after a position-exit fill."
+            ),
+            market_id=decision.market_id,
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            token_id=decision.token_id,
+            severity="warning",
+            metadata={
+                "cooldown_s": cooldown_s,
+                "seconds_remaining": seconds_remaining,
+                "risk_group_id": decision.risk_group_id,
+            },
+        )
+
+    def _drop_expired_position_exit_reentry_quarantines(
+        self,
+        now: datetime,
+    ) -> None:
+        expired = [
+            key
+            for key, quarantined_until in (
+                self._position_exit_reentry_quarantine_until.items()
+            )
+            if quarantined_until <= now
+        ]
+        for key in expired:
+            del self._position_exit_reentry_quarantine_until[key]
 
     async def _update_decision_status_if_supported(
         self,
@@ -3168,6 +3242,25 @@ def _position_key_from_decision(decision: TradeDecision) -> PositionSlotKey:
         decision.side,
         decision.strategy_id,
         decision.strategy_version_id,
+    )
+
+
+def _position_exit_reentry_key_from_decision(
+    decision: TradeDecision,
+) -> PositionExitReentryKey:
+    return (
+        decision.strategy_id,
+        decision.strategy_version_id,
+        decision.market_id,
+        decision.token_id,
+        decision.risk_group_id,
+    )
+
+
+def _is_position_exit_decision(decision: TradeDecision) -> bool:
+    return any(
+        condition.startswith("position_exit:")
+        for condition in decision.stop_conditions
     )
 
 

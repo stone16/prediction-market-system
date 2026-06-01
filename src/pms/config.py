@@ -308,6 +308,7 @@ class PositionExitSettings(BaseModel):
     stop_loss_pct: float | None = Field(default=None, gt=0.0)
     profit_take_pct: float | None = Field(default=None, gt=0.0)
     max_holding_days: int | None = Field(default=None, gt=0)
+    reentry_cooldown_s: float = Field(default=0.0, ge=0.0)
 
 
 class SensorSettings(BaseModel):
