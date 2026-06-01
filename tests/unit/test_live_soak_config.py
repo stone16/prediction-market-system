@@ -63,13 +63,13 @@ def test_live_soak_config_tunes_gamma_discovery_http_pool() -> None:
 
     assert settings.sensor.poll_interval_s == pytest.approx(60.0)
     assert settings.sensor.discovery_page_limit == 100
-    assert settings.sensor.discovery_max_pages == 10
+    assert settings.sensor.discovery_max_pages == 30
     assert settings.sensor.discovery_http_timeout_s == pytest.approx(10.0)
     assert settings.sensor.discovery_http_pool_timeout_s == pytest.approx(10.0)
     assert settings.sensor.discovery_http_max_connections == 10
     assert settings.sensor.discovery_http_max_keepalive_connections == 5
     assert settings.sensor.discovery_http_keepalive_expiry_s == pytest.approx(120.0)
-    assert settings.sensor.max_subscription_asset_ids == 150
+    assert settings.sensor.max_subscription_asset_ids == 400
 
 
 def test_live_soak_config_uses_distinct_audit_sinks() -> None:

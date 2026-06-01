@@ -28,9 +28,9 @@ position_exit:
 sensor:
   poll_interval_s: 60.0
   max_reconnect_interval_s: 60.0
-  max_subscription_asset_ids: 150
+  max_subscription_asset_ids: 400
   discovery_page_limit: 100
-  discovery_max_pages: 10
+  discovery_max_pages: 30
   discovery_http_timeout_s: 10.0
   discovery_http_pool_timeout_s: 10.0
   discovery_http_max_connections: 10
