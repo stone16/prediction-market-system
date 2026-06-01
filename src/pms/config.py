@@ -4,6 +4,7 @@ import getpass
 import importlib.util
 import math
 import os
+import re
 import stat
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -86,6 +87,13 @@ _POLYMARKET_CREDENTIAL_CONFIG_FIELDS: frozenset[str] = frozenset(
         "funder_address",
     }
 )
+_PATH_PLACEHOLDER_WORD_RE = re.compile(
+    r"(?<![a-z0-9_])(?:todo|replace|placeholder)(?![a-z0-9_])"
+)
+_TEXT_PLACEHOLDER_WORD_RE = re.compile(
+    r"(?<![a-z0-9])(?:todo|replace|placeholder)(?![a-z0-9])"
+)
+_STRONG_PLACEHOLDER_MARKERS: tuple[str, ...] = ("fill_in", "__fill")
 _POLYMARKET_TEXT_CREDENTIAL_CONFIG_FIELDS: frozenset[str] = (
     _POLYMARKET_CREDENTIAL_CONFIG_FIELDS - {"signature_type"}
 )
@@ -226,7 +234,7 @@ class DiscordSettings(BaseModel):
         normalized = str(value).strip()
         if normalized == "":
             raise ValueError("alert_dir must not be blank")
-        if _looks_like_placeholder(normalized):
+        if _path_looks_like_placeholder(normalized):
             raise ValueError("alert_dir must not contain a placeholder")
         return normalized
 
@@ -514,7 +522,7 @@ def validate_live_mode_ready(
         if settings.local_secret_file is None or settings.local_secret_file.strip() == "":
             msg = "LIVE local_file secret source requires PMS_LOCAL_SECRET_FILE."
             raise LiveTradingDisabledError(msg)
-        if _looks_like_placeholder(settings.local_secret_file):
+        if _path_looks_like_placeholder(settings.local_secret_file):
             msg = "LIVE local secret file path contains placeholder"
             raise LiveTradingDisabledError(msg)
         try:
@@ -646,7 +654,7 @@ def _require_live_preflight_artifact_path(settings: PMSSettings) -> None:
             "live_preflight_artifact_path"
         )
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(raw_path):
+    if _path_looks_like_placeholder(raw_path):
         msg = "LIVE credentialed preflight artifact path contains placeholder"
         raise LiveTradingDisabledError(msg)
 
@@ -696,7 +704,7 @@ def _require_live_alert_fallback_dir(settings: PMSSettings) -> None:
         )
         raise LiveTradingDisabledError(msg)
     raw_path = settings.discord.alert_dir
-    if _looks_like_placeholder(raw_path):
+    if _path_looks_like_placeholder(raw_path):
         msg = "LIVE discord.alert_dir contains placeholder"
         raise LiveTradingDisabledError(msg)
     path = Path(raw_path).expanduser()
@@ -924,30 +932,38 @@ def _looks_like_placeholder(value: str) -> bool:
     normalized = value.strip().lower()
     if normalized == "":
         return False
-    placeholder_markers = (
-        "fill_in",
-        "__fill",
-        "<",
-        ">",
-        "todo",
-        "replace",
-        "placeholder",
+    return (
+        _contains_strong_placeholder_marker(normalized)
+        or "<" in normalized
+        or ">" in normalized
+        or _TEXT_PLACEHOLDER_WORD_RE.search(normalized) is not None
     )
-    return any(marker in normalized for marker in placeholder_markers)
+
+
+def _path_looks_like_placeholder(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "":
+        return False
+    return (
+        _contains_strong_placeholder_marker(normalized)
+        or "<" in normalized
+        or ">" in normalized
+        or _PATH_PLACEHOLDER_WORD_RE.search(normalized) is not None
+    )
+
+
+def _contains_strong_placeholder_marker(normalized: str) -> bool:
+    return any(marker in normalized for marker in _STRONG_PLACEHOLDER_MARKERS)
 
 
 def _looks_like_report_placeholder_detail(value: str) -> bool:
     normalized = value.strip().lower()
     if normalized == "":
         return False
-    placeholder_markers = (
-        "fill_in",
-        "__fill",
-        "todo",
-        "replace",
-        "placeholder",
+    return (
+        _contains_strong_placeholder_marker(normalized)
+        or _TEXT_PLACEHOLDER_WORD_RE.search(normalized) is not None
     )
-    return any(marker in normalized for marker in placeholder_markers)
 
 
 def _coerce_aware_datetime(value: datetime) -> datetime:
@@ -968,7 +984,7 @@ def _require_live_operator_approval_path(
             "polymarket.first_live_order_approval_path"
         )
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(raw_path):
+    if _path_looks_like_placeholder(raw_path):
         msg = "LIVE operator approval path contains placeholder"
         raise LiveTradingDisabledError(msg)
     path = Path(raw_path).expanduser()
@@ -1125,10 +1141,10 @@ def _require_distinct_live_audit_paths(settings: PMSSettings) -> None:
     if settings.live_emergency_audit_path.strip() == "":
         msg = "LIVE emergency audit path missing: live_emergency_audit_path"
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(first_order_path):
+    if _path_looks_like_placeholder(first_order_path):
         msg = "LIVE first-order audit path contains placeholder"
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(settings.live_emergency_audit_path):
+    if _path_looks_like_placeholder(settings.live_emergency_audit_path):
         msg = "LIVE emergency audit path contains placeholder"
         raise LiveTradingDisabledError(msg)
 
@@ -1280,7 +1296,7 @@ def _require_live_paper_soak_go_report(settings: PMSSettings) -> datetime:
     if raw_path is None or raw_path.strip() == "":
         msg = "LIVE paper soak GO report missing: live_paper_soak_report_path"
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(raw_path):
+    if _path_looks_like_placeholder(raw_path):
         msg = "LIVE paper soak GO report path contains placeholder"
         raise LiveTradingDisabledError(msg)
 
@@ -2187,7 +2203,7 @@ def _require_live_operator_rehearsal_report(settings: PMSSettings) -> datetime:
             "live_operator_rehearsal_report_path"
         )
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(raw_path):
+    if _path_looks_like_placeholder(raw_path):
         msg = "LIVE operator rehearsal report path contains placeholder"
         raise LiveTradingDisabledError(msg)
 

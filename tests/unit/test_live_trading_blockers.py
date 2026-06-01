@@ -1412,6 +1412,21 @@ def test_live_mode_requires_passing_paper_soak_go_report() -> None:
         validate_live_mode_ready(settings)
 
 
+@pytest.mark.parametrize("random_like_suffix", ("todo1234", "replace1"))
+def test_live_mode_allows_random_report_path_substrings(
+    random_like_suffix: str,
+) -> None:
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix=f"pms-live-random-{random_like_suffix}-reports-"
+    )
+    settings = _live_settings(
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+    )
+
+    validate_live_mode_ready(settings)
+
+
 def test_live_mode_rejects_test_fixture_paper_soak_go_report() -> None:
     settings = _live_settings(
         live_paper_soak_report_path=FIXTURE_PAPER_SOAK_GO_REPORT
