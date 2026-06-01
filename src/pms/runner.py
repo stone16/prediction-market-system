@@ -983,6 +983,7 @@ class Runner:
                 poll_interval_s=self.config.sensor.poll_interval_s,
                 page_limit=self.config.sensor.discovery_page_limit,
                 max_pages=self.config.sensor.discovery_max_pages,
+                pagination_mode=self.config.sensor.discovery_pagination_mode,
                 persist_price_snapshots=(
                     self.config.sensor.persist_discovery_price_snapshots
                 ),

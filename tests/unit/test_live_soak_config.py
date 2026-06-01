@@ -72,6 +72,7 @@ def test_live_soak_config_tunes_gamma_discovery_http_pool() -> None:
     assert settings.sensor.poll_interval_s == pytest.approx(60.0)
     assert settings.sensor.discovery_page_limit == 100
     assert settings.sensor.discovery_max_pages == 30
+    assert settings.sensor.discovery_pagination_mode == "keyset"
     assert settings.sensor.discovery_http_timeout_s == pytest.approx(10.0)
     assert settings.sensor.discovery_http_pool_timeout_s == pytest.approx(10.0)
     assert settings.sensor.discovery_http_max_connections == 10

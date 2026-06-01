@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, Literal, cast
 
 import asyncpg
 import httpx
@@ -39,6 +39,7 @@ class MarketDiscoverySensor:
     poll_interval_s: float = 60.0
     page_limit: int = 500
     max_pages: int = 1
+    pagination_mode: Literal["keyset", "offset"] = "offset"
     persist_price_snapshots: bool = False
     on_poll_complete: Callable[[], Awaitable[None]] | None = None
 
@@ -99,6 +100,41 @@ class MarketDiscoverySensor:
                 backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)
 
     async def poll_once(self) -> None:
+        if self.pagination_mode == "keyset":
+            await self._poll_once_keyset()
+            return
+        await self._poll_once_offset()
+
+    async def _poll_once_keyset(self) -> None:
+        fetched_at = datetime.now(tz=UTC)
+        written_markets: list[Market] = []
+        cursor: str | None = None
+        exhausted_page_cap = False
+        for page_index in range(self.max_pages):
+            page_payload, raw_page_count, cursor = await self._fetch_keyset_page(cursor)
+            if raw_page_count == 0:
+                break
+            if page_payload:
+                await self._write_payload_page(
+                    payload=page_payload,
+                    fetched_at=fetched_at,
+                    written_markets=written_markets,
+                )
+            if cursor is None:
+                break
+            exhausted_page_cap = page_index == self.max_pages - 1
+        if exhausted_page_cap:
+            logger.warning(
+                "discovery reached configured keyset page cap max_pages=%d "
+                "page_limit=%d; Gamma universe may be truncated",
+                self.max_pages,
+                self.page_limit,
+            )
+
+        _record_price_fields_populated_ratio(written_markets)
+        await _record_snapshot_lag_seconds_max(self.store)
+
+    async def _poll_once_offset(self) -> None:
         fetched_at = datetime.now(tz=UTC)
         written_markets: list[Market] = []
         exhausted_page_cap = False
@@ -125,6 +161,34 @@ class MarketDiscoverySensor:
 
         _record_price_fields_populated_ratio(written_markets)
         await _record_snapshot_lag_seconds_max(self.store)
+
+    async def _fetch_keyset_page(
+        self,
+        cursor: str | None,
+    ) -> tuple[list[dict[str, Any]], int, str | None]:
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": str(self.page_limit),
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = await self.http_client.get(
+            "/markets/keyset",
+            params=params,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            msg = "Expected Gamma API /markets/keyset response to be an object"
+            raise ValueError(msg)
+        raw_markets = payload.get("markets")
+        if not isinstance(raw_markets, list):
+            msg = "Expected Gamma API /markets/keyset markets to be a list"
+            raise ValueError(msg)
+        next_cursor = _optional_text(payload.get("next_cursor"))
+        rows = [row for row in raw_markets if isinstance(row, dict)]
+        return rows, len(raw_markets), next_cursor
 
     async def _fetch_page(self, page_index: int) -> tuple[list[dict[str, Any]], int]:
         response = await self.http_client.get(

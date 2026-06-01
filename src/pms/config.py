@@ -317,6 +317,7 @@ class SensorSettings(BaseModel):
     max_subscription_asset_ids: int | None = Field(default=100, ge=1)
     discovery_page_limit: int = Field(default=500, ge=1, le=500)
     discovery_max_pages: int = Field(default=1, ge=1)
+    discovery_pagination_mode: Literal["keyset", "offset"] = "keyset"
     discovery_http_timeout_s: float = Field(default=10.0, gt=0.0)
     discovery_http_pool_timeout_s: float = Field(default=10.0, gt=0.0)
     discovery_http_max_connections: int = Field(default=10, ge=1)

@@ -397,6 +397,61 @@ async def test_market_discovery_sensor_paginates_gamma_markets_until_short_page(
 
 
 @pytest.mark.asyncio
+async def test_market_discovery_sensor_keyset_paginates_until_empty_cursor() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    captured_cursors: list[str | None] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets/keyset"
+        params = dict(request.url.params)
+        assert "offset" not in params
+        captured_cursors.append(params.get("cursor"))
+        if params.get("cursor") is None:
+            payload = {
+                "markets": [
+                    _gamma_market(
+                        "keyset-page-1-a",
+                        token_ids=["keyset-page-1-a-yes", "keyset-page-1-a-no"],
+                        outcomes=["Yes", "No"],
+                    )
+                ],
+                "next_cursor": "cursor-2",
+            }
+        else:
+            payload = {
+                "markets": [
+                    _gamma_market(
+                        "keyset-page-2-a",
+                        token_ids=["keyset-page-2-a-yes", "keyset-page-2-a-no"],
+                        outcomes=["Yes", "No"],
+                    )
+                ],
+                "next_cursor": "",
+            }
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+        page_limit=100,
+        max_pages=5,
+        pagination_mode="keyset",
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    assert captured_cursors == [None, "cursor-2"]
+    assert store_mock.write_market_mock.await_count == 2
+    assert store_mock.write_token_mock.await_count == 4
+
+
+@pytest.mark.asyncio
 async def test_market_discovery_sensor_continues_pagination_after_malformed_rows() -> None:
     store = _store_mock()
     store_mock = cast(StoreMock, store)
