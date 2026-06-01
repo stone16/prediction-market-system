@@ -11,6 +11,8 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 from pms.config import PMSSettings, SensorSettings
 from pms.core.enums import RunMode
@@ -930,6 +932,58 @@ async def test_market_data_sensor_retries_after_websocket_handshake_error(
 
     assert signal.market_id == "m-handshake"
     assert store_mock.write_book_snapshot_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_logs_expected_websocket_close_as_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    active_close = ConnectionClosedError(None, Close(1000, ""))
+    second_websocket = HeartbeatWebSocket(
+        [
+            json.dumps(
+                {
+                    "event_type": "book",
+                    "market": "m-active-close",
+                    "asset_id": "asset-active-close",
+                    "timestamp": "1757908892351",
+                    "hash": "book-reconnect",
+                    "bids": [{"price": "0.44", "size": "11"}],
+                    "asks": [{"price": "0.56", "size": "7"}],
+                    "last_trade_price": "0.45",
+                }
+            )
+        ],
+        ping_outcomes=[0.0],
+    )
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.connect",
+        ConnectSequence([active_close, second_websocket]),
+    )
+    sensor = MarketDataSensor(
+        store=store,
+        ws_url="ws://market-data.example.test",
+        asset_ids=["asset-active-close"],
+    )
+    sensor._INITIAL_BACKOFF_S = 0.0
+    sensor._heartbeat_interval_s = 1.0
+    iterator = cast(Any, sensor.__aiter__())
+
+    with caplog.at_level(logging.WARNING):
+        signal = await asyncio.wait_for(anext(iterator), timeout=0.5)
+
+    await asyncio.wait_for(iterator.aclose(), timeout=0.5)
+    await sensor.aclose()
+
+    assert signal.market_id == "m-active-close"
+    assert store_mock.write_book_snapshot_mock.await_count == 1
+    assert "market data sensor websocket closed; reconnecting" in caplog.text
+    assert "market data sensor receive loop failed" not in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
 
 
 @pytest.mark.asyncio

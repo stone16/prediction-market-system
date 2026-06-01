@@ -181,7 +181,7 @@ class MarketDataSensor:
                     TimeoutError,
                     InvalidHandshake,
                 ) as error:
-                    logger.error("market data sensor receive loop failed: %s", error)
+                    _log_reconnectable_error(error)
                     await self._sleep(backoff)
                     backoff = min(backoff * 2.0, self._max_reconnect_interval_s)
         finally:
@@ -584,6 +584,19 @@ def _is_unsupported_connect_kwarg_error(exc: TypeError) -> bool:
         "unexpected keyword argument" in message
         or "got an unexpected keyword" in message
         or "takes no keyword arguments" in message
+    )
+
+
+def _log_reconnectable_error(error: BaseException) -> None:
+    if isinstance(error, ConnectionClosed):
+        logger.warning(
+            "market data sensor websocket closed; reconnecting: %s",
+            error,
+        )
+        return
+    logger.warning(
+        "market data sensor transport interrupted; reconnecting: %s",
+        error,
     )
 
 
