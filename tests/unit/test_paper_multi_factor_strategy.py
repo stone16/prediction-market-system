@@ -13,6 +13,7 @@ from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, Portfolio, Position
+from pms.factors.composition import apply_composition
 from pms.storage.strategy_registry import _strategy_from_config_json
 from pms.strategies.paper_multifactor import (
     PAPER_MULTI_FACTOR_STRATEGY_ID,
@@ -140,7 +141,38 @@ def test_paper_multi_factor_strategy_matches_phase_a_contract() -> None:
         ("metaculus_prior", "rule_delta", 0.3, None, False, True),
         ("favorite_longshot_bias", "rule_delta", 0.2, None, False, True),
         ("rules", "blend_weighted", 1.0, None, False, True),
+        ("llm", "runtime_probability", 1.0, None, False, True),
+        ("llm", "blend_weighted", 1.0, None, False, True),
     )
+
+
+def test_paper_multi_factor_blends_llm_runtime_probability_when_available() -> None:
+    strategy = build_paper_multi_factor_strategy()
+    factor_values = {
+        ("yes_price", ""): 0.50,
+        ("orderbook_imbalance", ""): 0.85,
+        ("favorite_longshot_bias", ""): 0.00,
+        ("rules", ""): 0.60,
+        ("llm", ""): 0.70,
+    }
+
+    probability = apply_composition(strategy.config.factor_composition, factor_values)
+
+    assert probability == pytest.approx(0.70625)
+
+
+def test_paper_multi_factor_falls_back_to_rules_when_llm_is_unavailable() -> None:
+    strategy = build_paper_multi_factor_strategy()
+    factor_values = {
+        ("yes_price", ""): 0.50,
+        ("orderbook_imbalance", ""): 0.85,
+        ("favorite_longshot_bias", ""): 0.00,
+        ("rules", ""): 0.60,
+    }
+
+    probability = apply_composition(strategy.config.factor_composition, factor_values)
+
+    assert probability == pytest.approx(0.7125)
 
 
 def test_paper_multi_factor_config_json_round_trips_enabled_calibration() -> None:
