@@ -342,6 +342,9 @@ class Runner:
     _paper_orderbooks: dict[str, dict[str, Any]] = field(
         init=False, default_factory=dict
     )
+    _latest_signal_by_token: dict[str, MarketSignal] = field(
+        init=False, default_factory=dict
+    )
     _position_exit_monitor: PositionExitMonitor = field(init=False)
     _emitted_position_exit_keys: set[tuple[str, str, str, str | None, str]] = field(
         init=False,
@@ -519,6 +522,7 @@ class Runner:
             runtime_run_id=_runtime_run_id(mode=self.config.mode, started_at=started_at),
         )
         self._paper_orderbooks.clear()
+        self._latest_signal_by_token.clear()
 
         try:
             self._assert_no_legacy_jsonl_paths()
@@ -1205,6 +1209,10 @@ class Runner:
             return
         self._paper_orderbooks[signal.market_id] = signal.orderbook
 
+    def _remember_signal_for_decision_evidence(self, signal: MarketSignal) -> None:
+        if signal.token_id is not None:
+            self._latest_signal_by_token[signal.token_id] = signal
+
     def _enrich_signal_with_controller_baselines(
         self,
         signal: MarketSignal,
@@ -1227,6 +1235,7 @@ class Runner:
 
             try:
                 _append_bounded(self.state.signals, signal)
+                self._remember_signal_for_decision_evidence(signal)
                 if self.config.mode == RunMode.PAPER:
                     self._remember_paper_orderbook(signal)
                 await self.event_bus.publish(
@@ -1304,8 +1313,13 @@ class Runner:
                             if opportunity is not None
                             else None
                         )
-                        decision_evidence = _decision_evidence_from_signal(
+                        evidence_signal = _decision_evidence_signal_for_decision(
                             signal,
+                            decision,
+                            latest_signals_by_token=self._latest_signal_by_token,
+                        )
+                        decision_evidence = _decision_evidence_from_signal(
+                            evidence_signal,
                             decision=decision,
                             factor_snapshot_hash=factor_snapshot_hash,
                             quote_source=self.config.controller.quote_source,
@@ -1460,8 +1474,13 @@ class Runner:
                     self.portfolio = _portfolio_with_fill(self.portfolio, fill)
                     decision_evidence = work_item.decision_evidence
                     if not decision_evidence and signal is not None:
-                        decision_evidence = _decision_evidence_from_signal(
+                        evidence_signal = _decision_evidence_signal_for_decision(
                             signal,
+                            decision,
+                            latest_signals_by_token=self._latest_signal_by_token,
+                        )
+                        decision_evidence = _decision_evidence_from_signal(
+                            evidence_signal,
                             decision=decision,
                             factor_snapshot_hash=None,
                             quote_source=self.config.controller.quote_source,
@@ -3505,6 +3524,21 @@ def _decision_evidence_from_signal(
         "spread_bps_at_decision": decision.spread_bps_at_decision,
         "external_signal_keys": sorted(str(key) for key in signal.external_signal),
     }
+
+
+def _decision_evidence_signal_for_decision(
+    signal: MarketSignal,
+    decision: TradeDecision,
+    *,
+    latest_signals_by_token: Mapping[str, MarketSignal],
+) -> MarketSignal:
+    target_token_id = decision.token_id
+    if target_token_id is None or target_token_id == signal.token_id:
+        return signal
+    candidate = latest_signals_by_token.get(target_token_id)
+    if candidate is None or candidate.market_id != signal.market_id:
+        return signal
+    return candidate
 
 
 def _category_prior_estimator_from_settings(

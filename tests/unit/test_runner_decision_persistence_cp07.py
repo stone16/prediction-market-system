@@ -23,6 +23,7 @@ from pms.runner import (
     Runner,
     StrategyControllerRuntime,
     _decision_evidence_from_signal,
+    _decision_evidence_signal_for_decision,
     _decision_expires_at,
 )
 
@@ -418,6 +419,66 @@ def test_decision_evidence_records_submitted_token_when_buy_no_uses_yes_book() -
     assert evidence["decision_side"] == "BUY"
     assert evidence["spread_bps_at_decision"] == 500
     assert evidence["book_hash"]
+
+
+def test_decision_evidence_prefers_recent_target_token_signal_for_flipped_side() -> None:
+    yes_signal = replace(
+        _signal(),
+        token_id="token-cp07-yes",
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.42, "size": 25.0}],
+        },
+        external_signal={
+            "book_age_ms": 70.0,
+            "yes_token_id": "token-cp07-yes",
+            "no_token_id": "token-cp07-no",
+            "signal_token_outcome": "YES",
+        },
+    )
+    no_signal = replace(
+        _signal(),
+        token_id="token-cp07-no",
+        yes_price=0.59,
+        orderbook={
+            "bids": [{"price": 0.58, "size": 30.0}],
+            "asks": [{"price": 0.60, "size": 35.0}],
+        },
+        external_signal={
+            "book_age_ms": 80.0,
+            "yes_token_id": "token-cp07-yes",
+            "no_token_id": "token-cp07-no",
+            "signal_token_outcome": "NO",
+        },
+    )
+    decision = replace(
+        _decision(),
+        token_id="token-cp07-no",
+        outcome="NO",
+        limit_price=0.60,
+    )
+
+    evidence_signal = _decision_evidence_signal_for_decision(
+        yes_signal,
+        decision,
+        latest_signals_by_token={"token-cp07-no": no_signal},
+    )
+    evidence = _decision_evidence_from_signal(
+        evidence_signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=yes_signal.fetched_at,
+    )
+
+    assert evidence["book_token_id"] == "token-cp07-no"
+    assert evidence["book_token_outcome"] == "NO"
+    assert evidence["book_top_levels"] == {
+        "bids": [{"price": 0.58, "size": 30.0}],
+        "asks": [{"price": 0.60, "size": 35.0}],
+    }
+    assert evidence["book_age_ms"] == 80.0
+    assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
 
 
 def test_decision_evidence_records_secondary_baseline_probabilities() -> None:
