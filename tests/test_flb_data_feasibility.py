@@ -14,7 +14,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
-from typing import IO, cast
+from typing import IO, ClassVar, cast
 
 import pytest
 
@@ -28,6 +28,7 @@ from scripts.flb_data_feasibility import (
     build_flb_calibration_rows,
     check_sample_gate,
     compute_decile_stats,
+    fetch_resolved_markets,
     generate_report,
     load_warehouse_markets,
     main,
@@ -113,6 +114,17 @@ def _market(
     )
 
 
+class _FakeGammaResponse:
+    def __init__(self, payload: list[dict[str, object]]) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> list[dict[str, object]]:
+        return self._payload
+
+
 WAREHOUSE_COLUMNS = [
     "market_id",
     "question",
@@ -125,6 +137,79 @@ WAREHOUSE_COLUMNS = [
     "resolved_at",
     "category",
 ]
+
+
+def test_fetch_resolved_markets_orders_gamma_by_recent_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gamma's default closed-market sort is oldest-first and mostly cleared rows."""
+
+    class RecordingGammaClient:
+        calls: ClassVar[list[tuple[str, dict[str, str]]]] = []
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def __enter__(self) -> "RecordingGammaClient":
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            del exc_type, exc, traceback
+
+        def get(self, path: str, *, params: dict[str, str]) -> _FakeGammaResponse:
+            self.calls.append((path, dict(params)))
+            return _FakeGammaResponse(
+                [
+                    {
+                        "id": "recent-closed-market",
+                        "question": "Recent closed market?",
+                        "outcomes": '["Yes", "No"]',
+                        "outcomePrices": '["1", "0"]',
+                        "lastTradePrice": 0.49,
+                        "volumeNum": 10_000.0,
+                        "liquidityNum": 500.0,
+                        "endDate": "2026-06-01T23:20:00Z",
+                        "slug": "recent-closed-market",
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(
+        "scripts.flb_data_feasibility.httpx.Client",
+        RecordingGammaClient,
+    )
+
+    markets = fetch_resolved_markets(limit=10, max_pages=1)
+
+    assert RecordingGammaClient.calls == [
+        (
+            "/markets",
+            {
+                "closed": "true",
+                "order": "closedTime",
+                "ascending": "false",
+                "limit": "10",
+                "offset": "0",
+            },
+        )
+    ]
+    assert markets == [
+        ResolvedMarket(
+            market_id="recent-closed-market",
+            question="Recent closed market?",
+            yes_price=0.49,
+            resolved_yes=True,
+            volume=10_000.0,
+            liquidity=500.0,
+            end_date="2026-06-01T23:20:00Z",
+            category="other",
+        )
+    ]
 
 
 def _write_warehouse_csv(path: Path, rows: list[dict[str, str]]) -> None:

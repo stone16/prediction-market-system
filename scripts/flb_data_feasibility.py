@@ -59,6 +59,8 @@ from uuid import uuid4
 import httpx
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
+GAMMA_CLOSED_MARKET_ORDER = "closedTime"
+GAMMA_CLOSED_MARKET_ASCENDING = False
 SAMPLE_GATE_MIN = 100  # minimum resolved contracts per target bucket
 DECILE_BOUNDARIES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 TARGET_BUCKETS = [0, 9]  # decile 0 = [0%, 10%), decile 9 = [90%, 100%]
@@ -167,6 +169,8 @@ def fetch_resolved_markets(
                 "/markets",
                 params={
                     "closed": "true",
+                    "order": GAMMA_CLOSED_MARKET_ORDER,
+                    "ascending": _bool_param(GAMMA_CLOSED_MARKET_ASCENDING),
                     "limit": str(limit),
                     "offset": str(offset),
                 },
@@ -189,6 +193,10 @@ def fetch_resolved_markets(
                 break
 
     return markets
+
+
+def _bool_param(value: bool) -> str:
+    return "true" if value else "false"
 
 
 def _parse_market(row: dict[str, Any]) -> ResolvedMarket | None:
