@@ -100,6 +100,10 @@ from pms.market_selection import (
     UnionMergePolicy,
 )
 from pms.redaction import redact_live_error_values
+from pms.sensor.adapters.direct_book import (
+    PolymarketPublicBookClient,
+    RefreshingDirectBookSnapshotReader,
+)
 from pms.sensor.adapters.historical import HistoricalSensor
 from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
@@ -1163,11 +1167,15 @@ class Runner:
             raise RuntimeError(msg)
         if isinstance(self._controller_factory, ControllerPipelineFactory):
             market_data_store = PostgresMarketDataStore(self._pg_pool)
+            direct_book_reader = _controller_direct_book_reader(
+                self.config,
+                market_data_store,
+            )
             self._controller_factory = ControllerPipelineFactory(
                 settings=self.config,
                 factor_reader=PostgresFactorSnapshotReader(self._pg_pool),
                 outcome_token_resolver=MarketDataOutcomeTokenResolver(market_data_store),
-                direct_book_reader=market_data_store,
+                direct_book_reader=direct_book_reader,
             )
         if isinstance(self.eval_store, EvalStore):
             self.eval_store.bind_pool(self._pg_pool)
@@ -1388,9 +1396,20 @@ class Runner:
                             portfolio=self.portfolio,
                         )
                     if decision is not None:
+                        decision_signal = _controller_execution_signal_for_decision(
+                            runtime.controller,
+                            fallback_signal=signal,
+                            decision=decision,
+                            latest_signals_by_token=self._latest_signal_by_token,
+                        )
+                        if self.config.mode == RunMode.PAPER:
+                            self._remember_signal_for_decision_evidence(
+                                decision_signal
+                            )
+                            self._remember_paper_orderbook(decision_signal)
                         pre_actuator_diagnostic = self._pre_actuator_diagnostic(
                             decision,
-                            signal,
+                            decision_signal,
                         )
                         if pre_actuator_diagnostic is not None:
                             _append_bounded(
@@ -1413,13 +1432,8 @@ class Runner:
                             if opportunity is not None
                             else None
                         )
-                        evidence_signal = _decision_evidence_signal_for_decision(
-                            signal,
-                            decision,
-                            latest_signals_by_token=self._latest_signal_by_token,
-                        )
                         decision_evidence = _decision_evidence_from_signal(
-                            evidence_signal,
+                            decision_signal,
                             decision=decision,
                             factor_snapshot_hash=factor_snapshot_hash,
                             quote_source=self.config.controller.quote_source,
@@ -1443,10 +1457,10 @@ class Runner:
                                 current_status="pending",
                                 next_status="accepted",
                                 updated_at=created_at,
-                            )
+                        )
                         enqueued = await self._enqueue_decision(
                             decision,
-                            signal=signal,
+                            signal=decision_signal,
                             queued_at=created_at,
                             decision_evidence=decision_evidence,
                         )
@@ -3870,10 +3884,38 @@ def _decision_evidence_from_signal(
             decision_created_at=decision_created_at,
         ),
         "quote_source": quote_source,
+        "direct_outcome_book_source": _optional_text(
+            signal.external_signal.get("direct_outcome_book_source")
+        ),
         "factor_snapshot_hash": factor_snapshot_hash,
         "spread_bps_at_decision": decision.spread_bps_at_decision,
         "external_signal_keys": sorted(str(key) for key in signal.external_signal),
     }
+
+
+def _controller_execution_signal_for_decision(
+    controller: object,
+    *,
+    fallback_signal: MarketSignal,
+    decision: TradeDecision,
+    latest_signals_by_token: Mapping[str, MarketSignal],
+) -> MarketSignal:
+    execution_signal = getattr(controller, "last_execution_signal", None)
+    if (
+        isinstance(execution_signal, MarketSignal)
+        and execution_signal.market_id == decision.market_id
+        and (
+            decision.token_id is None
+            or execution_signal.token_id is None
+            or execution_signal.token_id == decision.token_id
+        )
+    ):
+        return execution_signal
+    return _decision_evidence_signal_for_decision(
+        fallback_signal,
+        decision,
+        latest_signals_by_token=latest_signals_by_token,
+    )
 
 
 def _decision_evidence_signal_for_decision(
@@ -3950,6 +3992,23 @@ def _controller_signal_event_time(signal: MarketSignal) -> datetime:
 
 def _controller_can_refresh_queued_book(controller: object) -> bool:
     return getattr(controller, "direct_book_reader", None) is not None
+
+
+def _controller_direct_book_reader(
+    settings: PMSSettings,
+    market_data_store: PostgresMarketDataStore,
+) -> PostgresMarketDataStore | RefreshingDirectBookSnapshotReader:
+    if not settings.controller.venue_book_refresh_enabled:
+        return market_data_store
+    return RefreshingDirectBookSnapshotReader(
+        primary=market_data_store,
+        venue_client=PolymarketPublicBookClient(
+            host=settings.polymarket.host,
+            timeout_s=settings.controller.venue_book_refresh_timeout_s,
+        ),
+        max_snapshot_age_ms=settings.controller.max_book_age_ms,
+        allowed_clock_skew_ms=settings.controller.allowed_book_clock_skew_ms,
+    )
 
 
 def _aware_utc(value: datetime) -> datetime:
@@ -4172,6 +4231,13 @@ def _optional_float(value: object) -> float | None:
     if not isfinite(parsed):
         return None
     return parsed
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _probability_or_none(value: object) -> float | None:

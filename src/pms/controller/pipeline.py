@@ -99,6 +99,7 @@ class ControllerPipeline:
     router: Router | None = None
     settings: PMSSettings = field(default_factory=PMSSettings)
     last_diagnostic: ControllerDiagnostic | None = field(init=False, default=None)
+    last_execution_signal: MarketSignal | None = field(init=False, default=None)
     suppressed_zero_size: int = field(init=False, default=0)
     _last_decision_emitted_at: dict[tuple[str, str, str, str, str], datetime] = field(
         init=False,
@@ -161,6 +162,7 @@ class ControllerPipeline:
         portfolio: Portfolio | None = None,
     ) -> OpportunityEmission | None:
         self.last_diagnostic = None
+        self.last_execution_signal = None
         router = _required(self.router, "router")
         if signal.token_id is None:
             _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
@@ -876,6 +878,7 @@ class ControllerPipeline:
             factor_snapshot_hash=factor_snapshot_hash,
             signal_timestamp=signal.timestamp,
         )
+        self.last_execution_signal = execution_signal
         return opportunity, TradeDecision(
             decision_id=f"decision-{uuid.uuid4().hex}",
             market_id=signal.market_id,

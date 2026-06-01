@@ -280,6 +280,8 @@ class ControllerSettings(BaseModel):
     quote_source: Literal["postgres_snapshot", "venue_direct", "dual"] = (
         "postgres_snapshot"
     )
+    venue_book_refresh_enabled: bool = False
+    venue_book_refresh_timeout_s: float = Field(default=5.0, gt=0.0)
     direct_quote_min_notional_usdc: float | None = 100.0
     dual_quote_max_price_delta_bps: float = 25.0
     category_prior_observations_path: str | None = None

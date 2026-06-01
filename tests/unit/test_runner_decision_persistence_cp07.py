@@ -22,6 +22,7 @@ from pms.core.models import (
 from pms.runner import (
     Runner,
     StrategyControllerRuntime,
+    _controller_execution_signal_for_decision,
     _decision_evidence_from_signal,
     _decision_evidence_signal_for_decision,
     _decision_expires_at,
@@ -672,6 +673,74 @@ def test_decision_evidence_prefers_recent_target_token_signal_for_flipped_side()
     }
     assert evidence["book_age_ms"] == 80.0
     assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
+
+
+def test_decision_evidence_prefers_controller_execution_signal() -> None:
+    class ControllerWithExecutionSignal:
+        last_execution_signal: MarketSignal | None
+
+        def __init__(self, execution_signal: MarketSignal) -> None:
+            self.last_execution_signal = execution_signal
+
+    raw_signal = replace(
+        _signal(),
+        token_id="token-cp07-yes",
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.42, "size": 25.0}],
+        },
+        external_signal={
+            "book_age_ms": 30_000.0,
+            "yes_token_id": "token-cp07-yes",
+            "no_token_id": "token-cp07-no",
+            "signal_token_outcome": "YES",
+        },
+    )
+    execution_signal = replace(
+        raw_signal,
+        token_id="token-cp07-no",
+        yes_price=0.59,
+        orderbook={
+            "bids": [{"price": 0.58, "size": 30.0}],
+            "asks": [{"price": 0.60, "size": 35.0}],
+        },
+        external_signal={
+            "book_age_ms": 12.0,
+            "yes_token_id": "token-cp07-yes",
+            "no_token_id": "token-cp07-no",
+            "signal_token_outcome": "NO",
+            "direct_outcome_book_source": "venue_direct",
+        },
+    )
+    decision = replace(
+        _decision(),
+        token_id="token-cp07-no",
+        outcome="NO",
+        limit_price=0.60,
+    )
+
+    evidence_signal = _controller_execution_signal_for_decision(
+        ControllerWithExecutionSignal(execution_signal),
+        fallback_signal=raw_signal,
+        decision=decision,
+        latest_signals_by_token={},
+    )
+    evidence = _decision_evidence_from_signal(
+        evidence_signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=raw_signal.fetched_at,
+    )
+
+    assert evidence_signal is execution_signal
+    assert evidence["book_token_id"] == "token-cp07-no"
+    assert evidence["book_age_ms"] == 12.0
+    assert evidence["direct_outcome_book_source"] == "venue_direct"
+    assert evidence["book_top_levels"] == {
+        "bids": [{"price": 0.58, "size": 30.0}],
+        "asks": [{"price": 0.60, "size": 35.0}],
+    }
 
 
 def test_decision_evidence_records_secondary_baseline_probabilities() -> None:

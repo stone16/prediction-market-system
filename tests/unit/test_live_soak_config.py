@@ -54,6 +54,8 @@ def test_live_soak_config_uses_paper_snapshot_freshness_window() -> None:
     assert settings.live_trading_enabled is False
     assert settings.controller.quote_source == "postgres_snapshot"
     assert settings.controller.max_book_age_ms == pytest.approx(15_000.0)
+    assert settings.controller.venue_book_refresh_enabled is True
+    assert settings.controller.venue_book_refresh_timeout_s == pytest.approx(5.0)
 
 
 def test_live_soak_config_uses_tradeable_paper_strategy() -> None:

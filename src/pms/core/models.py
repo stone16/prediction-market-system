@@ -19,7 +19,7 @@ from pms.core.enums import TimeInForce
 Venue = Literal["polymarket", "kalshi"]
 Outcome = Literal["YES", "NO"]
 BookSide = Literal["BUY", "SELL"]
-BookSource = Literal["subscribe", "reconnect", "checkpoint"]
+BookSource = Literal["subscribe", "reconnect", "checkpoint", "venue_direct"]
 
 
 class MarketRelationType(StrEnum):

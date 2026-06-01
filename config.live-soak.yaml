@@ -63,6 +63,8 @@ controller:
   max_spread_bps: 100.0
   strict_factor_gates: false
   quote_source: postgres_snapshot
+  venue_book_refresh_enabled: true
+  venue_book_refresh_timeout_s: 5.0
   direct_quote_min_notional_usdc: 100.0
   dual_quote_max_price_delta_bps: 25.0
   # Optional historical resolution export used to attach a no-lookahead
