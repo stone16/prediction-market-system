@@ -44,6 +44,25 @@ def test_claude_canonical_gates_show_alembic_before_integration_pytest() -> None
     assert alembic_index < integration_index
 
 
+def test_local_integration_gate_docs_require_compose_backed_database_url() -> None:
+    readme_development = _section(
+        README_PATH.read_text(encoding="utf-8"),
+        "## Development",
+    )
+    canonical_gates = _section(
+        CLAUDE_PATH.read_text(encoding="utf-8"),
+        "## Canonical gates",
+    )
+
+    for section_text in (readme_development, canonical_gates):
+        assert "docker compose up -d postgres" in section_text
+        assert (
+            "export PMS_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test"
+            in section_text
+        )
+        assert "PMS_RUN_INTEGRATION=1 uv run pytest -q -m integration" in section_text
+
+
 def test_migrations_doc_exists_with_required_sections_and_policy() -> None:
     text = MIGRATIONS_DOC_PATH.read_text(encoding="utf-8")
 
@@ -53,4 +72,3 @@ def test_migrations_doc_exists_with_required_sections_and_policy() -> None:
     assert "## Why we don't autogenerate" in text
     assert "do not run `alembic revision --autogenerate`" in text
     assert "forbidden by §B of the pms-correctness-bundle-v1 spec" in text
-

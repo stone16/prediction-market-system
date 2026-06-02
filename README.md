@@ -362,12 +362,15 @@ preflight artifact check as startup.
 uv sync
 uv run pytest -q                              # full default suite
 uv run mypy src/ tests/ --strict              # strict type check
-PMS_RUN_INTEGRATION=1 uv run pytest -m integration   # PostgreSQL + live-network tests
+docker compose up -d postgres
+export PMS_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
+PMS_RUN_INTEGRATION=1 uv run pytest -q -m integration   # DB-backed integration + gated live-network tests
 ```
 
 Baseline invariants enforced by CI:
 - pytest default suite stays green; integration checks are gated on
-  `PMS_RUN_INTEGRATION=1`.
+  `PMS_RUN_INTEGRATION=1`, with PostgreSQL-backed checks requiring
+  `PMS_TEST_DATABASE_URL`.
 - mypy strict must be clean on every committed source file.
 - Research sweep and worker spec format: `docs/research/backtest-spec-format.md`
 

@@ -55,9 +55,11 @@ feature work (see promoted rule: *Fresh-clone baseline verification*).
 
 Integration tests:
 ```bash
-export DATABASE_URL="${PMS_TEST_DATABASE_URL:-postgres://postgres:postgres@localhost:5432/pms_test}"
+docker compose up -d postgres
+export PMS_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
+export DATABASE_URL="$PMS_TEST_DATABASE_URL"
 uv run alembic upgrade head
-PMS_RUN_INTEGRATION=1 uv run pytest -m integration
+PMS_RUN_INTEGRATION=1 uv run pytest -q -m integration
 ```
 
 Compose-backed PostgreSQL integration DB:
