@@ -15,11 +15,11 @@ from pms.core.models import EvalRecord, TradeDecision
 from pms.metrics import (
     LLM_DAILY_COST_USDC_METRIC,
     LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
     SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC,
     SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
     SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
     SELECTION_FUNNEL_SELECTED_TOTAL_METRIC,
-    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
 )
 from scripts.paper_report import (
     ExecutionConcentration,
@@ -2311,7 +2311,7 @@ def test_metrics_from_api_payloads_surfaces_live_selection_funnel() -> None:
             SELECTION_FUNNEL_SELECTED_TOTAL_METRIC: 40.0,
             SELECTION_FUNNEL_ROUTED_TOTAL_METRIC: 23.0,
             SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC: 11.0,
-            SELECTION_FUNNEL_TRADED_TOTAL_METRIC: 4.0,
+            SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC: 4.0,
         },
     )
 
@@ -2322,9 +2322,10 @@ def test_metrics_from_api_payloads_surfaces_live_selection_funnel() -> None:
     assert metrics.selection_funnel.selected == 40
     assert metrics.selection_funnel.routed == 23
     assert metrics.selection_funnel.forecasted == 11
-    assert metrics.selection_funnel.traded == 4
+    assert metrics.selection_funnel.controller_emitted == 4
     assert "| Discovered | 120 |" in report
     assert "| Forecasted | 11 |" in report
+    assert "| Controller Emitted | 4 |" in report
     assert "No funnel events recorded." not in report
 
 
@@ -4648,7 +4649,7 @@ def test_paper_report_renders_calibration_and_cost_diagnostics() -> None:
     assert "| Selected | 5 |" in report
     assert "| Routed | 4 |" in report
     assert "| Forecasted | 3 |" in report
-    assert "| Traded | 1 |" in report
+    assert "| Controller Emitted | 1 |" in report
 
 
 def _eval_record(decision_id: str, *, prob: float, outcome: float) -> EvalRecord:

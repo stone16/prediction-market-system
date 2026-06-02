@@ -24,6 +24,7 @@ from pms.core.models import EvalRecord, TradeDecision
 from pms.metrics import (
     LLM_DAILY_COST_USDC_METRIC,
     LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
     SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC,
     SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
     SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
@@ -88,7 +89,7 @@ class SelectionFunnel:
     selected: int = 0
     routed: int = 0
     forecasted: int = 0
-    traded: int = 0
+    controller_emitted: int = 0
 
 
 @dataclass(frozen=True)
@@ -1515,7 +1516,7 @@ def _selection_funnel(log_events: Sequence[Mapping[str, object]]) -> SelectionFu
     selected = 0
     routed = 0
     forecasted = 0
-    traded = 0
+    controller_emitted = 0
     for event in log_events:
         event_name = event.get("event")
         if event_name == "funnel_selector":
@@ -1525,13 +1526,15 @@ def _selection_funnel(log_events: Sequence[Mapping[str, object]]) -> SelectionFu
             routed += _event_int(event, "routed_count")
         elif event_name == "funnel_pipeline":
             forecasted += _event_int(event, "forecasted_count")
-            traded += _event_int(event, "traded_count")
+            controller_emitted += _event_int(event, "emitted_count")
+            if "emitted_count" not in event:
+                controller_emitted += _event_int(event, "traded_count")
     return SelectionFunnel(
         discovered=discovered,
         selected=selected,
         routed=routed,
         forecasted=forecasted,
-        traded=traded,
+        controller_emitted=controller_emitted,
     )
 
 
@@ -1542,15 +1545,23 @@ def _selection_funnel_from_metrics(
     selected = _int_metric_value(metrics, SELECTION_FUNNEL_SELECTED_TOTAL_METRIC)
     routed = _int_metric_value(metrics, SELECTION_FUNNEL_ROUTED_TOTAL_METRIC)
     forecasted = _int_metric_value(metrics, SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC)
-    traded = _int_metric_value(metrics, SELECTION_FUNNEL_TRADED_TOTAL_METRIC)
-    if discovered == selected == routed == forecasted == traded == 0:
+    controller_emitted = _int_metric_value(
+        metrics,
+        SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
+    )
+    if controller_emitted == 0:
+        controller_emitted = _int_metric_value(
+            metrics,
+            SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
+        )
+    if discovered == selected == routed == forecasted == controller_emitted == 0:
         return None
     return SelectionFunnel(
         discovered=discovered,
         selected=selected,
         routed=routed,
         forecasted=forecasted,
-        traded=traded,
+        controller_emitted=controller_emitted,
     )
 
 
@@ -1708,7 +1719,7 @@ def _render_selection_funnel_section(funnel: SelectionFunnel | None) -> list[str
     lines.append(f"| Selected | {funnel.selected} |")
     lines.append(f"| Routed | {funnel.routed} |")
     lines.append(f"| Forecasted | {funnel.forecasted} |")
-    lines.append(f"| Traded | {funnel.traded} |")
+    lines.append(f"| Controller Emitted | {funnel.controller_emitted} |")
     return lines
 
 

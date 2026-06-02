@@ -49,9 +49,9 @@ from pms.factors.base import EMPTY_OUTER_RING
 from pms.factors.composition import apply_composition, evaluate_branch_probabilities
 from pms.factors.definitions.orderbook_imbalance import OrderbookImbalance
 from pms.metrics import (
+    SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
     SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
     SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
-    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
     increment_metric,
 )
 from pms.strategies.projections import ActiveStrategy, CalibrationContext, CalibrationSpec
@@ -209,7 +209,7 @@ class ControllerPipeline:
         self.last_execution_signal = None
         router = _required(self.router, "router")
         if signal.token_id is None:
-            _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
+            _log_pipeline_funnel(signal, forecasted_count=0, emitted_count=0)
             self.last_diagnostic = ControllerDiagnostic(
                 code="missing_token_id",
                 message=(
@@ -244,7 +244,7 @@ class ControllerPipeline:
         # to the diagnostic.
         if not router.gate(signal):
             gate_reason = router.gate_reason(signal)
-            _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
+            _log_pipeline_funnel(signal, forecasted_count=0, emitted_count=0)
             gate_metadata: dict[str, object] = {
                 "gate_reason": gate_reason or "unknown"
             }
@@ -309,7 +309,7 @@ class ControllerPipeline:
             self.strategy is not None and self.strategy.config.factor_composition
         )
         if not probabilities and not has_factor_composition:
-            _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
+            _log_pipeline_funnel(signal, forecasted_count=0, emitted_count=0)
             self.last_diagnostic = ControllerDiagnostic(
                 code="no_forecaster_output",
                 message=(
@@ -447,7 +447,7 @@ class ControllerPipeline:
                 _log_pipeline_funnel(
                     signal,
                     forecasted_count=len(probabilities),
-                    traded_count=0,
+                    emitted_count=0,
                 )
                 return None
         else:
@@ -474,7 +474,7 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
             )
             return None
         prob_estimate = calibrated_estimate
@@ -572,7 +572,7 @@ class ControllerPipeline:
                     _log_pipeline_funnel(
                         signal,
                         forecasted_count=len(probabilities),
-                        traded_count=0,
+                        emitted_count=0,
                     )
                     return None
                 decision_price = direct_price
@@ -601,7 +601,7 @@ class ControllerPipeline:
                 _log_pipeline_funnel(
                     signal,
                     forecasted_count=len(probabilities),
-                    traded_count=0,
+                    emitted_count=0,
                 )
                 return None
         if decision_edge <= 0.0:
@@ -622,7 +622,7 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
             )
             return None
         decision_spread_bps = spread_bps_at_decision(
@@ -653,7 +653,7 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
             )
             return None
         decision_costs = _decision_cost_edges(
@@ -691,7 +691,7 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
             )
             return None
         size = sizer.size(
@@ -737,7 +737,7 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
             )
             return None
         size = min(size, remaining_market_capacity_usdc)
@@ -778,7 +778,7 @@ class ControllerPipeline:
                 _log_pipeline_funnel(
                     signal,
                     forecasted_count=len(probabilities),
-                    traded_count=0,
+                    emitted_count=0,
                 )
                 return None
             size = min(size, executable_depth_usdc)
@@ -800,7 +800,7 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
             )
             return None
         cooldown_key = (
@@ -831,7 +831,7 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
             )
             return None
         decision_created_at = datetime.now(tz=UTC)
@@ -861,7 +861,7 @@ class ControllerPipeline:
                 _log_pipeline_funnel(
                     signal,
                     forecasted_count=len(probabilities),
-                    traded_count=0,
+                    emitted_count=0,
                 )
                 return None
             execution_signal = replace(
@@ -875,7 +875,7 @@ class ControllerPipeline:
         _log_pipeline_funnel(
             signal,
             forecasted_count=len(probabilities),
-            traded_count=1,
+            emitted_count=1,
         )
         opportunity = Opportunity(
             opportunity_id=f"opportunity-{uuid.uuid4().hex}",
@@ -1121,21 +1121,21 @@ def _log_pipeline_funnel(
     signal: MarketSignal,
     *,
     forecasted_count: int,
-    traded_count: int,
+    emitted_count: int,
 ) -> None:
     increment_metric(SELECTION_FUNNEL_ROUTED_TOTAL_METRIC)
     increment_metric(SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC, forecasted_count)
-    increment_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC, traded_count)
+    increment_metric(SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC, emitted_count)
     logger.info(
-        "controller pipeline funnel market_id=%s forecasted=%d traded=%d",
+        "controller pipeline funnel market_id=%s forecasted=%d emitted=%d",
         signal.market_id,
         forecasted_count,
-        traded_count,
+        emitted_count,
         extra={
             "event": "funnel_pipeline",
             "market_id": signal.market_id,
             "forecasted_count": forecasted_count,
-            "traded_count": traded_count,
+            "emitted_count": emitted_count,
         },
     )
 
