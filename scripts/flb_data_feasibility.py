@@ -5,8 +5,9 @@ Favorite-Longshot Bias (FLB) by probability decile with Wilson score
 confidence intervals, and evaluates H1 strategy viability.
 
 Each binary market is decomposed into two contract-level observations
-(YES at price ``p``, NO at price ``1-p``) so that the sample gate
-reflects the full tradable contract set.
+(YES at price ``p``, NO at price ``1-p``) for decile diagnostics.  The
+launch sample gate is stricter: it matches the runtime calibration artifact
+and counts original YES-price markets in the two H1 signal buckets.
 
 Usage:
     uv run python scripts/flb_data_feasibility.py [--limit N] [--output PATH]
@@ -20,7 +21,7 @@ Usage:
 
 Exit codes:
     0 — H1 viable (sample gate passed)
-    1 — H1 not viable (insufficient data in target buckets)
+    1 — H1 not viable (insufficient data in runtime signal buckets)
 
 Limitations:
     - **Entry price proxy:** Uses ``lastTradePrice`` from the Gamma API,
@@ -64,7 +65,7 @@ from pms.strategies.flb.source import require_flb_calibration_source_label
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 GAMMA_CLOSED_MARKET_ORDER = "closedTime"
 GAMMA_CLOSED_MARKET_ASCENDING = False
-SAMPLE_GATE_MIN = 100  # minimum resolved contracts per target bucket
+SAMPLE_GATE_MIN = 100  # minimum resolved markets per runtime H1 signal bucket
 DECILE_BOUNDARIES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 TARGET_BUCKETS = [0, 9]  # decile 0 = [0%, 10%), decile 9 = [90%, 100%]
 WILSON_Z = 1.96  # 95% confidence
@@ -109,9 +110,10 @@ class ContractObservation:
     - YES contract at price ``p`` (pays 1 if market resolves YES)
     - NO contract at price ``1-p`` (pays 1 if market resolves NO)
 
-    Bucketing by contract price ensures the full opportunity set is counted
-    in the sample gate (a market with YES at 0.08 also contributes a NO
-    contract at 0.92, filling both extreme buckets).
+    Bucketing by contract price exposes the full opportunity set for decile
+    diagnostics (a market with YES at 0.08 also contributes a NO contract at
+    0.92), but the launch sample gate is signal-specific and uses original
+    YES-price market buckets.
     """
 
     contract_side: str  # "YES" or "NO"
@@ -533,10 +535,10 @@ def markets_to_contracts(markets: list[ResolvedMarket]) -> list[ContractObservat
     - YES contract at ``yes_price`` — pays out if ``resolved_yes``
     - NO contract at ``1 - yes_price`` — pays out if ``not resolved_yes``
 
-    This doubles the observation count and ensures the sample gate reflects
-    the full tradable contract set.  A market with YES at 0.08 (longshot)
-    also contributes a NO contract at 0.92 (favorite), filling both extreme
-    buckets.
+    This doubles the observation count so the decile table reflects the full
+    tradable contract set.  A market with YES at 0.08 (longshot) also
+    contributes a NO contract at 0.92 (favorite), filling both extreme
+    diagnostic buckets.
     """
     contracts: list[ContractObservation] = []
     for m in markets:
@@ -683,24 +685,53 @@ def _wilson_interval(successes: int, trials: int) -> tuple[float, float]:
 class SampleGateResult:
     """Result of the H1 sample gate check."""
 
-    longshot_count: int  # markets in decile 0 [0%, 10%)
-    favorite_count: int  # markets in decile 9 [90%, 100%]
+    longshot_count: int  # original YES-price markets with YES < 10%
+    favorite_count: int  # original YES-price markets with YES > 90%
     longshot_passed: bool
     favorite_passed: bool
     passed: bool  # both buckets meet minimum
 
 
-def check_sample_gate(decile_stats: list[DecileStats]) -> SampleGateResult:
-    """Check whether enough data exists in the target FLB buckets.
+def _split_flb_signal_markets(
+    markets: Sequence[ResolvedMarket],
+) -> tuple[list[ResolvedMarket], list[ResolvedMarket]]:
+    """Split markets into the runtime H1 FLB calibration signal buckets."""
+    longshot_markets = [
+        market
+        for market in markets
+        if market.yes_price < DECILE_BOUNDARIES[1]
+    ]
+    favorite_markets = [
+        market
+        for market in markets
+        if market.yes_price > DECILE_BOUNDARIES[9]
+    ]
+    return longshot_markets, favorite_markets
 
-    The sample gate requires ≥100 resolved contracts in both the [0%, 10%)
-    (longshot) and [90%, 100%] (favorite) buckets.
+
+def check_sample_gate(
+    markets: Sequence[ResolvedMarket],
+    *,
+    min_sample_count: int = SAMPLE_GATE_MIN,
+) -> SampleGateResult:
+    """Check whether enough data exists in the runtime FLB signal buckets.
+
+    The sample gate requires enough resolved markets in both original
+    YES-price buckets used by runtime calibration:
+
+    - longshot signal: YES < 10%, BUY NO
+    - favorite signal: YES > 90%, BUY YES
     """
-    longshot_count = decile_stats[0].n
-    favorite_count = decile_stats[9].n
+    if min_sample_count <= 0:
+        msg = "min_sample_count must be positive"
+        raise ValueError(msg)
 
-    longshot_passed = longshot_count >= SAMPLE_GATE_MIN
-    favorite_passed = favorite_count >= SAMPLE_GATE_MIN
+    longshot_markets, favorite_markets = _split_flb_signal_markets(markets)
+    longshot_count = len(longshot_markets)
+    favorite_count = len(favorite_markets)
+
+    longshot_passed = longshot_count >= min_sample_count
+    favorite_passed = favorite_count >= min_sample_count
 
     return SampleGateResult(
         longshot_count=longshot_count,
@@ -738,30 +769,33 @@ def generate_report(
     gate_emoji = "✅" if gate.passed else "❌"
     lines.append(f"## Sample Gate: {gate_emoji}")
     lines.append("")
-    lines.append("| Bucket | Contract Count | Required | Status |")
-    lines.append("|--------|---------------|----------|--------|")
+    lines.append("| Signal | Market Count | Required | Status |")
+    lines.append("|--------|--------------|----------|--------|")
     ls = "✅" if gate.longshot_passed else "❌"
     fs = "✅" if gate.favorite_passed else "❌"
     lines.append(
-        f"| Longshot [0%-10%) | {gate.longshot_count} | ≥{SAMPLE_GATE_MIN} | {ls} |"
+        f"| Longshot: {LONGSHOT_SIGNAL_NAME} (YES < 10%, BUY NO) | "
+        f"{gate.longshot_count} | ≥{SAMPLE_GATE_MIN} | {ls} |"
     )
     lines.append(
-        f"| Favorite [90%-100%] | {gate.favorite_count} | ≥{SAMPLE_GATE_MIN} | {fs} |"
+        f"| Favorite: {FAVORITE_SIGNAL_NAME} (YES > 90%, BUY YES) | "
+        f"{gate.favorite_count} | ≥{SAMPLE_GATE_MIN} | {fs} |"
     )
     lines.append("")
 
     if gate.passed:
         lines.append(
-            "**H1 DATA VIABLE.** Extreme buckets meet the sample gate. "
-            "Proceed to the next backtest slice with fees, slippage, and "
-            "timestamped entry rules."
+            "**H1 DATA VIABLE.** Runtime FLB calibration signal buckets meet "
+            "the sample gate. Proceed to the next backtest slice with fees, "
+            "slippage, and timestamped entry rules."
         )
         lines.append("")
     else:
         lines.append(
-            "**H1 NOT VIABLE YET.** Insufficient resolved contracts in target "
-            "buckets. Next data-source gap: collect a broader Dune or "
-            "warehouse export before proceeding with FLB strategy."
+            "**H1 NOT VIABLE YET.** Insufficient resolved markets in runtime "
+            "calibration signal buckets. Next data-source gap: collect a "
+            "broader Dune or warehouse export before proceeding with FLB "
+            "strategy."
         )
         lines.append("")
 
@@ -1288,8 +1322,8 @@ def main() -> int:
     # Step 3: Compute FLB by decile (contract-level).
     decile_stats = compute_decile_stats(contracts)
 
-    # Step 4: Check sample gate (contract-level counts).
-    gate = check_sample_gate(decile_stats)
+    # Step 4: Check launch sample gate (runtime signal-specific market counts).
+    gate = check_sample_gate(markets)
 
     # Step 5: Generate report.
     report = generate_report(

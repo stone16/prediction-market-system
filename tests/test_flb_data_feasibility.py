@@ -498,7 +498,7 @@ class TestWarehouseCsvLoading:
         with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
             load_warehouse_markets(path)
 
-    def test_warehouse_contracts_can_pass_extreme_sample_gate(
+    def test_warehouse_longshot_contracts_do_not_imply_signal_viability(
         self, tmp_path: Path
     ) -> None:
         path = tmp_path / "sample_gate.csv"
@@ -511,7 +511,7 @@ class TestWarehouseCsvLoading:
         assert skipped == 0  # no 50/50 resolutions in this dataset
         contracts = markets_to_contracts(markets)
         stats = compute_decile_stats(contracts)
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=contracts,
@@ -522,11 +522,49 @@ class TestWarehouseCsvLoading:
         )
 
         assert len(markets) == 120
+        assert stats[0].n == 120
+        assert stats[9].n == 120
+        assert gate.longshot_count == 120
+        assert gate.favorite_count == 0
+        assert gate.passed is False
+        assert "H1 NOT VIABLE YET" in report
+        assert "warehouse CSV:" in report
+
+    def test_warehouse_signal_gate_passes_when_both_runtime_buckets_exist(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "sample_gate.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(market_id=f"longshot-{i}", entry_yes_price="0.05")
+            for i in range(120)
+        ] + [
+            _warehouse_row(
+                market_id=f"favorite-{i}",
+                entry_yes_price="0.95",
+                yes_payout="1",
+                no_payout="0",
+            )
+            for i in range(120)
+        ])
+
+        markets, skipped = load_warehouse_markets(path)
+        assert skipped == 0
+        contracts = markets_to_contracts(markets)
+        stats = compute_decile_stats(contracts)
+        gate = check_sample_gate(markets)
+        report = generate_report(
+            markets=markets,
+            contracts=contracts,
+            decile_stats=stats,
+            gate=gate,
+            fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
+            source_label=f"warehouse CSV: {path}",
+        )
+
         assert gate.longshot_count == 120
         assert gate.favorite_count == 120
         assert gate.passed is True
         assert "H1 DATA VIABLE" in report
-        assert "warehouse CSV:" in report
 
 
 class TestFlbCalibrationArtifact:
@@ -1327,50 +1365,37 @@ class TestComputeDecileStats:
 
 
 class TestSampleGate:
-    def _stats_with_counts(
+    def _markets_with_signal_counts(
         self, longshot_n: int, favorite_n: int
-    ) -> list[DecileStats]:
-        """Build decile stats with specified counts in target buckets."""
-        stats = []
-        for d in range(10):
-            n = longshot_n if d == 0 else (favorite_n if d == 9 else 0)
-            stats.append(DecileStats(
-                decile=d,
-                lower=d / 10.0,
-                upper=(d + 1) / 10.0 if d < 9 else 1.0,
-                n=n,
-                n_yes=0,
-                implied_prob=0.0,
-                actual_rate=0.0,
-                flb_gap=0.0,
-                wilson_lower=0.0,
-                wilson_upper=0.0,
-                recommended_side="no_edge",
-            ))
-        return stats
+    ) -> list[ResolvedMarket]:
+        """Build markets with specified counts in runtime FLB signal buckets."""
+        return (
+            [_market(0.05, False) for _ in range(longshot_n)]
+            + [_market(0.95, True) for _ in range(favorite_n)]
+        )
 
     def test_gate_passes_when_both_buckets_sufficient(self) -> None:
-        stats = self._stats_with_counts(150, 120)
-        gate = check_sample_gate(stats)
+        markets = self._markets_with_signal_counts(150, 120)
+        gate = check_sample_gate(markets)
         assert gate.passed is True
 
     def test_gate_fails_when_longshot_insufficient(self) -> None:
-        stats = self._stats_with_counts(50, 120)
-        gate = check_sample_gate(stats)
+        markets = self._markets_with_signal_counts(50, 120)
+        gate = check_sample_gate(markets)
         assert gate.passed is False
         assert gate.longshot_passed is False
         assert gate.favorite_passed is True
 
     def test_gate_fails_when_favorite_insufficient(self) -> None:
-        stats = self._stats_with_counts(150, 30)
-        gate = check_sample_gate(stats)
+        markets = self._markets_with_signal_counts(150, 30)
+        gate = check_sample_gate(markets)
         assert gate.passed is False
         assert gate.longshot_passed is True
         assert gate.favorite_passed is False
 
     def test_gate_fails_when_both_insufficient(self) -> None:
-        stats = self._stats_with_counts(10, 10)
-        gate = check_sample_gate(stats)
+        markets = self._markets_with_signal_counts(10, 10)
+        gate = check_sample_gate(markets)
         assert gate.passed is False
 
 
@@ -1381,7 +1406,7 @@ class TestReportGeneration:
     def test_report_contains_gate_section(self) -> None:
         markets = [_market(0.50, True)]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1396,7 +1421,7 @@ class TestReportGeneration:
     def test_report_contains_decile_table(self) -> None:
         markets = [_market(0.50, True)]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1411,7 +1436,7 @@ class TestReportGeneration:
     def test_report_contains_side_semantics(self) -> None:
         markets = [_market(0.50, True)]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1426,7 +1451,7 @@ class TestReportGeneration:
     def test_report_shows_not_viable_when_gate_fails(self) -> None:
         markets = [_market(0.50, True)]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1443,7 +1468,7 @@ class TestReportGeneration:
             markets.append(_market(0.05, False))  # longshot bucket
             markets.append(_market(0.95, True))   # favorite bucket
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1459,7 +1484,7 @@ class TestReportGeneration:
             _market(0.30, False, category="sports"),
         ]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1471,11 +1496,11 @@ class TestReportGeneration:
         assert "politics" in report
         assert "sports" in report
 
-    def test_report_uses_consistent_boundary_language(self) -> None:
-        """Report should use [0%-10%) and [90%-100%] not <10% and >90%."""
+    def test_report_uses_runtime_signal_boundary_language(self) -> None:
+        """Report gate rows should match runtime calibration signal buckets."""
         markets = [_market(0.50, True)]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1483,8 +1508,8 @@ class TestReportGeneration:
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
         )
-        assert "[0%-10%)" in report
-        assert "[90%-100%]" in report
+        assert "YES < 10%" in report
+        assert "YES > 90%" in report
 
 
 # ── P1 Regression: outcomePrices ordering ───────────────────────────────────
@@ -1572,30 +1597,25 @@ class TestOutcomePricesOrdering:
 
 
 class TestNinetyPercentBoundary:
-    """P2: verify that exactly 90% markets land in decile 9 (favorite bucket).
-
-    The sample gate counts decile 9 as the favorite bucket. Markets at
-    exactly 90% should be counted, not excluded.
-    """
+    """P2: keep contract deciles and runtime signal gates distinct."""
 
     def test_exactly_90_in_favorite_decile(self) -> None:
         """Markets at exactly 90% should be in decile 9."""
         assert _assign_decile(0.90) == 9
 
-    def test_exactly_90_counted_in_sample_gate(self) -> None:
-        """120 markets at exactly 90% should pass the favorite gate."""
+    def test_exactly_90_not_counted_in_signal_sample_gate(self) -> None:
+        """Runtime favorite calibration uses the strict YES > 90% signal bucket."""
         markets = [_market(0.90, True) for _ in range(120)]
-        stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
-        assert gate.favorite_count == 120
-        assert gate.favorite_passed is True
+        gate = check_sample_gate(markets)
+        assert gate.favorite_count == 0
+        assert gate.favorite_passed is False
 
     def test_just_below_90_not_in_favorite(self) -> None:
         """Markets at 89.9% should be in decile 8, not the favorite bucket."""
         assert _assign_decile(0.899) == 8
 
     def test_boundary_does_not_overstate_favorite_sample(self) -> None:
-        """Only markets ≥90% should count; 89% markets should not inflate."""
+        """Only markets >90% should count; 89% markets should not inflate."""
         # 50 markets at 89% (decile 8) + 50 at 91% (decile 9)
         markets = [_market(0.89, True) for _ in range(50)]
         markets += [_market(0.91, True) for _ in range(50)]
@@ -1603,6 +1623,8 @@ class TestNinetyPercentBoundary:
         # Only the 91% markets should be in the favorite bucket
         assert stats[9].n == 50
         assert stats[8].n == 50
+        gate = check_sample_gate(markets)
+        assert gate.favorite_count == 50
 
 
 # ── Regression: binary-only parser ──────────────────────────────────────────
@@ -1684,7 +1706,7 @@ class TestMedianVolume:
             _market(0.53, True, volume=400.0),
         ]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1703,7 +1725,7 @@ class TestMedianVolume:
             _market(0.52, True, volume=300.0),
         ]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1904,8 +1926,8 @@ class TestContractLevelAnalysis:
         assert stats[9].actual_rate == 1.0
         assert stats[9].flb_gap == pytest.approx(-0.08, abs=1e-10)  # NO underpriced
 
-    def test_sample_gate_counts_contracts_not_markets(self) -> None:
-        """With 3 markets, should get 6 contracts, affecting sample gate."""
+    def test_sample_gate_counts_original_yes_price_signal_buckets(self) -> None:
+        """Contract deciles are diagnostic; runtime sample gate counts signals."""
         markets = [
             ResolvedMarket(market_id=f"m{i}", question=f"Q{i}", yes_price=0.05,
                           resolved_yes=(i % 2 == 0), volume=1000.0, liquidity=100.0,
@@ -1915,7 +1937,7 @@ class TestContractLevelAnalysis:
 
         contracts = markets_to_contracts(markets)
         stats = compute_decile_stats(contracts)
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
 
         # Should have 6 contracts (3 markets × 2)
         assert len(contracts) == 6
@@ -1926,10 +1948,13 @@ class TestContractLevelAnalysis:
 
         assert len(longshot_contracts) == 3  # Three 0.05 contracts
         assert len(favorite_contracts) == 3  # Three 0.95 contracts
+        assert stats[0].n == 3
+        assert stats[9].n == 3
 
-        # Sample gate should reflect contract counts
+        # Runtime signal gate should not count synthetic NO contracts as
+        # favorite_yes_underpriced_buy_yes calibration samples.
         assert gate.longshot_count == 3
-        assert gate.favorite_count == 3
+        assert gate.favorite_count == 0
 
     def test_flb_gap_same_magnitude_opposite_sign(self) -> None:
         """FLB gap should have same magnitude for both sides of same market."""
