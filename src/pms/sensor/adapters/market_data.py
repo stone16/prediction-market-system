@@ -45,6 +45,7 @@ class _BookState:
     bids: dict[float, float] = field(default_factory=dict)
     asks: dict[float, float] = field(default_factory=dict)
     last_trade_price: float | None = None
+    fee_rate_bps: float | None = None
     last_hash: str | None = None
 
 
@@ -306,6 +307,9 @@ class MarketDataSensor:
         state.asks = _levels_to_map(message.get("asks"))
         state.last_hash = _optional_str(message.get("hash"))
         state.last_trade_price = _optional_float(message.get("last_trade_price"))
+        fee_rate_bps = _optional_float(message.get("fee_rate_bps"))
+        if fee_rate_bps is not None:
+            state.fee_rate_bps = fee_rate_bps
 
         source: BookSource = "subscribe"
         if asset_id in self._pending_reconnect_assets:
@@ -348,6 +352,9 @@ class MarketDataSensor:
             size = _required_float(change, "size")
             side = _required_side(change.get("side"))
             _apply_price_change(state, side=side, price=price, size=size)
+            fee_rate_bps = _optional_float(change.get("fee_rate_bps"))
+            if fee_rate_bps is not None:
+                state.fee_rate_bps = fee_rate_bps
             best_bid = _optional_float(change.get("best_bid"))
             best_ask = _optional_float(change.get("best_ask"))
             state.last_hash = _optional_str(change.get("hash"))
@@ -391,6 +398,9 @@ class MarketDataSensor:
         timestamp = _message_timestamp(message.get("timestamp"))
         state = self._book_state(market_id, asset_id)
         state.last_trade_price = price
+        fee_rate_bps = _optional_float(message.get("fee_rate_bps"))
+        if fee_rate_bps is not None:
+            state.fee_rate_bps = fee_rate_bps
         await self.store.write_trade(
             Trade(
                 id=0,
@@ -410,7 +420,7 @@ class MarketDataSensor:
                 **metadata,
                 "side": _optional_str(message.get("side")),
                 "size": _optional_float(message.get("size")),
-                "fee_rate_bps": _optional_float(message.get("fee_rate_bps")),
+                "fee_rate_bps": fee_rate_bps,
             },
         )
 
@@ -683,12 +693,14 @@ def _signal_from_state(
             for level_price, level_size in sorted(state.asks.items(), key=lambda item: item[0])
         ],
     }
-    external_signal = {
+    external_signal: dict[str, Any] = {
         "raw_event_type": event_type,
         "book_received_at": datetime.now(tz=UTC).isoformat(),
     }
     if extra is not None:
         external_signal.update(extra)
+    if state.fee_rate_bps is not None and "fee_rate_bps" not in external_signal:
+        external_signal["fee_rate_bps"] = state.fee_rate_bps
     token_outcome = _signal_token_outcome(
         asset_id=state.asset_id,
         yes_token_id=external_signal.get("yes_token_id"),
