@@ -546,8 +546,11 @@ def _validate_live_preflight_artifact(
     if artifact.get("skip_venue") is not False:
         msg = "LIVE credentialed preflight artifact must not skip venue reconciliation"
         raise LiveTradingDisabledError(msg)
-    if artifact.get("skip_credentials") is True:
-        msg = "LIVE credentialed preflight artifact must not skip credential validation"
+    if artifact.get("skip_credentials") is not False:
+        msg = (
+            "LIVE credentialed preflight artifact skip_credentials must be false; "
+            "must not skip credential validation"
+        )
         raise LiveTradingDisabledError(msg)
     if artifact.get("database_url_override_used") is not False:
         msg = (

@@ -7703,6 +7703,34 @@ def test_live_preflight_artifact_rejects_skip_credentials(
         validator(settings)
 
 
+def test_live_preflight_artifact_requires_skip_credentials_false(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    artifact_path = Path(
+        make_live_preflight_artifact_path(
+            prefix="pms-live-preflight-missing-skip-credentials-",
+            settings=settings,
+        )
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact.pop("skip_credentials", None)
+    artifact_path.write_text(
+        json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    settings.live_preflight_artifact_path = str(artifact_path)
+    validator = getattr(live_preflight_module, "require_live_preflight_artifact")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="skip_credentials must be false",
+    ):
+        validator(settings)
+
+
 def test_live_preflight_category_prior_artifact_rejects_duplicate_csv_header() -> None:
     validator = getattr(
         live_preflight_artifact_module,

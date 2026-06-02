@@ -42,6 +42,7 @@ def test_check_paper_soak_artifacts_fails_when_flb_calibration_missing(
             [
                 "mode: paper",
                 "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
                 "strategies:",
                 f"  flb_calibration_path: {missing_path}",
                 "  flb_min_calibration_samples: 100",
@@ -70,6 +71,7 @@ def test_check_paper_soak_artifacts_passes_with_staged_flb_calibration(
             [
                 "mode: paper",
                 "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
                 "strategies:",
                 f"  flb_calibration_path: {calibration_path}",
                 "  flb_min_calibration_samples: 100",
@@ -89,6 +91,34 @@ def test_check_paper_soak_artifacts_passes_with_staged_flb_calibration(
     assert "not configured" in captured.out
 
 
+def test_check_paper_soak_artifacts_fails_when_default_strategy_not_archived(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calibration_path = tmp_path / "flb-calibration.csv"
+    _write_flb_calibration(calibration_path)
+    config_path = tmp_path / "live-soak.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "strategies:",
+                f"  flb_calibration_path: {calibration_path}",
+                "  flb_min_calibration_samples: 100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = check_paper_soak_artifacts.main(["--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[FAIL] h1_flb_strategy:" in captured.out
+    assert "paper_soak_archive_default=true" in captured.out
+
+
 def test_check_paper_soak_artifacts_fails_when_flb_parent_is_permissive(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -104,6 +134,7 @@ def test_check_paper_soak_artifacts_fails_when_flb_parent_is_permissive(
             [
                 "mode: paper",
                 "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
                 "strategies:",
                 f"  flb_calibration_path: {calibration_path}",
                 "  flb_min_calibration_samples: 100",
@@ -135,6 +166,7 @@ def test_check_paper_soak_artifacts_fails_thin_configured_category_prior(
             [
                 "mode: paper",
                 "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
                 "controller:",
                 f"  category_prior_observations_path: {category_prior_path}",
                 "  category_prior_min_global_samples: 2",
@@ -174,6 +206,7 @@ def test_check_paper_soak_artifacts_fails_when_category_prior_parent_is_permissi
             [
                 "mode: paper",
                 "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
                 "controller:",
                 f"  category_prior_observations_path: {category_prior_path}",
                 "  category_prior_min_global_samples: 2",

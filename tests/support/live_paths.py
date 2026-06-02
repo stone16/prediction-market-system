@@ -235,6 +235,7 @@ def make_live_preflight_artifact_path(
                 "artifact_mode": "credentialed_preflight",
                 "final_go_no_go_valid": True,
                 "skip_venue": False,
+                "skip_credentials": False,
                 "config_path": "config.live.yaml",
                 "database_url_override_used": False,
                 "settings_fingerprint": live_preflight_settings_fingerprint(settings),

@@ -50,17 +50,26 @@ def _check_paper_mode(settings: PMSSettings) -> PaperSoakArtifactCheck:
 
 
 def _check_h1_flb_strategy(settings: PMSSettings) -> PaperSoakArtifactCheck:
-    if settings.paper_soak_strategy_id == "h1_flb":
+    if settings.paper_soak_strategy_id != "h1_flb":
         return PaperSoakArtifactCheck(
             "h1_flb_strategy",
-            True,
-            "paper_soak_strategy_id=h1_flb",
+            False,
+            "paper_soak_strategy_id must be h1_flb for the launch soak: "
+            f"{settings.paper_soak_strategy_id}",
+        )
+    if not settings.paper_soak_archive_default:
+        return PaperSoakArtifactCheck(
+            "h1_flb_strategy",
+            False,
+            (
+                "paper_soak_archive_default=true is required so the launch "
+                "soak does not run the legacy default strategy beside h1_flb"
+            ),
         )
     return PaperSoakArtifactCheck(
         "h1_flb_strategy",
-        False,
-        "paper_soak_strategy_id must be h1_flb for the launch soak: "
-        f"{settings.paper_soak_strategy_id}",
+        True,
+        "paper_soak_strategy_id=h1_flb; paper_soak_archive_default=true",
     )
 
 
