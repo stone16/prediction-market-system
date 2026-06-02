@@ -52,7 +52,8 @@ passphrases into chat, issues, PRs, logs, or config files.
    uv run alembic upgrade head
    uv run python scripts/install_paper_canary_strategy.py \
      --database-url "$DATABASE_URL" \
-     --archive-default
+     --archive-default \
+     --sample-modulus 1
    export PMS_API_TOKEN="$(openssl rand -hex 32)"
    PMS_CONFIG_PATH=config.local.paper-canary.yaml uv run pms-api
    ```

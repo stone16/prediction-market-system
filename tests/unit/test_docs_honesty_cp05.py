@@ -250,6 +250,7 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "--paper-canary" in runbook_text
     assert "scripts/install_paper_canary_strategy.py" in runbook_text
     assert "--archive-default" in runbook_text
+    assert "--sample-modulus 1" in runbook_text
     assert "paper_soak_strategy_id: null" in runbook_text
     assert "flb_calibration_path: null" in runbook_text
     assert "PMS_SECURE_DIR" in readme_text
