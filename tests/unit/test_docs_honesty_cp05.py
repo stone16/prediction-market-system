@@ -193,6 +193,8 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "credentialed preflight artifact to still validate" in readme_text
     assert "PAPER_SOAK_REPORT_DATE" in readme_text
     assert "--output /secure/pms/paper-soak-go-report.md" in readme_text
+    assert "--calibration-csv /secure/pms/flb-calibration.csv" in readme_text
+    assert "--calibration-source-label warehouse-flb-v1" in readme_text
     assert "credentialed preflight artifact is missing/invalid" in readme_text
     assert "Create the approval JSON only after preview review" in readme_text
     assert "true LIVE template leaves LLM disabled by default" in readme_text
@@ -205,5 +207,8 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
         ROOT / "docs" / "operations" / "fly-deploy-runbook.md"
     ).read_text(encoding="utf-8")
     assert "fly.live.toml.example" in fly_runbook_text
+    assert "fly volumes create pms_paper_soak_secure" in fly_runbook_text
+    assert "install -d -m 700 /secure/pms" in fly_runbook_text
+    assert "/secure/pms/flb-calibration.csv" in fly_runbook_text
     assert "fly deploy -c fly.live.toml" in fly_runbook_text
     assert "DATABASE_URL" in fly_runbook_text

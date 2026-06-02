@@ -128,10 +128,18 @@ cp config.live-soak.yaml config.local.live-soak.yaml
 #   - Adjust risk.max_position_per_market (paper default: $1)
 #   - Adjust risk.max_total_exposure (proposed: $50)
 #   - Adjust risk.max_drawdown_pct (proposed: 20)
+#   - Keep strategies.flb_calibration_path pointed at the secure CSV below
 #   - Set controller.category_prior_observations_path to the secure CSV below
 
-# 4a. Generate the category-prior baseline artifact outside the repo
+# 4a. Generate required non-secret launch artifacts outside the repo
 sudo install -d -m 700 -o "$USER" /secure/pms
+uv run python scripts/flb_data_feasibility.py \
+  --source warehouse-csv \
+  --input /secure/pms/polymarket_resolved_binary.csv \
+  --output /secure/pms/flb-feasibility.md \
+  --csv /secure/pms/flb-deciles.csv \
+  --calibration-csv /secure/pms/flb-calibration.csv \
+  --calibration-source-label warehouse-flb-v1
 uv run python scripts/export_category_prior_observations.py \
   --output /secure/pms/category-prior-observations.csv \
   --min-observations 100

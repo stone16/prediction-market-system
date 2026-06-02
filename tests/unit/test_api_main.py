@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from pms.api.app import create_app
 import pms.api.__main__ as api_main
 from pms.core.enums import RunMode
@@ -231,3 +233,57 @@ def test_create_app_uses_config_path_for_default_runner(tmp_path: Path) -> None:
     assert app.state.runner.config.mode is RunMode.PAPER
     assert app.state.runner.config.risk.max_position_per_market == 5.0
     assert app.state.runner.config.risk.max_total_exposure == 50.0
+
+
+def test_create_app_fails_closed_when_h1_flb_calibration_artifact_is_missing(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "live-soak.yaml"
+    missing_calibration_path = tmp_path / "missing-flb-calibration.csv"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "strategies:",
+                f"  flb_calibration_path: {missing_calibration_path}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="FLB calibration CSV does not exist"):
+        create_app(auto_start=False, config_path=str(config_path))
+
+
+def test_create_app_starts_with_staged_h1_flb_calibration_artifact(
+    tmp_path: Path,
+) -> None:
+    calibration_path = tmp_path / "flb-calibration.csv"
+    calibration_path.write_text(
+        "\n".join(
+            [
+                "signal_name,probability_estimate,sample_count,source_label",
+                "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "live-soak.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "strategies:",
+                f"  flb_calibration_path: {calibration_path}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    app = create_app(auto_start=False, config_path=str(config_path))
+
+    assert app.state.runner.config.paper_soak_strategy_id == "h1_flb"

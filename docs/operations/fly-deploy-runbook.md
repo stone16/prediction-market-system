@@ -72,8 +72,31 @@ resolved at boot. The image command intentionally does not pass `--config`;
 `fly.toml` selects the supervised paper-soak config with
 `PMS_CONFIG_PATH=/app/config.live-soak.yaml`.
 
+The supervised paper-soak config now requires the calibrated H1 FLB artifact at
+`/secure/pms/flb-calibration.csv`. Bootstrap the app volume and stage the
+artifact before the first machine starts; otherwise `Runner` fails closed while
+loading the config.
+
+Generate the artifact from the strict warehouse export first:
+
 ```bash
-fly deploy
+install -d -m 700 /secure/pms
+uv run python scripts/flb_data_feasibility.py \
+  --source warehouse-csv \
+  --input /secure/pms/polymarket_resolved_binary.csv \
+  --output /secure/pms/flb-feasibility.md \
+  --csv /secure/pms/flb-deciles.csv \
+  --calibration-csv /secure/pms/flb-calibration.csv \
+  --calibration-source-label warehouse-flb-v1
+```
+
+Then create the Fly paper-soak volume and deploy while copying the non-secret
+artifact into the mounted path:
+
+```bash
+fly volumes create pms_paper_soak_secure --region iad
+fly deploy \
+  --file-local /secure/pms/flb-calibration.csv=/secure/pms/flb-calibration.csv
 ```
 
 For LIVE capital, do not edit `fly.toml`. Prepare the separate ignored config

@@ -11,7 +11,7 @@ primary_region = "iad"
 
 [mounts]
   source = "pms_paper_soak_secure"
-  destination = "/secure"
+  destination = "/secure/pms"
 
 [http_service]
   internal_port = 8000
