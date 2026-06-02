@@ -75,6 +75,18 @@ def test_readme_development_documents_all_ci_gates() -> None:
     assert "dashboard Vitest" in readme_development
 
 
+def test_claude_canonical_gates_document_all_ci_gates() -> None:
+    canonical_gates = _section(
+        CLAUDE_PATH.read_text(encoding="utf-8"),
+        "## Canonical gates",
+    )
+
+    assert "uv run lint-imports" in canonical_gates
+    assert "(cd dashboard && npm ci && npm run test:ci)" in canonical_gates
+    assert "import-linter contracts" in canonical_gates
+    assert "dashboard Vitest" in canonical_gates
+
+
 def test_migrations_doc_exists_with_required_sections_and_policy() -> None:
     text = MIGRATIONS_DOC_PATH.read_text(encoding="utf-8")
 

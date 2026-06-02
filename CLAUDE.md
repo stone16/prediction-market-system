@@ -31,18 +31,19 @@ Never commit to `main` directly; changes land via PR.
 
 ## Canonical gates
 
-Run from a clean shell at the repo root. Both gates are load-bearing.
+Run from a clean shell at the repo root. These gates are load-bearing.
 
 ```bash
 uv sync                                  # install deps from uv.lock
 uv run pytest -q                         # full suite — see baseline below
 uv run mypy src/ tests/ --strict         # strict on every committed module
+uv run lint-imports                      # import-linter contracts
 ```
 
-For dashboard work, also run:
+The dashboard Vitest suite is also enforced by CI:
 
 ```bash
-(cd dashboard && npm run test)           # Vitest suite
+(cd dashboard && npm ci && npm run test:ci)
 ```
 
 **Baseline (as of 2026-04-21, main @ 96f2a14):** `pytest`
