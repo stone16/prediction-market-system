@@ -47,13 +47,13 @@ def test_live_soak_config_relaxes_paper_factor_gate_for_phase_a() -> None:
     assert settings.controller.strict_factor_gates is False
 
 
-def test_live_soak_config_uses_paper_snapshot_freshness_window() -> None:
+def test_live_soak_config_uses_tight_paper_snapshot_freshness_window() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
     assert settings.mode == "paper"
     assert settings.live_trading_enabled is False
     assert settings.controller.quote_source == "postgres_snapshot"
-    assert settings.controller.max_book_age_ms == pytest.approx(15_000.0)
+    assert settings.controller.max_book_age_ms == pytest.approx(2_000.0)
     assert settings.controller.venue_book_refresh_enabled is True
     assert settings.controller.venue_book_refresh_timeout_s == pytest.approx(5.0)
 

@@ -54,11 +54,10 @@ controller:
   max_slippage_bps: 50
   time_in_force: IOC
   decision_cooldown_s: 60.0
-  # Paper soak uses Postgres websocket snapshots, and Polymarket books can be
-  # quiet for several seconds between changes. Keep this wide enough to produce
-  # paper evidence without changing LIVE safety: live mode rejects
-  # postgres_snapshot and validates a fresh venue quote again pre-submit.
-  max_book_age_ms: 15000.0
+  # Keep execution evidence tight enough for readiness. Venue refresh is
+  # enabled below; stale websocket snapshots must refresh from the public book
+  # endpoint or be rejected before a paper order is emitted.
+  max_book_age_ms: 2000.0
   allowed_book_clock_skew_ms: 250.0
   max_spread_bps: 100.0
   strict_factor_gates: false
