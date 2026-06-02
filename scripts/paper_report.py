@@ -1703,7 +1703,7 @@ def _render_selection_funnel_section(funnel: SelectionFunnel | None) -> list[str
     if funnel is None:
         lines.append("No funnel events recorded.")
         return lines
-    lines.extend(["| Stage | Count |", "|---|---:|"])
+    lines.extend(["| Stage | Asset Count |", "|---|---:|"])
     lines.append(f"| Discovered | {funnel.discovered} |")
     lines.append(f"| Selected | {funnel.selected} |")
     lines.append(f"| Routed | {funnel.routed} |")

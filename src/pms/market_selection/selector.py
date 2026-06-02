@@ -78,7 +78,9 @@ class MarketSelector:
                 spec.resolution_time_max_horizon_days,
                 spec.volume_min_usdc,
             )
-            self._last_discovered_count += len(eligible_markets)
+            self._last_discovered_count += len(
+                _asset_ids_from_eligible_markets(eligible_markets)
+            )
             filtered_markets = await self._filter_markets(eligible_markets, spec)
             ranked_asset_ids = _asset_ids_from_eligible_markets(filtered_markets)
             selections.append(

@@ -43,6 +43,74 @@ def test_selector_funnel_log_updates_live_metrics() -> None:
     ) == pytest.approx(selected_before + 5.0)
 
 
+@pytest.mark.asyncio
+async def test_market_selector_funnel_discovery_uses_asset_count() -> None:
+    market_selector_cls = _load_symbol("pms.market_selection.selector", "MarketSelector")
+    union_merge_policy_cls = _load_symbol(
+        "pms.market_selection.merge",
+        "UnionMergePolicy",
+    )
+
+    class FakeRegistry:
+        async def list_market_selections(
+            self,
+        ) -> list[tuple[str, str, MarketSelectionSpec]]:
+            return [
+                (
+                    "alpha",
+                    "alpha-v1",
+                    MarketSelectionSpec(
+                        venue="polymarket",
+                        resolution_time_max_horizon_days=7,
+                        volume_min_usdc=500.0,
+                    ),
+                )
+            ]
+
+    class FakeStore:
+        async def read_eligible_markets(
+            self,
+            venue: str,
+            max_horizon_days: int | None,
+            min_volume_usdc: float,
+        ) -> list[tuple[Market, list[Token]]]:
+            del venue, max_horizon_days, min_volume_usdc
+            return [
+                _eligible_market(
+                    "asset-funnel-a",
+                    token_ids=("asset-funnel-a-yes", "asset-funnel-a-no"),
+                ),
+                _eligible_market(
+                    "asset-funnel-b",
+                    token_ids=("asset-funnel-b-yes", "asset-funnel-b-no"),
+                ),
+            ]
+
+    discovered_before = get_metric(SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC) or 0.0
+    selected_before = get_metric(SELECTION_FUNNEL_SELECTED_TOTAL_METRIC) or 0.0
+
+    selector = market_selector_cls(
+        store=FakeStore(),
+        registry=FakeRegistry(),
+        merge_policy=union_merge_policy_cls(),
+    )
+
+    result = await selector.select()
+
+    assert result.asset_ids == [
+        "asset-funnel-a-no",
+        "asset-funnel-a-yes",
+        "asset-funnel-b-no",
+        "asset-funnel-b-yes",
+    ]
+    assert (
+        get_metric(SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC) or 0.0
+    ) == pytest.approx(discovered_before + 4.0)
+    assert (
+        get_metric(SELECTION_FUNNEL_SELECTED_TOTAL_METRIC) or 0.0
+    ) == pytest.approx(selected_before + 4.0)
+
+
 def _eligible_market(
     market_id: str,
     *,
