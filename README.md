@@ -117,8 +117,8 @@ disabled for the first real-money path unless you separately stage
 
 | Mode | Purpose | Command |
 |------|---------|---------|
-| **backtest** | Historical simulation through the runner/API control plane | `PMS_MODE=backtest PMS_AUTO_START=1 uv run pms-api` |
-| **paper** | Live data, simulated trades, no real orders | `uv run pms-api --config config.live-soak.yaml` |
+| **backtest** | Historical simulation through the runner/API control plane | `PMS_MODE=backtest uv run pms-api`, then authenticated `POST /run/start` |
+| **paper** | Live data, simulated trades, no real orders | `uv run pms-api --config config.live-soak.yaml`, then authenticated `POST /run/start` |
 | **live** | Real Polymarket trading (gated) | `uv run pms-api` with `PMS_MODE=live` + credentials |
 
 ### Step-by-Step: From Zero to Paper Soak
@@ -177,12 +177,17 @@ uv run python scripts/export_category_prior_observations.py \
 uv run python scripts/check_paper_soak_artifacts.py \
   --config config.local.live-soak.yaml
 
-# 5. Start paper soak (live data, no real orders). Keep the token private;
+# 5. Start the paper-soak API control plane. Keep the token private;
 #    scripts/paper_report.py reads the same token from PMS_API_TOKEN.
 export PMS_API_TOKEN="$(openssl rand -hex 32)"
 uv run pms-api --config config.local.live-soak.yaml
 
-# 6. Monitor status
+# 6. In another shell, start the runner and monitor status.
+#    The `pms-api` command starts the API control plane; it does not start
+#    the runner until an authenticated `POST /run/start` succeeds.
+curl -X POST \
+  -H "Authorization: Bearer $PMS_API_TOKEN" \
+  http://127.0.0.1:8000/run/start
 curl -H "Authorization: Bearer $PMS_API_TOKEN" \
   http://127.0.0.1:8000/status
 
@@ -304,9 +309,14 @@ uv run alembic downgrade base
 
 # 4. Start the FastAPI backend (port 8000 by default)
 uv run pms-api                       # → http://127.0.0.1:8000
-# Optional: auto-start the runner at boot
-PMS_AUTO_START=1 uv run pms-api
-# First-live paper soak: load the tight risk envelope explicitly
+# Optional supervised auto-start; PMS_AUTO_START=1 requires PMS_DISCORD__WEBHOOK_URL
+# so startup alerts have an external operator channel.
+PMS_AUTO_START=1 \
+PMS_DISCORD__WEBHOOK_URL="https://discord.com/api/webhooks/..." \
+uv run pms-api
+# First-live paper soak: load the tight risk envelope explicitly.
+# This starts the control plane; use the Runner lifecycle commands below
+# to POST /run/start.
 uv run pms-api --config config.live-soak.yaml
 
 # 5. In another shell, start the dashboard (port 3100)

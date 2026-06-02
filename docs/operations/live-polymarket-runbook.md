@@ -25,25 +25,43 @@ passphrases into chat, issues, PRs, logs, or config files.
    `max_open_positions=50`, `max_exposure_per_risk_group=$1`,
    `max_quantity_shares=500`, `slippage_threshold_bps=50`, and
    `llm.max_daily_llm_cost_usdc=$0.05`.
-3. Run PAPER mode against live market data with the soak config:
-   `uv run pms-api --config config.live-soak.yaml`.
+3. Start the PAPER soak API control plane against live market data with the
+   soak config. Keep the token private; `scripts/paper_report.py` reads the
+   same token from `PMS_API_TOKEN` when polling protected paper API endpoints.
+
+   ```bash
+   export PMS_API_TOKEN="$(openssl rand -hex 32)"
+   uv run pms-api --config config.local.live-soak.yaml
+   ```
+
    For process managers that cannot pass CLI args, set
-   `PMS_CONFIG_PATH=config.live-soak.yaml`.
-4. Confirm `/status` reports every active sensor as `running`, not `stale` or
+   `PMS_CONFIG_PATH=config.local.live-soak.yaml`.
+4. In another shell, start the runner explicitly. The `pms-api` command starts
+   the API control plane; it does not start the runner until an authenticated
+   `POST /run/start` succeeds.
+
+   ```bash
+   curl -X POST \
+     -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/run/start
+   ```
+
+5. Confirm `/status` reports `running=true` and every active sensor as
+   `running`, not `stale` or
    `failed`. `MarketDataSensor` must have a fresh `last_signal_at`; a runner
    process that is alive but has stale market-data signals is not a valid soak.
-5. Confirm `/strategies` shows the intended active strategy. Use
+6. Confirm `/strategies` shows the intended active strategy. Use
    `paper_canary_v1` when the goal is to verify live-data -> controller ->
    paper-actuator plumbing. Use the real default strategy only after its
    required factors are populated; 0 decisions from missing factors is not a
    market signal. `/status.strategy` is only a legacy display fallback; an
    empty or versionless `/strategies` response blocks a final GO report.
-6. Confirm `/trades`, `/positions`, and evaluator metrics update when the
+7. Confirm `/trades`, `/positions`, and evaluator metrics update when the
    selected strategy emits paper decisions.
-7. Review order notional, slippage, rejected orders, and portfolio exposure.
-8. Keep `live_trading_enabled=false` until the 30-day soak and compliance
+8. Review order notional, slippage, rejected orders, and portfolio exposure.
+9. Keep `live_trading_enabled=false` until the 30-day soak and compliance
    checklist are accepted.
-9. Ratify the strategic exit criteria (the kill plan) defined in
+10. Ratify the strategic exit criteria (the kill plan) defined in
    [live-exit-criteria.md](live-exit-criteria.md) **before** the first live
    order. Do not flip `live_trading_enabled=true` until
    `live_exit_criteria_ratified_by` and `live_exit_criteria_ratified_at` are

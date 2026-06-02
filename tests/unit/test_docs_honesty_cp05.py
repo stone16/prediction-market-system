@@ -41,6 +41,42 @@ def test_readme_paper_api_examples_use_bearer_token_when_token_is_configured() -
     assert "scripts/paper_report.py reads the same token" in readme_text
 
 
+def test_paper_soak_docs_explicitly_start_runner_after_api_control_plane() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    normalized_readme = _normalized_doc_text(readme_text)
+    normalized_runbook = _normalized_doc_text(runbook_text)
+
+    expected_control_plane_warning = (
+        "The `pms-api` command starts the API control plane; it does not start "
+        "the runner until an authenticated `POST /run/start` succeeds."
+    )
+    expected_start_command = "http://127.0.0.1:8000/run/start"
+
+    assert expected_control_plane_warning in normalized_readme
+    assert expected_control_plane_warning in normalized_runbook
+    assert expected_start_command in readme_text
+    assert expected_start_command in runbook_text
+
+
+def test_readme_autostart_example_mentions_required_discord_webhook() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    normalized = _normalized_doc_text(readme_text)
+
+    assert "PMS_AUTO_START=1 requires PMS_DISCORD__WEBHOOK_URL" in normalized
+    assert "PMS_AUTO_START=1 uv run pms-api" not in readme_text
+
+
+def _normalized_doc_text(text: str) -> str:
+    lines = [
+        line.lstrip("#").strip()
+        for line in text.splitlines()
+    ]
+    return " ".join(" ".join(lines).split())
+
+
 def test_readme_paper_soak_status_mentions_required_launch_artifacts() -> None:
     readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
     normalized = " ".join(readme_text.split())
