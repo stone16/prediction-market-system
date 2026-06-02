@@ -605,7 +605,7 @@ class Runner:
             await self._cleanup_after_start_failure()
             raise
 
-    async def stop(self) -> None:
+    async def stop(self, *, close_pool: bool = True) -> None:
         self._stop_event.set()
         error: BaseException | None = None
 
@@ -689,11 +689,12 @@ class Runner:
         self._live_preflight_artifact_validated = False
         self._live_preflight_active_strategies_fingerprint = None
 
-        try:
-            await self._close_pg_pool()
-        except BaseException as exc:  # pragma: no cover - defensive
-            if error is None:
-                error = exc
+        if close_pool:
+            try:
+                await self._close_pg_pool()
+            except BaseException as exc:  # pragma: no cover - defensive
+                if error is None:
+                    error = exc
 
         if error is not None:
             raise error

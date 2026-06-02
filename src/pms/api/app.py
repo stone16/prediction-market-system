@@ -837,7 +837,7 @@ def create_app(
 
     @app.post("/run/stop", dependencies=[Depends(require_api_token)])
     async def run_stop() -> dict[str, Any]:
-        await active_runner.stop()
+        await active_runner.stop(close_pool=False)
         return {"status": "stopped"}
 
     return app

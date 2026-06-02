@@ -59,6 +59,21 @@ FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
 AUTH_HEADERS = {"Authorization": "Bearer live-api-token"}
 
 
+class ReportingFillStoreDouble:
+    async def read_trades(
+        self,
+        *,
+        limit: int,
+        offset: int = 0,
+        until: datetime | None = None,
+    ) -> list[Any]:
+        del limit, offset, until
+        return []
+
+    async def read_positions(self) -> list[Position]:
+        return []
+
+
 def _settings() -> PMSSettings:
     return PMSSettings(
         mode=RunMode.BACKTEST,
@@ -1253,6 +1268,36 @@ async def test_api_run_start_stop_cycle(tmp_path: Path) -> None:
     assert stop_resp.status_code == 200
     assert stop_resp.json() == {"status": "stopped"}
     assert stopped_status["running"] is False
+
+
+@pytest.mark.asyncio
+async def test_api_run_stop_keeps_reporting_pool_bound() -> None:
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            auto_migrate_default_v2=False,
+            api_token="live-api-token",
+        ),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+        fill_store=cast(FillStore, ReportingFillStoreDouble()),
+    )
+    fake_pool = object()
+    runner.bind_pg_pool(cast(Any, fake_pool))
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        stop_resp = await client.post("/run/stop", headers=AUTH_HEADERS)
+        trades_resp = await client.get("/trades", headers=AUTH_HEADERS)
+        positions_resp = await client.get("/positions", headers=AUTH_HEADERS)
+
+    assert stop_resp.status_code == 200
+    assert runner.pg_pool is fake_pool
+    assert trades_resp.status_code == 200
+    assert trades_resp.json() == {"trades": [], "limit": 50, "offset": 0}
+    assert positions_resp.status_code == 200
+    assert positions_resp.json() == {"positions": []}
 
 
 @pytest.mark.asyncio
