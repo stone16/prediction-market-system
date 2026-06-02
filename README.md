@@ -131,7 +131,7 @@ uv sync --extra live --extra llm
 docker compose up -d postgres
 
 # 3. Apply migrations
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_dev
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
 uv run alembic upgrade head
 
 # 4. Create a private artifact directory and repo-ignored local config.
@@ -300,8 +300,8 @@ docker compose up -d postgres
 # 2. Install Python deps
 uv sync
 
-# 3. Point PMS at your local dev database and apply migrations
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_dev
+# 3. Point PMS at the compose-created database and apply migrations
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
 uv run alembic upgrade head
 
 # Escape hatch: roll back to the pre-migration state for the current DATABASE_URL

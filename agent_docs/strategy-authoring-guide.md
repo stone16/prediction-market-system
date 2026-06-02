@@ -47,7 +47,7 @@ Before you write a single line, confirm:
 
    ```bash
    docker compose up -d postgres
-   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_dev
+   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
    uv run alembic upgrade head
    ```
 

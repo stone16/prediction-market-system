@@ -247,6 +247,11 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "max_exposure_per_risk_group=$15" not in readme_text
     assert "scripts/prepare_local_paper_soak_config.py" in readme_text
     assert "scripts/prepare_local_paper_soak_config.py" in runbook_text
+    assert "--paper-canary" in runbook_text
+    assert "scripts/install_paper_canary_strategy.py" in runbook_text
+    assert "--archive-default" in runbook_text
+    assert "paper_soak_strategy_id: null" in runbook_text
+    assert "flb_calibration_path: null" in runbook_text
     assert "PMS_SECURE_DIR" in readme_text
     assert "PMS_SECURE_DIR" in runbook_text
     assert "private artifact parent" in readme_text

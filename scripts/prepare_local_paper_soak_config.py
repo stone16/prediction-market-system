@@ -32,6 +32,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Overwrite an existing local config.",
     )
+    parser.add_argument(
+        "--paper-canary",
+        action="store_true",
+        help=(
+            "Write a no-credential PAPER plumbing smoke config by clearing "
+            "the H1 FLB soak override and launch artifact paths. Install "
+            "paper_canary_v1 separately before starting pms-api."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -40,13 +49,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             output=args.output,
             secure_dir=args.secure_dir,
             overwrite=bool(args.overwrite),
+            paper_canary=bool(args.paper_canary),
         )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     print(f"local paper-soak config written: {output_path}")
-    print(f"local artifact directory ready: {Path(args.secure_dir).expanduser()}")
+    if args.paper_canary:
+        print("paper-canary plumbing config does not require launch artifacts")
+    else:
+        print(f"local artifact directory ready: {Path(args.secure_dir).expanduser()}")
     return 0
 
 
@@ -56,6 +69,7 @@ def _prepare_local_paper_soak_config(
     output: Path,
     secure_dir: Path,
     overwrite: bool,
+    paper_canary: bool,
 ) -> Path:
     source_path = source.expanduser()
     output_path = output.expanduser()
@@ -67,20 +81,39 @@ def _prepare_local_paper_soak_config(
     calibration_path = artifact_dir / "flb-calibration.csv"
     category_prior_path = artifact_dir / "category-prior-observations.csv"
 
-    text = _replace_single(
-        text,
-        "  category_prior_observations_path: null",
-        f"  category_prior_observations_path: {_yaml_string(category_prior_path)}",
-        field_name="controller.category_prior_observations_path",
-    )
-    text = _replace_single(
-        text,
-        "  flb_calibration_path: /secure/pms/flb-calibration.csv",
-        f"  flb_calibration_path: {_yaml_string(calibration_path)}",
-        field_name="strategies.flb_calibration_path",
-    )
-
-    _prepare_private_artifact_dir(artifact_dir)
+    if paper_canary:
+        text = _replace_single(
+            text,
+            "paper_soak_strategy_id: h1_flb",
+            "paper_soak_strategy_id: null",
+            field_name="paper_soak_strategy_id",
+        )
+        text = _replace_single(
+            text,
+            "paper_soak_archive_default: true",
+            "paper_soak_archive_default: false",
+            field_name="paper_soak_archive_default",
+        )
+        text = _replace_single(
+            text,
+            "  flb_calibration_path: /secure/pms/flb-calibration.csv",
+            "  flb_calibration_path: null",
+            field_name="strategies.flb_calibration_path",
+        )
+    else:
+        text = _replace_single(
+            text,
+            "  category_prior_observations_path: null",
+            f"  category_prior_observations_path: {_yaml_string(category_prior_path)}",
+            field_name="controller.category_prior_observations_path",
+        )
+        text = _replace_single(
+            text,
+            "  flb_calibration_path: /secure/pms/flb-calibration.csv",
+            f"  flb_calibration_path: {_yaml_string(calibration_path)}",
+            field_name="strategies.flb_calibration_path",
+        )
+        _prepare_private_artifact_dir(artifact_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _write_text_no_follow(output_path, text, overwrite=overwrite)
     return output_path

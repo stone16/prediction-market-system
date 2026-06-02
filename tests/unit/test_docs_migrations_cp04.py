@@ -9,6 +9,7 @@ CLAUDE_PATH = ROOT / "CLAUDE.md"
 GITIGNORE_PATH = ROOT / ".gitignore"
 STRATEGY_AUTHORING_GUIDE_PATH = ROOT / "agent_docs" / "strategy-authoring-guide.md"
 MIGRATIONS_DOC_PATH = ROOT / "docs" / "operations" / "migrations.md"
+LIVE_POLYMARKET_RUNBOOK_PATH = ROOT / "docs" / "operations" / "live-polymarket-runbook.md"
 
 
 def _section(text: str, heading: str) -> str:
@@ -63,6 +64,28 @@ def test_local_integration_gate_docs_require_compose_backed_database_url() -> No
             in section_text
         )
         assert "PMS_RUN_INTEGRATION=1 uv run pytest -q -m integration" in section_text
+
+
+def test_compose_backed_local_docs_use_database_created_by_compose() -> None:
+    compose_dsn = "postgres://postgres:postgres@localhost:5432/pms_test"
+    missing_compose_dsn = "postgres://postgres:postgres@localhost:5432/pms_dev"
+    sections = (
+        _section(README_PATH.read_text(encoding="utf-8"), "## Quick start"),
+        _section(README_PATH.read_text(encoding="utf-8"), "### Step-by-Step: From Zero to Paper Soak"),
+        _section(
+            LIVE_POLYMARKET_RUNBOOK_PATH.read_text(encoding="utf-8"),
+            "## PAPER Soak",
+        ),
+        _section(
+            STRATEGY_AUTHORING_GUIDE_PATH.read_text(encoding="utf-8"),
+            "## 1. Prerequisites",
+        ),
+    )
+
+    for section_text in sections:
+        assert "docker compose up -d postgres" in section_text
+        assert compose_dsn in section_text
+        assert missing_compose_dsn not in section_text
 
 
 def test_readme_development_documents_all_ci_gates() -> None:

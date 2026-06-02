@@ -144,3 +144,46 @@ def test_prepare_local_paper_soak_config_requires_expected_source_paths(
 
     assert exit_code == 1
     assert not output.exists()
+
+
+def test_prepare_local_paper_soak_config_can_write_paper_canary_plumbing_config(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "config.live-soak.yaml"
+    output = tmp_path / "config.local.paper-canary.yaml"
+    secure_dir = tmp_path / "pms-secure"
+    source.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
+                "controller:",
+                "  category_prior_observations_path: null",
+                "strategies:",
+                "  flb_calibration_path: /secure/pms/flb-calibration.csv",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = prepare_local_paper_soak_config.main(
+        [
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+            "--secure-dir",
+            str(secure_dir),
+            "--paper-canary",
+        ]
+    )
+
+    rendered = output.read_text(encoding="utf-8")
+    assert exit_code == 0
+    assert "paper_soak_strategy_id: null" in rendered
+    assert "paper_soak_archive_default: false" in rendered
+    assert "category_prior_observations_path: null" in rendered
+    assert "flb_calibration_path: null" in rendered
+    assert "/secure/pms" not in rendered

@@ -14,7 +14,11 @@ from pms.strategies.paper_canary import build_paper_canary_strategy
 from pms.strategies.projections import StrategyVersion
 
 
-async def install_paper_canary_strategy(database_url: str) -> StrategyVersion:
+async def install_paper_canary_strategy(
+    database_url: str,
+    *,
+    archive_default: bool = False,
+) -> StrategyVersion:
     pool = await asyncpg.create_pool(
         dsn=database_url,
         min_size=1,
@@ -22,7 +26,18 @@ async def install_paper_canary_strategy(database_url: str) -> StrategyVersion:
     )
     try:
         registry = PostgresStrategyRegistry(pool)
-        return await registry.create_version(build_paper_canary_strategy())
+        strategy = build_paper_canary_strategy()
+        version = await registry.create_version(strategy, activate=False)
+        if archive_default:
+            try:
+                await registry.archive_strategy("default")
+            except LookupError:
+                pass
+        await registry.set_active(
+            strategy.config.strategy_id,
+            version.strategy_version_id,
+        )
+        return version
     finally:
         await pool.close()
 
@@ -36,6 +51,14 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("DATABASE_URL"),
         help="PostgreSQL DSN. Defaults to DATABASE_URL.",
     )
+    parser.add_argument(
+        "--archive-default",
+        action="store_true",
+        help=(
+            "Archive the seeded default strategy so paper_canary_v1 is the "
+            "only active plumbing-smoke controller."
+        ),
+    )
     args = parser.parse_args(argv)
 
     database_url = args.database_url
@@ -43,15 +66,21 @@ def main(argv: list[str] | None = None) -> int:
         print("error: DATABASE_URL is not set", file=sys.stderr)
         return 2
 
-    version = _run_install(database_url)
+    version = _run_install(database_url, archive_default=args.archive_default)
     print(f"strategy_id: {version.strategy_id}")
     print(f"strategy_version_id: {version.strategy_version_id}")
     print(f"created_at: {version.created_at.isoformat()}")
+    print(f"archived_default: {str(args.archive_default).lower()}")
     return 0
 
 
-def _run_install(database_url: str) -> StrategyVersion:
-    return asyncio.run(install_paper_canary_strategy(database_url))
+def _run_install(database_url: str, *, archive_default: bool = False) -> StrategyVersion:
+    return asyncio.run(
+        install_paper_canary_strategy(
+            database_url,
+            archive_default=archive_default,
+        )
+    )
 
 
 if __name__ == "__main__":

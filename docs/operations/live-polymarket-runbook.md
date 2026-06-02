@@ -25,6 +25,37 @@ passphrases into chat, issues, PRs, logs, or config files.
    `max_open_positions=50`, `max_exposure_per_risk_group=$1`,
    `max_quantity_shares=500`, `slippage_threshold_bps=50`, and
    `llm.max_daily_llm_cost_usdc=$0.05`.
+
+   Optional local no-credential plumbing smoke: use `paper_canary_v1` only to
+   verify live-data ingestion, controller fan-out, and the paper actuator before
+   warehouse FLB artifacts are staged. This is not paper-soak performance
+   evidence and must not be used for a final GO report.
+
+   ```bash
+   uv run python scripts/prepare_local_paper_soak_config.py \
+     --output config.local.paper-canary.yaml \
+     --paper-canary
+   ```
+
+   The helper writes the canary config with `paper_soak_strategy_id: null`,
+   `paper_soak_archive_default: false`,
+   `controller.category_prior_observations_path: null`, and
+   `strategies.flb_calibration_path: null`. Those null artifact paths are
+   required for the no-credential smoke because Runner loads configured
+   category-prior and FLB artifacts during construction even when H1 FLB is not
+   the active strategy. After applying migrations, install the canary as the
+   only active strategy:
+
+   ```bash
+   docker compose up -d postgres
+   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
+   uv run alembic upgrade head
+   uv run python scripts/install_paper_canary_strategy.py \
+     --database-url "$DATABASE_URL" \
+     --archive-default
+   export PMS_API_TOKEN="$(openssl rand -hex 32)"
+   PMS_CONFIG_PATH=config.local.paper-canary.yaml uv run pms-api
+   ```
 3. Start the PAPER soak API control plane against live market data with the
    soak config. Keep the token private; `scripts/paper_report.py` reads the
    same token from `PMS_API_TOKEN` when polling protected paper API endpoints.
