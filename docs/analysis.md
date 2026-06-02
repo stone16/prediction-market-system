@@ -55,7 +55,7 @@ Backtest CLI 文档不一致	README 已改为 runner/API backtest 或 pms-resear
 
 你现在的核心显性策略是 H1 favorite-longshot bias，也就是：低 YES 价格的 longshot 视为 overpriced，买 NO；高 YES 价格的 favorite 视为 underpriced，买 YES。LiveFlbSource 的逻辑确实按 <10% 和 >90% 分桶，并生成 BUY NO / BUY YES 信号；当 `strategies.flb_calibration_path` 指向 warehouse-calibrated CSV artifact 时，它会用 `signal_name,probability_estimate,sample_count,source_label` 中的概率替代 `limit_price + min_expected_edge`，并在样本不足或净 edge 低于门槛时 fail closed。净 edge 现在会先扣 `strategies.flb_entry_execution_cost_bps` 和 `strategies.flb_fee_rate` 估计的入场执行成本 / fee，且低于门槛会在 sizing 前被压掉。没有配置该 artifact 时，旧的 2% placeholder 逻辑仍只适合 paper plumbing。LIVE runtime/preflight 现在会拒绝只写 `metadata.live_allowed=true` 的策略；要进入真钱路径，策略投影必须带非 placeholder 的 `alpha_source`、`edge_model_source`、`calibration_source`、`evidence_source`，并启用 calibration。但这些字段只能防止误启动，不能替代真实 paper/live 业绩证明。
 
-FLB feasibility 脚本本身也很诚实：Gamma closed markets 的 lastTradePrice 只是 resolution 前最后成交价代理，不是固定 entry horizon 的 timestamped snapshot；脚本是 feasibility check，不是 strategy P&L backtest，不包含 fees、slippage、execution timing。它要求 extreme buckets 至少 100 个 resolved contract observations 才过 sample gate。
+FLB feasibility 脚本本身也很诚实：Gamma closed markets 的 lastTradePrice 只是 resolution 前最后成交价代理，不是固定 entry horizon 的 timestamped snapshot；脚本是 feasibility check，不是 strategy P&L backtest，不包含 fees、slippage、execution timing。它仍输出 contract-level decile 诊断，但 launch sample gate 必须和 runtime calibration artifact 一致：`longshot_yes_overpriced_buy_no` 需要至少 100 个 YES price `<10%` 的原始市场行，`favorite_yes_underpriced_buy_yes` 需要至少 100 个 YES price `>90%` 的原始市场行。
 
 所以现在的策略状态更准确地说是：
 

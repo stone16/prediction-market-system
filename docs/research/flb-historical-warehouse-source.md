@@ -5,19 +5,20 @@ H2 anchoring lag or LLM/news replay.
 
 ## Goal
 
-Produce resolved Polymarket binary contract observations that can be replayed
-through `scripts/flb_data_feasibility.py` and compared against PR #45's
-contract-level `ContractObservation` semantics:
+Produce resolved Polymarket binary market rows that can be replayed through
+`scripts/flb_data_feasibility.py`. The script still emits contract-level
+`ContractObservation` decile diagnostics:
 
 - YES contract at entry YES price `p`.
 - NO contract at entry price `1 - p`.
 - `pays_out` must come from explicit final settlement data.
 
-The H1 data source is viable only when both extreme contract buckets meet the
-sample gate:
+The H1 launch data source is viable only when both runtime calibration signal
+buckets meet the sample gate. These counts come from the original YES-price
+market rows, not from synthetic opposite-side contracts:
 
-- `[0%,10%)`: at least 100 contract observations.
-- `[90%,100%]`: at least 100 contract observations.
+- `longshot_yes_overpriced_buy_no`: at least 100 markets with YES price `<10%`.
+- `favorite_yes_underpriced_buy_yes`: at least 100 markets with YES price `>90%`.
 
 ## Warehouse CSV Contract
 
@@ -62,7 +63,7 @@ uv run python scripts/flb_data_feasibility.py \
 The script returns:
 
 - exit `0` when H1 data is viable and both extreme buckets have at least 100
-  contract observations.
+  original market rows in the runtime signal buckets.
 - exit `1` when H1 is not viable yet because the sample gate fails.
 - exit `2` when no markets were loaded.
 

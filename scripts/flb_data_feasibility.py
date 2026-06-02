@@ -879,10 +879,10 @@ def generate_report(
     lines.append("")
     lines.append(
         "1. **Contract-level analysis:** Each binary market contributes two "
-        "contract observations (YES at `p`, NO at `1-p`). The sample gate "
-        "counts contracts, not markets. FLB gap is measured per contract "
-        "side, so the same market-level mispricing appears in both the "
-        "longshot and favorite buckets from opposite sides."
+        "contract observations (YES at `p`, NO at `1-p`) for the decile "
+        "diagnostic table. The launch sample gate counts original YES-price "
+        "markets in the two runtime FLB calibration signal buckets, not "
+        "synthetic opposite-side contracts."
     )
     lines.append(
         "2. **Entry price proxy:** Uses `lastTradePrice` (last trade before "
