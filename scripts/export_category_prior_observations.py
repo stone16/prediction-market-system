@@ -307,7 +307,8 @@ def _first_mapping(value: object) -> Mapping[str, object] | None:
 
 
 def _write_rows(output_path: Path, rows: Sequence[CategoryPriorCsvRow]) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = output_path.expanduser()
+    _prepare_private_parent(output_path)
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{output_path.name}.",
         suffix=".tmp",
@@ -333,9 +334,29 @@ def _write_rows(output_path: Path, rows: Sequence[CategoryPriorCsvRow]) -> None:
                 )
         temp_path.chmod(0o600)
         temp_path.replace(output_path)
+        output_path.chmod(0o600)
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
+
+
+def _prepare_private_parent(path: Path) -> None:
+    parent = path.parent
+    if parent.exists():
+        if not parent.is_dir() or parent.is_symlink():
+            msg = f"output parent is not a directory: {parent}"
+            raise ValueError(msg)
+    else:
+        parent.mkdir(parents=True, mode=0o700)
+        parent.chmod(0o700)
+
+    permissions = parent.stat().st_mode & 0o777
+    if permissions & 0o077:
+        msg = f"output parent {parent} is too permissive; run chmod 700"
+        raise ValueError(msg)
+    if not permissions & 0o200:
+        msg = f"output parent {parent} is not owner-writable; run chmod 700"
+        raise ValueError(msg)
 
 
 if __name__ == "__main__":

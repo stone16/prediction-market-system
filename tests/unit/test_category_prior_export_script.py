@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import stat
+from pathlib import Path
+
 import pytest
 
+from scripts import export_category_prior_observations as exporter
 from scripts.export_category_prior_observations import (
     CategoryPriorCsvRow,
+    export_category_prior_observations,
     observation_row_from_gamma_market,
 )
 
@@ -100,3 +105,79 @@ def test_observation_row_from_gamma_market_skips_malformed_json_sequences(
     )
 
     assert row is None
+
+
+def test_export_category_prior_observations_publishes_private_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_path = tmp_path / "secure" / "category-prior-observations.csv"
+
+    monkeypatch.setattr(
+        exporter,
+        "_fetch_closed_market_page",
+        lambda _client, *, limit, offset: [
+            {
+                "conditionId": "market-1",
+                "category": "Politics",
+                "closedTime": "2026-06-02T05:14:32Z",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["1", "0"]',
+            },
+            {
+                "conditionId": "market-2",
+                "category": "Politics",
+                "closedTime": "2026-06-02T05:15:32Z",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0", "1"]',
+            },
+        ],
+    )
+
+    stats = export_category_prior_observations(
+        output_path=output_path,
+        gamma_base_url="https://gamma.example.test",
+        page_limit=2,
+        max_pages=1,
+        min_observations=2,
+    )
+
+    assert stats.written == 2
+    assert stat.S_IMODE(output_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(output_path.stat().st_mode) == 0o600
+
+
+def test_export_category_prior_observations_rejects_permissive_parent_without_publishing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "permissive"
+    output_dir.mkdir()
+    output_dir.chmod(0o755)
+    output_path = output_dir / "category-prior-observations.csv"
+    output_path.write_text("existing artifact\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        exporter,
+        "_fetch_closed_market_page",
+        lambda _client, *, limit, offset: [
+            {
+                "conditionId": "market-1",
+                "category": "Politics",
+                "closedTime": "2026-06-02T05:14:32Z",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["1", "0"]',
+            },
+        ],
+    )
+
+    with pytest.raises(ValueError, match="too permissive"):
+        export_category_prior_observations(
+            output_path=output_path,
+            gamma_base_url="https://gamma.example.test",
+            page_limit=1,
+            max_pages=1,
+            min_observations=1,
+        )
+
+    assert output_path.read_text(encoding="utf-8") == "existing artifact\n"
