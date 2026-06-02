@@ -140,7 +140,11 @@ book hash, observed book token id, submitted decision token id and outcome,
 book age, quote source, factor snapshot hash, spread, source signal timestamp,
 and market-implied / mid-quote / last-trade baseline probabilities, plus
 `category_prior_baseline_prob_estimate` when the signal supplies a calibrated
-decision-time prior. Configure `controller.category_prior_observations_path`
+decision-time prior. Baseline probability fields are in the final evaluator's
+YES-outcome coordinate (`baseline_probability_coordinate: YES`); for NO
+orders, use `decision_outcome_market_implied_prob_estimate` when checking the
+traded token's implied probability. Configure
+`controller.category_prior_observations_path`
 to load that prior from a historical resolution CSV export with columns
 `market_id,category,yes_payout,no_payout,resolved_at`. Startup fails closed if
 the file is missing, has duplicate `market_id` rows, or contains price-like

@@ -769,6 +769,10 @@ def test_decision_evidence_records_secondary_baseline_probabilities() -> None:
     )
 
     assert evidence["market_implied_baseline_prob_estimate"] == pytest.approx(0.61)
+    assert evidence["baseline_probability_coordinate"] == "YES"
+    assert evidence["decision_outcome_market_implied_prob_estimate"] == (
+        pytest.approx(0.39)
+    )
     assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
     assert evidence["last_trade_baseline_prob_estimate"] == pytest.approx(0.43)
     assert evidence["category_prior_baseline_prob_estimate"] == pytest.approx(0.52)
@@ -843,5 +847,9 @@ def test_decision_evidence_projects_direct_no_book_baselines_to_yes_probability(
     assert evidence["yes_price"] == pytest.approx(0.415)
     assert evidence["direct_token_price"] == pytest.approx(0.585)
     assert evidence["market_implied_baseline_prob_estimate"] == pytest.approx(0.40)
+    assert evidence["baseline_probability_coordinate"] == "YES"
+    assert evidence["decision_outcome_market_implied_prob_estimate"] == (
+        pytest.approx(0.60)
+    )
     assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
     assert evidence["last_trade_baseline_prob_estimate"] == pytest.approx(0.43)

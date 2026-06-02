@@ -3868,9 +3868,11 @@ def _decision_evidence_from_signal(
             book_top_levels=book_top_levels,
         ),
         "book_depth": 5,
+        "baseline_probability_coordinate": "YES",
         "market_implied_baseline_prob_estimate": (
             _market_implied_baseline_prob_estimate(decision)
         ),
+        "decision_outcome_market_implied_prob_estimate": decision.limit_price,
         "mid_quote_baseline_prob_estimate": (
             _mid_quote_baseline_prob_estimate(
                 book_top_levels,
