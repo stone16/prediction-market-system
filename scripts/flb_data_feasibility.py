@@ -22,6 +22,8 @@ Usage:
 Exit codes:
     0 — H1 viable (sample gate passed)
     1 — H1 not viable (insufficient data in runtime signal buckets)
+    2 — operator/input error (missing input, malformed warehouse CSV,
+        unsafe artifact path, network/IO failure, or no resolved markets)
 
 Limitations:
     - **Entry price proxy:** Uses ``lastTradePrice`` from the Gamma API,

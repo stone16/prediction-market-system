@@ -18,6 +18,7 @@ from typing import IO, ClassVar, cast
 
 import pytest
 
+import scripts.flb_data_feasibility as flb_data_feasibility
 from scripts.flb_data_feasibility import (
     DecileStats,
     FlbCalibrationArtifactRow,
@@ -37,6 +38,14 @@ from scripts.flb_data_feasibility import (
     save_flb_calibration_csv,
 )
 from pms.strategies.flb.source import load_flb_calibration_csv
+
+
+def test_flb_data_feasibility_docstring_documents_operator_error_exit_code() -> None:
+    docstring = flb_data_feasibility.__doc__
+
+    assert docstring is not None
+    assert "2 — operator/input error" in docstring
+    assert "malformed warehouse CSV" in docstring
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
