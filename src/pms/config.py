@@ -32,6 +32,7 @@ _LIVE_OPERATOR_REHEARSAL_REPORT_GENERATOR = "scripts/rehearse_first_order.py"
 _MAX_LIVE_OPERATOR_APPROVAL_AGE_S = 5 * 60
 _MAX_LIVE_PREFLIGHT_ARTIFACT_AGE_S = 60 * 60
 _MAX_LIVE_READINESS_REPORT_AGE_S = 7 * 24 * 60 * 60
+_MAX_LIVE_LLM_DAILY_COST_TO_MIN_ORDER_RATIO = 0.05
 _LOOPBACK_API_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"})
 _REQUIRED_LIVE_PAPER_SOAK_GATE_CHECKS: tuple[str, ...] = (
     "soak_days",
@@ -860,6 +861,17 @@ def _require_live_risk_envelope(settings: PMSSettings) -> None:
         ):
             invalid.append(
                 "llm.max_daily_llm_cost_usdc must be <= risk.max_daily_loss_usdc"
+            )
+        if (
+            llm_daily_cost is not None
+            and _is_finite_positive(llm_daily_cost)
+            and _is_finite_positive(settings.risk.min_order_usdc)
+            and llm_daily_cost
+            > settings.risk.min_order_usdc
+            * _MAX_LIVE_LLM_DAILY_COST_TO_MIN_ORDER_RATIO
+        ):
+            invalid.append(
+                "llm.max_daily_llm_cost_usdc must be <= 5% of risk.min_order_usdc"
             )
 
     if invalid:

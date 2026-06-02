@@ -871,6 +871,22 @@ def test_live_mode_rejects_llm_daily_cost_cap_above_daily_loss_cap() -> None:
         validate_live_mode_ready(settings)
 
 
+def test_live_mode_rejects_llm_daily_cost_cap_above_first_order_cost_budget() -> None:
+    settings = _live_settings()
+    settings.llm = LLMSettings(
+        enabled=True,
+        provider="anthropic",
+        api_key="sk-test",
+        max_daily_llm_cost_usdc=settings.risk.min_order_usdc * 0.05 + 0.001,
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="llm.max_daily_llm_cost_usdc",
+    ):
+        validate_live_mode_ready(settings)
+
+
 def test_live_mode_requires_drawdown_cap() -> None:
     settings = _live_settings()
     settings.risk.max_drawdown_pct = None
@@ -1361,9 +1377,12 @@ def test_live_mode_rejects_enabled_llm_when_provider_sdk_is_missing(
 
     monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
     settings = _live_settings()
-    settings.llm.enabled = True
-    settings.llm.provider = "anthropic"
-    settings.llm.api_key = "sk-test"
+    settings.llm = LLMSettings(
+        enabled=True,
+        provider="anthropic",
+        api_key="sk-test",
+        max_daily_llm_cost_usdc=0.05,
+    )
 
     with pytest.raises(LiveTradingDisabledError) as exc_info:
         validate_live_mode_ready(settings)

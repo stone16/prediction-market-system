@@ -552,6 +552,30 @@ async def test_market_data_sensor_carries_last_trade_price_into_book_signal() ->
 
 
 @pytest.mark.asyncio
+async def test_market_data_sensor_ignores_book_payload_last_trade_without_token_event() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    sensor = MarketDataSensor(store=store)
+
+    book_signals = await sensor._handle_message(
+        {
+            "event_type": "book",
+            "market": "m-book-last-trade",
+            "asset_id": "yes-token",
+            "timestamp": "1757908892351",
+            "hash": "book-hash-last-trade",
+            "bids": [{"price": "0.09", "size": "150"}],
+            "asks": [{"price": "0.10", "size": "150"}],
+            "last_trade_price": "0.904",
+        }
+    )
+
+    assert book_signals[0].yes_price == pytest.approx(0.095)
+    assert "last_trade_price" not in book_signals[0].external_signal
+
+
+@pytest.mark.asyncio
 async def test_market_data_sensor_update_subscription_warns_and_retries_on_slow_pool(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

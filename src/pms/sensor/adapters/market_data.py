@@ -306,9 +306,6 @@ class MarketDataSensor:
         state.bids = _levels_to_map(message.get("bids"))
         state.asks = _levels_to_map(message.get("asks"))
         state.last_hash = _optional_str(message.get("hash"))
-        last_trade_price = _optional_float(message.get("last_trade_price"))
-        if last_trade_price is not None:
-            state.last_trade_price = last_trade_price
         fee_rate_bps = _optional_float(message.get("fee_rate_bps"))
         if fee_rate_bps is not None:
             state.fee_rate_bps = fee_rate_bps
@@ -331,7 +328,7 @@ class MarketDataSensor:
         return _signal_from_state(
             state=state,
             timestamp=timestamp,
-            price=state.last_trade_price,
+            price=_book_signal_price(state),
             event_type="book",
             extra=metadata,
         )
@@ -749,6 +746,15 @@ def _signal_price(
     if best_bid is not None and best_ask is not None and best_bid > 0 and best_ask > 0:
         return (best_bid + best_ask) / 2.0
     return price
+
+
+def _book_signal_price(state: _BookState) -> float | None:
+    if state.bids and state.asks:
+        best_bid = max(state.bids)
+        best_ask = min(state.asks)
+        if best_bid > 0.0 and best_ask > 0.0:
+            return (best_bid + best_ask) / 2.0
+    return state.last_trade_price
 
 
 def _required_str(mapping: dict[str, Any], key: str) -> str:

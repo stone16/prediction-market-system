@@ -12,7 +12,7 @@ passphrases into chat, issues, PRs, logs, or config files.
    `max_drawdown_pct=20%`, `max_daily_loss_usdc=$20`,
    `max_open_positions=50`, `max_exposure_per_risk_group=$1`,
    `max_quantity_shares=500`, `slippage_threshold_bps=50`, and
-   `llm.max_daily_llm_cost_usdc=$1`.
+   `llm.max_daily_llm_cost_usdc=$0.05`.
 3. Run PAPER mode against live market data with the soak config:
    `uv run pms-api --config config.live-soak.yaml`.
    For process managers that cannot pass CLI args, set

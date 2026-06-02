@@ -100,6 +100,7 @@ from pms.market_selection import (
     SensorSubscriptionController,
     UnionMergePolicy,
 )
+from pms.metrics import SELECTION_FUNNEL_TRADED_TOTAL_METRIC, increment_metric
 from pms.redaction import redact_live_error_values
 from pms.sensor.adapters.direct_book import (
     PolymarketPublicBookClient,
@@ -1577,6 +1578,7 @@ class Runner:
                 )
                 if fill is not None:
                     _append_bounded(self.state.fills, fill)
+                    increment_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC)
                     try:
                         await self.fill_store.insert(fill)
                     except Exception as error:  # noqa: BLE001

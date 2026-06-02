@@ -118,7 +118,10 @@ def test_live_soak_config_enables_llm_forecaster_with_bounded_budget() -> None:
 
     assert settings.llm.enabled is True
     assert settings.llm.provider == "anthropic"
-    assert settings.llm.max_daily_llm_cost_usdc == 1.0
+    llm_daily_cap = settings.llm.max_daily_llm_cost_usdc
+    assert llm_daily_cap is not None
+    assert llm_daily_cap == pytest.approx(0.05)
+    assert llm_daily_cap <= settings.risk.min_order_usdc * 0.05
 
 
 def test_live_soak_config_yaml_does_not_pin_model_or_credentials() -> None:
@@ -206,7 +209,7 @@ def test_live_config_example_is_non_secret_and_uses_soak_risk_envelope() -> None
     assert payload["llm"] == {
         "enabled": False,
         "provider": "anthropic",
-        "max_daily_llm_cost_usdc": 1.0,
+        "max_daily_llm_cost_usdc": 0.05,
     }
     assert payload["polymarket"] == {
         "operator_approval_mode": "every_order",

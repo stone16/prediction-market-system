@@ -21,6 +21,11 @@ from pms.config import (
 from pms.core.enums import MarketStatus, OrderStatus, RunMode, Side, TimeInForce
 from pms.core.models import FillRecord, MarketSignal, OrderState, Portfolio, Position
 from pms.core.models import TradeDecision
+from pms.metrics import (
+    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
+    get_metric,
+    set_metric,
+)
 from pms.runner import ActuatorWorkItem, Runner, _portfolio_with_fill
 
 
@@ -406,6 +411,7 @@ async def _run_actuator_loop(runner: Runner) -> None:
 
 @pytest.mark.asyncio
 async def test_actuator_loop_persists_fill_after_appending_runner_state() -> None:
+    set_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC, 0.0)
     runner = _runner()
     runner.actuator_executor = cast(Any, _ExecutorDouble())
     runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
@@ -424,6 +430,7 @@ async def test_actuator_loop_persists_fill_after_appending_runner_state() -> Non
     assert cast(_RecordingOrderStore, runner.order_store).calls == ["market-cp06-a"]
     assert [fill.market_id for fill in runner.state.fills] == ["market-cp06-a"]
     assert cast(_RecordingFillStore, runner.fill_store).calls == ["market-cp06-a"]
+    assert get_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC) == pytest.approx(1.0)
     assert runner.portfolio.locked_usdc == pytest.approx(20.5)
     assert cast(_EvaluatorSpoolDouble, runner._evaluator_spool).calls == [
         ("market-cp06-a", "decision-market-cp06-a")
