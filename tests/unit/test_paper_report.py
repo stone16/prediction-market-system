@@ -127,7 +127,7 @@ def test_paper_report_escapes_freeform_table_values() -> None:
 
     assert "| Strategy | default\\|paper v1 | - |" in report
     assert "| 12\\|00 | bad trigger | operator saw \\| FAIL \\| text |" in report
-    assert "| decision\\|1 | market 1 | 12.0% | 1.0% | 11.0% |" in report
+    assert "| decision\\|1 | market 1 | 12.0% | 1.0% | 0.0% | 0.0% | 11.0% |" in report
     assert "| missing\\|required factor | 1 |" in report
     assert "| market\\|clamp 1 | 2 |" in report
 
@@ -1131,6 +1131,59 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
         "halt_recovery_cycles_7d",
         "2 recovered halt cycle(s) in trailing 7d",
     ) in metrics.risk_events
+
+
+def test_trade_cost_breakdown_uses_decision_evidence_cost_basis() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T00:00:00+00:00",
+            "sensors": [],
+            "controller": {"decisions_total": 1, "diagnostic_counts": {}},
+            "actuator": {"fills_total": 1},
+            "evaluator": {},
+            "quality": {},
+        },
+        decisions=[
+            {
+                "decision_id": "d-cost-evidence",
+                "market_id": "m-cost-evidence",
+                "prob_estimate": 0.62,
+                "limit_price": 0.41,
+                "expected_edge": 0.21,
+                "spread_bps_at_decision": 80,
+                "created_at": "2026-05-05T00:00:00+00:00",
+                "decision_evidence": {
+                    "fee_edge_at_decision": 0.0177,
+                    "slippage_edge_at_decision": 0.00205,
+                    "net_edge_after_costs": 0.18697,
+                },
+            }
+        ],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.trade_costs == (
+        TradeCostBreakdown(
+            decision_id="d-cost-evidence",
+            market_id="m-cost-evidence",
+            gross_edge=0.21,
+            spread_cost=0.00328,
+            fee_cost=0.0177,
+            slippage_cost=0.00205,
+            net_edge=0.18697,
+        ),
+    )
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert "## Trade Cost Decomposition" in report
+    assert (
+        "| d-cost-evidence | m-cost-evidence | 21.0% | 0.3% | 1.8% | 0.2% | 18.7% |"
+        in report
+    )
 
 
 def test_metrics_from_api_payloads_counts_only_elapsed_soak_days() -> None:
@@ -4473,8 +4526,8 @@ def test_paper_report_renders_calibration_and_cost_diagnostics() -> None:
     assert "## Calibration Reliability" in report
     assert "| [10%-20%) | 3 | insufficient data |" in report
     assert "| [50%-60%) | 5 | 60.0% |" in report
-    assert "## Spread Cost Decomposition" in report
-    assert "| d-cost-1 | m-cost | 12.0% | 0.4% | 11.6% |" in report
+    assert "## Trade Cost Decomposition" in report
+    assert "| d-cost-1 | m-cost | 12.0% | 0.4% | 0.0% | 0.3% | 11.3% |" in report
     assert "## Extreme Probability Rejections" in report
     assert "| m-extreme | 2 |" in report
     assert "## Selection Funnel" in report

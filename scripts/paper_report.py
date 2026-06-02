@@ -64,6 +64,8 @@ class TradeCostBreakdown:
     gross_edge: float
     spread_cost: float
     net_edge: float
+    fee_cost: float = 0.0
+    slippage_cost: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1407,13 +1409,18 @@ def _trade_costs(decisions: Sequence[TradeDecision]) -> tuple[TradeCostBreakdown
             bps=decision.spread_bps_at_decision,
             price=decision.limit_price,
         )
+        slippage_cost = _price_space_cost(
+            bps=decision.max_slippage_bps,
+            price=decision.limit_price,
+        )
         costs.append(
             TradeCostBreakdown(
                 decision_id=decision.decision_id,
                 market_id=decision.market_id,
                 gross_edge=gross_edge,
                 spread_cost=spread_cost,
-                net_edge=gross_edge - spread_cost,
+                slippage_cost=slippage_cost,
+                net_edge=gross_edge - spread_cost - slippage_cost,
             )
         )
     return tuple(costs)
@@ -1432,13 +1439,26 @@ def _trade_costs_from_decision_rows(
             bps=spread_bps,
             price=_decision_price(row),
         )
+        evidence_obj = row.get("decision_evidence")
+        evidence: Mapping[str, object] = (
+            evidence_obj if isinstance(evidence_obj, Mapping) else {}
+        )
+        fee_cost = _optional_float_from_mapping(evidence, "fee_edge_at_decision") or 0.0
+        slippage_cost = (
+            _optional_float_from_mapping(evidence, "slippage_edge_at_decision") or 0.0
+        )
+        net_edge = _optional_float_from_mapping(evidence, "net_edge_after_costs")
+        if net_edge is None:
+            net_edge = gross_edge - spread_cost - fee_cost - slippage_cost
         costs.append(
             TradeCostBreakdown(
                 decision_id=_string_from_mapping(row, "decision_id", "unknown"),
                 market_id=_string_from_mapping(row, "market_id", "unknown"),
                 gross_edge=gross_edge,
                 spread_cost=spread_cost,
-                net_edge=gross_edge - spread_cost,
+                fee_cost=fee_cost,
+                slippage_cost=slippage_cost,
+                net_edge=net_edge,
             )
         )
     return tuple(costs)
@@ -1587,14 +1607,17 @@ def _render_secondary_baseline_score_section(
 
 
 def _render_trade_cost_section(costs: Sequence[TradeCostBreakdown]) -> list[str]:
-    lines = ["", "## Spread Cost Decomposition", ""]
+    lines = ["", "## Trade Cost Decomposition", ""]
     if not costs:
         lines.append("No trade cost data.")
         return lines
     lines.extend(
         [
-            "| Decision | Market | Gross edge | Spread cost | Net edge |",
-            "|---|---|---:|---:|---:|",
+            (
+                "| Decision | Market | Gross edge | Spread cost | Fee cost | "
+                "Slippage cost | Net after costs |"
+            ),
+            "|---|---|---:|---:|---:|---:|---:|",
         ]
     )
     for cost in costs:
@@ -1603,6 +1626,8 @@ def _render_trade_cost_section(costs: Sequence[TradeCostBreakdown]) -> list[str]
             f"{_escape_table_value(cost.market_id)} | "
             f"{_fmt_probability_percent(cost.gross_edge)} | "
             f"{_fmt_probability_percent(cost.spread_cost)} | "
+            f"{_fmt_probability_percent(cost.fee_cost)} | "
+            f"{_fmt_probability_percent(cost.slippage_cost)} | "
             f"{_fmt_probability_percent(cost.net_edge)} |"
         )
     return lines
