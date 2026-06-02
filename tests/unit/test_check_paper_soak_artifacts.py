@@ -89,6 +89,38 @@ def test_check_paper_soak_artifacts_passes_with_staged_flb_calibration(
     assert "not configured" in captured.out
 
 
+def test_check_paper_soak_artifacts_fails_when_flb_parent_is_permissive(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    artifact_dir = tmp_path / "permissive"
+    artifact_dir.mkdir()
+    artifact_dir.chmod(0o755)
+    calibration_path = artifact_dir / "flb-calibration.csv"
+    _write_flb_calibration(calibration_path)
+    config_path = tmp_path / "live-soak.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "strategies:",
+                f"  flb_calibration_path: {calibration_path}",
+                "  flb_min_calibration_samples: 100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = check_paper_soak_artifacts.main(["--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[FAIL] flb_calibration:" in captured.out
+    assert "parent directory" in captured.out
+    assert "too permissive" in captured.out
+
+
 def test_check_paper_soak_artifacts_fails_thin_configured_category_prior(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -121,3 +153,42 @@ def test_check_paper_soak_artifacts_fails_thin_configured_category_prior(
     assert "[FAIL] category_prior:" in captured.out
     assert "loaded 1 resolved rows" in captured.out
     assert "category_prior_min_global_samples=2" in captured.out
+
+
+def test_check_paper_soak_artifacts_fails_when_category_prior_parent_is_permissive(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calibration_dir = tmp_path / "private"
+    calibration_dir.mkdir(mode=0o700)
+    calibration_path = calibration_dir / "flb-calibration.csv"
+    _write_flb_calibration(calibration_path)
+    category_dir = tmp_path / "permissive"
+    category_dir.mkdir()
+    category_dir.chmod(0o755)
+    category_prior_path = category_dir / "category-prior.csv"
+    _write_category_prior(category_prior_path, rows=2)
+    config_path = tmp_path / "live-soak.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "controller:",
+                f"  category_prior_observations_path: {category_prior_path}",
+                "  category_prior_min_global_samples: 2",
+                "strategies:",
+                f"  flb_calibration_path: {calibration_path}",
+                "  flb_min_calibration_samples: 100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = check_paper_soak_artifacts.main(["--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[FAIL] category_prior:" in captured.out
+    assert "parent directory" in captured.out
+    assert "too permissive" in captured.out

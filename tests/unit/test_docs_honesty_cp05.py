@@ -211,6 +211,8 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "scripts/prepare_local_paper_soak_config.py" in runbook_text
     assert "PMS_SECURE_DIR" in readme_text
     assert "PMS_SECURE_DIR" in runbook_text
+    assert "private artifact parent" in readme_text
+    assert "private artifact parent" in runbook_text
     assert "scripts/check_paper_soak_artifacts.py" in readme_text
     assert "scripts/check_paper_soak_artifacts.py" in runbook_text
     assert "credentialed preflight artifact is missing/invalid" in readme_text

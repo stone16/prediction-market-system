@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import stat
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -71,9 +72,11 @@ def _check_flb_calibration(settings: PMSSettings) -> PaperSoakArtifactCheck:
             False,
             "strategies.flb_calibration_path is required for h1_flb paper soak",
         )
+    path = Path(raw_path).expanduser()
     try:
+        _require_private_parent(path, label="FLB calibration artifact")
         model = load_flb_calibration_csv(
-            raw_path,
+            path,
             min_sample_count=settings.strategies.flb_min_calibration_samples,
         )
     except (OSError, ValueError) as exc:
@@ -83,7 +86,7 @@ def _check_flb_calibration(settings: PMSSettings) -> PaperSoakArtifactCheck:
         "flb_calibration",
         True,
         (
-            f"loaded {len(model.calibrations)} signals from {Path(raw_path).expanduser()} "
+            f"loaded {len(model.calibrations)} signals from {path} "
             f"(min_sample_count={model.min_sample_count}, "
             f"source_labels={','.join(source_labels)})"
         ),
@@ -98,8 +101,10 @@ def _check_category_prior(settings: PMSSettings) -> PaperSoakArtifactCheck:
             True,
             "not configured; skipped for PAPER soak startup",
         )
+    path = Path(raw_path).expanduser()
     try:
-        loaded = load_category_prior_observations_csv(raw_path)
+        _require_private_parent(path, label="category-prior artifact")
+        loaded = load_category_prior_observations_csv(path)
     except (OSError, ValueError) as exc:
         return PaperSoakArtifactCheck("category_prior", False, str(exc))
     observation_count = len(loaded.observations)
@@ -110,7 +115,7 @@ def _check_category_prior(settings: PMSSettings) -> PaperSoakArtifactCheck:
             False,
             (
                 f"loaded {observation_count} resolved rows from "
-                f"{Path(raw_path).expanduser()}; requires "
+                f"{path}; requires "
                 f"category_prior_min_global_samples={minimum}"
             ),
         )
@@ -119,10 +124,29 @@ def _check_category_prior(settings: PMSSettings) -> PaperSoakArtifactCheck:
         True,
         (
             f"loaded {observation_count} resolved rows from "
-            f"{Path(raw_path).expanduser()} "
+            f"{path} "
             f"(skipped_ambiguous_count={loaded.skipped_ambiguous_count})"
         ),
     )
+
+
+def _require_private_parent(path: Path, *, label: str) -> None:
+    parent = path.parent
+    try:
+        mode = parent.lstat().st_mode
+    except FileNotFoundError as exc:
+        msg = f"{label} parent directory does not exist: {parent}"
+        raise ValueError(msg) from exc
+    if not stat.S_ISDIR(mode):
+        msg = f"{label} parent directory is not a directory: {parent}"
+        raise ValueError(msg)
+    permissions = stat.S_IMODE(mode)
+    if permissions & 0o077:
+        msg = f"{label} parent directory {parent} is too permissive; run chmod 700"
+        raise ValueError(msg)
+    if not permissions & stat.S_IWUSR:
+        msg = f"{label} parent directory {parent} is not owner-writable; run chmod 700"
+        raise ValueError(msg)
 
 
 def _format_plain(checks: Sequence[PaperSoakArtifactCheck]) -> str:

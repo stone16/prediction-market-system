@@ -233,8 +233,10 @@ For Fly/LIVE volume staging, keep the same artifact filenames under
 
 Before starting the paper-soak API, run the local artifact check. It uses the
 same FLB calibration and optional category-prior CSV loaders as runtime
-startup, so a missing or malformed launch artifact fails before the API process
-gets as far as `Runner(...)` construction:
+startup, and it also verifies each configured private artifact parent before
+the API process gets as far as `Runner(...)` construction. A missing,
+malformed, or permissively staged launch artifact fails here instead of during
+paper-soak startup:
 
 ```bash
 uv run python scripts/check_paper_soak_artifacts.py \

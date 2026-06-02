@@ -165,8 +165,9 @@ uv run python scripts/export_category_prior_observations.py \
 # for example: --calibration-csv /secure/pms/flb-calibration.csv
 
 # 4b. Fail fast before starting the API; this uses the same artifact loaders
-#     as runtime startup and exits nonzero when required launch artifacts are
-#     missing or malformed.
+#     as runtime startup, also verifies each configured private artifact parent,
+#     and exits nonzero when required launch artifacts are missing, malformed,
+#     or staged in a permissive directory.
 uv run python scripts/check_paper_soak_artifacts.py \
   --config config.local.live-soak.yaml
 
