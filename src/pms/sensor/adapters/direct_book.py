@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import math
-from typing import Any, Callable, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol, cast
 
 import httpx
 
@@ -27,6 +27,14 @@ class VenueBookClient(Protocol):
         market_id: str,
         token_id: str,
     ) -> VenueBook: ...
+
+
+class VenueFeeRateClient(Protocol):
+    async def read_fee_rate_bps(
+        self,
+        market_id: str,
+        token_id: str,
+    ) -> float | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +115,16 @@ class RefreshingDirectBookSnapshotReader:
             return list(synthetic_levels)
         return await self.primary.read_levels_for_snapshot(snapshot_id)
 
+    async def read_fee_rate_bps(self, market_id: str, token_id: str) -> float | None:
+        reader = getattr(self.venue_client, "read_fee_rate_bps", None)
+        if not callable(reader):
+            return None
+        typed_reader = cast(
+            Callable[[str, str], Awaitable[float | None]],
+            reader,
+        )
+        return await typed_reader(market_id, token_id)
+
     def _is_stale(self, ts: datetime) -> bool:
         now = _call_clock(self.clock)
         raw_age_ms = (_aware_utc(now) - _aware_utc(ts)).total_seconds() * 1000.0
@@ -148,6 +166,17 @@ class PolymarketPublicBookClient:
             observed_at=_call_clock(self.clock),
         )
 
+    async def read_fee_rate_bps(self, market_id: str, token_id: str) -> float | None:
+        del market_id
+        async with httpx.AsyncClient(http2=False, timeout=self.timeout_s) as client:
+            response = await client.get(
+                f"{self.host.rstrip('/')}/fee-rate",
+                params={"token_id": token_id},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        return fee_rate_bps_from_clob_payload(payload)
+
 
 def venue_book_from_clob_payload(
     payload: Mapping[str, Any],
@@ -183,6 +212,29 @@ def venue_book_from_clob_payload(
         bids=bids,
         asks=asks,
     )
+
+
+def fee_rate_bps_from_clob_payload(payload: object) -> float | None:
+    raw_fee_rate: object
+    if isinstance(payload, Mapping):
+        raw_fee_rate = (
+            payload.get("fee_rate_bps")
+            if payload.get("fee_rate_bps") is not None
+            else (
+                payload.get("feeRateBps")
+                if payload.get("feeRateBps") is not None
+                else payload.get("base_fee")
+            )
+        )
+    else:
+        raw_fee_rate = payload
+    if raw_fee_rate is None:
+        return None
+    fee_rate_bps = _finite_float(raw_fee_rate, field_name="fee_rate_bps")
+    if fee_rate_bps < 0.0 or fee_rate_bps > 10_000.0:
+        msg = "Polymarket fee_rate_bps must satisfy 0 <= value <= 10000"
+        raise ValueError(msg)
+    return fee_rate_bps
 
 
 def _book_levels_from_payload_side(

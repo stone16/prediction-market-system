@@ -84,8 +84,10 @@ class StaticDirectBookReader:
         bids: list[tuple[float, float]],
         asks: list[tuple[float, float]],
         ts: datetime | None = None,
+        fee_rate_bps: float | None = None,
     ) -> None:
         self.token_id = token_id
+        self.fee_rate_bps = fee_rate_bps
         self.snapshot = BookSnapshot(
             id=101,
             market_id="market-cp02",
@@ -127,6 +129,10 @@ class StaticDirectBookReader:
 
     async def read_levels_for_snapshot(self, snapshot_id: int) -> list[BookLevel]:
         return list(self.levels) if snapshot_id == self.snapshot.id else []
+
+    async def read_fee_rate_bps(self, market_id: str, token_id: str) -> float | None:
+        del market_id
+        return self.fee_rate_bps if token_id == self.token_id else None
 
 
 class NullForecaster:
@@ -552,6 +558,59 @@ async def test_best_ask_strategy_sorts_refreshed_direct_book_levels() -> None:
             {"price": 0.99, "size": 10.0},
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_best_ask_strategy_uses_direct_fee_rate_bps_for_costs() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(
+            ControllerSettings(
+                min_volume=100.0,
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            )
+        ),
+        direct_book_reader=StaticDirectBookReader(
+            token_id="token-cp02",
+            bids=[(0.39, 1_000.0)],
+            asks=[(0.40, 1_000.0)],
+            fee_rate_bps=300.0,
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            ),
+        ),
+    )
+    now = datetime.now(tz=UTC)
+    signal = replace(
+        _signal(fetched_at=now),
+        resolves_at=now + timedelta(days=1),
+        external_signal={
+            **_signal().external_signal,
+            "raw_event_type": "book",
+            "book_received_at": (now - timedelta(seconds=5)).isoformat(),
+        },
+        orderbook={
+            "bids": [{"price": 0.39, "size": 1_000.0}],
+            "asks": [{"price": 0.40, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is not None
+    opportunity, _ = emission
+    assert pipeline.last_execution_signal is not None
+    assert pipeline.last_execution_signal.external_signal["fee_rate_bps"] == 300.0
+    assert opportunity.composition_trace["fee_rate"] == pytest.approx(0.03)
+    assert opportunity.composition_trace["fee_edge"] == pytest.approx(0.018)
 
 
 @pytest.mark.asyncio

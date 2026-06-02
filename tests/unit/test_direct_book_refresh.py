@@ -13,6 +13,7 @@ from pms.sensor.adapters.direct_book import (
     PolymarketPublicBookClient,
     RefreshingDirectBookSnapshotReader,
     VenueBook,
+    fee_rate_bps_from_clob_payload,
     venue_book_from_clob_payload,
 )
 from pms.storage.market_data_store import PostgresMarketDataStore
@@ -42,10 +43,16 @@ class FakePrimaryBookReader:
 class FakeVenueBookClient:
     book: VenueBook
     calls: list[tuple[str, str]] = field(default_factory=list)
+    fee_rate_bps: float | None = None
+    fee_calls: list[tuple[str, str]] = field(default_factory=list)
 
     async def read_order_book(self, market_id: str, token_id: str) -> VenueBook:
         self.calls.append((market_id, token_id))
         return self.book
+
+    async def read_fee_rate_bps(self, market_id: str, token_id: str) -> float | None:
+        self.fee_calls.append((market_id, token_id))
+        return self.fee_rate_bps
 
 
 @pytest.mark.asyncio
@@ -141,6 +148,34 @@ async def test_refreshing_direct_book_reader_refreshes_stale_primary_snapshot() 
     assert primary.level_calls == []
 
 
+@pytest.mark.asyncio
+async def test_refreshing_direct_book_reader_reads_venue_fee_rate_bps() -> None:
+    now = datetime(2026, 6, 1, 22, 0, tzinfo=UTC)
+    primary = FakePrimaryBookReader(snapshot=None)
+    venue = FakeVenueBookClient(
+        VenueBook(
+            market_id="market-1",
+            token_id="token-no",
+            ts=now,
+            hash="venue-hash",
+            bids=(BookLevel(0, "market-1", "BUY", 0.43, 20.0),),
+            asks=(BookLevel(0, "market-1", "SELL", 0.44, 30.0),),
+        ),
+        fee_rate_bps=300.0,
+    )
+    reader = RefreshingDirectBookSnapshotReader(
+        primary=primary,
+        venue_client=venue,
+        max_snapshot_age_ms=1_000.0,
+        clock=lambda: now,
+    )
+
+    fee_rate_bps = await reader.read_fee_rate_bps("market-1", "token-no")
+
+    assert fee_rate_bps == pytest.approx(300.0)
+    assert venue.fee_calls == [("market-1", "token-no")]
+
+
 def test_venue_book_from_clob_payload_parses_public_book_response() -> None:
     observed_at = datetime(2026, 6, 1, 22, 0, tzinfo=UTC)
 
@@ -177,6 +212,12 @@ def test_venue_book_from_clob_payload_parses_public_book_response() -> None:
         BookLevel(0, "market-1", "SELL", 0.51, 9.5),
         BookLevel(0, "market-1", "SELL", 0.75, 2.0),
         BookLevel(0, "market-1", "SELL", 0.99, 1.0),
+    )
+
+
+def test_fee_rate_bps_from_clob_payload_accepts_base_fee_response() -> None:
+    assert fee_rate_bps_from_clob_payload({"base_fee": 1000}) == pytest.approx(
+        1000.0
     )
 
 

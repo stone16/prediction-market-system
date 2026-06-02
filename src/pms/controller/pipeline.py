@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from math import isfinite
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
@@ -80,6 +81,41 @@ class _DirectBookRead:
     signal: MarketSignal | None
     failure: str | None = None
     age_ms: float | None = None
+
+
+async def _read_direct_fee_rate_bps(
+    reader: DirectBookSnapshotReader | None,
+    *,
+    market_id: str,
+    token_id: str,
+) -> float | None:
+    if reader is None:
+        return None
+    fee_reader = getattr(reader, "read_fee_rate_bps", None)
+    if not callable(fee_reader):
+        return None
+    typed_reader = cast(
+        Callable[[str, str], Awaitable[float | None]],
+        fee_reader,
+    )
+    try:
+        fee_rate_bps = await typed_reader(market_id, token_id)
+    except Exception as error:  # noqa: BLE001
+        logger.warning(
+            "direct fee-rate read failed for %s/%s: %s",
+            market_id,
+            token_id,
+            error,
+        )
+        return None
+    if (
+        fee_rate_bps is None
+        or not isfinite(fee_rate_bps)
+        or fee_rate_bps < 0.0
+        or fee_rate_bps > 10_000.0
+    ):
+        return None
+    return fee_rate_bps
 
 
 @dataclass
@@ -972,6 +1008,13 @@ class ControllerPipeline:
             "book_received_at": snapshot_ts.isoformat(),
             "direct_outcome_book_source": snapshot.source,
         }
+        fee_rate_bps = await _read_direct_fee_rate_bps(
+            self.direct_book_reader,
+            market_id=signal.market_id,
+            token_id=token_id,
+        )
+        if fee_rate_bps is not None:
+            external_signal["fee_rate_bps"] = fee_rate_bps
         direct_signal = replace(
             signal,
             token_id=token_id,
