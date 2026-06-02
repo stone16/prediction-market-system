@@ -11,12 +11,15 @@ and counts original YES-price markets in the two H1 signal buckets.
 
 Usage:
     uv run python scripts/flb_data_feasibility.py [--limit N] [--output PATH]
-    uv run python scripts/flb_data_feasibility.py \
-        --source warehouse-csv --input exports/polymarket_resolved_binary.csv
+    uv run python scripts/export_flb_warehouse_from_dune.py \
+        --output "$PMS_SECURE_DIR/polymarket_resolved_binary.csv"
     uv run python scripts/flb_data_feasibility.py \
         --source warehouse-csv \
-        --input exports/polymarket_resolved_binary.csv \
-        --calibration-csv exports/flb_calibration.csv \
+        --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv"
+    uv run python scripts/flb_data_feasibility.py \
+        --source warehouse-csv \
+        --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
+        --calibration-csv "$PMS_SECURE_DIR/flb-calibration.csv" \
         --calibration-source-label warehouse-flb-v1
 
 Exit codes:

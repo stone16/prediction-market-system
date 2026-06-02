@@ -205,10 +205,19 @@ strategies:
 Replace the static cost fields with paper/live telemetry before promotion.
 
 Generate the local PAPER artifact from the strict warehouse resolution export
-with the command below. First stage the external Dune/warehouse export at
-`$PMS_SECURE_DIR/polymarket_resolved_binary.csv`:
+with the commands below. The checked-in Dune SQL template lives at
+`docs/research/flb_polymarket_resolved_binary_dune.sql`; the Dune API key is a
+credential, but the exported CSV and generated calibration CSV are non-secret
+launch artifacts. The exporter validates the downloaded CSV with the same
+strict warehouse loader as `scripts/flb_data_feasibility.py` and refuses to
+publish an under-sampled launch export unless `--allow-under-sampled` is
+explicitly passed for diagnostics:
 
 ```bash
+export DUNE_API_KEY="<load from operator secret store>"
+uv run python scripts/export_flb_warehouse_from_dune.py \
+  --output "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
+  --performance large
 uv run python scripts/flb_data_feasibility.py \
   --source warehouse-csv \
   --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \

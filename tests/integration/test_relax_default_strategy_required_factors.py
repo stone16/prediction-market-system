@@ -79,14 +79,18 @@ def _active_config(cur: psycopg.Cursor[Any]) -> tuple[str, dict[str, Any]]:
 
 
 def _required_flags(config: dict[str, Any]) -> dict[str, bool]:
-    factors = config["config"]["factor_composition"]
-    return {
-        f["factor_id"]: f.get("required", True)
-        for f in factors
-        if f["factor_id"] in {
-            "metaculus_prior", "subset_pricing_violation"
-        }
-    }
+    factors = config.get("config", {}).get("factor_composition", [])
+    if not isinstance(factors, list):
+        return {}
+    flags: dict[str, bool] = {}
+    for factor in factors:
+        if not isinstance(factor, dict):
+            continue
+        factor_id = factor.get("factor_id")
+        if factor_id not in {"metaculus_prior", "subset_pricing_violation"}:
+            continue
+        flags[str(factor_id)] = bool(factor.get("required", True))
+    return flags
 
 
 def _run_script() -> subprocess.CompletedProcess[str]:

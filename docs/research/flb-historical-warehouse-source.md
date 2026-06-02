@@ -27,6 +27,23 @@ one row per resolved binary market. `market_id` must be unique; trade-level or
 token-level exports must be aggregated to one entry snapshot per market before
 running the gate.
 
+The default launch export path is now checked in:
+
+```bash
+export DUNE_API_KEY="<load from operator secret store>"
+uv run python scripts/export_flb_warehouse_from_dune.py \
+  --sql docs/research/flb_polymarket_resolved_binary_dune.sql \
+  --output "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
+  --performance large
+```
+
+The script executes Dune raw SQL, polls the execution, downloads the CSV, parses
+the result with the strict warehouse loader below, and only then publishes the
+output to the private artifact directory. By default it also requires both H1
+runtime signal buckets to meet the sample gate before publishing. Use
+`--allow-under-sampled` only for diagnostics; an under-sampled export is not a
+launch artifact.
+
 The CSV requires these columns:
 
 | Column | Meaning |
@@ -55,9 +72,11 @@ they can leak settlement truth into the FLB sample.
 ```bash
 uv run python scripts/flb_data_feasibility.py \
   --source warehouse-csv \
-  --input exports/polymarket_resolved_binary.csv \
-  --output docs/research/flb-report.md \
-  --csv docs/research/flb-deciles.csv
+  --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
+  --output "$PMS_SECURE_DIR/flb-feasibility.md" \
+  --csv "$PMS_SECURE_DIR/flb-deciles.csv" \
+  --calibration-csv "$PMS_SECURE_DIR/flb-calibration.csv" \
+  --calibration-source-label warehouse-flb-v1
 ```
 
 The script returns:
@@ -65,7 +84,8 @@ The script returns:
 - exit `0` when H1 data is viable and both extreme buckets have at least 100
   original market rows in the runtime signal buckets.
 - exit `1` when H1 is not viable yet because the sample gate fails.
-- exit `2` when no markets were loaded.
+- exit `2` for operator/input errors: missing input, malformed warehouse CSV,
+  unsafe artifact paths, network/IO failure, or no resolved markets.
 
 ## Next Data Gap
 

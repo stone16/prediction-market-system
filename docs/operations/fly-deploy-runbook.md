@@ -77,10 +77,16 @@ The supervised paper-soak config now requires the calibrated H1 FLB artifact at
 artifact before the first machine starts; otherwise `Runner` fails closed while
 loading the config.
 
-Generate the artifact from the strict warehouse export first:
+Generate the artifact from the checked-in Dune export first. `DUNE_API_KEY` is
+a credential; load it from the operator secret store into the staging shell and
+do not commit or paste it:
 
 ```bash
 install -d -m 700 /secure/pms
+export DUNE_API_KEY="<load from operator secret store>"
+uv run python scripts/export_flb_warehouse_from_dune.py \
+  --output /secure/pms/polymarket_resolved_binary.csv \
+  --performance large
 uv run python scripts/flb_data_feasibility.py \
   --source warehouse-csv \
   --input /secure/pms/polymarket_resolved_binary.csv \

@@ -41,9 +41,11 @@ enough coverage and measurable edge.
 Six things remain between the current branch and real capital:
 
 1. **Non-secret launch artifacts** — Generate `/secure/pms/flb-calibration.csv`
-   from `/secure/pms/polymarket_resolved_binary.csv` with
-   `scripts/flb_data_feasibility.py --source warehouse-csv`; paper-soak startup
-   fails closed until this artifact exists and passes the runtime H1 sample gate.
+   from `/secure/pms/polymarket_resolved_binary.csv` with the checked-in Dune
+   export SQL plus `scripts/flb_data_feasibility.py --source warehouse-csv`;
+   paper-soak startup fails closed until this artifact exists and passes the
+   runtime H1 sample gate. The Dune API key is a credential; the export and
+   calibration artifacts are not.
 2. **Polymarket credentials** — 6 fields (private_key, api_key, api_secret,
    api_passphrase, funder_address, signature_type). For local LIVE, stage them
    in the chmod 600 `local_secret_file` outside the working tree; never put
@@ -148,8 +150,12 @@ uv run python scripts/prepare_local_paper_soak_config.py \
 #   - Keep controller.category_prior_observations_path pointed at the local secure CSV below
 
 # 4a. Generate required non-secret launch artifacts outside the repo.
-#     First stage the strict external warehouse/Dune export at:
-#       $PMS_SECURE_DIR/polymarket_resolved_binary.csv
+#     The Dune API key is a credential; keep it in an operator secret store
+#     and load it only into this shell.
+export DUNE_API_KEY="<load from operator secret store>"
+uv run python scripts/export_flb_warehouse_from_dune.py \
+  --output "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
+  --performance large
 uv run python scripts/flb_data_feasibility.py \
   --source warehouse-csv \
   --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
