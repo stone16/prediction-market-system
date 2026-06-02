@@ -88,6 +88,16 @@ def test_compose_backed_local_docs_use_database_created_by_compose() -> None:
         assert missing_compose_dsn not in section_text
 
 
+def test_migrations_doc_uses_compose_default_database_for_local_example() -> None:
+    applying = _section(
+        MIGRATIONS_DOC_PATH.read_text(encoding="utf-8"),
+        "## Applying",
+    )
+
+    assert "postgres://postgres:postgres@localhost:5432/pms_test" in applying
+    assert "postgres://postgres:postgres@localhost:5432/pms_dev" not in applying
+
+
 def test_readme_development_documents_all_ci_gates() -> None:
     readme_development = _section(
         README_PATH.read_text(encoding="utf-8"),
