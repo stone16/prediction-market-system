@@ -47,6 +47,7 @@ from pms.config import (
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, RunMode, Side, TimeInForce
 from pms.core.models import (
     LiveTradingDisabledError,
+    MarketSignal,
     OrderState,
     Portfolio,
     TradeDecision,
@@ -4040,6 +4041,41 @@ def test_fill_from_order_applies_configured_fee_rate() -> None:
     # 4.0 notional * 0.04 * (1 - 0.5) = 0.08
     assert fill.fees == pytest.approx(0.08)
     assert fill.fee_bps == 400
+
+
+def test_fill_from_order_uses_signal_fee_rate_bps_when_available() -> None:
+    """Paper fills should use market fee evidence carried by the signal.
+
+    Polymarket fees are market/category specific, so a global fallback rate can
+    corrupt paper P&L and net-edge evidence when the feed includes fee_rate_bps.
+    """
+    from pms.runner import _fill_from_order
+
+    decision = _decision(notional_usdc=10.0)
+    signal = MarketSignal(
+        market_id=decision.market_id,
+        token_id=decision.token_id,
+        venue=decision.venue,
+        title="Will signal fees be used?",
+        yes_price=0.5,
+        volume_24h=1000.0,
+        resolves_at=datetime(2026, 4, 26, tzinfo=UTC),
+        orderbook={},
+        external_signal={"fee_rate_bps": "300"},
+        fetched_at=datetime(2026, 4, 25, tzinfo=UTC),
+        market_status="open",
+    )
+    fill = _fill_from_order(
+        _filled_state(decision),
+        decision,
+        signal,
+        fee_rate=0.07,
+    )
+
+    assert fill is not None
+    # 4.0 notional * 0.03 * (1 - 0.5) = 0.06
+    assert fill.fees == pytest.approx(0.06)
+    assert fill.fee_bps == 300
 
 
 def test_fill_from_order_omits_fee_when_rate_is_none() -> None:

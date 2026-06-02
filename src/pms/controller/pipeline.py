@@ -43,6 +43,7 @@ from pms.core.models import (
     Portfolio,
     TradeDecision,
 )
+from pms.execution.fees import market_fee_rate_from_metadata
 from pms.factors.base import EMPTY_OUTER_RING
 from pms.factors.composition import apply_composition, evaluate_branch_probabilities
 from pms.factors.definitions.orderbook_imbalance import OrderbookImbalance
@@ -616,6 +617,10 @@ class ControllerPipeline:
             decision_price=decision_price,
             spread_bps=decision_spread_bps,
             settings=self.settings,
+            fee_rate=market_fee_rate_from_metadata(
+                execution_signal.external_signal,
+                fallback_rate=self.settings.strategies.flb_fee_rate,
+            ),
         )
         net_edge_after_costs = decision_edge - decision_costs.total_edge
         if net_edge_after_costs <= 0.0:
@@ -630,7 +635,7 @@ class ControllerPipeline:
                     "gross_edge": decision_edge,
                     "spread_bps_at_decision": decision_spread_bps,
                     "spread_edge": decision_costs.spread_edge,
-                    "fee_rate": self.settings.strategies.flb_fee_rate,
+                    "fee_rate": decision_costs.fee_rate,
                     "fee_edge": decision_costs.fee_edge,
                     "max_slippage_bps": self.settings.controller.max_slippage_bps,
                     "slippage_edge": decision_costs.slippage_edge,
@@ -858,7 +863,7 @@ class ControllerPipeline:
                 "gross_edge": decision_edge,
                 "spread_bps_at_decision": decision_spread_bps,
                 "spread_edge": decision_costs.spread_edge,
-                "fee_rate": self.settings.strategies.flb_fee_rate,
+                "fee_rate": decision_costs.fee_rate,
                 "fee_edge": decision_costs.fee_edge,
                 "max_slippage_bps": self.settings.controller.max_slippage_bps,
                 "slippage_edge": decision_costs.slippage_edge,
@@ -1085,6 +1090,7 @@ def _log_pipeline_funnel(
 @dataclass(frozen=True)
 class _DecisionCostEdges:
     spread_edge: float
+    fee_rate: float
     fee_edge: float
     slippage_edge: float
 
@@ -1098,10 +1104,14 @@ def _decision_cost_edges(
     decision_price: float,
     spread_bps: int | None,
     settings: PMSSettings,
+    fee_rate: float | None = None,
 ) -> _DecisionCostEdges:
     price = Decimal(str(decision_price))
-    fee_rate = Decimal(str(settings.strategies.flb_fee_rate))
-    fee_edge = fee_rate * (Decimal("1.0") - price)
+    effective_fee_rate = (
+        settings.strategies.flb_fee_rate if fee_rate is None else fee_rate
+    )
+    fee_rate_decimal = Decimal(str(effective_fee_rate))
+    fee_edge = fee_rate_decimal * (Decimal("1.0") - price)
     slippage_edge = (
         Decimal(settings.controller.max_slippage_bps) / Decimal("10000")
     ) * price
@@ -1112,6 +1122,7 @@ def _decision_cost_edges(
     )
     return _DecisionCostEdges(
         spread_edge=float(spread_edge),
+        fee_rate=effective_fee_rate,
         fee_edge=float(fee_edge),
         slippage_edge=float(slippage_edge),
     )

@@ -85,6 +85,7 @@ from pms.evaluation.metrics import (
 from pms.evaluation.quote_reader import TokenBookQuoteReader
 from pms.evaluation.spool import EvalSpool
 from pms.event_stream import RuntimeEventBus
+from pms.execution.fees import market_fee_rate_from_metadata
 from pms.factors.catalog import ensure_factor_catalog
 from pms.factors.definitions import REGISTERED
 from pms.factors.service import FactorService
@@ -3511,18 +3512,27 @@ def _fill_from_order(
 
     # Simulated (paper/backtest) fills carry the modelled Polymarket fee so the
     # evaluator's net-edge gate can compute instead of rendering N/A, and so
-    # paper P&L is not inflated relative to live. fee_rate is None for LIVE
-    # fills — there the venue reports the real fee via reconciliation, and we
-    # must not synthesize over it. Formula matches ExecutionModel.compute_fee.
+    # paper P&L is not inflated relative to live. When signal metadata carries
+    # market fee evidence, prefer it over the global fallback. fee_rate is None
+    # for LIVE fills — venue reconciliation owns real fees there, and we must not
+    # synthesize over it. Formula matches ExecutionModel.compute_fee.
     fees: float | None = None
     fee_bps: int | None = None
     if fee_rate is not None:
+        effective_fee_rate = (
+            market_fee_rate_from_metadata(
+                signal.external_signal,
+                fallback_rate=fee_rate,
+            )
+            if signal is not None
+            else fee_rate
+        )
         fees = (
             order_state.filled_notional_usdc
-            * fee_rate
+            * effective_fee_rate
             * (1.0 - order_state.fill_price)
         )
-        fee_bps = int(fee_rate * 10_000)
+        fee_bps = int(effective_fee_rate * 10_000)
 
     return FillRecord(
         trade_id=order_state.order_id,
