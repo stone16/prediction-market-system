@@ -45,6 +45,7 @@ from pms.live_preflight import (
 from pms.storage.schema_check import EXPECTED_SCHEMA_HEAD
 from pms.storage.live_reconciliation import LiveOrderReconciliationRecord
 from pms.strategies.aggregate import Strategy
+from pms.strategies.flb import build_h1_flb_strategy
 from pms.strategies.paper_canary import build_paper_canary_strategy
 from pms.strategies.projections import (
     ActiveStrategy,
@@ -6709,6 +6710,45 @@ async def test_live_preflight_fails_when_active_strategy_lacks_explicit_live_opt
     assert result.ok is False
     assert strategy_check.ok is False
     assert "metadata.live_allowed=true" in strategy_check.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_accepts_h1_flb_live_candidate_strategy(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    active_strategy = build_h1_flb_strategy()
+    active_strategy_label = (
+        f"{active_strategy.config.strategy_id}@"
+        f"{_strategy_version_id(active_strategy)}"
+    )
+    _insert_report_summary_strategy(
+        cast(str, settings.live_paper_soak_report_path),
+        active_strategy_label,
+    )
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(
+                _Connection(
+                    active_strategy_rows=(_active_strategy_row(active_strategy),)
+                )
+            ),
+        ),
+        venue_reconciler=cast(
+            PolymarketVenueAccountReconciler,
+            _MatchingVenueReconciler(),
+        ),
+    )
+
+    strategy_check = result.require_check("active_strategies")
+    assert result.ok is True
+    assert strategy_check.ok is True
+    assert f"{active_strategy.config.strategy_id}@" in strategy_check.detail
 
 
 @pytest.mark.asyncio

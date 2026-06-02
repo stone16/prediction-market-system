@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from pms.config import LLMSettings, PMSSettings, RiskSettings
+from pms.config import PMSSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.factor_snapshot import (
     FactorSnapshotReader,
@@ -13,6 +13,7 @@ from pms.controller.forecasters.llm import (
     LLMForecaster,
     validate_llm_runtime_dependencies,
 )
+from pms.controller.forecasters.flb import FlbForecaster
 from pms.controller.forecasters.paper_canary import PaperCanaryForecaster
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
@@ -25,6 +26,7 @@ from pms.controller.pipeline import ControllerPipeline, DirectBookSnapshotReader
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.interfaces import IForecaster
+from pms.strategies.flb.source import load_flb_calibration_csv
 from pms.strategies.projections import ActiveStrategy, FactorCompositionStep
 
 
@@ -77,7 +79,7 @@ class ControllerPipelineFactory:
             _build_forecaster(
                 name=name,
                 raw_params=raw_params,
-                llm_settings=self.settings.llm,
+                settings=self.settings,
                 mode=self.settings.mode,
                 factor_reader=self.factor_reader,
                 factor_composition=strategy.config.factor_composition,
@@ -92,7 +94,7 @@ def _build_forecaster(
     *,
     name: str,
     raw_params: tuple[tuple[str, str], ...],
-    llm_settings: LLMSettings,
+    settings: PMSSettings,
     mode: RunMode,
     factor_reader: FactorSnapshotReader,
     factor_composition: tuple[FactorCompositionStep, ...],
@@ -125,8 +127,25 @@ def _build_forecaster(
                 f"{raw_params!r}"
             )
             raise ValueError(msg)
-        validate_llm_runtime_dependencies(llm_settings)
-        return LLMForecaster(config=llm_settings)
+        validate_llm_runtime_dependencies(settings.llm)
+        return LLMForecaster(config=settings.llm)
+    if name == "flb":
+        if raw_params:
+            msg = (
+                "FlbForecaster does not yet accept per-strategy params: "
+                f"{raw_params!r}"
+            )
+            raise ValueError(msg)
+        raw_path = settings.strategies.flb_calibration_path
+        if raw_path is None or raw_path.strip() == "":
+            msg = "flb forecaster requires strategies.flb_calibration_path"
+            raise ValueError(msg)
+        return FlbForecaster(
+            calibration_model=load_flb_calibration_csv(
+                raw_path,
+                min_sample_count=settings.strategies.flb_min_calibration_samples,
+            )
+        )
     if name == "paper_canary":
         if mode != RunMode.PAPER:
             msg = "paper_canary forecaster is PAPER-only"

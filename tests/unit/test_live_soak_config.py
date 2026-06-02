@@ -14,14 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture(autouse=True)
 def stub_llm_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provide a stub PMS_LLM__API_KEY so config.live-soak.yaml passes validation.
-
-    The soak YAML enables the LLM forecaster; the validator at
-    ``LLMSettings._validate_when_enabled`` requires ``api_key`` to be non-empty
-    when ``enabled=True``. In production the key is supplied by the operator's
-    shell (``export PMS_LLM__API_KEY=sk-ant-...``); tests stub it so they don't
-    depend on operator state.
-    """
+    """Keep config loading independent of any operator shell LLM credentials."""
     monkeypatch.setenv("PMS_LLM__API_KEY", "sk-stub-test-only")
 
 
@@ -61,8 +54,11 @@ def test_live_soak_config_uses_tight_paper_snapshot_freshness_window() -> None:
 def test_live_soak_config_uses_tradeable_paper_strategy() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
-    assert settings.paper_soak_strategy_id == "paper_multi_factor_v1"
+    assert settings.paper_soak_strategy_id == "h1_flb"
     assert settings.paper_soak_archive_default is True
+    assert settings.strategies.flb_calibration_path == (
+        "/secure/pms/flb-calibration.csv"
+    )
 
 
 def test_live_soak_config_has_no_dead_top_level_calibration_section() -> None:
@@ -113,10 +109,10 @@ def test_live_soak_config_keeps_credentials_env_only() -> None:
     assert settings.polymarket.funder_address is None
 
 
-def test_live_soak_config_enables_llm_forecaster_with_bounded_budget() -> None:
+def test_live_soak_config_disables_llm_for_h1_flb_soak() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
-    assert settings.llm.enabled is True
+    assert settings.llm.enabled is False
     assert settings.llm.provider == "anthropic"
     llm_daily_cap = settings.llm.max_daily_llm_cost_usdc
     assert llm_daily_cap is not None

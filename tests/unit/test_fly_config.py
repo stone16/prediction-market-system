@@ -15,6 +15,7 @@ def test_fly_binds_api_host_via_env_and_checks_readiness() -> None:
 
     assert fly_config["env"]["PMS_API_HOST"] == "0.0.0.0"
     assert fly_config["env"]["PMS_CONFIG_PATH"] == "/app/config.live-soak.yaml"
+    assert fly_config["mounts"]["destination"] == "/secure"
     assert fly_config["http_service"]["checks"][0]["path"] == "/readiness"
 
 

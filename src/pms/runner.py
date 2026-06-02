@@ -141,6 +141,10 @@ from pms.strategies.flb.source import (
     LiveFlbSource,
     load_flb_calibration_csv,
 )
+from pms.strategies.flb.projection import (
+    H1_FLB_STRATEGY_ID,
+    build_h1_flb_strategy,
+)
 from pms.strategies.intents import StrategyContext
 from pms.strategies.paper_multifactor import (
     PAPER_MULTI_FACTOR_STRATEGY_ID,
@@ -1138,14 +1142,19 @@ class Runner:
         if registry is None:
             msg = "Runner strategy registry is not initialized"
             raise RuntimeError(msg)
-        if self.config.paper_soak_strategy_id != PAPER_MULTI_FACTOR_STRATEGY_ID:
+        if self.config.paper_soak_strategy_id == PAPER_MULTI_FACTOR_STRATEGY_ID:
+            strategy = build_paper_multi_factor_strategy()
+        elif self.config.paper_soak_strategy_id == H1_FLB_STRATEGY_ID:
+            if self._flb_calibration_model is None:
+                msg = "h1_flb paper soak requires strategies.flb_calibration_path"
+                raise ValueError(msg)
+            strategy = build_h1_flb_strategy()
+        else:
             msg = (
                 "Unsupported paper_soak_strategy_id: "
                 f"{self.config.paper_soak_strategy_id!r}"
             )
             raise ValueError(msg)
-
-        strategy = build_paper_multi_factor_strategy()
         version = await registry.create_version(strategy, activate=False)
         await registry.populate_strategy_factors(
             strategy.config.strategy_id,

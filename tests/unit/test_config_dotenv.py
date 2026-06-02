@@ -19,7 +19,7 @@ from pms.config import PMSSettings
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_dotenv_supplies_llm_api_key_when_yaml_omits_it(
+def test_dotenv_supplies_llm_api_key_without_enabling_h1_flb_soak_llm(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -31,7 +31,7 @@ def test_dotenv_supplies_llm_api_key_when_yaml_omits_it(
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
     assert settings.llm.api_key == "sk-from-dotenv-file"
-    assert settings.llm.enabled is True
+    assert settings.llm.enabled is False
     assert settings.llm.provider == "anthropic"
 
 

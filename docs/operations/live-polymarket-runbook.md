@@ -162,16 +162,17 @@ artifact and rejects files with fewer resolved rows than
 fingerprint binds the staged CSV contents, so replacing the category-prior
 artifact after preflight invalidates the launch artifact.
 
-For H1 FLB runs, configure `strategies.flb_calibration_path` only after a
-warehouse model artifact exists. The CSV schema is
+The launch paper-soak config (`config.live-soak.yaml`) is bound to H1 FLB and
+requires `strategies.flb_calibration_path` to point at a staged warehouse model
+artifact. The CSV schema is
 `signal_name,probability_estimate,sample_count,source_label`, and it must
 contain both `longshot_yes_overpriced_buy_no` and
 `favorite_yes_underpriced_buy_yes`. Startup fails closed when either signal is
 missing, `sample_count < strategies.flb_min_calibration_samples`, or the
 probability is outside `(0, 1)`. When configured, FLB uses the artifact
 probability and suppresses signals whose net edge is below `min_expected_edge`;
-when null, the old `limit_price + min_expected_edge` placeholder remains
-paper-plumbing only. Net edge subtracts `strategies.flb_entry_execution_cost_bps`
+do not run the launch soak with a null FLB calibration path. Net edge subtracts
+`strategies.flb_entry_execution_cost_bps`
 and the configured `strategies.flb_fee_rate` fee estimate before sizing. Keep
 the static fee estimate conservative until per-market fee telemetry is wired;
 Polymarket fees are market/category specific and queryable per market.

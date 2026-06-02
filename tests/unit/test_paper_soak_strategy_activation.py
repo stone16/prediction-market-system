@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from pms.config import PMSSettings
+from pms.config import PMSSettings, StrategyRuntimeSettings
 from pms.core.enums import RunMode
 from pms.runner import Runner
 from pms.strategies.aggregate import Strategy
+from pms.strategies.flb.projection import H1_FLB_STRATEGY_ID
 from pms.strategies.paper_multifactor import PAPER_MULTI_FACTOR_STRATEGY_ID
 from pms.strategies.projections import FactorCompositionStep, StrategyVersion
 
@@ -79,3 +81,69 @@ async def test_runner_installs_configured_paper_multi_factor_strategy_before_soa
         "metaculus_prior",
         "orderbook_imbalance",
     }
+
+
+def _write_flb_calibration(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_h1_flb_paper_soak_without_calibration_path() -> None:
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            paper_soak_strategy_id="h1_flb",
+            paper_soak_archive_default=True,
+        )
+    )
+    runner._strategy_registry = cast(Any, _FakeStrategyRegistry())  # noqa: SLF001
+
+    with pytest.raises(ValueError, match="h1_flb paper soak requires"):
+        await runner._ensure_paper_soak_strategy()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_runner_installs_configured_h1_flb_strategy_before_soak(
+    tmp_path: Path,
+) -> None:
+    calibration_path = _write_flb_calibration(tmp_path / "flb-calibration.csv")
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            paper_soak_strategy_id="h1_flb",
+            paper_soak_archive_default=True,
+            strategies=StrategyRuntimeSettings(
+                flb_calibration_path=str(calibration_path),
+            ),
+        )
+    )
+    registry = _FakeStrategyRegistry()
+    runner._strategy_registry = cast(Any, registry)  # noqa: SLF001
+
+    await runner._ensure_paper_soak_strategy()  # noqa: SLF001
+
+    assert len(registry.created) == 1
+    strategy, activate = registry.created[0]
+    metadata = dict(strategy.config.metadata)
+    assert strategy.config.strategy_id == H1_FLB_STRATEGY_ID
+    assert metadata["live_allowed"] == "true"
+    assert metadata["alpha_source"] == "warehouse_flb_decile_model_v1"
+    assert metadata["edge_model_source"] == "flb_calibration_model_v1"
+    assert metadata["calibration_source"] == "warehouse_flb_v1"
+    assert strategy.calibration.enabled is True
+    assert strategy.forecaster.forecasters == (("flb", ()),)
+    assert activate is False
+    assert registry.archived == ["default"]
+    assert registry.active == [(H1_FLB_STRATEGY_ID, "paper-multi-factor-test-version")]
+    assert registry.populated == [(H1_FLB_STRATEGY_ID, "paper-multi-factor-test-version", ())]

@@ -7,7 +7,7 @@ live_trading_enabled: false
 live_account_reconciliation_required: true
 live_emergency_audit_path: .data/live-emergency-audit.jsonl
 live_first_order_audit_path: .data/first-order-audit.jsonl
-paper_soak_strategy_id: paper_multi_factor_v1
+paper_soak_strategy_id: h1_flb
 paper_soak_archive_default: true
 
 risk:
@@ -79,10 +79,11 @@ controller:
   category_prior_smoothing_beta: 1.0
 
 strategies:
-  # Optional warehouse-calibrated H1 FLB model. Keep null until the artifact
-  # exists; if set, startup fails closed when schema/sample gates fail.
+  # Warehouse-calibrated H1 FLB model. This is intentionally required for the
+  # launch soak: startup fails closed when the artifact is missing or when
+  # schema/sample gates fail.
   # CSV columns: signal_name, probability_estimate, sample_count, source_label.
-  flb_calibration_path: null
+  flb_calibration_path: /secure/pms/flb-calibration.csv
   flb_min_calibration_samples: 100
   flb_entry_execution_cost_bps: 15.0
   flb_fee_rate: 0.07
@@ -100,11 +101,10 @@ polymarket:
   operator_approval_mode: every_order
 
 llm:
-  enabled: true
+  enabled: false
   provider: anthropic
-  # Keep the LLM budget small during paper soak. The strategy falls back to
-  # rules/stats when the daily cap is exhausted, and LLM spend is deducted
-  # from P&L in the paper report.
+  # H1 FLB does not use an LLM forecaster. Keep a small cap in config so an
+  # operator who deliberately enables LLM experiments still has a hard budget.
   max_daily_llm_cost_usdc: 0.05
   # api_key, model, and base_url are intentionally omitted from the committed
   # YAML so the operator's .env or shell can choose between native Anthropic
