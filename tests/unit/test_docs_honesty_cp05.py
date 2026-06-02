@@ -91,6 +91,8 @@ def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_ga
     assert "cannot bypass the\nstartup artifact gate" in runbook_text
     assert "PAPER_SOAK_REPORT_DATE" in runbook_text
     assert "--output /secure/pms/paper-soak-go-report.md" in runbook_text
+    assert "requires at least 50 simulated fills before the report can pass" in runbook_text
+    assert "requires at least 10 simulated fills before the report can pass" not in runbook_text
     assert "`artifact_mode` set to `persisted`" in runbook_text
     assert "`generated_at` timestamp" in runbook_text
     assert "Dry-run output is marked `dry_run`" in runbook_text

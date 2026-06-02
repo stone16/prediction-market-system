@@ -473,7 +473,7 @@ non-empty `Detail` cell, because the launch gate treats blank evidence and
 placeholder text such as `TODO` as an invalid report. The `strategy_evidence`
 detail must match the Summary `Strategy` row, so the report cannot mix a
 current strategy label with gate evidence from another run. The committed GO gate
-requires at least 10 simulated fills before the report can pass. Runtime LIVE
+requires at least 50 simulated fills before the report can pass. Runtime LIVE
 validation also requires the generated `Baseline Evidence Coverage` and
 `Secondary Baseline Brier` sections: `market_implied`, `mid_quote`, and
 `category_prior` coverage must be complete over the reported decision set, and
