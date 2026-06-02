@@ -844,6 +844,24 @@ def _require_live_risk_envelope(settings: PMSSettings) -> None:
     elif settings.risk.slippage_threshold_bps < 0.0:
         invalid.append("risk.slippage_threshold_bps must be >= 0")
 
+    if settings.llm.enabled:
+        llm_daily_cost = settings.llm.max_daily_llm_cost_usdc
+        max_daily_loss = settings.risk.max_daily_loss_usdc
+        if llm_daily_cost is None:
+            invalid.append(
+                "llm.max_daily_llm_cost_usdc is required when LLM is enabled"
+            )
+        elif not _is_finite_positive(llm_daily_cost):
+            invalid.append("llm.max_daily_llm_cost_usdc must be finite and > 0")
+        elif (
+            max_daily_loss is not None
+            and _is_finite_positive(max_daily_loss)
+            and llm_daily_cost > max_daily_loss
+        ):
+            invalid.append(
+                "llm.max_daily_llm_cost_usdc must be <= risk.max_daily_loss_usdc"
+            )
+
     if invalid:
         fields = ", ".join(invalid)
         msg = f"LIVE risk envelope invalid: {fields}"

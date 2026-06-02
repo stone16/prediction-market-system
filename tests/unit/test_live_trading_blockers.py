@@ -838,6 +838,39 @@ def test_live_mode_rejects_risk_group_cap_below_min_order() -> None:
         validate_live_mode_ready(settings)
 
 
+def test_live_mode_rejects_enabled_llm_without_daily_cost_cap() -> None:
+    settings = _live_settings()
+    settings.llm = LLMSettings(
+        enabled=True,
+        provider="anthropic",
+        api_key="sk-test",
+        max_daily_llm_cost_usdc=None,
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="llm.max_daily_llm_cost_usdc",
+    ):
+        validate_live_mode_ready(settings)
+
+
+def test_live_mode_rejects_llm_daily_cost_cap_above_daily_loss_cap() -> None:
+    settings = _live_settings()
+    assert settings.risk.max_daily_loss_usdc is not None
+    settings.llm = LLMSettings(
+        enabled=True,
+        provider="anthropic",
+        api_key="sk-test",
+        max_daily_llm_cost_usdc=settings.risk.max_daily_loss_usdc + 1.0,
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="llm.max_daily_llm_cost_usdc",
+    ):
+        validate_live_mode_ready(settings)
+
+
 def test_live_mode_requires_drawdown_cap() -> None:
     settings = _live_settings()
     settings.risk.max_drawdown_pct = None
