@@ -266,6 +266,34 @@ class ControllerPipeline:
             )
             return None
 
+        active_portfolio = portfolio or _default_portfolio()
+        sizer = _required(self.sizer, "sizer")
+        min_order_usdc = _effective_min_order_usdc(
+            strategy=self.strategy,
+            sizer=sizer,
+            settings=self.settings,
+        )
+        risk_group_id = _risk_group_id(signal)
+        group_capacity_diagnostic = _risk_group_capacity_diagnostic(
+            portfolio=active_portfolio,
+            settings=self.settings,
+            min_order_usdc=min_order_usdc,
+            risk_group_id=risk_group_id,
+        )
+        if group_capacity_diagnostic is not None:
+            code, metadata = group_capacity_diagnostic
+            self._set_drop_diagnostic(
+                signal,
+                code=code,
+                message=(
+                    "Skipping decision before forecasting because the risk-group "
+                    "capacity cannot accept another minimum-size order."
+                ),
+                metadata=metadata,
+            )
+            _log_pipeline_funnel(signal, forecasted_count=0, emitted_count=0)
+            return None
+
         forecasters = _required(self.forecasters, "forecasters")
         tasks = [
             self._predict_forecaster(forecaster, signal)
@@ -483,8 +511,6 @@ class ControllerPipeline:
         if signal_outcome.signal_outcome == "NO":
             yes_reference_price = signal.yes_price
         yes_edge = yes_probability - yes_reference_price
-        active_portfolio = portfolio or _default_portfolio()
-        sizer = _required(self.sizer, "sizer")
         opportunity_side: Literal["yes", "no"] = "yes"
         decision_token_id = signal_outcome.yes_token_id or signal_token_id
         decision_yes_token_id: str | None = signal_outcome.yes_token_id or signal_token_id
@@ -699,11 +725,6 @@ class ControllerPipeline:
             market_price=decision_price,
             portfolio=active_portfolio,
         )
-        min_order_usdc = _effective_min_order_usdc(
-            strategy=self.strategy,
-            sizer=sizer,
-            settings=self.settings,
-        )
         market_exposure_usdc = _market_exposure_usdc(
             active_portfolio,
             market_id=signal.market_id,
@@ -741,6 +762,13 @@ class ControllerPipeline:
             )
             return None
         size = min(size, remaining_market_capacity_usdc)
+        remaining_risk_group_capacity_usdc = _remaining_risk_group_capacity_usdc(
+            portfolio=active_portfolio,
+            settings=self.settings,
+            risk_group_id=risk_group_id,
+        )
+        if remaining_risk_group_capacity_usdc is not None:
+            size = min(size, remaining_risk_group_capacity_usdc)
         executable_depth_usdc = _executable_buy_depth_usdc(
             execution_signal.orderbook,
             limit_price=decision_price,
@@ -1617,6 +1645,75 @@ def _market_exposure_usdc(portfolio: Portfolio, *, market_id: str) -> float:
         position.locked_usdc
         for position in portfolio.open_positions
         if position.market_id == market_id
+    )
+
+
+def _risk_group_capacity_diagnostic(
+    *,
+    portfolio: Portfolio,
+    settings: PMSSettings,
+    min_order_usdc: float,
+    risk_group_id: str | None,
+) -> tuple[str, dict[str, object]] | None:
+    max_group_exposure = settings.risk.max_exposure_per_risk_group
+    if max_group_exposure is None:
+        return None
+    if risk_group_id is None:
+        return (
+            "missing_risk_group_id",
+            {
+                "max_exposure_per_risk_group": max_group_exposure,
+                "min_order_usdc": min_order_usdc,
+            },
+        )
+    remaining_group_capacity_usdc = _remaining_risk_group_capacity_usdc(
+        portfolio,
+        settings=settings,
+        risk_group_id=risk_group_id,
+    )
+    if remaining_group_capacity_usdc is None:
+        return None
+    group_exposure_usdc = max_group_exposure - remaining_group_capacity_usdc
+    if remaining_group_capacity_usdc >= min_order_usdc:
+        return None
+    return (
+        "risk_group_capacity_below_minimum",
+        {
+            "risk_group_id": risk_group_id,
+            "group_exposure_usdc": group_exposure_usdc,
+            "max_exposure_per_risk_group": max_group_exposure,
+            "remaining_group_capacity_usdc": remaining_group_capacity_usdc,
+            "min_order_usdc": min_order_usdc,
+        },
+    )
+
+
+def _remaining_risk_group_capacity_usdc(
+    portfolio: Portfolio,
+    *,
+    settings: PMSSettings,
+    risk_group_id: str | None,
+) -> float | None:
+    max_group_exposure = settings.risk.max_exposure_per_risk_group
+    if max_group_exposure is None or risk_group_id is None:
+        return None
+    group_exposure_usdc = _risk_group_exposure_usdc(
+        portfolio,
+        risk_group_id=risk_group_id,
+    )
+    remaining_group_capacity_usdc = max(0.0, max_group_exposure - group_exposure_usdc)
+    return remaining_group_capacity_usdc
+
+
+def _risk_group_exposure_usdc(
+    portfolio: Portfolio,
+    *,
+    risk_group_id: str,
+) -> float:
+    return sum(
+        position.locked_usdc
+        for position in portfolio.open_positions
+        if position.risk_group_id == risk_group_id
     )
 
 

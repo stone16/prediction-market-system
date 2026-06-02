@@ -45,6 +45,15 @@ class StaticForecaster:
         return 0.67
 
 
+class CountingForecaster(StaticForecaster):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def predict(self, signal: MarketSignal) -> tuple[float, float, str]:
+        self.calls += 1
+        return super().predict(signal)
+
+
 def test_pipeline_funnel_log_updates_live_metrics() -> None:
     routed_before = get_metric(SELECTION_FUNNEL_ROUTED_TOTAL_METRIC) or 0.0
     forecasted_before = get_metric(SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC) or 0.0
@@ -202,6 +211,7 @@ def _position(
     market_id: str = "market-cp02",
     token_id: str = "token-cp02",
     locked_usdc: float = 0.0,
+    risk_group_id: str | None = None,
 ) -> Position:
     return Position(
         market_id=market_id,
@@ -214,6 +224,7 @@ def _position(
         locked_usdc=locked_usdc,
         strategy_id="alpha",
         strategy_version_id="alpha-v1",
+        risk_group_id=risk_group_id,
     )
 
 
@@ -363,6 +374,89 @@ async def test_controller_pipeline_caps_size_to_remaining_market_capacity() -> N
     emission = await pipeline.on_signal(
         _signal(),
         portfolio=_portfolio(open_positions=[_position(locked_usdc=3.5)]),
+    )
+
+    assert emission is not None
+    opportunity, decision = emission
+    assert decision.notional_usdc == pytest.approx(1.5)
+    assert opportunity.target_size_usdc == pytest.approx(1.5)
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_skips_full_risk_group_before_forecasting() -> None:
+    risk = RiskSettings(
+        max_position_per_market=5.0,
+        max_exposure_per_risk_group=1.0,
+        min_order_usdc=1.0,
+    )
+    forecaster = CountingForecaster()
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[forecaster],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=risk),
+        router=Router(ControllerSettings(min_volume=100.0)),
+        settings=PMSSettings(risk=risk),
+    )
+    signal = replace(
+        _signal(),
+        external_signal={**_signal().external_signal, "risk_group_id": "event:cp02"},
+    )
+
+    emission = await pipeline.on_signal(
+        signal,
+        portfolio=_portfolio(
+            open_positions=[
+                _position(
+                    market_id="other-market",
+                    token_id="other-token",
+                    locked_usdc=1.0,
+                    risk_group_id="event:cp02",
+                )
+            ]
+        ),
+    )
+
+    assert emission is None
+    assert forecaster.calls == 0
+    assert pipeline.last_diagnostic is not None
+    assert pipeline.last_diagnostic.code == "risk_group_capacity_below_minimum"
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_caps_size_to_remaining_risk_group_capacity() -> None:
+    risk = RiskSettings(
+        max_position_per_market=5.0,
+        max_exposure_per_risk_group=2.0,
+        min_order_usdc=1.0,
+    )
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=risk),
+        router=Router(ControllerSettings(min_volume=100.0)),
+        settings=PMSSettings(risk=risk),
+    )
+    signal = replace(
+        _signal(),
+        external_signal={**_signal().external_signal, "risk_group_id": "event:cp02"},
+    )
+
+    emission = await pipeline.on_signal(
+        signal,
+        portfolio=_portfolio(
+            open_positions=[
+                _position(
+                    market_id="other-market",
+                    token_id="other-token",
+                    locked_usdc=0.5,
+                    risk_group_id="event:cp02",
+                )
+            ]
+        ),
     )
 
     assert emission is not None
