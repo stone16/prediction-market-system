@@ -441,6 +441,33 @@ async def test_actuator_loop_persists_fill_after_appending_runner_state() -> Non
 
 
 @pytest.mark.asyncio
+async def test_actuator_loop_does_not_count_exit_sell_as_selection_funnel_trade() -> None:
+    set_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC, 0.0)
+    runner = _runner()
+    runner.actuator_executor = cast(Any, _ExecutorDouble())
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _RecordingOrderStore(runner))
+    runner.fill_store = cast(Any, _RecordingFillStore(runner))
+    _mark_controller_done(runner)
+
+    decision = replace(
+        _decision(market_id="market-cp06-exit", notional_usdc=12.5),
+        decision_id="exit-profit_take-market-cp06-exit",
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+        limit_price=0.61,
+    )
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(decision, _signal(market_id="market-cp06-exit"))
+    )
+
+    await _run_actuator_loop(runner)
+
+    assert [fill.side for fill in runner.state.fills] == [Side.SELL.value]
+    assert get_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC) == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
 async def test_paper_actuator_uses_queued_target_token_orderbook_snapshot() -> None:
     runner = _runner()
     runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001

@@ -403,6 +403,8 @@ def metrics_from_api_payloads(
             if entry_decisions
             else Decimal("0.0")
         )
+    selection_funnel = _selection_funnel_from_metrics(metric_rows)
+    events.extend(_selection_funnel_risk_events(selection_funnel))
 
     return PaperReportMetrics(
         report_date=report_date,
@@ -459,7 +461,7 @@ def metrics_from_api_payloads(
         trade_costs=_trade_costs_from_decision_rows(decision_rows),
         baseline_evidence=baseline_evidence,
         clamp_rejections=clamp_rejections,
-        selection_funnel=_selection_funnel_from_metrics(metric_rows),
+        selection_funnel=selection_funnel,
         position_mark_sources=position_mark_sources,
         execution_concentration=execution_concentration,
         risk_events=tuple(events),
@@ -1588,6 +1590,34 @@ def _selection_funnel_from_metrics(
         forecasted=forecasted,
         controller_emitted=controller_emitted,
         traded=traded,
+    )
+
+
+def _selection_funnel_risk_events(
+    funnel: SelectionFunnel | None,
+) -> tuple[tuple[str, str, str], ...]:
+    if funnel is None:
+        return ()
+    adjacent_counts = (
+        ("discovered", funnel.discovered, "selected", funnel.selected),
+        ("selected", funnel.selected, "routed", funnel.routed),
+        ("routed", funnel.routed, "forecasted", funnel.forecasted),
+        (
+            "forecasted",
+            funnel.forecasted,
+            "controller_emitted",
+            funnel.controller_emitted,
+        ),
+        ("controller_emitted", funnel.controller_emitted, "traded", funnel.traded),
+    )
+    return tuple(
+        (
+            "selection_funnel",
+            "selection funnel stage count inverted",
+            f"{later_name}={later_count} > {earlier_name}={earlier_count}",
+        )
+        for earlier_name, earlier_count, later_name, later_count in adjacent_counts
+        if earlier_count > 0 and later_count > earlier_count
     )
 
 

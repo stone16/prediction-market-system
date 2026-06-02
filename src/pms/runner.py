@@ -1578,7 +1578,8 @@ class Runner:
                 )
                 if fill is not None:
                     _append_bounded(self.state.fills, fill)
-                    increment_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC)
+                    if _is_selection_funnel_entry_fill(fill):
+                        increment_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC)
                     try:
                         await self.fill_store.insert(fill)
                     except Exception as error:  # noqa: BLE001
@@ -3558,6 +3559,10 @@ def _fill_from_order(
         fees=fees,
         fee_bps=fee_bps,
     )
+
+
+def _is_selection_funnel_entry_fill(fill: FillRecord) -> bool:
+    return fill.side == Side.BUY.value
 
 
 def _decision_status_from_order(order_state: OrderState) -> str:

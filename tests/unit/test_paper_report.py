@@ -2374,6 +2374,27 @@ def test_metrics_from_api_payloads_surfaces_live_selection_funnel() -> None:
     assert "No funnel events recorded." not in report
 
 
+def test_metrics_from_api_payloads_flags_inconsistent_selection_funnel() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        metrics_override={
+            SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC: 120.0,
+            SELECTION_FUNNEL_SELECTED_TOTAL_METRIC: 40.0,
+            SELECTION_FUNNEL_ROUTED_TOTAL_METRIC: 23.0,
+            SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC: 11.0,
+            SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC: 5.0,
+            SELECTION_FUNNEL_TRADED_TOTAL_METRIC: 6.0,
+        },
+    )
+
+    assert metrics.selection_funnel is not None
+    assert metrics.selection_funnel.traded == 6
+    assert (
+        "selection_funnel",
+        "selection funnel stage count inverted",
+        "traded=6 > controller_emitted=5",
+    ) in metrics.risk_events
+
+
 def test_paper_soak_gate_fails_without_persisted_runtime_continuity_evidence() -> None:
     metrics = _passing_metrics_from_api_payloads(include_runtime_continuity=False)
 
