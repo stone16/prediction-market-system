@@ -204,6 +204,16 @@ uv run python scripts/flb_data_feasibility.py \
   --calibration-source-label warehouse-flb-v1
 ```
 
+Before starting the paper-soak API, run the local artifact check. It uses the
+same FLB calibration and optional category-prior CSV loaders as runtime
+startup, so a missing or malformed launch artifact fails before the API process
+gets as far as `Runner(...)` construction:
+
+```bash
+uv run python scripts/check_paper_soak_artifacts.py \
+  --config config.local.live-soak.yaml
+```
+
 When using research backtests to justify a live rollout, do not leave the
 execution profile at the optimistic paper defaults. Rebuild it with observed
 paper/live telemetry and include both `displayed_depth_fill_ratio` and

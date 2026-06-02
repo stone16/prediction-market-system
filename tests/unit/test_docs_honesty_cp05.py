@@ -205,6 +205,8 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "--output /secure/pms/paper-soak-go-report.md" in readme_text
     assert "--calibration-csv /secure/pms/flb-calibration.csv" in readme_text
     assert "--calibration-source-label warehouse-flb-v1" in readme_text
+    assert "scripts/check_paper_soak_artifacts.py" in readme_text
+    assert "scripts/check_paper_soak_artifacts.py" in runbook_text
     assert "credentialed preflight artifact is missing/invalid" in readme_text
     assert "Create the approval JSON only after preview review" in readme_text
     assert "true LIVE template leaves LLM disabled by default" in readme_text

@@ -154,6 +154,12 @@ uv run python scripts/export_category_prior_observations.py \
   --output /secure/pms/category-prior-observations.csv \
   --min-observations 100
 
+# 4b. Fail fast before starting the API; this uses the same artifact loaders
+#     as runtime startup and exits nonzero when required launch artifacts are
+#     missing or malformed.
+uv run python scripts/check_paper_soak_artifacts.py \
+  --config config.local.live-soak.yaml
+
 # 5. Start paper soak (live data, no real orders). Keep the token private;
 #    scripts/paper_report.py reads the same token from PMS_API_TOKEN.
 export PMS_API_TOKEN="$(openssl rand -hex 32)"
