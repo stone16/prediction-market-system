@@ -271,6 +271,16 @@ def _signal_category(signal: MarketSignal) -> str | None:
             category = _normalize_category(value)
             if category is not None:
                 return category
+    risk_group_id = signal.external_signal.get("risk_group_id")
+    if isinstance(risk_group_id, str):
+        category = _normalize_category(risk_group_id)
+        if category is not None:
+            return category
+    event_id = signal.external_signal.get("event_id")
+    if isinstance(event_id, str):
+        category = _normalize_category(event_id)
+        if category is not None:
+            return f"event:{category}"
     return None
 
 

@@ -128,6 +128,13 @@ cp config.live-soak.yaml config.local.live-soak.yaml
 #   - Adjust risk.max_position_per_market (paper default: $1)
 #   - Adjust risk.max_total_exposure (proposed: $50)
 #   - Adjust risk.max_drawdown_pct (proposed: 20)
+#   - Set controller.category_prior_observations_path to the secure CSV below
+
+# 4a. Generate the category-prior baseline artifact outside the repo
+sudo install -d -m 700 -o "$USER" /secure/pms
+uv run python scripts/export_category_prior_observations.py \
+  --output /secure/pms/category-prior-observations.csv \
+  --min-observations 100
 
 # 5. Start paper soak (live data, no real orders). Keep the token private;
 #    scripts/paper_report.py reads the same token from PMS_API_TOKEN.
