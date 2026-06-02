@@ -477,6 +477,7 @@ async def test_market_data_sensor_persists_last_trade_price_and_emits_signal(
     assert trade_signal.market_id == "m-trade"
     assert trade_signal.token_id == "asset-trade"
     assert trade_signal.yes_price == 0.456
+    assert trade_signal.external_signal["last_trade_price"] == 0.456
     assert trade_signal.external_signal["fee_rate_bps"] == 0.0
 
 
@@ -514,6 +515,40 @@ async def test_market_data_sensor_carries_last_trade_fee_rate_into_book_signal()
 
     assert trade_signals[0].external_signal["fee_rate_bps"] == 300.0
     assert book_signals[0].external_signal["fee_rate_bps"] == 300.0
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_carries_last_trade_price_into_book_signal() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    sensor = MarketDataSensor(store=store)
+
+    trade_signals = await sensor._handle_message(
+        {
+            "event_type": "last_trade_price",
+            "market": "m-last-trade",
+            "asset_id": "asset-last-trade",
+            "price": "0.456",
+            "side": "BUY",
+            "size": "219.217767",
+            "timestamp": "1750428146322",
+        }
+    )
+    book_signals = await sensor._handle_message(
+        {
+            "event_type": "book",
+            "market": "m-last-trade",
+            "asset_id": "asset-last-trade",
+            "timestamp": "1757908892351",
+            "hash": "book-hash-last-trade",
+            "bids": [{"price": "0.48", "size": "30"}],
+            "asks": [{"price": "0.52", "size": "25"}],
+        }
+    )
+
+    assert trade_signals[0].external_signal["last_trade_price"] == 0.456
+    assert book_signals[0].external_signal["last_trade_price"] == 0.456
 
 
 @pytest.mark.asyncio

@@ -306,7 +306,9 @@ class MarketDataSensor:
         state.bids = _levels_to_map(message.get("bids"))
         state.asks = _levels_to_map(message.get("asks"))
         state.last_hash = _optional_str(message.get("hash"))
-        state.last_trade_price = _optional_float(message.get("last_trade_price"))
+        last_trade_price = _optional_float(message.get("last_trade_price"))
+        if last_trade_price is not None:
+            state.last_trade_price = last_trade_price
         fee_rate_bps = _optional_float(message.get("fee_rate_bps"))
         if fee_rate_bps is not None:
             state.fee_rate_bps = fee_rate_bps
@@ -701,6 +703,8 @@ def _signal_from_state(
         external_signal.update(extra)
     if state.fee_rate_bps is not None and "fee_rate_bps" not in external_signal:
         external_signal["fee_rate_bps"] = state.fee_rate_bps
+    if state.last_trade_price is not None and "last_trade_price" not in external_signal:
+        external_signal["last_trade_price"] = state.last_trade_price
     token_outcome = _signal_token_outcome(
         asset_id=state.asset_id,
         yes_token_id=external_signal.get("yes_token_id"),
