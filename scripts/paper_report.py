@@ -22,6 +22,8 @@ from urllib.request import Request, urlopen
 from pms.config import PMSSettings, RiskSettings
 from pms.core.models import EvalRecord, TradeDecision
 from pms.metrics import (
+    LLM_BUDGET_EXHAUSTED_TOTAL_METRIC,
+    LLM_DAILY_COST_LIMIT_USDC_METRIC,
     LLM_DAILY_COST_USDC_METRIC,
     LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
     SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
@@ -127,6 +129,7 @@ class PaperReportMetrics:
     pnl_source: str = "final_eval"
     current_unrealized_pnl: float = 0.0
     llm_cost_usdc: float = 0.0
+    llm_budget_exhaustions: int = 0
     max_drawdown_pct: float | None = None
     open_positions: int = 0
     total_exposure: float = 0.0
@@ -377,6 +380,8 @@ def metrics_from_api_payloads(
     )
     llm_total_cost = Decimal(str(_llm_total_cost_usdc(metric_rows)))
     llm_daily_cost = Decimal(str(_llm_daily_cost_usdc(metric_rows)))
+    llm_budget_exhaustions = _llm_budget_exhaustions(metric_rows)
+    events.extend(_llm_budget_risk_events(metric_rows))
     cumulative_pnl -= llm_total_cost
     todays_pnl_decimal = Decimal(str(todays_pnl)) - llm_daily_cost
     max_drawdown_pct = _max_drawdown_pct_from_metrics(metric_rows)
@@ -414,6 +419,7 @@ def metrics_from_api_payloads(
         pnl_source=_pnl_source_from_metrics(metric_rows),
         current_unrealized_pnl=float(current_unrealized_pnl),
         llm_cost_usdc=float(llm_total_cost),
+        llm_budget_exhaustions=llm_budget_exhaustions,
         max_drawdown_pct=(
             None if max_drawdown_pct_decimal is None else float(max_drawdown_pct_decimal)
         ),
@@ -617,6 +623,7 @@ def render_report(
             f"| Cumulative P&L | {_fmt_money_signed(metrics.cumulative_pnl)} | > 0 by soak end |",
             f"| P&L source | {_escape_table_value(metrics.pnl_source)} | - |",
             f"| LLM cost (estimated) | {_fmt_money(metrics.llm_cost_usdc)} | deducted from P&L |",
+            f"| LLM budget exhaustions | {metrics.llm_budget_exhaustions} | 0 required |",
             f"| Current open-position MTM | {_fmt_money_signed(metrics.current_unrealized_pnl)} | informational |",
             f"| Max drawdown | {_fmt_percent(metrics.max_drawdown_pct)} | <= {_fmt_percent(risk.max_drawdown_pct)} |",
             f"| Open positions | {metrics.open_positions} | <= {risk.max_open_positions or 'N/A'} |",
@@ -2314,6 +2321,41 @@ def _llm_total_cost_usdc(metrics: Mapping[str, Any]) -> float:
 
 def _llm_daily_cost_usdc(metrics: Mapping[str, Any]) -> float:
     return _optional_float_from_mapping(metrics, LLM_DAILY_COST_USDC_METRIC) or 0.0
+
+
+def _llm_daily_cost_limit_usdc(metrics: Mapping[str, Any]) -> float:
+    return (
+        _optional_float_from_mapping(metrics, LLM_DAILY_COST_LIMIT_USDC_METRIC) or 0.0
+    )
+
+
+def _llm_budget_exhaustions(metrics: Mapping[str, Any]) -> int:
+    raw_exhaustions = _optional_float_from_mapping(
+        metrics,
+        LLM_BUDGET_EXHAUSTED_TOTAL_METRIC,
+    )
+    if raw_exhaustions is None or not math.isfinite(raw_exhaustions):
+        return 0
+    return max(0, int(raw_exhaustions))
+
+
+def _llm_budget_risk_events(
+    metrics: Mapping[str, Any],
+) -> tuple[tuple[str, str, str], ...]:
+    exhaustions = _llm_budget_exhaustions(metrics)
+    if exhaustions <= 0:
+        return ()
+    daily_cost = _llm_daily_cost_usdc(metrics)
+    limit = _llm_daily_cost_limit_usdc(metrics)
+    limit_detail = f", limit={limit:.4f}" if limit > 0 else ""
+    return (
+        (
+            "llm",
+            "daily LLM budget exhausted",
+            f"{exhaustions} exhaustion(s); daily_cost={daily_cost:.4f}"
+            f"{limit_detail}; forecasts are falling back to non-LLM branches",
+        ),
+    )
 
 
 def _max_drawdown_pct_from_metrics(metrics: Mapping[str, Any]) -> float | None:

@@ -16,6 +16,8 @@ from weakref import ReferenceType, ref
 from pms.config import LLMSettings
 from pms.core.models import MarketSignal
 from pms.metrics import (
+    LLM_BUDGET_EXHAUSTED_TOTAL_METRIC,
+    LLM_DAILY_COST_LIMIT_USDC_METRIC,
     LLM_DAILY_COST_USDC_METRIC,
     LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
     LLM_FORECAST_CALLS_TOTAL_METRIC,
@@ -117,6 +119,7 @@ class LLMForecaster:
     def __post_init__(self) -> None:
         if self.config is None:
             self.config = LLMSettings()
+        self._publish_budget_metrics()
 
     def predict(self, signal: MarketSignal) -> LLMForecastResult | None:
         if self.config is None or not self.config.enabled:
@@ -126,6 +129,8 @@ class LLMForecaster:
             return cached
         estimated_cost = self._estimated_call_cost_usdc()
         if not self._reserve_budget(estimated_cost):
+            increment_metric(LLM_BUDGET_EXHAUSTED_TOTAL_METRIC)
+            self._publish_budget_metrics()
             logger.info(
                 "llm_forecaster_budget_exhausted",
                 extra={
@@ -364,7 +369,7 @@ class LLMForecaster:
             LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
             float(estimated_cost_usdc),
         )
-        set_metric(LLM_DAILY_COST_USDC_METRIC, daily_cost)
+        self._publish_budget_metrics(daily_cost=daily_cost)
         logger.info(
             "llm_forecaster_cost_recorded",
             extra={
@@ -381,6 +386,16 @@ class LLMForecaster:
         tracker = self._budget_tracker()
         with tracker.lock:
             return float(tracker.daily_cost_usdc)
+
+    def _publish_budget_metrics(self, *, daily_cost: float | None = None) -> None:
+        assert self.config is not None
+        observed_daily_cost = (
+            self._daily_cost_usdc_float() if daily_cost is None else daily_cost
+        )
+        max_daily = self.config.max_daily_llm_cost_usdc
+        limit = 0.0 if max_daily is None else float(max_daily)
+        set_metric(LLM_DAILY_COST_USDC_METRIC, observed_daily_cost)
+        set_metric(LLM_DAILY_COST_LIMIT_USDC_METRIC, limit)
 
     def _budget_tracker(self) -> _BudgetTracker:
         assert self.config is not None

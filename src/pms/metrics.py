@@ -16,6 +16,8 @@ MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC = "pms_markets_snapshot_lag_seconds_max"
 LLM_FORECAST_CALLS_TOTAL_METRIC = "pms_llm_forecast_calls_total"
 LLM_ESTIMATED_COST_USDC_TOTAL_METRIC = "pms_llm_estimated_cost_usdc_total"
 LLM_DAILY_COST_USDC_METRIC = "pms_llm_daily_cost_usdc"
+LLM_DAILY_COST_LIMIT_USDC_METRIC = "pms_llm_daily_cost_limit_usdc"
+LLM_BUDGET_EXHAUSTED_TOTAL_METRIC = "pms_llm_budget_exhausted_total"
 SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC = (
     "pms_selection_funnel_discovered_total"
 )
@@ -37,6 +39,8 @@ _metrics: dict[str, float] = {
     LLM_FORECAST_CALLS_TOTAL_METRIC: 0.0,
     LLM_ESTIMATED_COST_USDC_TOTAL_METRIC: 0.0,
     LLM_DAILY_COST_USDC_METRIC: 0.0,
+    LLM_DAILY_COST_LIMIT_USDC_METRIC: 0.0,
+    LLM_BUDGET_EXHAUSTED_TOTAL_METRIC: 0.0,
     SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC: 0.0,
     SELECTION_FUNNEL_SELECTED_TOTAL_METRIC: 0.0,
     SELECTION_FUNNEL_ROUTED_TOTAL_METRIC: 0.0,

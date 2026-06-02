@@ -32,7 +32,9 @@ from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import MarketStatus
 from pms.core.models import MarketSignal, Portfolio
 from pms.metrics import (
+    LLM_BUDGET_EXHAUSTED_TOTAL_METRIC,
     LLM_DAILY_COST_USDC_METRIC,
+    LLM_DAILY_COST_LIMIT_USDC_METRIC,
     LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
     LLM_FORECAST_CALLS_TOTAL_METRIC,
     get_metric,
@@ -502,11 +504,16 @@ def test_llm_forecaster_budget_exhaustion_and_midnight_utc_reset(
         "pms.controller.forecasters.llm._today_utc",
         lambda: next(days),
     )
+    exhausted_before = get_metric(LLM_BUDGET_EXHAUSTED_TOTAL_METRIC) or 0.0
 
     assert forecaster.predict(_signal(market_id="m-1")) is not None
     assert forecaster.predict(_signal(market_id="m-2")) is None
     assert forecaster.predict(_signal(market_id="m-3")) is not None
     assert len(client.messages.calls) == 2
+    assert (get_metric(LLM_BUDGET_EXHAUSTED_TOTAL_METRIC) or 0.0) == pytest.approx(
+        exhausted_before + 1.0
+    )
+    assert get_metric(LLM_DAILY_COST_LIMIT_USDC_METRIC) == pytest.approx(0.003)
 
 
 def test_llm_forecaster_records_estimated_cost_metrics() -> None:

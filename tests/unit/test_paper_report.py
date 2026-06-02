@@ -13,6 +13,8 @@ from pms.config import RiskSettings
 from pms.core.enums import TimeInForce
 from pms.core.models import EvalRecord, TradeDecision
 from pms.metrics import (
+    LLM_BUDGET_EXHAUSTED_TOTAL_METRIC,
+    LLM_DAILY_COST_LIMIT_USDC_METRIC,
     LLM_DAILY_COST_USDC_METRIC,
     LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
     SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
@@ -1565,6 +1567,45 @@ def test_metrics_from_api_payloads_deducts_llm_cost_from_pnl() -> None:
     assert metrics.llm_cost_usdc == pytest.approx(1.25)
     assert metrics.todays_pnl == pytest.approx(1.25)
     assert metrics.cumulative_pnl == pytest.approx(0.75)
+
+
+def test_metrics_from_api_payloads_flags_llm_budget_exhaustion() -> None:
+    report_date = date(2026, 5, 30)
+
+    metrics = metrics_from_api_payloads(
+        report_date=report_date,
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "pnl_series": _pnl_series(report_date, pnl=0.0),
+            LLM_BUDGET_EXHAUSTED_TOTAL_METRIC: 2.0,
+            LLM_DAILY_COST_USDC_METRIC: 0.05,
+            LLM_DAILY_COST_LIMIT_USDC_METRIC: 0.05,
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.llm_budget_exhaustions == 2
+    assert (
+        "llm",
+        "daily LLM budget exhausted",
+        "2 exhaustion(s); daily_cost=0.0500, limit=0.0500; "
+        "forecasts are falling back to non-LLM branches",
+    ) in metrics.risk_events
 
 
 def test_metrics_from_api_payloads_falls_back_to_quote_mtm_pnl_series() -> None:
