@@ -6,6 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 README_PATH = ROOT / "README.md"
 CLAUDE_PATH = ROOT / "CLAUDE.md"
+GITIGNORE_PATH = ROOT / ".gitignore"
+STRATEGY_AUTHORING_GUIDE_PATH = ROOT / "agent_docs" / "strategy-authoring-guide.md"
 MIGRATIONS_DOC_PATH = ROOT / "docs" / "operations" / "migrations.md"
 
 
@@ -85,6 +87,39 @@ def test_claude_canonical_gates_document_all_ci_gates() -> None:
     assert "(cd dashboard && npm ci && npm run test:ci)" in canonical_gates
     assert "import-linter contracts" in canonical_gates
     assert "dashboard Vitest" in canonical_gates
+
+
+def test_living_gate_docs_do_not_publish_stale_count_snapshots() -> None:
+    stale_snapshots = (
+        "337 passing",
+        "337 pass",
+        "85 skipped",
+        "196 source files",
+        "see baseline below",
+    )
+
+    for path in (CLAUDE_PATH, README_PATH, STRATEGY_AUTHORING_GUIDE_PATH):
+        text = path.read_text(encoding="utf-8")
+        for snapshot in stale_snapshots:
+            assert snapshot not in text, f"{path.relative_to(ROOT)} contains {snapshot!r}"
+
+
+def test_strategy_authoring_prerequisites_document_all_current_ci_gates() -> None:
+    prerequisites = _section(
+        STRATEGY_AUTHORING_GUIDE_PATH.read_text(encoding="utf-8"),
+        "## 1. Prerequisites",
+    )
+
+    assert "uv run pytest -q" in prerequisites
+    assert "uv run mypy src/ tests/ --strict" in prerequisites
+    assert "uv run lint-imports" in prerequisites
+    assert "(cd dashboard && npm ci && npm run test:ci)" in prerequisites
+
+
+def test_dashboard_coverage_output_is_ignored() -> None:
+    gitignore = GITIGNORE_PATH.read_text(encoding="utf-8")
+
+    assert "dashboard/coverage/" in gitignore
 
 
 def test_migrations_doc_exists_with_required_sections_and_policy() -> None:

@@ -56,9 +56,14 @@ Before you write a single line, confirm:
 
    ```bash
    uv sync
-   uv run pytest -q              # baseline: 337 pass / 85 skipped
+   uv run pytest -q
    uv run mypy src/ tests/ --strict
+   uv run lint-imports
+   (cd dashboard && npm ci && npm run test:ci)
    ```
+
+   Use the current head's gate output as the source of truth instead
+   of copying historical pass/skipped count snapshots.
 
 3. You can boot the API and reach the dashboard:
 

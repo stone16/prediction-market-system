@@ -35,7 +35,7 @@ Run from a clean shell at the repo root. These gates are load-bearing.
 
 ```bash
 uv sync                                  # install deps from uv.lock
-uv run pytest -q                         # full suite — see baseline below
+uv run pytest -q                         # full default suite
 uv run mypy src/ tests/ --strict         # strict on every committed module
 uv run lint-imports                      # import-linter contracts
 ```
@@ -46,13 +46,14 @@ The dashboard Vitest suite is also enforced by CI:
 (cd dashboard && npm ci && npm run test:ci)
 ```
 
-**Baseline (as of 2026-04-21, main @ 96f2a14):** `pytest`
-337 passing, 85 skipped. The 85 skips are PostgreSQL-backed integration
-checks gated on `PMS_RUN_INTEGRATION=1` and, where needed,
-`PMS_TEST_DATABASE_URL`. mypy strict must be clean (196 source files).
-If the baseline fails on a fresh clone, fix the config — not the test —
-and commit with a `fix(tests):` or `fix(build):` prefix before starting
-feature work (see promoted rule: *Fresh-clone baseline verification*).
+**Baseline policy:** do not rely on historical pass/skipped or source-file
+count snapshots. The current head's gate output is the source of truth:
+default `pytest` must pass with only explicitly gated skips, mypy strict must
+be clean on every committed module, import-linter contracts must hold, and the
+dashboard Vitest suite must pass. If the baseline fails on a fresh clone, fix
+the config — not the test — and commit with a `fix(tests):` or `fix(build):`
+prefix before starting feature work (see promoted rule: *Fresh-clone baseline
+verification*).
 
 Integration tests:
 ```bash
