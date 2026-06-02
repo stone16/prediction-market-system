@@ -62,6 +62,8 @@ def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_ga
     assert "permissive approval" in runbook_text
     assert "private and owner-writable" in runbook_text
     assert "max_exposure_per_risk_group" in runbook_text
+    assert "max_exposure_per_risk_group=$1" in runbook_text
+    assert "llm.max_daily_llm_cost_usdc=$1" in runbook_text
     assert "risk_group_id" in runbook_text
     assert "decisions without a risk group are rejected" in runbook_text
     assert "market_data_freshness" in runbook_text
