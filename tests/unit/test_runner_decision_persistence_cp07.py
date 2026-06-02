@@ -774,6 +774,40 @@ def test_decision_evidence_records_secondary_baseline_probabilities() -> None:
     assert evidence["category_prior_baseline_prob_estimate"] == pytest.approx(0.52)
 
 
+def test_decision_evidence_records_cost_basis_at_decision_time() -> None:
+    signal = replace(
+        _signal(),
+        external_signal={
+            "resolved_outcome": 1.0,
+            "book_age_ms": 75.0,
+            "fee_rate_bps": 300.0,
+        },
+    )
+    decision = replace(
+        _decision(),
+        expected_edge=0.21,
+        limit_price=0.41,
+        max_slippage_bps=50,
+        spread_bps_at_decision=80,
+    )
+
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at,
+    )
+
+    assert evidence["fee_rate_bps"] == pytest.approx(300.0)
+    assert evidence["fee_rate"] == pytest.approx(0.03)
+    assert evidence["fee_edge_at_decision"] == pytest.approx(0.0177)
+    assert evidence["spread_edge_at_decision"] == pytest.approx(0.00328)
+    assert evidence["slippage_edge_at_decision"] == pytest.approx(0.00205)
+    assert evidence["total_cost_edge_at_decision"] == pytest.approx(0.02303)
+    assert evidence["net_edge_after_costs"] == pytest.approx(0.18697)
+
+
 def test_decision_evidence_projects_direct_no_book_baselines_to_yes_probability() -> None:
     signal = replace(
         _signal(),

@@ -3900,8 +3900,55 @@ def _decision_evidence_from_signal(
         ),
         "factor_snapshot_hash": factor_snapshot_hash,
         "spread_bps_at_decision": decision.spread_bps_at_decision,
+        **_decision_cost_evidence(signal, decision),
         "external_signal_keys": sorted(str(key) for key in signal.external_signal),
     }
+
+
+def _decision_cost_evidence(
+    signal: MarketSignal,
+    decision: TradeDecision,
+) -> dict[str, float]:
+    price = Decimal(str(decision.limit_price))
+    if not price.is_finite() or price < 0:
+        return {}
+
+    evidence: dict[str, float] = {}
+    total_cost_edge = Decimal("0")
+    has_cost_evidence = False
+
+    fee_rate_bps = _optional_float(signal.external_signal.get("fee_rate_bps"))
+    if fee_rate_bps is not None and 0.0 <= fee_rate_bps <= 10_000.0:
+        fee_rate = Decimal(str(fee_rate_bps)) / Decimal("10000")
+        fee_edge = fee_rate * (Decimal("1.0") - price)
+        evidence["fee_rate_bps"] = fee_rate_bps
+        evidence["fee_rate"] = float(fee_rate)
+        evidence["fee_edge_at_decision"] = float(fee_edge)
+        total_cost_edge += fee_edge
+        has_cost_evidence = True
+
+    spread_bps = _optional_float(decision.spread_bps_at_decision)
+    if spread_bps is not None and spread_bps >= 0.0:
+        spread_edge = (Decimal(str(spread_bps)) / Decimal("10000")) * price
+        evidence["spread_edge_at_decision"] = float(spread_edge)
+        total_cost_edge += spread_edge
+        has_cost_evidence = True
+
+    slippage_bps = _optional_float(decision.max_slippage_bps)
+    if slippage_bps is not None and slippage_bps >= 0.0:
+        slippage_edge = (Decimal(str(slippage_bps)) / Decimal("10000")) * price
+        evidence["slippage_edge_at_decision"] = float(slippage_edge)
+        total_cost_edge += slippage_edge
+        has_cost_evidence = True
+
+    if not has_cost_evidence:
+        return evidence
+
+    evidence["total_cost_edge_at_decision"] = float(total_cost_edge)
+    expected_edge = Decimal(str(decision.expected_edge))
+    if expected_edge.is_finite():
+        evidence["net_edge_after_costs"] = float(expected_edge - total_cost_edge)
+    return evidence
 
 
 def _controller_execution_signal_for_decision(
