@@ -90,6 +90,7 @@ class SelectionFunnel:
     routed: int = 0
     forecasted: int = 0
     controller_emitted: int = 0
+    traded: int = 0
 
 
 @dataclass(frozen=True)
@@ -1517,6 +1518,7 @@ def _selection_funnel(log_events: Sequence[Mapping[str, object]]) -> SelectionFu
     routed = 0
     forecasted = 0
     controller_emitted = 0
+    traded = 0
     for event in log_events:
         event_name = event.get("event")
         if event_name == "funnel_selector":
@@ -1527,6 +1529,7 @@ def _selection_funnel(log_events: Sequence[Mapping[str, object]]) -> SelectionFu
         elif event_name == "funnel_pipeline":
             forecasted += _event_int(event, "forecasted_count")
             controller_emitted += _event_int(event, "emitted_count")
+            traded += _event_int(event, "traded_count")
             if "emitted_count" not in event:
                 controller_emitted += _event_int(event, "traded_count")
     return SelectionFunnel(
@@ -1535,6 +1538,7 @@ def _selection_funnel(log_events: Sequence[Mapping[str, object]]) -> SelectionFu
         routed=routed,
         forecasted=forecasted,
         controller_emitted=controller_emitted,
+        traded=traded,
     )
 
 
@@ -1549,12 +1553,21 @@ def _selection_funnel_from_metrics(
         metrics,
         SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
     )
+    traded = _int_metric_value(metrics, SELECTION_FUNNEL_TRADED_TOTAL_METRIC)
     if controller_emitted == 0:
         controller_emitted = _int_metric_value(
             metrics,
             SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
         )
-    if discovered == selected == routed == forecasted == controller_emitted == 0:
+    if (
+        discovered
+        == selected
+        == routed
+        == forecasted
+        == controller_emitted
+        == traded
+        == 0
+    ):
         return None
     return SelectionFunnel(
         discovered=discovered,
@@ -1562,6 +1575,7 @@ def _selection_funnel_from_metrics(
         routed=routed,
         forecasted=forecasted,
         controller_emitted=controller_emitted,
+        traded=traded,
     )
 
 
@@ -1720,6 +1734,7 @@ def _render_selection_funnel_section(funnel: SelectionFunnel | None) -> list[str
     lines.append(f"| Routed | {funnel.routed} |")
     lines.append(f"| Forecasted | {funnel.forecasted} |")
     lines.append(f"| Controller Emitted | {funnel.controller_emitted} |")
+    lines.append(f"| Traded | {funnel.traded} |")
     return lines
 
 

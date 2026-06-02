@@ -20,6 +20,7 @@ from pms.metrics import (
     SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
     SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
     SELECTION_FUNNEL_SELECTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
 )
 from scripts.paper_report import (
     ExecutionConcentration,
@@ -2312,6 +2313,7 @@ def test_metrics_from_api_payloads_surfaces_live_selection_funnel() -> None:
             SELECTION_FUNNEL_ROUTED_TOTAL_METRIC: 23.0,
             SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC: 11.0,
             SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC: 4.0,
+            SELECTION_FUNNEL_TRADED_TOTAL_METRIC: 3.0,
         },
     )
 
@@ -2323,9 +2325,11 @@ def test_metrics_from_api_payloads_surfaces_live_selection_funnel() -> None:
     assert metrics.selection_funnel.routed == 23
     assert metrics.selection_funnel.forecasted == 11
     assert metrics.selection_funnel.controller_emitted == 4
+    assert metrics.selection_funnel.traded == 3
     assert "| Discovered | 120 |" in report
     assert "| Forecasted | 11 |" in report
     assert "| Controller Emitted | 4 |" in report
+    assert "| Traded | 3 |" in report
     assert "No funnel events recorded." not in report
 
 
