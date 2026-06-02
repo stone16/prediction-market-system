@@ -44,8 +44,11 @@ _FLB_CALIBRATION_SOURCE_LABEL_FORBIDDEN_PARTS = frozenset(
         "example",
         "fixture",
         "gamma",
+        "local",
         "placeholder",
         "sample",
+        "smoke",
+        "synthetic",
         "test",
         "todo",
     }

@@ -373,6 +373,9 @@ def test_load_flb_calibration_csv_parses_model(tmp_path: Path) -> None:
         "Gamma API closed markets",
         "warehouse CSV: /tmp/polymarket.csv",
         "tests/fixtures/flb-calibration",
+        "synthetic-flb-v1",
+        "local-flb-v1",
+        "smoke-flb-v1",
         "placeholder",
     ],
 )

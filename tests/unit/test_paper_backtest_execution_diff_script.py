@@ -21,6 +21,8 @@ from scripts.paper_backtest_execution_diff import (
 
 EXECUTION_COLUMNS = [
     "decision_id",
+    "strategy_id",
+    "strategy_version_id",
     "market_id",
     "status",
     "slippage_bps",
@@ -90,6 +92,8 @@ def _write_execution_csv(path: Path, rows: list[dict[str, str]]) -> None:
 def _row(
     decision_id: str,
     *,
+    strategy_id: str = "h1_flb",
+    strategy_version_id: str = "h1-flb-v1",
     market_id: str = "market-1",
     status: str = "filled",
     slippage_bps: str = "6",
@@ -98,6 +102,8 @@ def _row(
 ) -> dict[str, str]:
     return {
         "decision_id": decision_id,
+        "strategy_id": strategy_id,
+        "strategy_version_id": strategy_version_id,
         "market_id": market_id,
         "status": status,
         "slippage_bps": slippage_bps,
@@ -174,6 +180,7 @@ def test_build_execution_diff_writes_pass_artifact(tmp_path: Path) -> None:
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["generated_by"] == "scripts/paper_backtest_execution_diff.py"
     assert payload["artifact_mode"] == "paper_backtest_execution_diff"
+    assert payload["strategy_evidence"] == "h1_flb@h1-flb-v1"
     assert payload["final_go_no_go_valid"] is True
     assert payload["metrics"]["paper_fill_rate"] == pytest.approx(0.8)
     assert payload["metrics"]["backtest_fill_rate"] == pytest.approx(0.8)
@@ -323,6 +330,25 @@ def test_build_execution_diff_fails_on_status_mismatch(tmp_path: Path) -> None:
     assert "status mismatch decision-1: paper=filled backtest=rejected" in (
         diff.failures
     )
+
+
+def test_build_execution_diff_rejects_strategy_mismatch_between_exports(
+    tmp_path: Path,
+) -> None:
+    paper_path = tmp_path / "paper.csv"
+    backtest_path = tmp_path / "backtest.csv"
+    _write_execution_csv(paper_path, [_row("decision-1")])
+    _write_execution_csv(
+        backtest_path,
+        [_row("decision-1", strategy_id="paper_canary_v1")],
+    )
+
+    with pytest.raises(ValueError, match="strategy evidence mismatch"):
+        build_execution_diff(
+            paper_path=paper_path,
+            backtest_path=backtest_path,
+            min_matched_decisions=1,
+        )
 
 
 def test_build_execution_diff_requires_minimum_matched_decisions(

@@ -499,7 +499,14 @@ def _settings(
     )
 
 
-def _write_valid_paper_backtest_diff_json(path: Path) -> None:
+def _write_valid_paper_backtest_diff_json(
+    path: Path,
+    *,
+    strategy_evidence: str | None = None,
+) -> None:
+    if strategy_evidence is None:
+        strategy = _live_strategy()
+        strategy_evidence = f"{strategy.config.strategy_id}@{_strategy_version_id(strategy)}"
     path.write_text(
         json.dumps(
             {
@@ -508,6 +515,7 @@ def _write_valid_paper_backtest_diff_json(path: Path) -> None:
                 "generated_at": (
                     datetime.now(tz=UTC) - timedelta(seconds=60)
                 ).isoformat(),
+                "strategy_evidence": strategy_evidence,
                 "final_go_no_go_valid": True,
                 "thresholds": {
                     "min_matched_decisions": 10,
@@ -5852,6 +5860,33 @@ async def test_live_preflight_fails_with_failed_paper_backtest_diff_artifact(
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_fails_when_paper_backtest_diff_strategy_mismatches_active_strategy(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    payload["strategy_evidence"] = "paper_canary_v1@paper-only-version"
+    diff_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert (
+        "paper-vs-backtest execution diff artifact strategy_evidence "
+        "must match active strategies"
+    ) in live_config.detail
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_with_thin_paper_backtest_diff_sample(
     tmp_path: Path,
 ) -> None:
@@ -6736,6 +6771,10 @@ async def test_live_preflight_accepts_h1_flb_live_candidate_strategy(
         cast(str, settings.live_paper_soak_report_path),
         active_strategy_label,
     )
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    diff_payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    diff_payload["strategy_evidence"] = active_strategy_label
+    diff_path.write_text(json.dumps(diff_payload), encoding="utf-8")
 
     result = await run_live_preflight(
         settings,
@@ -7779,6 +7818,9 @@ def test_live_preflight_flb_calibration_artifact_rejects_duplicate_csv_header() 
         "Gamma API closed markets",
         "warehouse CSV: /tmp/polymarket.csv",
         "tests/fixtures/flb-calibration",
+        "synthetic-flb-v1",
+        "local-flb-v1",
+        "smoke-flb-v1",
         "placeholder",
     ],
 )

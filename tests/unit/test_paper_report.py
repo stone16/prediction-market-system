@@ -242,6 +242,32 @@ def test_paper_soak_gate_fails_without_concrete_strategy_version_evidence() -> N
     )
 
 
+def test_paper_soak_gate_rejects_paper_only_strategy_evidence() -> None:
+    metrics = _passing_gate_metrics(
+        strategy=(
+            "h1_flb@live-v1, "
+            "paper_canary_v1@canary-v1, "
+            "paper_multi_factor_v1@paper-v1"
+        ),
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert gate.ok is False
+    assert gate.require_check("strategy_evidence").detail == (
+        "paper-only strategy cannot be final GO evidence: "
+        "paper_canary_v1@canary-v1, paper_multi_factor_v1@paper-v1"
+    )
+
+
 def test_paper_soak_gate_requires_launch_sample_size() -> None:
     metrics = _passing_gate_metrics(decisions_accepted=29, fills=49)
 

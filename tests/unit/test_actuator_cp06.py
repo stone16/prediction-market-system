@@ -1119,6 +1119,9 @@ _SECRET_CREDENTIAL_VALUES = (
     "0x2222222222222222222222222222222222222222",
 )
 _SECRET_DSN = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+_LIVE_FIXTURE_STRATEGY_EVIDENCE = (
+    "default@4d326514fa853b9278502ad43750b9648ac8f4f6ad8685ba522b2a4aa5f47d25"
+)
 
 
 def _live_settings_with_secret_credentials() -> PMSSettings:
@@ -1224,6 +1227,7 @@ def _stage_readiness_fingerprint_files(settings: PMSSettings, root: Path) -> Non
                 "generated_by": "scripts/paper_backtest_execution_diff.py",
                 "artifact_mode": "paper_backtest_execution_diff",
                 "generated_at": generated_at.isoformat(),
+                "strategy_evidence": _LIVE_FIXTURE_STRATEGY_EVIDENCE,
                 "final_go_no_go_valid": True,
                 "thresholds": {
                     "min_matched_decisions": 10,

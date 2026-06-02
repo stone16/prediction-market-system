@@ -1415,6 +1415,10 @@ def _validate_live_paper_backtest_diff_artifact(settings: PMSSettings) -> None:
         label="LIVE paper-vs-backtest execution diff artifact",
         max_age_s=settings.live_readiness_report_max_age_s,
     )
+    _require_paper_backtest_diff_strategy_evidence(
+        payload,
+        expected_labels=_paper_soak_report_strategy_labels(settings),
+    )
     if payload.get("final_go_no_go_valid") is not True:
         msg = (
             "LIVE paper-vs-backtest execution diff artifact must be final GO"
@@ -1502,6 +1506,56 @@ def _require_paper_backtest_diff_metric_number(
         )
         raise LiveTradingDisabledError(msg)
     return value
+
+
+def _require_paper_backtest_diff_strategy_evidence(
+    payload: Mapping[str, object],
+    *,
+    expected_labels: Sequence[str],
+) -> None:
+    raw_value = payload.get("strategy_evidence")
+    if not isinstance(raw_value, str) or raw_value.strip() == "":
+        msg = (
+            "LIVE paper-vs-backtest execution diff artifact "
+            "strategy_evidence is required"
+        )
+        raise LiveTradingDisabledError(msg)
+    observed_labels = _strategy_evidence_labels(raw_value)
+    expected = set(expected_labels)
+    observed = set(observed_labels)
+    if observed != expected:
+        msg = (
+            "LIVE paper-vs-backtest execution diff artifact "
+            "strategy_evidence must match active strategies from "
+            "paper-soak GO report: "
+            f"expected={', '.join(sorted(expected))}; "
+            f"observed={', '.join(sorted(observed))}"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _strategy_evidence_labels(raw_value: str) -> tuple[str, ...]:
+    labels = tuple(
+        label.strip()
+        for label in raw_value.split(",")
+        if label.strip() != ""
+    )
+    if (
+        not labels
+        or len(set(labels)) != len(labels)
+        or any(
+            label.lower() == "unknown"
+            or "@" not in label
+            or _looks_like_preflight_placeholder_detail(label)
+            for label in labels
+        )
+    ):
+        msg = (
+            "LIVE paper-vs-backtest execution diff artifact "
+            "strategy_evidence must contain concrete strategy_id@strategy_version_id"
+        )
+        raise LiveTradingDisabledError(msg)
+    return labels
 
 
 def _require_json_artifact_generated_at(

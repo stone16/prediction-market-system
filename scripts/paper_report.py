@@ -46,6 +46,12 @@ _SECONDARY_BASELINE_ORDER = (
     "category_prior",
 )
 _BASELINE_SOURCE_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+_PAPER_ONLY_STRATEGY_IDS = frozenset(
+    {
+        "paper_canary_v1",
+        "paper_multi_factor_v1",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -1264,11 +1270,27 @@ def _check_strategy_evidence(strategy: str) -> PaperSoakGateCheck:
             False,
             "missing concrete strategy_id@strategy_version_id",
         )
+    paper_only_labels = tuple(
+        label for label in labels if _is_paper_only_strategy_label(label)
+    )
+    if paper_only_labels:
+        return PaperSoakGateCheck(
+            "strategy_evidence",
+            False,
+            "paper-only strategy cannot be final GO evidence: "
+            f"{', '.join(paper_only_labels)}",
+        )
     return PaperSoakGateCheck(
         "strategy_evidence",
         True,
         ", ".join(labels),
     )
+
+
+def _is_paper_only_strategy_label(label: str) -> bool:
+    strategy_id, _, _strategy_version_id = label.partition("@")
+    normalized = strategy_id.strip().lower()
+    return normalized in _PAPER_ONLY_STRATEGY_IDS
 
 
 def _looks_like_placeholder(value: str) -> bool:

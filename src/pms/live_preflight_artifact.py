@@ -71,8 +71,11 @@ _FLB_CALIBRATION_SOURCE_LABEL_FORBIDDEN_PARTS = frozenset(
         "example",
         "fixture",
         "gamma",
+        "local",
         "placeholder",
         "sample",
+        "smoke",
+        "synthetic",
         "test",
         "todo",
     }
@@ -371,6 +374,10 @@ def _validate_live_paper_backtest_diff_artifact(settings: PMSSettings) -> None:
         label="LIVE paper-vs-backtest execution diff artifact",
         max_age_s=settings.live_readiness_report_max_age_s,
     )
+    _require_paper_backtest_diff_strategy_evidence(
+        payload,
+        expected_labels=_paper_soak_report_strategy_labels(settings),
+    )
     if payload.get("final_go_no_go_valid") is not True:
         msg = "LIVE paper-vs-backtest execution diff artifact must be final GO"
         raise LiveTradingDisabledError(msg)
@@ -430,6 +437,56 @@ def _validate_live_paper_backtest_diff_artifact(settings: PMSSettings) -> None:
         min_matched_decisions=min_matched_decisions,
     )
     _require_paper_backtest_diff_thresholds(metric_values, thresholds=thresholds)
+
+
+def _require_paper_backtest_diff_strategy_evidence(
+    payload: Mapping[str, object],
+    *,
+    expected_labels: Sequence[str],
+) -> None:
+    raw_value = payload.get("strategy_evidence")
+    if not isinstance(raw_value, str) or raw_value.strip() == "":
+        msg = (
+            "LIVE paper-vs-backtest execution diff artifact "
+            "strategy_evidence is required"
+        )
+        raise LiveTradingDisabledError(msg)
+    observed_labels = _strategy_evidence_labels(raw_value)
+    expected = set(expected_labels)
+    observed = set(observed_labels)
+    if observed != expected:
+        msg = (
+            "LIVE paper-vs-backtest execution diff artifact "
+            "strategy_evidence must match active strategies from "
+            "paper-soak GO report: "
+            f"expected={', '.join(sorted(expected))}; "
+            f"observed={', '.join(sorted(observed))}"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _strategy_evidence_labels(raw_value: str) -> tuple[str, ...]:
+    labels = tuple(
+        label.strip()
+        for label in raw_value.split(",")
+        if label.strip() != ""
+    )
+    if (
+        not labels
+        or len(set(labels)) != len(labels)
+        or any(
+            label.lower() == "unknown"
+            or "@" not in label
+            or _looks_like_artifact_placeholder(label)
+            for label in labels
+        )
+    ):
+        msg = (
+            "LIVE paper-vs-backtest execution diff artifact "
+            "strategy_evidence must contain concrete strategy_id@strategy_version_id"
+        )
+        raise LiveTradingDisabledError(msg)
+    return labels
 
 
 def _validate_live_category_prior_artifact(settings: PMSSettings) -> None:
@@ -1101,6 +1158,59 @@ def _readiness_report_generated_at(raw_path: str | None, *, label: str) -> datet
         msg = f"{label} persisted provenance generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
     return _coerce_datetime(generated_at)
+
+
+def _paper_soak_report_strategy_labels(settings: PMSSettings) -> tuple[str, ...]:
+    raw_path = settings.live_paper_soak_report_path
+    if raw_path is None or raw_path.strip() == "":
+        msg = "LIVE paper-soak GO report missing for strategy artifact binding"
+        raise LiveTradingDisabledError(msg)
+    path = Path(raw_path).expanduser()
+    try:
+        report_text = _read_bytes_no_follow(path).decode("utf-8")
+    except OSError as exc:
+        msg = (
+            "LIVE paper-soak GO report is unreadable for strategy artifact "
+            f"binding: {path}"
+        )
+        raise LiveTradingDisabledError(msg) from exc
+    strategy_label = _markdown_summary_strategy_value(report_text)
+    if (
+        strategy_label.strip() == ""
+        or strategy_label.strip().lower() == "unknown"
+        or _looks_like_artifact_placeholder(strategy_label)
+    ):
+        msg = "LIVE paper-soak GO report missing concrete strategy evidence"
+        raise LiveTradingDisabledError(msg)
+    labels = tuple(
+        label.strip()
+        for label in strategy_label.split(",")
+        if label.strip() != ""
+    )
+    if not labels:
+        msg = "LIVE paper-soak GO report missing concrete strategy evidence"
+        raise LiveTradingDisabledError(msg)
+    return labels
+
+
+def _markdown_summary_strategy_value(report_text: str) -> str:
+    in_summary = False
+    for raw_line in report_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            in_summary = line == "## Summary"
+            continue
+        if not in_summary or not line.startswith("|"):
+            continue
+        cells = _markdown_table_cells(line)
+        if len(cells) < 2 or cells[0] != "Strategy":
+            continue
+        if len(cells) != 3:
+            msg = "LIVE paper-soak GO report malformed Summary Strategy row"
+            raise LiveTradingDisabledError(msg)
+        return cells[1].strip()
+    msg = "LIVE paper-soak GO report missing Summary Strategy row"
+    raise LiveTradingDisabledError(msg)
 
 
 def _markdown_report_provenance_value(

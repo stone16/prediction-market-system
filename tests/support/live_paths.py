@@ -110,6 +110,10 @@ def make_live_paper_backtest_diff_path(
                 "generated_by": "scripts/paper_backtest_execution_diff.py",
                 "artifact_mode": "paper_backtest_execution_diff",
                 "generated_at": datetime.now(tz=UTC).isoformat(),
+                "strategy_evidence": (
+                    "default@"
+                    "4d326514fa853b9278502ad43750b9648ac8f4f6ad8685ba522b2a4aa5f47d25"
+                ),
                 "final_go_no_go_valid": True,
                 "thresholds": {
                     "min_matched_decisions": 10,
