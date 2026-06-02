@@ -94,4 +94,4 @@ llm:
   # staging PMS_LLM__API_KEY and accepting the added dependency/cost surface.
   enabled: false
   provider: anthropic
-  max_daily_llm_cost_usdc: 25.0
+  max_daily_llm_cost_usdc: 1.0

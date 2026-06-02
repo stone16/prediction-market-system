@@ -113,12 +113,12 @@ def test_live_soak_config_keeps_credentials_env_only() -> None:
     assert settings.polymarket.funder_address is None
 
 
-def test_live_soak_config_enables_llm_forecaster_with_widened_budget() -> None:
+def test_live_soak_config_enables_llm_forecaster_with_bounded_budget() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
     assert settings.llm.enabled is True
     assert settings.llm.provider == "anthropic"
-    assert settings.llm.max_daily_llm_cost_usdc == 25.0
+    assert settings.llm.max_daily_llm_cost_usdc == 1.0
 
 
 def test_live_soak_config_yaml_does_not_pin_model_or_credentials() -> None:
@@ -206,7 +206,7 @@ def test_live_config_example_is_non_secret_and_uses_soak_risk_envelope() -> None
     assert payload["llm"] == {
         "enabled": False,
         "provider": "anthropic",
-        "max_daily_llm_cost_usdc": 25.0,
+        "max_daily_llm_cost_usdc": 1.0,
     }
     assert payload["polymarket"] == {
         "operator_approval_mode": "every_order",

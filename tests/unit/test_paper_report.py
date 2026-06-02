@@ -2215,6 +2215,24 @@ def test_paper_soak_gate_fails_when_rejection_reason_key_is_blank() -> None:
     assert gate.require_check("risk_events").detail == "1 risk event(s)"
 
 
+def test_metrics_from_api_payloads_surfaces_live_clamp_rejection_summary() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 20,
+            "diagnostics_total": 37,
+            "diagnostic_counts": {"calibration_clamp_rejected": 37},
+        },
+    )
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert metrics.rejection_reasons == (("calibration_clamp_rejected", 37),)
+    assert metrics.clamp_rejections == (("aggregate", 37),)
+    assert "| calibration_clamp_rejected | 37 |" in report
+    assert "| aggregate | 37 |" in report
+    assert "No clamp rejections recorded." not in report
+
+
 def test_paper_soak_gate_fails_without_persisted_runtime_continuity_evidence() -> None:
     metrics = _passing_metrics_from_api_payloads(include_runtime_continuity=False)
 

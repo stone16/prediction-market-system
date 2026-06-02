@@ -303,6 +303,7 @@ def metrics_from_api_payloads(
     events.extend(_current_controller_runtime_risk_events(controller))
     rejection_reasons = _diagnostic_counts(controller)
     events.extend(_diagnostic_evidence_risk_events(controller, rejection_reasons))
+    clamp_rejections = _clamp_rejections_from_diagnostic_counts(rejection_reasons)
     decision_rows = _rows_in_soak_window(
         _rows_from_payload(decisions, "decisions"),
         timestamp_key="created_at",
@@ -441,6 +442,7 @@ def metrics_from_api_payloads(
         rejection_reasons=rejection_reasons,
         trade_costs=_trade_costs_from_decision_rows(decision_rows),
         baseline_evidence=baseline_evidence,
+        clamp_rejections=clamp_rejections,
         execution_concentration=execution_concentration,
         risk_events=tuple(events),
     )
@@ -1491,6 +1493,15 @@ def _clamp_rejections(
         key = market_id if isinstance(market_id, str) and market_id else "unknown"
         counts[key] = counts.get(key, 0) + 1
     return tuple(sorted(counts.items()))
+
+
+def _clamp_rejections_from_diagnostic_counts(
+    diagnostic_counts: Sequence[tuple[str, int]],
+) -> tuple[tuple[str, int], ...]:
+    for reason, count in diagnostic_counts:
+        if reason == "calibration_clamp_rejected" and count > 0:
+            return (("aggregate", count),)
+    return ()
 
 
 def _selection_funnel(log_events: Sequence[Mapping[str, object]]) -> SelectionFunnel:

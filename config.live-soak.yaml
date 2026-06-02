@@ -102,7 +102,10 @@ polymarket:
 llm:
   enabled: true
   provider: anthropic
-  max_daily_llm_cost_usdc: 25.0
+  # Keep the LLM budget small during paper soak. The strategy falls back to
+  # rules/stats when the daily cap is exhausted, and LLM spend is deducted
+  # from P&L in the paper report.
+  max_daily_llm_cost_usdc: 1.0
   # api_key, model, and base_url are intentionally omitted from the committed
   # YAML so the operator's .env or shell can choose between native Anthropic
   # and any Anthropic-compatible provider (DeepSeek's /anthropic endpoint,
