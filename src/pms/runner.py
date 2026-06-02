@@ -3400,9 +3400,11 @@ def _open_position_keys(portfolio: Portfolio) -> set[PositionSlotKey]:
 
 
 def _estimated_decision_quantity(decision: TradeDecision) -> float | None:
-    if decision.limit_price <= 0.0:
+    limit_price = Decimal(str(decision.limit_price))
+    if limit_price <= Decimal("0"):
         return None
-    return decision.notional_usdc / decision.limit_price
+    notional_usdc = Decimal(str(decision.notional_usdc))
+    return float(notional_usdc / limit_price)
 
 
 def _position_key_from_position(position: Position) -> PositionSlotKey:

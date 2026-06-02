@@ -9,7 +9,7 @@ import pytest
 from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import TimeInForce
 from pms.core.models import MarketSignal, Position, TradeDecision, Venue
-from pms.runner import Runner
+from pms.runner import Runner, _estimated_decision_quantity
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -235,6 +235,15 @@ class TestWouldExceedPositionCapacity:
             1000.0
         )
         assert diagnostic.metadata["max_quantity_shares"] == pytest.approx(500.0)
+
+    def test_estimated_quantity_uses_decimal_internal_arithmetic(self) -> None:
+        decision = replace(
+            _decision(),
+            notional_usdc=0.3,
+            limit_price=0.1,
+        )
+
+        assert _estimated_decision_quantity(decision) == 3.0
 
     @pytest.mark.asyncio
     async def test_enqueue_rechecks_capacity_before_queuing(self) -> None:
