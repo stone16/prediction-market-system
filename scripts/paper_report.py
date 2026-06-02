@@ -1782,6 +1782,27 @@ def _strategy_metrics_risk_events(
                     f"{label} record_count={record_count}",
                 )
             )
+            quote_record_count = _int_from_dict(metric_row, "quote_record_count")
+            pnl_source = metric_row.get("pnl_source")
+            quote_mtm_pnl = _optional_float_from_dict(metric_row, "quote_mtm_pnl")
+            if (
+                pnl_source == "quote_mtm"
+                and quote_record_count > 0
+                and (
+                    quote_mtm_pnl is None
+                    or Decimal(str(quote_mtm_pnl)) <= Decimal("0.0")
+                )
+            ):
+                events.append(
+                    (
+                        "strategy",
+                        "active strategy quote-mtm pnl not positive",
+                        (
+                            f"{label} quote_mtm_pnl="
+                            f"{0.0 if quote_mtm_pnl is None else quote_mtm_pnl:.4f}"
+                        ),
+                    )
+                )
             continue
         pnl = _optional_float_from_dict(metric_row, "pnl")
         pnl_decimal = None if pnl is None else Decimal(str(pnl))

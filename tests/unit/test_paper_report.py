@@ -2022,6 +2022,67 @@ def test_insufficient_strategy_samples_do_not_emit_derived_zero_metric_events() 
     )
 
 
+def test_insufficient_strategy_samples_still_flag_negative_quote_mtm_pnl() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 2},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(date(2026, 5, 30), pnl=10.0)},
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+        strategies={
+            "strategies": [
+                {"strategy_id": "new", "active_version_id": "new-v1"},
+            ]
+        },
+        strategy_metrics={
+            "strategies": [
+                {
+                    "strategy_id": "new",
+                    "strategy_version_id": "new-v1",
+                    "record_count": 0,
+                    "insufficient_samples": True,
+                    "pnl": -0.25,
+                    "pnl_source": "quote_mtm",
+                    "fill_rate": 1.0,
+                    "brier_improvement_overall": None,
+                    "quote_record_count": 2,
+                    "quote_mtm_pnl": -0.25,
+                },
+            ]
+        },
+    )
+
+    assert (
+        "strategy",
+        "active strategy samples insufficient",
+        "new@new-v1 record_count=0",
+    ) in metrics.risk_events
+    assert (
+        "strategy",
+        "active strategy quote-mtm pnl not positive",
+        "new@new-v1 quote_mtm_pnl=-0.2500",
+    ) in metrics.risk_events
+    assert not any(
+        event[0] == "strategy"
+        and event[1] == "active strategy pnl not positive"
+        for event in metrics.risk_events
+    )
+
+
 def test_metrics_from_api_payloads_reads_max_drawdown_pct_from_metrics_payload() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
