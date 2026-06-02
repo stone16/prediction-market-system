@@ -614,10 +614,17 @@ def create_app(
         return await list_strategies_items(active_runner.pg_pool)
 
     @app.get("/strategies/metrics", dependencies=[Depends(require_api_token)])
-    async def strategy_metrics() -> dict[str, Any]:
+    async def strategy_metrics(
+        since: datetime | None = Query(default=None),
+        until: datetime | None = Query(default=None),
+    ) -> dict[str, Any]:
         if active_runner.pg_pool is None:
             raise HTTPException(status_code=503, detail="Runner PostgreSQL pool is not initialized")
-        return await list_strategy_metrics_items(active_runner.pg_pool)
+        return await list_strategy_metrics_items(
+            active_runner.pg_pool,
+            since=since,
+            until=until,
+        )
 
     @app.get(
         "/strategies/{strategy_id}/decay-status",
@@ -921,14 +928,8 @@ def _quote_calibration_payload(snapshot: QuoteMetricsSnapshot) -> dict[str, Any]
 def _quote_mtm_pnl_series(
     quote_records: Sequence[QuoteEvalRecord],
 ) -> list[dict[str, Any]]:
-    cumulative_pnl = Decimal("0")
     rows: list[dict[str, Any]] = []
-    ordered_records = sorted(
-        quote_records,
-        key=lambda record: (_coerce_aware_datetime(record.recorded_at), record.fill_id),
-    )
-    for record in ordered_records:
-        cumulative_pnl += Decimal(str(record.mtm_pnl))
+    for record, cumulative_pnl in _quote_mtm_portfolio_snapshots(quote_records):
         rows.append(
             {
                 "recorded_at": _coerce_aware_datetime(record.recorded_at).isoformat(),
@@ -947,18 +948,36 @@ def _quote_mtm_max_drawdown_pct(
     if capital_base_usdc is None or capital_base_usdc <= 0.0:
         return None
 
-    cumulative_pnl = Decimal("0")
     peak_equity = Decimal("0")
     max_drawdown = Decimal("0")
-    ordered_records = sorted(
-        quote_records,
-        key=lambda record: (_coerce_aware_datetime(record.recorded_at), record.fill_id),
-    )
-    for record in ordered_records:
-        cumulative_pnl += Decimal(str(record.mtm_pnl))
+    for _record, cumulative_pnl in _quote_mtm_portfolio_snapshots(quote_records):
         peak_equity = max(peak_equity, cumulative_pnl)
         max_drawdown = max(max_drawdown, peak_equity - cumulative_pnl)
     return float(max_drawdown / Decimal(str(capital_base_usdc)) * Decimal("100"))
+
+
+def _quote_mtm_portfolio_snapshots(
+    quote_records: Sequence[QuoteEvalRecord],
+) -> list[tuple[QuoteEvalRecord, Decimal]]:
+    latest_mtm_by_fill: dict[str, Decimal] = {}
+    rows: list[tuple[QuoteEvalRecord, Decimal]] = []
+    ordered_records = sorted(
+        quote_records,
+        key=lambda record: (
+            _coerce_aware_datetime(record.recorded_at),
+            record.fill_id,
+            record.quote_lag_seconds,
+        ),
+    )
+    for record in ordered_records:
+        latest_mtm_by_fill[record.fill_id] = Decimal(str(record.mtm_pnl))
+        rows.append(
+            (
+                record,
+                sum(latest_mtm_by_fill.values(), Decimal("0")),
+            )
+        )
+    return rows
 
 
 def _eval_records_since(

@@ -158,15 +158,28 @@ def test_position_exit_monitor_disabled_triggers_never_fire() -> None:
     assert monitor.evaluate(_position(pnl_pct=-99.0, opened_days_ago=30), now=NOW) is None
 
 
-def test_mark_position_from_opposite_token_signal_is_skipped() -> None:
+def test_mark_position_from_opposite_token_signal_uses_complement_price() -> None:
     from pms.actuator.exit_monitor import mark_position_from_signal
 
     position = _position(token_id="exit-token-no", current_price=0.40)
-    signal = _signal(yes_price=0.75, token_id="exit-token-yes")
+    signal = replace(
+        _signal(yes_price=0.75, token_id="exit-token-yes"),
+        orderbook={
+            "bids": [{"price": 0.74, "size": 250.0}],
+            "asks": [{"price": 0.76, "size": 250.0}],
+        },
+        external_signal={
+            "yes_token_id": "exit-token-yes",
+            "no_token_id": "exit-token-no",
+            "signal_token_outcome": "YES",
+        },
+    )
 
     marked = mark_position_from_signal(position, signal)
 
-    assert marked is None
+    assert marked is not None
+    assert marked.current_price == pytest.approx(0.24)
+    assert marked.unrealized_pnl == pytest.approx(-26.0)
 
 
 def test_exit_decision_from_no_signal_preserves_yes_token_outcome() -> None:
@@ -187,7 +200,9 @@ def test_exit_decision_from_no_signal_preserves_yes_token_outcome() -> None:
         },
     )
 
-    assert mark_position_from_signal(position, signal) is None
+    marked = mark_position_from_signal(position, signal)
+    assert marked is not None
+    assert marked.current_price == pytest.approx(0.74)
 
     decision = build_exit_decision(
         signal,
@@ -407,7 +422,7 @@ async def test_runner_converts_exit_signal_to_opposing_trade_decision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_skips_exit_from_complementary_token_signal() -> None:
+async def test_runner_exits_from_complementary_token_signal() -> None:
     executor = CapturingExecutor()
     signal = replace(
         _signal(yes_price=0.87, token_id="asset-no-token"),
@@ -445,4 +460,10 @@ async def test_runner_skips_exit_from_complementary_token_signal() -> None:
     finally:
         await runner.stop()
 
-    assert executor.decisions == []
+    assert len(executor.decisions) == 1
+    decision = executor.decisions[0]
+    assert decision.side == "SELL"
+    assert decision.token_id == "asset-yes-token"
+    assert decision.outcome == "YES"
+    assert decision.limit_price == pytest.approx(0.13)
+    assert decision.stop_conditions == ["position_exit:stop_loss"]

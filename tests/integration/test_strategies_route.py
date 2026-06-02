@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -300,6 +300,7 @@ async def _seed_quote_eval_row(
     mtm_pnl: float,
     quote_score: float,
     recorded_at: datetime,
+    quote_lag_seconds: int = 0,
 ) -> None:
     await connection.execute(
         """
@@ -323,7 +324,7 @@ async def _seed_quote_eval_row(
             model_id
         ) VALUES (
             $1, $2, 'market-quote', 'token-quote', $3, $4, 0.55, 0.50,
-            'postgres_snapshot', 0, $5, $6, $7, $7, '[]'::jsonb,
+            'postgres_snapshot', $8, $5, $6, $7, $7, '[]'::jsonb,
             'paper', 'paper-model'
         )
         """,
@@ -334,6 +335,7 @@ async def _seed_quote_eval_row(
         quote_score,
         mtm_pnl,
         recorded_at,
+        quote_lag_seconds,
     )
 
 
@@ -573,6 +575,118 @@ async def test_strategy_metrics_route_returns_grouped_comparative_rows(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_strategy_metrics_route_windows_eval_execution_and_quote_rows(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    old_at = datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
+    in_window_at = datetime(2026, 5, 30, 0, 0, tzinfo=UTC)
+    async with pg_pool.acquire() as connection:
+        await _seed_strategy(
+            connection,
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+        )
+        await _seed_eval_record(
+            connection,
+            decision_id="windowed-old-eval",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            brier_score=0.36,
+            pnl=-100.0,
+            slippage_bps=100.0,
+            recorded_at=old_at,
+        )
+        await _seed_eval_record(
+            connection,
+            decision_id="windowed-new-eval",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            brier_score=0.09,
+            pnl=3.0,
+            slippage_bps=10.0,
+            recorded_at=in_window_at,
+        )
+        await _seed_decision_row(
+            connection,
+            decision_id="windowed-old-decision",
+            opportunity_id="windowed-old-opportunity",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            created_at=old_at,
+        )
+        await _seed_decision_row(
+            connection,
+            decision_id="windowed-new-decision",
+            opportunity_id="windowed-new-opportunity",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            created_at=in_window_at,
+        )
+        await _seed_fill_row(
+            connection,
+            fill_id="windowed-old-fill",
+            order_id="windowed-old-order",
+            market_id="windowed-market",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            filled_at=old_at,
+            fill_notional_usdc=100.0,
+        )
+        await _seed_fill_row(
+            connection,
+            fill_id="windowed-new-fill",
+            order_id="windowed-new-order",
+            market_id="windowed-market",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            filled_at=in_window_at,
+            fill_notional_usdc=2.0,
+        )
+        await _seed_quote_eval_row(
+            connection,
+            fill_id="windowed-old-fill",
+            decision_id="windowed-old-decision",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            mtm_pnl=-100.0,
+            quote_score=0.50,
+            recorded_at=old_at,
+        )
+        await _seed_quote_eval_row(
+            connection,
+            fill_id="windowed-new-fill",
+            decision_id="windowed-new-decision",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            mtm_pnl=0.5,
+            quote_score=0.05,
+            recorded_at=in_window_at,
+        )
+
+    async with _app_client(pg_pool) as client:
+        response = await client.get(
+            "/strategies/metrics",
+            params={
+                "since": "2026-05-01T00:00:00+00:00",
+                "until": "2026-05-31T00:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    row = next(
+        item for item in response.json()["strategies"] if item["strategy_id"] == "windowed"
+    )
+    assert row["record_count"] == 1
+    assert row["pnl"] == pytest.approx(3.0)
+    assert row["slippage_bps"] == pytest.approx(10.0)
+    assert row["decision_count"] == 1
+    assert row["fill_count"] == 1
+    assert row["executed_notional_usdc"] == pytest.approx(2.0)
+    assert row["quote_record_count"] == 1
+    assert row["quote_mtm_pnl"] == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_strategy_metrics_route_uses_execution_and_quote_metrics_before_resolution(
     pg_pool: asyncpg.Pool,
 ) -> None:
@@ -619,6 +733,17 @@ async def test_strategy_metrics_route_uses_execution_and_quote_metrics_before_re
             quote_score=0.03,
             recorded_at=decision_at,
         )
+        await _seed_quote_eval_row(
+            connection,
+            fill_id="paper-fill-1",
+            decision_id="paper-decision-1",
+            strategy_id="paper",
+            strategy_version_id="paper-v1",
+            mtm_pnl=0.08,
+            quote_score=0.05,
+            recorded_at=decision_at + timedelta(hours=1),
+            quote_lag_seconds=7_200,
+        )
 
     async with _app_client(pg_pool) as client:
         response = await client.get("/strategies/metrics")
@@ -635,8 +760,8 @@ async def test_strategy_metrics_route_uses_execution_and_quote_metrics_before_re
     assert paper_row["execution_fill_rate"] == pytest.approx(0.5)
     assert paper_row["fill_rate"] == pytest.approx(0.5)
     assert paper_row["executed_notional_usdc"] == pytest.approx(1.25)
-    assert paper_row["quote_record_count"] == 1
-    assert paper_row["quote_score_overall"] == pytest.approx(0.03)
-    assert paper_row["pnl"] == pytest.approx(-0.12)
-    assert paper_row["quote_mtm_pnl"] == pytest.approx(-0.12)
+    assert paper_row["quote_record_count"] == 2
+    assert paper_row["quote_score_overall"] == pytest.approx(0.04)
+    assert paper_row["pnl"] == pytest.approx(0.08)
+    assert paper_row["quote_mtm_pnl"] == pytest.approx(0.08)
     assert paper_row["pnl_source"] == "quote_mtm"

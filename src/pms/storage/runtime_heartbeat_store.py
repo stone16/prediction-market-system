@@ -68,11 +68,19 @@ class RuntimeHeartbeatStore:
                 json.dumps(component_status, sort_keys=True),
             )
 
-    async def continuity(self, *, run_id: str) -> RuntimeContinuity | None:
+    async def continuity(
+        self,
+        *,
+        run_id: str,
+        observed_until: datetime | None = None,
+    ) -> RuntimeContinuity | None:
         async with self.pool.acquire() as connection:
             row = await connection.fetchrow(
                 """
-                WITH ordered AS (
+                WITH report_clock AS (
+                    SELECT COALESCE($2::timestamptz, NOW()) AS observed_until
+                ),
+                ordered AS (
                     SELECT
                         started_at,
                         observed_at,
@@ -108,6 +116,15 @@ class RuntimeHeartbeatStore:
                             COALESCE(
                                 EXTRACT(EPOCH FROM MIN(observed_at) - MIN(started_at)),
                                 0
+                            ),
+                            COALESCE(
+                                EXTRACT(
+                                    EPOCH FROM (
+                                        (SELECT observed_until FROM report_clock)
+                                        - MAX(observed_at)
+                                    )
+                                ),
+                                0
                             )
                         ) AS max_gap_seconds
                     FROM ordered
@@ -124,6 +141,7 @@ class RuntimeHeartbeatStore:
                 WHERE heartbeat_count > 0
                 """,
                 run_id,
+                None if observed_until is None else _aware(observed_until),
             )
         if row is None:
             return None
@@ -136,7 +154,7 @@ class RuntimeHeartbeatStore:
             first_observed_at=first_observed_at,
             last_observed_at=last_observed_at,
             heartbeat_count=int(cast(int, row["heartbeat_count"])),
-            healthy_days=_elapsed_whole_days(first_started_at, last_observed_at),
+            healthy_days=_elapsed_whole_days(first_observed_at, last_observed_at),
             max_gap_seconds=float(row["max_gap_seconds"]),
             unhealthy_heartbeat_count=int(cast(int, row["unhealthy_heartbeat_count"])),
             min_controller_runtimes=int(cast(int, row["min_controller_runtimes"])),

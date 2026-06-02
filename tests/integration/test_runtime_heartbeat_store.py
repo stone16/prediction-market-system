@@ -47,9 +47,48 @@ async def test_runtime_continuity_includes_initial_missing_heartbeat_gap(
         component_status={"running": True},
     )
 
-    continuity = await store.continuity(run_id=run_id)
+    continuity = await store.continuity(
+        run_id=run_id,
+        observed_until=first_observed_at,
+    )
 
     assert continuity is not None
-    assert continuity.healthy_days == 30
+    assert continuity.healthy_days == 0
     assert continuity.heartbeat_count == 1
     assert continuity.max_gap_seconds == pytest.approx(2_592_000.0)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_runtime_continuity_includes_trailing_missing_heartbeat_gap(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    run_id = "runtime-heartbeat-stale-tail"
+    started_at = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    first_observed_at = started_at
+    last_observed_at = started_at + timedelta(minutes=1)
+    observed_until = started_at + timedelta(minutes=10)
+    store = RuntimeHeartbeatStore(pg_pool)
+    async with pg_pool.acquire() as connection:
+        await connection.execute(
+            "DELETE FROM runtime_heartbeats WHERE run_id = $1",
+            run_id,
+        )
+
+    for observed_at in (first_observed_at, last_observed_at):
+        await store.append(
+            run_id=run_id,
+            mode="paper",
+            started_at=started_at,
+            observed_at=observed_at,
+            strategy_fingerprint="strategy-fingerprint",
+            component_status={"running": True, "sensor_tasks": 1, "controller_runtimes": 1},
+        )
+
+    continuity = await store.continuity(
+        run_id=run_id,
+        observed_until=observed_until,
+    )
+
+    assert continuity is not None
+    assert continuity.heartbeat_count == 2
+    assert continuity.max_gap_seconds == pytest.approx(540.0)

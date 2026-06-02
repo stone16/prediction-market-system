@@ -641,6 +641,62 @@ async def test_metrics_route_exposes_quote_mtm_pnl_series() -> None:
 
 
 @pytest.mark.asyncio
+async def test_metrics_route_deduplicates_repeated_quote_mtm_marks_by_fill() -> None:
+    first_mark = replace(
+        _quote_eval_record(),
+        fill_id="same-fill",
+        quote_lag_seconds=60,
+        recorded_at=datetime(2026, 5, 30, 1, tzinfo=UTC),
+        mtm_pnl=1.0,
+    )
+    latest_mark = replace(
+        _quote_eval_record(),
+        fill_id="same-fill",
+        quote_lag_seconds=120,
+        recorded_at=datetime(2026, 5, 30, 2, tzinfo=UTC),
+        mtm_pnl=2.0,
+    )
+    other_fill_mark = replace(
+        _quote_eval_record(),
+        fill_id="other-fill",
+        quote_lag_seconds=60,
+        recorded_at=datetime(2026, 5, 30, 3, tzinfo=UTC),
+        mtm_pnl=-0.5,
+    )
+    runner = _runner_with_state()
+    runner.quote_eval_store = cast(
+        QuoteEvalStore,
+        _QuoteEvalStore([first_mark, latest_mark, other_fill_mark]),
+    )
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/metrics")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["quote_calibration"]["mtm_pnl"] == 1.5
+    assert payload["quote_calibration"]["pnl_series"] == [
+        {
+            "recorded_at": "2026-05-30T01:00:00+00:00",
+            "pnl": 1.0,
+            "source": "quote_mtm",
+        },
+        {
+            "recorded_at": "2026-05-30T02:00:00+00:00",
+            "pnl": 2.0,
+            "source": "quote_mtm",
+        },
+        {
+            "recorded_at": "2026-05-30T03:00:00+00:00",
+            "pnl": 1.5,
+            "source": "quote_mtm",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_metrics_route_exposes_quote_mtm_max_drawdown_pct() -> None:
     quote_records = [
         replace(

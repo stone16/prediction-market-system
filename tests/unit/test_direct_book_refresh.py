@@ -149,6 +149,43 @@ async def test_refreshing_direct_book_reader_refreshes_stale_primary_snapshot() 
 
 
 @pytest.mark.asyncio
+async def test_refreshing_direct_book_reader_evicts_synthetic_levels_after_read() -> None:
+    now = datetime(2026, 6, 1, 22, 0, tzinfo=UTC)
+    primary = FakePrimaryBookReader(
+        snapshot=None,
+        levels=[BookLevel(-1, "market-1", "BUY", 0.41, 5.0)],
+    )
+    venue = FakeVenueBookClient(
+        VenueBook(
+            market_id="market-1",
+            token_id="token-no",
+            ts=now,
+            hash="venue-hash",
+            bids=(BookLevel(0, "market-1", "BUY", 0.43, 20.0),),
+            asks=(BookLevel(0, "market-1", "SELL", 0.44, 30.0),),
+        )
+    )
+    reader = RefreshingDirectBookSnapshotReader(
+        primary=primary,
+        venue_client=venue,
+        max_snapshot_age_ms=1_000.0,
+        clock=lambda: now,
+    )
+
+    snapshot = await reader.read_latest_snapshot("market-1", "token-no")
+    assert snapshot is not None
+    first_levels = await reader.read_levels_for_snapshot(snapshot.id)
+    second_levels = await reader.read_levels_for_snapshot(snapshot.id)
+
+    assert first_levels == [
+        BookLevel(snapshot.id, "market-1", "BUY", 0.43, 20.0),
+        BookLevel(snapshot.id, "market-1", "SELL", 0.44, 30.0),
+    ]
+    assert second_levels == [BookLevel(-1, "market-1", "BUY", 0.41, 5.0)]
+    assert primary.level_calls == [snapshot.id]
+
+
+@pytest.mark.asyncio
 async def test_refreshing_direct_book_reader_reads_venue_fee_rate_bps() -> None:
     now = datetime(2026, 6, 1, 22, 0, tzinfo=UTC)
     primary = FakePrimaryBookReader(snapshot=None)

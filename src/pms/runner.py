@@ -1533,6 +1533,7 @@ class Runner:
 
             decision = work_item.decision
             signal = work_item.signal
+            order_state: OrderState | None = None
             try:
                 if (
                     self.config.mode == RunMode.LIVE
@@ -1574,6 +1575,7 @@ class Runner:
                             error=error,
                         )
                     logger.warning("order persistence failed: %s", error)
+                self._record_live_order_risk_reservation(order_state)
                 # LIVE fills get their real fee from venue reconciliation; for
                 # paper/backtest, model it from the configured rate so net-edge
                 # metrics are not inflated.
@@ -1682,8 +1684,9 @@ class Runner:
                 )
                 logger.warning("actuator execution failed: %s", detail)
             finally:
-                self._release_position_exit_key(decision.decision_id)
-                self._release_position_capacity_reservation(decision.decision_id)
+                if not self._keeps_live_open_order_reservations(order_state):
+                    self._release_position_exit_key(decision.decision_id)
+                    self._release_position_capacity_reservation(decision.decision_id)
                 self._decision_queue.task_done()
 
     async def _decision_expiry_loop(self) -> None:
@@ -1736,8 +1739,7 @@ class Runner:
                 tuple(self._controller_runtimes.values())
             ),
             component_status={
-                "running": True,
-                "sensor_tasks": len(self.sensor_stream.tasks),
+                **self._runtime_sensor_component_status(),
                 "controller_runtimes": len(self._controller_runtimes),
             },
         )
@@ -2189,6 +2191,59 @@ class Runner:
         key = self._position_exit_keys_by_decision.pop(decision_id, None)
         if key is not None:
             self._emitted_position_exit_keys.discard(key)
+
+    def _keeps_live_open_order_reservations(
+        self,
+        order_state: OrderState | None,
+    ) -> bool:
+        return (
+            self.config.mode == RunMode.LIVE
+            and order_state is not None
+            and _is_open_order_state(order_state)
+        )
+
+    def _record_live_order_risk_reservation(
+        self,
+        order_state: OrderState | None,
+    ) -> None:
+        if self.config.mode != RunMode.LIVE or order_state is None:
+            return
+        risk = getattr(self.actuator_executor, "risk", None)
+        if risk is None:
+            return
+        if _is_open_order_state(order_state):
+            record_open_order = getattr(risk, "record_open_order_state", None)
+            if callable(record_open_order):
+                record_open_order(order_state)
+            return
+        record_order_filled = getattr(risk, "record_order_filled", None)
+        if callable(record_order_filled):
+            record_order_filled(order_state.order_id)
+
+    def _runtime_sensor_component_status(self) -> dict[str, object]:
+        tasks = self.sensor_stream.tasks
+        running_tasks = 0
+        failed_tasks = 0
+        for task in tasks:
+            if not task.done():
+                running_tasks += 1
+                continue
+            if task.cancelled():
+                continue
+            if task.exception() is not None:
+                failed_tasks += 1
+        sensor_running = bool(tasks) and running_tasks == len(tasks)
+        return {
+            "running": (
+                sensor_running
+                and len(self._controller_runtimes) > 0
+                and not self._stop_event.is_set()
+            ),
+            "sensor_running": sensor_running,
+            "sensor_tasks": running_tasks,
+            "sensor_tasks_total": len(tasks),
+            "sensor_task_failures": failed_tasks,
+        }
 
     def _record_position_exit_reentry_quarantine(
         self,
@@ -3599,6 +3654,24 @@ def _decision_status_from_order(order_state: OrderState) -> str:
     if normalized_status == OrderStatus.INVALID.value:
         return "rejected"
     return "submitted"
+
+
+def _is_open_order_state(order_state: OrderState) -> bool:
+    if order_state.remaining_notional_usdc <= 1e-9:
+        return False
+    normalized_status = order_state.status.lower()
+    raw_status = order_state.raw_status.lower()
+    return normalized_status in {
+        OrderStatus.LIVE.value,
+        OrderStatus.UNMATCHED.value,
+        OrderStatus.PARTIAL.value,
+        "open",
+    } or raw_status in {
+        OrderStatus.LIVE.value,
+        OrderStatus.UNMATCHED.value,
+        OrderStatus.PARTIAL.value,
+        "open",
+    }
 
 
 def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:

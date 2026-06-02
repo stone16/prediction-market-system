@@ -213,7 +213,7 @@ def _apply_rule_delta(
     probability = yes_price
     applied = False
     for step in rule_steps:
-        factor_value = factor_values.get((step.factor_id, step.param))
+        factor_value = _rule_delta_factor_value(step, factor_values)
         if factor_value is None:
             continue
         delta = _rule_delta(step.factor_id, factor_value, market_price=yes_price)
@@ -225,6 +225,36 @@ def _apply_rule_delta(
     if not applied:
         return None
     return _bounded_probability(probability)
+
+
+def _rule_delta_factor_value(
+    step: FactorCompositionStep,
+    factor_values: Mapping[tuple[str, str], float],
+) -> float | None:
+    factor_value = factor_values.get((step.factor_id, step.param))
+    if factor_value is not None:
+        return _orient_rule_delta_value(
+            factor_id=step.factor_id,
+            param=step.param,
+            factor_value=factor_value,
+        )
+    if step.factor_id != "orderbook_imbalance" or step.param != "":
+        return None
+    no_token_value = factor_values.get((step.factor_id, "NO"))
+    if no_token_value is not None:
+        return -no_token_value
+    return factor_values.get((step.factor_id, "YES"))
+
+
+def _orient_rule_delta_value(
+    *,
+    factor_id: str,
+    param: str,
+    factor_value: float,
+) -> float:
+    if factor_id == "orderbook_imbalance" and param.upper() == "NO":
+        return -factor_value
+    return factor_value
 
 
 def _rule_delta(

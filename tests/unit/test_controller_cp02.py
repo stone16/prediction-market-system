@@ -172,6 +172,58 @@ class StaticDirectBookReader:
         return self.fee_rate_bps if token_id == self.token_id else None
 
 
+class MultiDirectBookReader:
+    def __init__(
+        self,
+        books: dict[str, tuple[list[tuple[float, float]], list[tuple[float, float]]]],
+    ) -> None:
+        self.snapshots: dict[str, BookSnapshot] = {}
+        self.levels: dict[int, list[BookLevel]] = {}
+        for index, (token_id, (bids, asks)) in enumerate(books.items(), start=1):
+            snapshot = BookSnapshot(
+                id=200 + index,
+                market_id="market-cp02",
+                token_id=token_id,
+                ts=datetime.now(tz=UTC),
+                hash=f"direct-book-{token_id}",
+                source="subscribe",
+            )
+            self.snapshots[token_id] = snapshot
+            self.levels[snapshot.id] = [
+                *(
+                    BookLevel(
+                        snapshot_id=snapshot.id,
+                        market_id="market-cp02",
+                        side="BUY",
+                        price=price,
+                        size=size,
+                    )
+                    for price, size in bids
+                ),
+                *(
+                    BookLevel(
+                        snapshot_id=snapshot.id,
+                        market_id="market-cp02",
+                        side="SELL",
+                        price=price,
+                        size=size,
+                    )
+                    for price, size in asks
+                ),
+            ]
+
+    async def read_latest_snapshot(
+        self,
+        market_id: str,
+        token_id: str,
+    ) -> BookSnapshot | None:
+        del market_id
+        return self.snapshots.get(token_id)
+
+    async def read_levels_for_snapshot(self, snapshot_id: int) -> list[BookLevel]:
+        return list(self.levels.get(snapshot_id, ()))
+
+
 class FailingFeeDirectBookReader(StaticDirectBookReader):
     async def read_fee_rate_bps(self, market_id: str, token_id: str) -> float | None:
         del market_id, token_id
@@ -1232,6 +1284,143 @@ async def test_no_token_signal_with_positive_yes_edge_does_not_force_no_trade() 
     assert diagnostic.code == "direct_outcome_orderbook_required"
     assert diagnostic.metadata["decision_outcome"] == "YES"
     assert diagnostic.metadata["decision_token_id"] == "token-yes"
+
+
+@pytest.mark.asyncio
+async def test_no_token_signal_with_positive_yes_edge_requires_yes_token_metadata() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[VeryBullishForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=1_000.0)),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(max_spread_bps=1_000.0),
+        ),
+    )
+    signal = replace(
+        _signal(),
+        token_id="token-no",
+        yes_price=0.30,
+        external_signal={
+            **_signal().external_signal,
+            "no_token_id": "token-no",
+            "signal_token_outcome": "NO",
+        },
+        orderbook={
+            "bids": [{"price": 0.29, "size": 1_000.0}],
+            "asks": [{"price": 0.30, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.code == "missing_yes_token"
+    assert diagnostic.metadata["signal_token_id"] == "token-no"
+    assert diagnostic.metadata["no_token_id"] == "token-no"
+    assert diagnostic.metadata["outcome"] == "YES"
+
+
+@pytest.mark.asyncio
+async def test_best_ask_strategy_recomputes_spread_after_direct_book_switch() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[VeryBearishForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=1_000.0)),
+        outcome_token_resolver=StaticOutcomeTokenResolver(),
+        direct_book_reader=MultiDirectBookReader(
+            {
+                "token-no": (
+                    [(0.20, 1_000.0)],
+                    [(0.30, 1_000.0)],
+                ),
+            }
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(max_spread_bps=1_000.0),
+        ),
+    )
+    signal = replace(
+        _signal(),
+        token_id="token-yes",
+        yes_price=0.80,
+        external_signal={
+            **_signal().external_signal,
+            "yes_token_id": "token-yes",
+            "no_token_id": "token-no",
+            "spread_bps": 50,
+        },
+        orderbook={
+            "bids": [{"price": 0.795, "size": 1_000.0}],
+            "asks": [{"price": 0.800, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.code == "router_gate:spread_too_wide"
+    assert diagnostic.metadata["spread_bps_at_decision"] == 4000
+    assert diagnostic.metadata["decision_token_id"] == "token-no"
+
+
+@pytest.mark.asyncio
+async def test_best_ask_strategy_refreshes_direct_book_token_price_evidence() -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[BearishForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=1_000.0)),
+        outcome_token_resolver=StaticOutcomeTokenResolver(),
+        direct_book_reader=StaticDirectBookReader(
+            token_id="token-no",
+            bids=[(0.40, 1_000.0)],
+            asks=[(0.41, 1_000.0)],
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(max_spread_bps=1_000.0),
+        ),
+    )
+    signal = replace(
+        _signal(),
+        token_id="token-yes",
+        yes_price=0.585,
+        external_signal={
+            **_signal().external_signal,
+            "yes_token_id": "token-yes",
+            "no_token_id": "token-no",
+        },
+        orderbook={
+            "bids": [{"price": 0.58, "size": 1_000.0}],
+            "asks": [{"price": 0.59, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is not None
+    _, decision = emission
+    assert decision.outcome == "NO"
+    assert decision.token_id == "token-no"
+    assert decision.limit_price == pytest.approx(0.41)
+    assert pipeline.last_execution_signal is not None
+    assert pipeline.last_execution_signal.token_id == "token-no"
+    assert pipeline.last_execution_signal.yes_price == pytest.approx(0.41)
+    assert pipeline.last_execution_signal.external_signal["direct_token_price"] == pytest.approx(
+        0.41
+    )
+    assert pipeline.last_execution_signal.external_signal["best_ask"] == pytest.approx(0.41)
 
 
 @pytest.mark.asyncio

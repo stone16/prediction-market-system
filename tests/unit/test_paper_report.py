@@ -1569,6 +1569,51 @@ def test_metrics_from_api_payloads_deducts_llm_cost_from_pnl() -> None:
     assert metrics.cumulative_pnl == pytest.approx(0.75)
 
 
+def test_metrics_from_api_payloads_rejects_process_global_llm_cost_for_window() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "window_started_at": "2026-04-30T00:00:00+00:00",
+            "window_ended_at": "2026-05-31T00:00:00+00:00",
+            "pnl_series": [
+                {
+                    "recorded_at": "2026-05-30T12:00:00+00:00",
+                    "pnl": 2.0,
+                },
+            ],
+            LLM_DAILY_COST_USDC_METRIC: 0.75,
+            LLM_ESTIMATED_COST_USDC_TOTAL_METRIC: 1.25,
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.llm_cost_usdc == pytest.approx(0.0)
+    assert metrics.todays_pnl == pytest.approx(1.25)
+    assert metrics.cumulative_pnl == pytest.approx(2.0)
+    assert (
+        "llm",
+        "windowed LLM cost evidence missing",
+        "pms_llm_estimated_cost_usdc_total=1.2500 is process-global and cannot "
+        "be deducted from a paper-soak window",
+    ) in metrics.risk_events
+
+
 def test_metrics_from_api_payloads_flags_llm_budget_exhaustion() -> None:
     report_date = date(2026, 5, 30)
 
@@ -3728,7 +3773,7 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
             )
         if path == "/strategies":
             return ({"strategies": []}, None)
-        if path == "/strategies/metrics":
+        if path.startswith("/strategies/metrics"):
             return ({"strategies": []}, None)
         raise AssertionError(f"unexpected JSON path: {path}")
 
@@ -3792,7 +3837,14 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
         "since": ["2026-04-30T00:00:00+00:00"],
         "until": ["2026-05-31T00:00:00+00:00"],
     }
-    assert "/strategies/metrics" in fetched_json_paths
+    strategy_metrics_path = next(
+        path for path in fetched_json_paths if path.startswith("/strategies/metrics")
+    )
+    strategy_metrics_query = parse_qs(urlsplit(strategy_metrics_path).query)
+    assert strategy_metrics_query == {
+        "since": ["2026-04-30T00:00:00+00:00"],
+        "until": ["2026-05-31T00:00:00+00:00"],
+    }
     assert len(set(paginated_until_values)) == 1
     assert metrics.average_slippage_bps == pytest.approx(10.0)
 

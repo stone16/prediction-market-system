@@ -110,7 +110,7 @@ class RefreshingDirectBookSnapshotReader:
         )
 
     async def read_levels_for_snapshot(self, snapshot_id: int) -> list[BookLevel]:
-        synthetic_levels = self._levels_by_synthetic_snapshot_id.get(snapshot_id)
+        synthetic_levels = self._levels_by_synthetic_snapshot_id.pop(snapshot_id, None)
         if synthetic_levels is not None:
             return list(synthetic_levels)
         return await self.primary.read_levels_for_snapshot(snapshot_id)

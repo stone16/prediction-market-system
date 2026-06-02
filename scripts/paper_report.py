@@ -378,7 +378,9 @@ def metrics_from_api_payloads(
             )
         )
     )
-    llm_total_cost = Decimal(str(_llm_total_cost_usdc(metric_rows)))
+    llm_total_cost_float, llm_window_cost_events = _llm_soak_cost_usdc(metric_rows)
+    events.extend(llm_window_cost_events)
+    llm_total_cost = Decimal(str(llm_total_cost_float))
     llm_daily_cost = Decimal(str(_llm_daily_cost_usdc(metric_rows)))
     llm_budget_exhaustions = _llm_budget_exhaustions(metric_rows)
     events.extend(_llm_budget_risk_events(metric_rows))
@@ -566,9 +568,12 @@ def load_live_metrics(
     if strategies_error is not None:
         events.append(("report generation", "/strategies unavailable", strategies_error))
         strategies_payload = None
+    strategy_metrics_path = _strategy_metrics_path_for_metrics_window(
+        expected_metrics_window,
+    )
     strategy_metrics, strategy_metrics_error = _fetch_api_json(
         api_base_url=api_base_url,
-        path="/strategies/metrics",
+        path=strategy_metrics_path,
         api_token=api_token,
     )
     strategy_metrics_payload: dict[str, Any] | None = strategy_metrics
@@ -2349,6 +2354,31 @@ def _llm_total_cost_usdc(metrics: Mapping[str, Any]) -> float:
     ) or 0.0
 
 
+def _llm_soak_cost_usdc(
+    metrics: Mapping[str, Any],
+) -> tuple[float, list[tuple[str, str, str]]]:
+    total_cost = _llm_total_cost_usdc(metrics)
+    if total_cost <= 0.0 or not _metrics_payload_has_window(metrics):
+        return total_cost, []
+    return 0.0, [
+        (
+            "llm",
+            "windowed LLM cost evidence missing",
+            (
+                f"{LLM_ESTIMATED_COST_USDC_TOTAL_METRIC}={total_cost:.4f} is "
+                "process-global and cannot be deducted from a paper-soak window"
+            ),
+        )
+    ]
+
+
+def _metrics_payload_has_window(metrics: Mapping[str, Any]) -> bool:
+    return (
+        metrics.get("window_started_at") is not None
+        or metrics.get("window_ended_at") is not None
+    )
+
+
 def _llm_daily_cost_usdc(metrics: Mapping[str, Any]) -> float:
     return _optional_float_from_mapping(metrics, LLM_DAILY_COST_USDC_METRIC) or 0.0
 
@@ -2847,6 +2877,15 @@ def _metrics_path_for_soak_window(
         }
     )
     return f"/metrics?{query}", (started_at.isoformat(), window_end.isoformat())
+
+
+def _strategy_metrics_path_for_metrics_window(
+    metrics_window: tuple[str, str] | None,
+) -> str:
+    if metrics_window is None:
+        return "/strategies/metrics"
+    query = urlencode({"since": metrics_window[0], "until": metrics_window[1]})
+    return f"/strategies/metrics?{query}"
 
 
 def _elapsed_soak_days(started_at: datetime, *, observed_until: datetime) -> int:

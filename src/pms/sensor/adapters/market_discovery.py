@@ -556,7 +556,7 @@ def _gamma_market_to_tokens(
     condition_id: str,
 ) -> list[Token]:
     raw_token_ids = row.get("clobTokenIds")
-    if raw_token_ids in {None, ""}:
+    if _is_missing_sequence_payload(raw_token_ids):
         return []
 
     loaded = json.loads(raw_token_ids) if isinstance(raw_token_ids, str) else raw_token_ids
@@ -585,7 +585,7 @@ def _gamma_market_to_tokens(
 
 def _gamma_market_outcomes(row: dict[str, Any]) -> tuple[Outcome, Outcome]:
     raw_outcomes = row.get("outcomes")
-    if raw_outcomes in {None, ""}:
+    if _is_missing_sequence_payload(raw_outcomes):
         msg = "Gamma market row is missing outcomes"
         raise ValueError(msg)
     loaded = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
@@ -601,7 +601,7 @@ def _gamma_market_outcomes(row: dict[str, Any]) -> tuple[Outcome, Outcome]:
 
 def _is_non_binary_gamma_market(row: dict[str, Any]) -> bool:
     raw_outcomes = row.get("outcomes")
-    if raw_outcomes in {None, ""}:
+    if _is_missing_sequence_payload(raw_outcomes):
         return False
     try:
         loaded = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
@@ -611,6 +611,10 @@ def _is_non_binary_gamma_market(row: dict[str, Any]) -> bool:
         return False
     normalized = tuple(str(outcome).strip().upper() for outcome in loaded)
     return len(normalized) != 2 or set(normalized) != {"YES", "NO"}
+
+
+def _is_missing_sequence_payload(value: object) -> bool:
+    return value is None or (isinstance(value, str) and value == "")
 
 
 def _optional_datetime(value: object) -> datetime | None:

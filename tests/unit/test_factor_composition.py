@@ -224,6 +224,26 @@ def test_apply_composition_scales_rule_delta_raw_orderbook_imbalance() -> None:
     assert result == pytest.approx(0.7125)
 
 
+def test_apply_composition_flips_no_token_orderbook_imbalance_before_rule_delta() -> None:
+    result = apply_composition(
+        (
+            _step(
+                "orderbook_imbalance",
+                role="rule_delta",
+                weight=0.25,
+                threshold=0.80,
+            ),
+            _step("rules", role="blend_weighted", weight=1.0),
+        ),
+        {
+            ("orderbook_imbalance", "NO"): 0.85,
+            ("yes_price", ""): 0.50,
+        },
+    )
+
+    assert result == pytest.approx(0.2875)
+
+
 def test_apply_composition_supports_generic_threshold_edge_steps() -> None:
     result = apply_composition(
         (

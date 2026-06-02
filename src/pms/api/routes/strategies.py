@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -97,14 +97,29 @@ async def list_strategies(pg_pool: asyncpg.Pool) -> dict[str, Any]:
     return payload.model_dump(mode="json")
 
 
-async def list_strategy_metrics(pg_pool: asyncpg.Pool) -> dict[str, Any]:
+async def list_strategy_metrics(
+    pg_pool: asyncpg.Pool,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> dict[str, Any]:
+    since = None if since is None else _coerce_aware_datetime(since)
+    until = None if until is None else _coerce_aware_datetime(until)
     registry = PostgresStrategyRegistry(pg_pool)
     strategy_rows = [
         row for row in await registry.list_strategies() if row.active_version_id is not None
     ]
     eval_store = EvalStore(pg_pool)
-    records_by_strategy = await _load_records_by_strategy(eval_store, strategy_rows)
-    execution_by_strategy = await _load_execution_snapshots(pg_pool)
+    records_by_strategy = _filter_records_by_window(
+        await _load_records_by_strategy(eval_store, strategy_rows),
+        since=since,
+        until=until,
+    )
+    execution_by_strategy = await _load_execution_snapshots(
+        pg_pool,
+        since=since,
+        until=until,
+    )
     grouped_snapshots = MetricsCollector(
         record
         for strategy_records in records_by_strategy.values()
@@ -153,6 +168,9 @@ async def _load_records_by_strategy(
 
 async def _load_execution_snapshots(
     pg_pool: asyncpg.Pool,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> dict[StrategyVersionKey, StrategyExecutionSnapshot]:
     async with pg_pool.acquire() as connection:
         rows = await connection.fetch(
@@ -165,6 +183,8 @@ async def _load_execution_snapshots(
             decision_stats AS (
                 SELECT strategy_id, strategy_version_id, COUNT(*)::integer AS decision_count
                 FROM decisions
+                WHERE ($1::timestamptz IS NULL OR created_at >= $1)
+                  AND ($2::timestamptz IS NULL OR created_at <= $2)
                 GROUP BY strategy_id, strategy_version_id
             ),
             fill_stats AS (
@@ -175,7 +195,24 @@ async def _load_execution_snapshots(
                     COALESCE(SUM(fill_notional_usdc), 0.0)::double precision
                         AS executed_notional_usdc
                 FROM fills
+                WHERE ($1::timestamptz IS NULL OR ts >= $1)
+                  AND ($2::timestamptz IS NULL OR ts <= $2)
                 GROUP BY strategy_id, strategy_version_id
+            ),
+            quote_rows AS (
+                SELECT
+                    strategy_id,
+                    strategy_version_id,
+                    fill_id,
+                    quote_score,
+                    mtm_pnl,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY strategy_id, strategy_version_id, fill_id
+                        ORDER BY recorded_at DESC, quote_lag_seconds DESC
+                    ) AS fill_mark_rank
+                FROM quote_eval_records
+                WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
+                  AND ($2::timestamptz IS NULL OR recorded_at <= $2)
             ),
             quote_stats AS (
                 SELECT
@@ -183,8 +220,11 @@ async def _load_execution_snapshots(
                     strategy_version_id,
                     COUNT(*)::integer AS quote_record_count,
                     AVG(quote_score)::double precision AS quote_score_overall,
-                    COALESCE(SUM(mtm_pnl), 0.0)::double precision AS quote_mtm_pnl
-                FROM quote_eval_records
+                    COALESCE(
+                        SUM(mtm_pnl) FILTER (WHERE fill_mark_rank = 1),
+                        0.0
+                    )::double precision AS quote_mtm_pnl
+                FROM quote_rows
                 GROUP BY strategy_id, strategy_version_id
             )
             SELECT
@@ -208,7 +248,9 @@ async def _load_execution_snapshots(
                 ON quote_stats.strategy_id = active_strategies.strategy_id
                AND quote_stats.strategy_version_id = active_strategies.strategy_version_id
             ORDER BY active_strategies.strategy_id ASC
-            """
+            """,
+            since,
+            until,
         )
     return {
         (str(row["strategy_id"]), str(row["strategy_version_id"])): (
@@ -227,6 +269,31 @@ async def _load_execution_snapshots(
         )
         for row in rows
     }
+
+
+def _filter_records_by_window(
+    records_by_strategy: dict[StrategyVersionKey, list[EvalRecord]],
+    *,
+    since: datetime | None,
+    until: datetime | None,
+) -> dict[StrategyVersionKey, list[EvalRecord]]:
+    if since is None and until is None:
+        return records_by_strategy
+    return {
+        key: [
+            record
+            for record in records
+            if (since is None or record.recorded_at >= since)
+            and (until is None or record.recorded_at <= until)
+        ]
+        for key, records in records_by_strategy.items()
+    }
+
+
+def _coerce_aware_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _empty_execution_snapshot() -> StrategyExecutionSnapshot:

@@ -8,7 +8,7 @@ import importlib.machinery
 import importlib.util
 import logging
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -140,6 +140,7 @@ def _order_state(
         strategy_id=decision.strategy_id,
         strategy_version_id=decision.strategy_version_id,
         filled_quantity=filled_quantity,
+        risk_group_id=decision.risk_group_id,
     )
 
 
@@ -868,6 +869,58 @@ def test_risk_manager_rejects_total_exposure_and_drawdown() -> None:
         manager.check(_decision(notional_usdc=10.0), _portfolio(max_drawdown_pct=0.21)).reason
         == "drawdown_circuit_breaker"
     )
+
+
+def test_risk_manager_reserves_risk_group_exposure_for_live_open_orders() -> None:
+    manager = RiskManager(
+        RiskSettings(
+            max_position_per_market=100.0,
+            max_total_exposure=1000.0,
+            max_exposure_per_risk_group=10.0,
+        )
+    )
+    decision = replace(
+        _decision(
+            decision_id="risk-open-order",
+            notional_usdc=6.0,
+        ),
+        risk_group_id="event:risk-group",
+    )
+    order = _order_state(
+        decision,
+        status=OrderStatus.LIVE.value,
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+
+    manager.record_open_order_state(order)
+
+    rejected = manager.check(
+        replace(
+            _decision(
+                decision_id="risk-next-order",
+                notional_usdc=5.0,
+            ),
+            risk_group_id="event:risk-group",
+        ),
+        _portfolio(),
+    )
+    assert rejected.approved is False
+    assert rejected.reason == "max_exposure_per_risk_group"
+
+    manager.record_order_filled(order.order_id)
+
+    approved = manager.check(
+        replace(
+            _decision(
+                decision_id="risk-after-fill-order",
+                notional_usdc=5.0,
+            ),
+            risk_group_id="event:risk-group",
+        ),
+        _portfolio(),
+    )
+    assert approved.approved is True
 
 
 @pytest.mark.asyncio

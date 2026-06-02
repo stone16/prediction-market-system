@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from scripts.export_category_prior_observations import (
     CategoryPriorCsvRow,
     observation_row_from_gamma_market,
@@ -70,6 +72,30 @@ def test_observation_row_from_gamma_market_skips_non_binary_markets() -> None:
             "closedTime": "2026-06-02T05:14:32Z",
             "outcomes": '["A", "B", "C"]',
             "outcomePrices": '["1", "0", "0"]',
+        }
+    )
+
+    assert row is None
+
+
+@pytest.mark.parametrize(
+    "malformed_field",
+    [
+        {"outcomes": '["Yes",'},
+        {"outcomePrices": '["1",'},
+    ],
+)
+def test_observation_row_from_gamma_market_skips_malformed_json_sequences(
+    malformed_field: dict[str, str],
+) -> None:
+    row = observation_row_from_gamma_market(
+        {
+            "conditionId": "0xmarket",
+            "category": "Politics",
+            "closedTime": "2026-06-02T05:14:32Z",
+            "outcomes": '["Yes", "No"]',
+            "outcomePrices": '["1", "0"]',
+            **malformed_field,
         }
     )
 

@@ -2169,7 +2169,7 @@ async def _market_data_freshness_check(
 
     try:
         missing_subscribed_usable_token_count = (
-            await _fresh_usable_subscribed_token_missing_count(
+            await _fresh_usable_launch_token_missing_count(
                 pool,
                 max_age_s=max_age_s,
             )
@@ -2190,9 +2190,9 @@ async def _market_data_freshness_check(
             "market_data_freshness",
             False,
             (
-                f"{missing_subscribed_usable_token_count} subscribed {noun} "
+                f"{missing_subscribed_usable_token_count} launch {noun} "
                 "lack fresh usable book depth; live launch subscription "
-                "freshness is not proven"
+                "and strategy freshness is not proven"
             ),
         )
 
@@ -2292,24 +2292,151 @@ async def _latest_usable_book_snapshot_age_s(pool: asyncpg.Pool) -> float | None
     return max(0.0, float(value))
 
 
-async def _fresh_usable_subscribed_token_missing_count(
+_LIVE_LAUNCH_TOKENS_CTE = """
+manual_tokens AS (
+    SELECT token_id
+    FROM market_subscriptions
+    WHERE source = 'user'
+),
+active_strategy_specs AS (
+    SELECT versions.config_json->'market_selection' AS market_selection
+    FROM strategies
+    JOIN strategy_versions AS versions
+        ON versions.strategy_version_id = strategies.active_version_id
+    WHERE strategies.active_version_id IS NOT NULL
+),
+active_strategy_tokens AS (
+    SELECT tokens.token_id
+    FROM active_strategy_specs
+    JOIN markets
+        ON markets.venue = COALESCE(
+            active_strategy_specs.market_selection->>'venue',
+            'polymarket'
+        )
+    JOIN tokens
+        ON tokens.condition_id = markets.condition_id
+    WHERE tokens.token_id IS NOT NULL
+      AND (
+          COALESCE(
+              NULLIF(
+                  active_strategy_specs.market_selection->>'volume_min_usdc',
+                  ''
+              )::double precision,
+              0.0
+          ) <= 0.0
+          OR (
+              markets.volume_24h IS NOT NULL
+              AND markets.volume_24h >= COALESCE(
+                  NULLIF(
+                      active_strategy_specs.market_selection->>'volume_min_usdc',
+                      ''
+                  )::double precision,
+                  0.0
+              )
+          )
+      )
+      AND (
+          (
+              NULLIF(
+                  active_strategy_specs.market_selection
+                      ->>'resolution_time_max_horizon_days',
+                  ''
+              ) IS NULL
+              AND (
+                  markets.resolves_at IS NULL
+                  OR markets.resolves_at > NOW()
+              )
+          )
+          OR (
+              NULLIF(
+                  active_strategy_specs.market_selection
+                      ->>'resolution_time_max_horizon_days',
+                  ''
+              ) IS NOT NULL
+              AND markets.resolves_at IS NOT NULL
+              AND markets.resolves_at > NOW()
+              AND markets.resolves_at <= (
+                  NOW() + (
+                      NULLIF(
+                          active_strategy_specs.market_selection
+                              ->>'resolution_time_max_horizon_days',
+                          ''
+                      )::integer * INTERVAL '1 day'
+                  )
+              )
+          )
+      )
+      AND (
+          COALESCE(
+              (
+                  active_strategy_specs.market_selection->>'accepting_orders'
+              )::boolean,
+              false
+          ) IS NOT TRUE
+          OR markets.accepting_orders IS NOT FALSE
+      )
+      AND (
+          NULLIF(
+              active_strategy_specs.market_selection->>'liquidity_min_usdc',
+              ''
+          ) IS NULL
+          OR (
+              markets.liquidity IS NOT NULL
+              AND markets.liquidity >= NULLIF(
+                  active_strategy_specs.market_selection->>'liquidity_min_usdc',
+                  ''
+              )::double precision
+          )
+      )
+      AND (
+          NULLIF(
+              active_strategy_specs.market_selection->>'yes_price_min',
+              ''
+          ) IS NULL
+          OR (
+              markets.yes_price IS NOT NULL
+              AND markets.yes_price >= NULLIF(
+                  active_strategy_specs.market_selection->>'yes_price_min',
+                  ''
+              )::double precision
+          )
+      )
+      AND (
+          NULLIF(
+              active_strategy_specs.market_selection->>'yes_price_max',
+              ''
+          ) IS NULL
+          OR (
+              markets.yes_price IS NOT NULL
+              AND markets.yes_price <= NULLIF(
+                  active_strategy_specs.market_selection->>'yes_price_max',
+                  ''
+              )::double precision
+          )
+      )
+),
+launch_tokens AS (
+    SELECT token_id FROM manual_tokens
+    UNION
+    SELECT token_id FROM active_strategy_tokens
+)
+"""
+
+
+async def _fresh_usable_launch_token_missing_count(
     pool: asyncpg.Pool,
     *,
     max_age_s: float,
 ) -> int:
     async with pool.acquire() as connection:
         value = await connection.fetchval(
-            """
-            WITH subscribed_tokens AS (
-                SELECT token_id
-                FROM market_subscriptions
-                WHERE source = 'user'
-            ),
-            latest_usable_subscribed_tokens AS (
+            f"""
+            WITH {_LIVE_LAUNCH_TOKENS_CTE},
+            latest_usable_launch_tokens AS (
                 SELECT book_snapshots.token_id, MAX(book_snapshots.ts) AS latest_ts
                 FROM book_snapshots
-                JOIN subscribed_tokens
-                    ON subscribed_tokens.token_id = book_snapshots.token_id
+                JOIN launch_tokens
+                    ON launch_tokens.token_id = book_snapshots.token_id
                 JOIN book_levels AS bid_levels
                     ON bid_levels.snapshot_id = book_snapshots.id
                    AND bid_levels.side = 'BUY'
@@ -2326,15 +2453,15 @@ async def _fresh_usable_subscribed_token_missing_count(
                   )
                 GROUP BY book_snapshots.token_id
             ),
-            missing_subscribed_usable_tokens AS (
-                SELECT subscribed_tokens.token_id
-                FROM subscribed_tokens
-                LEFT JOIN latest_usable_subscribed_tokens
-                    ON latest_usable_subscribed_tokens.token_id = subscribed_tokens.token_id
-                WHERE latest_usable_subscribed_tokens.token_id IS NULL
+            missing_launch_usable_tokens AS (
+                SELECT launch_tokens.token_id
+                FROM launch_tokens
+                LEFT JOIN latest_usable_launch_tokens
+                    ON latest_usable_launch_tokens.token_id = launch_tokens.token_id
+                WHERE latest_usable_launch_tokens.token_id IS NULL
             )
             SELECT COUNT(*)::bigint
-            FROM missing_subscribed_usable_tokens
+            FROM missing_launch_usable_tokens
             """,
             max_age_s,
         )
@@ -2348,10 +2475,13 @@ async def _fresh_usable_book_market_missing_risk_metadata_count(
 ) -> int:
     async with pool.acquire() as connection:
         value = await connection.fetchval(
-            """
-            WITH missing_market_risk_metadata AS (
+            f"""
+            WITH {_LIVE_LAUNCH_TOKENS_CTE},
+            fresh_usable_launch_markets AS (
                 SELECT DISTINCT book_snapshots.market_id
                 FROM book_snapshots
+                JOIN launch_tokens
+                    ON launch_tokens.token_id = book_snapshots.token_id
                 JOIN book_levels AS bid_levels
                     ON bid_levels.snapshot_id = book_snapshots.id
                    AND bid_levels.side = 'BUY'
@@ -2362,13 +2492,18 @@ async def _fresh_usable_book_market_missing_risk_metadata_count(
                    AND ask_levels.side = 'SELL'
                    AND ask_levels.size > 0.0
                    AND ask_levels.price > 0.0
-                LEFT JOIN markets
-                    ON markets.condition_id = book_snapshots.market_id
                 WHERE book_snapshots.ts IS NOT NULL
                   AND book_snapshots.ts >= (
                       NOW() - ($1::double precision * INTERVAL '1 second')
                   )
-                  AND (
+            ),
+            missing_market_risk_metadata AS (
+                SELECT fresh_usable_launch_markets.market_id
+                FROM fresh_usable_launch_markets
+                LEFT JOIN markets
+                    ON markets.condition_id = fresh_usable_launch_markets.market_id
+                WHERE markets.condition_id IS NULL
+                   OR (
                       markets.risk_group_id IS NULL
                       OR btrim(markets.risk_group_id) = ''
                   )

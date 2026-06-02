@@ -184,8 +184,11 @@ def _fetch_closed_market_page(
 def _binary_payouts_from_outcome_prices(
     market: Mapping[str, object],
 ) -> tuple[str, str] | None:
-    outcomes = _decode_sequence(market.get("outcomes"))
-    prices = _decode_sequence(market.get("outcomePrices"))
+    try:
+        outcomes = _decode_sequence(market.get("outcomes"))
+        prices = _decode_sequence(market.get("outcomePrices"))
+    except json.JSONDecodeError:
+        return None
     if len(outcomes) != 2 or len(prices) != 2:
         return None
 

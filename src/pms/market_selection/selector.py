@@ -55,8 +55,15 @@ class MarketSelector:
         if not user_asset_ids:
             _log_selector_funnel(self._last_discovered_count, len(merged.asset_ids))
             return merged
+        asset_ids = list(merged.asset_ids)
+        seen_asset_ids = set(asset_ids)
+        asset_ids.extend(
+            asset_id
+            for asset_id in sorted(user_asset_ids)
+            if asset_id not in seen_asset_ids
+        )
         result = MergeResult(
-            asset_ids=sorted(frozenset(merged.asset_ids) | user_asset_ids),
+            asset_ids=asset_ids,
             conflicts=merged.conflicts,
         )
         _log_selector_funnel(self._last_discovered_count, len(result.asset_ids))

@@ -6,7 +6,8 @@ import json
 import math
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -420,12 +421,37 @@ def _load_cli_settings(
     *,
     skip_local_secret_file: bool = False,
 ) -> PMSSettings:
-    if config_path is None:
-        return load_settings(load_local_secret_file=not skip_local_secret_file)
-    return PMSSettings.load(
-        config_path,
-        load_local_secret_file=not skip_local_secret_file,
-    )
+    with _diagnostic_env_for_skipped_credentials(skip_local_secret_file):
+        if config_path is None:
+            return load_settings(load_local_secret_file=not skip_local_secret_file)
+        return PMSSettings.load(
+            config_path,
+            load_local_secret_file=not skip_local_secret_file,
+        )
+
+
+@contextmanager
+def _diagnostic_env_for_skipped_credentials(enabled: bool) -> Iterator[None]:
+    if not enabled:
+        yield
+        return
+    defaults = {
+        "PMS_LLM__API_KEY": "diagnostic-llm-api-key",
+        "PMS_LLM__PROVIDER": "anthropic",
+    }
+    previous: dict[str, str | None] = {key: os.environ.get(key) for key in defaults}
+    try:
+        for key, default_value in defaults.items():
+            current = os.environ.get(key)
+            if current is None or current.strip() == "":
+                os.environ[key] = default_value
+        yield
+    finally:
+        for key, previous_value in previous.items():
+            if previous_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous_value
 
 
 def _effective_cli_config_path(config_path: str | None) -> str:

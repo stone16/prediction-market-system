@@ -128,8 +128,8 @@ async def test_select_reads_user_subscriptions_on_every_call() -> None:
     first = await selector.select()
     second = await selector.select()
 
-    assert first.asset_ids == ["first-user-token", "strategy-token"]
-    assert second.asset_ids == ["second-user-token", "strategy-token"]
+    assert first.asset_ids == ["strategy-token", "first-user-token"]
+    assert second.asset_ids == ["strategy-token", "second-user-token"]
     assert user_store.calls == 2
     assert user_store.seen_results == [{"first-user-token"}, {"second-user-token"}]
 

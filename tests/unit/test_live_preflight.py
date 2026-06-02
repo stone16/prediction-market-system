@@ -270,7 +270,7 @@ class _Connection:
             return EXPECTED_SCHEMA_HEAD
         if "outcome = 'submission_unknown'" in query:
             return self.unresolved_submission_unknown
-        if "missing_subscribed_usable_tokens" in query:
+        if "missing_launch_usable_tokens" in query:
             return self.missing_subscribed_usable_token_count
         if "missing_market_risk_metadata" in query:
             return self.missing_market_risk_metadata_count
@@ -725,10 +725,14 @@ async def test_pms_live_preflight_skip_credentials_skips_local_secret_file_load(
                 "secret_source: local_file",
                 f"local_secret_file: {missing_secret_path}",
                 "live_trading_enabled: true",
+                "llm:",
+                "  enabled: true",
             )
         ),
         encoding="utf-8",
     )
+    monkeypatch.delenv("PMS_LLM__API_KEY", raising=False)
+    monkeypatch.delenv("PMS_LLM__PROVIDER", raising=False)
 
     async def fake_run_live_preflight(
         settings: PMSSettings,
@@ -737,6 +741,8 @@ async def test_pms_live_preflight_skip_credentials_skips_local_secret_file_load(
         skip_credentials: bool,
     ) -> LivePreflightResult:
         assert settings.local_secret_file == str(missing_secret_path)
+        assert settings.llm.api_key == "diagnostic-llm-api-key"
+        assert settings.llm.provider == "anthropic"
         assert skip_venue is False
         assert skip_credentials is True
         return LivePreflightResult(
@@ -766,6 +772,8 @@ async def test_pms_live_preflight_skip_credentials_skips_local_secret_file_load(
     assert exit_code == 1
     assert payload["checks"][0]["name"] == "live_config"
     assert payload["checks"][0]["ok"] is True
+    assert os.environ.get("PMS_LLM__API_KEY") is None
+    assert os.environ.get("PMS_LLM__PROVIDER") is None
 
 
 def test_pms_live_cli_parses_live_order_reconcile_command() -> None:
@@ -8363,6 +8371,49 @@ async def test_live_preflight_fails_when_usable_book_snapshot_is_stale(
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_checks_launch_tokens_from_manual_and_active_strategy_sources() -> None:
+    connection = _Connection(missing_subscribed_usable_token_count=0)
+
+    missing_count = await live_preflight_module._fresh_usable_launch_token_missing_count(
+        cast(asyncpg.Pool, _Pool(connection)),
+        max_age_s=300.0,
+    )
+
+    assert missing_count == 0
+    query = next(
+        query for query in connection.fetchval_calls if "missing_launch_usable_tokens" in query
+    )
+    assert "manual_tokens AS" in query
+    assert "active_strategy_specs AS" in query
+    assert "active_strategy_tokens AS" in query
+    assert "JOIN launch_tokens" in query
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_scopes_risk_metadata_to_fresh_usable_launch_markets() -> None:
+    connection = _Connection(missing_market_risk_metadata_count=0)
+
+    missing_count = await (
+        live_preflight_module._fresh_usable_book_market_missing_risk_metadata_count(
+            cast(asyncpg.Pool, _Pool(connection)),
+            max_age_s=300.0,
+        )
+    )
+
+    assert missing_count == 0
+    query = next(
+        query
+        for query in connection.fetchval_calls
+        if "missing_market_risk_metadata" in query
+    )
+    assert "active_strategy_specs AS" in query
+    assert "JOIN launch_tokens" in query
+    assert "fresh_usable_launch_markets AS" in query
+    assert "FROM fresh_usable_launch_markets" in query
+    assert "WHERE markets.condition_id IS NULL" in query
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_when_fresh_usable_market_lacks_risk_group_metadata(
     tmp_path: Path,
 ) -> None:
@@ -8406,7 +8457,7 @@ async def test_live_preflight_fails_when_subscribed_token_lacks_fresh_usable_dep
     market_data_check = result.require_check("market_data_freshness")
     assert result.ok is False
     assert market_data_check.ok is False
-    assert "1 subscribed token" in market_data_check.detail
+    assert "1 launch token" in market_data_check.detail
     assert "fresh usable book depth" in market_data_check.detail
 
 

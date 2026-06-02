@@ -17,7 +17,7 @@ async def test_runtime_continuity_counts_only_elapsed_healthy_days() -> None:
             _Pool(
                 {
                     "first_started_at": datetime(2026, 1, 1, 23, 29, tzinfo=UTC),
-                    "first_observed_at": datetime(2026, 1, 1, 23, 30, tzinfo=UTC),
+                    "first_observed_at": datetime(2026, 1, 1, 23, 29, tzinfo=UTC),
                     "last_observed_at": datetime(2026, 1, 31, 23, 29, tzinfo=UTC),
                     "heartbeat_count": 2,
                     "max_gap_seconds": 60.0,
@@ -35,7 +35,7 @@ async def test_runtime_continuity_counts_only_elapsed_healthy_days() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_continuity_query_counts_initial_heartbeat_gap() -> None:
+async def test_runtime_continuity_does_not_count_initial_gap_as_healthy_days() -> None:
     pool = _Pool(
         {
             "first_started_at": datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
@@ -52,9 +52,36 @@ async def test_runtime_continuity_query_counts_initial_heartbeat_gap() -> None:
     continuity = await store.continuity(run_id="run-late-heartbeat")
 
     assert continuity is not None
-    assert continuity.healthy_days == 30
+    assert continuity.healthy_days == 0
     assert continuity.max_gap_seconds == 2_592_000.0
     assert "MIN(observed_at) - MIN(started_at)" in pool.last_query
+
+
+@pytest.mark.asyncio
+async def test_runtime_continuity_query_counts_trailing_heartbeat_gap() -> None:
+    observed_until = datetime(2026, 1, 31, 0, 10, tzinfo=UTC)
+    pool = _Pool(
+        {
+            "first_started_at": datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            "first_observed_at": datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            "last_observed_at": datetime(2026, 1, 31, 0, 0, tzinfo=UTC),
+            "heartbeat_count": 30,
+            "max_gap_seconds": 600.0,
+            "unhealthy_heartbeat_count": 0,
+            "min_controller_runtimes": 1,
+        }
+    )
+    store = RuntimeHeartbeatStore(pool=cast(Any, pool))
+
+    continuity = await store.continuity(
+        run_id="run-stale-heartbeat",
+        observed_until=observed_until,
+    )
+
+    assert continuity is not None
+    assert continuity.max_gap_seconds == 600.0
+    assert "observed_until FROM report_clock" in pool.last_query
+    assert pool.last_args == ("run-stale-heartbeat", observed_until)
 
 
 @pytest.mark.asyncio
@@ -84,6 +111,7 @@ class _Pool:
     def __init__(self, row: Mapping[str, object]) -> None:
         self._row = row
         self.last_query = ""
+        self.last_args: tuple[object, ...] = ()
 
     def acquire(self) -> _AcquireContext:
         return _AcquireContext(_Connection(self))
@@ -109,7 +137,7 @@ class _Connection:
     def __init__(self, pool: _Pool) -> None:
         self._pool = pool
 
-    async def fetchrow(self, query: str, run_id: str) -> Mapping[str, object]:
-        del run_id
+    async def fetchrow(self, query: str, *args: object) -> Mapping[str, object]:
         self._pool.last_query = query
+        self._pool.last_args = args
         return self._pool._row

@@ -323,6 +323,38 @@ async def test_market_data_sensor_retries_empty_market_risk_metadata_lookup() ->
 
 
 @pytest.mark.asyncio
+async def test_market_data_sensor_retries_incomplete_outcome_token_metadata_lookup() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.read_market_signal_metadata_mock.side_effect = [
+        {"category": "Politics"},
+        {
+            "category": "Politics",
+            "yes_token_id": "asset-late-metadata-yes",
+            "no_token_id": "asset-late-metadata-no",
+        },
+    ]
+    sensor = MarketDataSensor(store=store)
+    message = {
+        "event_type": "book",
+        "market": "m-late-token-metadata",
+        "asset_id": "asset-late-metadata-no",
+        "timestamp": "1757908892352",
+        "bids": [{"price": "0.48", "size": "12"}],
+        "asks": [{"price": "0.51", "size": "10"}],
+    }
+
+    first = await sensor._handle_book(message)
+    second = await sensor._handle_book(message)
+    await sensor.aclose()
+
+    assert first.external_signal["category"] == "Politics"
+    assert "signal_token_outcome" not in first.external_signal
+    assert second.external_signal["signal_token_outcome"] == "NO"
+    assert store_mock.read_market_signal_metadata_mock.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_market_data_sensor_replays_fixture_losslessly_and_persists_piecewise_deltas(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -515,6 +547,41 @@ async def test_market_data_sensor_carries_last_trade_fee_rate_into_book_signal()
 
     assert trade_signals[0].external_signal["fee_rate_bps"] == 300.0
     assert book_signals[0].external_signal["fee_rate_bps"] == 300.0
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_preserves_cached_fee_rate_on_trade_without_fee() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    sensor = MarketDataSensor(store=store)
+
+    await sensor._handle_message(
+        {
+            "event_type": "book",
+            "market": "m-trade-fee-cache",
+            "asset_id": "asset-trade-fee-cache",
+            "timestamp": "1757908892351",
+            "hash": "book-hash-fee-cache",
+            "bids": [{"price": "0.48", "size": "30"}],
+            "asks": [{"price": "0.52", "size": "25"}],
+            "fee_rate_bps": "300",
+        }
+    )
+    trade_signals = await sensor._handle_message(
+        {
+            "event_type": "last_trade_price",
+            "market": "m-trade-fee-cache",
+            "asset_id": "asset-trade-fee-cache",
+            "price": "0.456",
+            "side": "BUY",
+            "size": "219.217767",
+            "timestamp": "1750428146322",
+        }
+    )
+    await sensor.aclose()
+
+    assert trade_signals[0].external_signal["fee_rate_bps"] == 300.0
 
 
 @pytest.mark.asyncio

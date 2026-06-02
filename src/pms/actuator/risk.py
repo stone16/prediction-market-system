@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Literal
 
 from pms.config import RiskSettings
-from pms.core.models import Portfolio, Position, TradeDecision
+from pms.core.models import OrderState, Portfolio, Position, TradeDecision
 
 
 class InsufficientLiquidityError(RuntimeError):
@@ -89,6 +89,10 @@ class RiskManager:
         default_factory=dict,
         init=False,
     )
+    _open_order_risk_reservations: dict[str, tuple[str, float]] = field(
+        default_factory=dict,
+        init=False,
+    )
 
     @property
     def halt_events(self) -> tuple[HaltEvent, ...]:
@@ -138,6 +142,7 @@ class RiskManager:
                 return RiskDecision(False, "missing_risk_group_id")
             if (
                 _risk_group_exposure(portfolio, decision.risk_group_id)
+                + self._open_order_risk_group_exposure(decision.risk_group_id)
                 + residual_notional
                 > self.risk.max_exposure_per_risk_group
             ):
@@ -292,8 +297,21 @@ class RiskManager:
     def record_order_placed(self, order_id: str, *, at: datetime | None = None) -> None:
         self._open_order_submitted_at[order_id] = _coerce_aware(at)
 
+    def record_open_order_state(self, order_state: OrderState) -> None:
+        if (
+            order_state.risk_group_id is None
+            or order_state.remaining_notional_usdc <= 1e-9
+        ):
+            self._open_order_risk_reservations.pop(order_state.order_id, None)
+            return
+        self._open_order_risk_reservations[order_state.order_id] = (
+            order_state.risk_group_id,
+            order_state.remaining_notional_usdc,
+        )
+
     def record_order_filled(self, order_id: str) -> None:
         self._open_order_submitted_at.pop(order_id, None)
+        self._open_order_risk_reservations.pop(order_id, None)
 
     def clear_halt(self, *, at: datetime | None = None) -> None:
         if self._halt_state is not None and self._active_halt_event is not None:
@@ -309,6 +327,14 @@ class RiskManager:
         self._recent_trades.clear()
         self._recent_rate_limits.clear()
         self._open_order_submitted_at.clear()
+        self._open_order_risk_reservations.clear()
+
+    def _open_order_risk_group_exposure(self, risk_group_id: str) -> float:
+        return sum(
+            remaining_notional
+            for group_id, remaining_notional in self._open_order_risk_reservations.values()
+            if group_id == risk_group_id
+        )
 
     def _halt(
         self,

@@ -68,10 +68,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     host = settings.api_host
 
-    if not settings.api_token and settings.mode == RunMode.LIVE:
+    api_token = _normalized_api_token(settings.api_token)
+    if api_token is None and settings.mode == RunMode.LIVE:
         print(_live_startup_gate_message(), file=sys.stderr)
         return 1
-    if not settings.api_token and host not in LOOPBACK_API_HOSTS:
+    if api_token is None and host not in LOOPBACK_API_HOSTS:
         print(_startup_gate_message(host), file=sys.stderr)
         return 1
     auto_start = os.environ.get("PMS_AUTO_START", "").lower() in {"1", "true", "yes"}
@@ -88,6 +89,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         reload=args.reload,
     )
     return 0
+
+
+def _normalized_api_token(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 if __name__ == "__main__":

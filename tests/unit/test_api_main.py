@@ -85,6 +85,30 @@ def test_main_refuses_live_loopback_without_api_token(
     assert "live mode" in captured.err
 
 
+def test_main_refuses_live_loopback_with_blank_api_token(
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    def fake_run(app: str, **kwargs: Any) -> None:
+        calls["app"] = app
+        calls.update(kwargs)
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+    monkeypatch.setenv("PMS_MODE", "live")
+    monkeypatch.setenv("PMS_API_HOST", "127.0.0.1")
+    monkeypatch.setenv("PMS_API_TOKEN", "   ")
+
+    exit_code = api_main.main([])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert calls == {}
+    assert "PMS_API_TOKEN" in captured.err
+    assert "live mode" in captured.err
+
+
 def test_main_auto_start_requires_discord_webhook(
     monkeypatch: Any,
     capsys: Any,

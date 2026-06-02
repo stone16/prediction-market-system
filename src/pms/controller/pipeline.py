@@ -519,6 +519,52 @@ class ControllerPipeline:
         decision_price = yes_reference_price
         decision_edge = yes_edge
         execution_signal = signal
+        if yes_edge >= 0.0 and signal_outcome.signal_outcome == "NO":
+            if (
+                signal_outcome.yes_token_id is None
+                or signal_outcome.yes_token_id == signal_token_id
+            ):
+                resolved_tokens = await self.outcome_token_resolver.resolve(
+                    market_id=signal.market_id,
+                    signal_token_id=signal_token_id,
+                )
+                signal_outcome = _SignalOutcomeContext(
+                    yes_token_id=resolved_tokens.yes_token_id
+                    or signal_outcome.yes_token_id,
+                    no_token_id=resolved_tokens.no_token_id
+                    or signal_outcome.no_token_id,
+                    signal_outcome=signal_outcome.signal_outcome,
+                )
+            if (
+                signal_outcome.yes_token_id is None
+                or signal_outcome.yes_token_id == signal_token_id
+            ):
+                self.last_diagnostic = ControllerDiagnostic(
+                    code="missing_yes_token",
+                    message=(
+                        "Skipping bullish decision because no YES token could be "
+                        "resolved for a NO-token signal."
+                    ),
+                    market_id=signal.market_id,
+                    strategy_id=self.strategy_id,
+                    strategy_version_id=self.strategy_version_id,
+                    token_id=signal.token_id,
+                    severity="warning",
+                    metadata={
+                        "signal_token_id": signal.token_id,
+                        "no_token_id": signal_outcome.no_token_id,
+                        "outcome": "YES",
+                    },
+                )
+                logger.info(
+                    "controller diagnostic %s for %s",
+                    self.last_diagnostic.code,
+                    signal.market_id,
+                    extra={"controller_diagnostic": self.last_diagnostic},
+                )
+                return None
+            decision_token_id = signal_outcome.yes_token_id
+            decision_yes_token_id = signal_outcome.yes_token_id
         if yes_edge < 0.0:
             if signal_outcome.no_token_id is None:
                 resolved_tokens = await self.outcome_token_resolver.resolve(
@@ -577,6 +623,7 @@ class ControllerPipeline:
                 signal,
                 token_id=decision_token_id,
                 outcome=decision_outcome,
+                price_coordinate="target_token",
             )
             if direct_read.signal is not None:
                 execution_signal = direct_read.signal
@@ -1005,6 +1052,7 @@ class ControllerPipeline:
         *,
         token_id: str | None,
         outcome: Literal["YES", "NO"],
+        price_coordinate: Literal["canonical_yes", "target_token"] = "canonical_yes",
     ) -> _DirectBookRead:
         if token_id is None or self.direct_book_reader is None:
             failure = "missing_token_id" if token_id is None else "reader_unavailable"
@@ -1037,12 +1085,18 @@ class ControllerPipeline:
         if orderbook is None:
             return _DirectBookRead(signal=None, failure="levels_missing", age_ms=age_ms)
         external_signal: dict[str, Any] = {
-            **signal.external_signal,
-            "signal_token_outcome": outcome,
-            "book_age_ms": age_ms,
-            "book_received_at": snapshot_ts.isoformat(),
-            "direct_outcome_book_source": snapshot.source,
+            key: value
+            for key, value in signal.external_signal.items()
+            if key not in {"best_ask", "best_bid", "direct_token_price", "spread_bps"}
         }
+        external_signal.update(
+            {
+                "signal_token_outcome": outcome,
+                "book_age_ms": age_ms,
+                "book_received_at": snapshot_ts.isoformat(),
+                "direct_outcome_book_source": snapshot.source,
+            }
+        )
         fee_rate_bps = await _read_direct_fee_rate_bps(
             self.direct_book_reader,
             market_id=signal.market_id,
@@ -1050,21 +1104,28 @@ class ControllerPipeline:
         )
         if fee_rate_bps is not None:
             external_signal["fee_rate_bps"] = fee_rate_bps
-        direct_signal = replace(
-            signal,
-            token_id=token_id,
-            orderbook=orderbook,
-            external_signal=external_signal,
-        )
-        spread_bps = spread_bps_at_decision(direct_signal)
-        if spread_bps is not None:
-            external_signal["spread_bps"] = spread_bps
         best_bid = _best_level(orderbook, "bids")
         if best_bid is not None:
             external_signal["best_bid"] = best_bid
         direct_best_ask = _best_level(orderbook, "asks")
         if direct_best_ask is not None:
             external_signal["best_ask"] = direct_best_ask
+            external_signal["direct_token_price"] = direct_best_ask
+        direct_signal = replace(
+            signal,
+            token_id=token_id,
+            yes_price=_refreshed_direct_signal_price(
+                signal,
+                outcome=outcome,
+                direct_best_ask=direct_best_ask,
+                price_coordinate=price_coordinate,
+            ),
+            orderbook=orderbook,
+            external_signal=external_signal,
+        )
+        spread_bps = spread_bps_at_decision(direct_signal)
+        if spread_bps is not None:
+            external_signal["spread_bps"] = spread_bps
         return _DirectBookRead(
             signal=replace(direct_signal, external_signal=external_signal),
             age_ms=age_ms,
@@ -1283,6 +1344,23 @@ def _direct_signal_reference_price(
         return signal.yes_price
     executable_price = best_ask(signal)
     return signal.yes_price if executable_price is None else executable_price
+
+
+def _refreshed_direct_signal_price(
+    signal: MarketSignal,
+    *,
+    outcome: Literal["YES", "NO"],
+    direct_best_ask: float | None,
+    price_coordinate: Literal["canonical_yes", "target_token"],
+) -> float:
+    if direct_best_ask is None:
+        return signal.yes_price
+    if price_coordinate == "target_token":
+        return direct_best_ask
+    if outcome == "NO":
+        canonical_yes_price = _complement_probability_or_none(direct_best_ask)
+        return signal.yes_price if canonical_yes_price is None else canonical_yes_price
+    return direct_best_ask
 
 
 def _complement_probability_or_none(value: float) -> float | None:

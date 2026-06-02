@@ -410,17 +410,19 @@ class MarketDataSensor:
             )
         )
         metadata = await self._market_metadata_for_signal(market_id)
+        extra: dict[str, Any] = {
+            **metadata,
+            "side": _optional_str(message.get("side")),
+            "size": _optional_float(message.get("size")),
+        }
+        if fee_rate_bps is not None:
+            extra["fee_rate_bps"] = fee_rate_bps
         return _signal_from_state(
             state=state,
             timestamp=timestamp,
             price=price,
             event_type="last_trade_price",
-            extra={
-                **metadata,
-                "side": _optional_str(message.get("side")),
-                "size": _optional_float(message.get("size")),
-                "fee_rate_bps": fee_rate_bps,
-            },
+            extra=extra,
         )
 
     def _book_state(self, market_id: str, asset_id: str) -> _BookState:
@@ -451,7 +453,7 @@ class MarketDataSensor:
             and isinstance(value, str)
             and value.strip() != ""
         }
-        if normalized:
+        if _has_complete_outcome_token_metadata(normalized):
             self._market_signal_metadata[market_id] = normalized
         return normalized
 
@@ -735,6 +737,13 @@ def _signal_token_outcome(
     if isinstance(no_token_id, str) and asset_id == no_token_id:
         return "NO"
     return None
+
+
+def _has_complete_outcome_token_metadata(metadata: dict[str, str]) -> bool:
+    return (
+        metadata.get("yes_token_id", "").strip() != ""
+        and metadata.get("no_token_id", "").strip() != ""
+    )
 
 
 def _signal_price(

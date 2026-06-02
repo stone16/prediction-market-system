@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
+import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from pms.config import PMSSettings, RiskSettings
-from pms.core.enums import TimeInForce
+from pms.core.enums import RunMode, TimeInForce
 from pms.core.models import MarketSignal, Position, TradeDecision, Venue
-from pms.runner import Runner, _estimated_decision_quantity
+from pms.runner import Runner, StrategyControllerRuntime, _estimated_decision_quantity
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -115,6 +118,39 @@ class _RecordingDedupStore:
 
     async def release(self, decision_id: str, outcome: str) -> None:
         self.release_calls.append((decision_id, outcome))
+
+
+class _HeartbeatPool:
+    def __init__(self) -> None:
+        self.component_status: dict[str, object] | None = None
+
+    def acquire(self) -> "_HeartbeatAcquireContext":
+        return _HeartbeatAcquireContext(_HeartbeatConnection(self))
+
+
+class _HeartbeatAcquireContext:
+    def __init__(self, connection: "_HeartbeatConnection") -> None:
+        self._connection = connection
+
+    async def __aenter__(self) -> "_HeartbeatConnection":
+        return self._connection
+
+    async def __aexit__(
+        self,
+        exc_type: object,
+        exc: object,
+        traceback: object,
+    ) -> None:
+        return None
+
+
+class _HeartbeatConnection:
+    def __init__(self, pool: _HeartbeatPool) -> None:
+        self._pool = pool
+
+    async def execute(self, query: str, *args: object) -> None:
+        del query
+        self._pool.component_status = cast(dict[str, object], json.loads(str(args[-1])))
 
 
 class TestWouldExceedPositionCapacity:
@@ -236,6 +272,31 @@ class TestWouldExceedPositionCapacity:
         )
         assert diagnostic.metadata["max_quantity_shares"] == pytest.approx(500.0)
 
+    def test_pre_actuator_diagnostic_returns_missing_paper_orderbook(self) -> None:
+        runner = Runner(
+            config=PMSSettings(
+                mode=RunMode.PAPER,
+                risk=RiskSettings(
+                    max_open_positions=50,
+                    max_quantity_shares=500.0,
+                ),
+            ),
+            historical_data_path=FIXTURE_PATH,
+        )
+        signal = _signal(token_id="signal-token")
+        decision = replace(
+            _decision(),
+            token_id="target-token",
+            outcome="NO",
+        )
+
+        diagnostic = runner._pre_actuator_diagnostic(decision, signal)
+
+        assert diagnostic is not None
+        assert diagnostic.code == "paper_orderbook_missing_for_decision_token"
+        assert diagnostic.metadata["decision_token_id"] == "target-token"
+        assert diagnostic.metadata["signal_token_id"] == "signal-token"
+
     def test_estimated_quantity_uses_decimal_internal_arithmetic(self) -> None:
         decision = replace(
             _decision(),
@@ -244,6 +305,39 @@ class TestWouldExceedPositionCapacity:
         )
 
         assert _estimated_decision_quantity(decision) == 3.0
+
+    @pytest.mark.asyncio
+    async def test_runtime_heartbeat_reports_crashed_sensor_tasks_unhealthy(
+        self,
+    ) -> None:
+        async def crash() -> None:
+            raise RuntimeError("sensor failed")
+
+        runner = _runner(max_open_positions=50)
+        pool = _HeartbeatPool()
+        runner._pg_pool = cast(Any, pool)  # noqa: SLF001
+        runner.state.runtime_run_id = "run-sensor-crash"
+        runner.state.runner_started_at = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+            strategy_id="default",
+            strategy_version_id="default-v1",
+            controller=cast(Any, object()),
+            asset_ids=None,
+        )
+        sensor_task = asyncio.create_task(crash())
+        await asyncio.sleep(0)
+        assert sensor_task.done()
+        runner.sensor_stream._tasks = (sensor_task,)  # noqa: SLF001
+
+        await runner._write_runtime_heartbeat()  # noqa: SLF001
+
+        assert pool.component_status is not None
+        assert pool.component_status["running"] is False
+        assert pool.component_status["sensor_running"] is False
+        assert pool.component_status["sensor_tasks"] == 0
+        assert pool.component_status["sensor_tasks_total"] == 1
+        assert pool.component_status["sensor_task_failures"] == 1
+        sensor_task.exception()
 
     @pytest.mark.asyncio
     async def test_enqueue_rechecks_capacity_before_queuing(self) -> None:
