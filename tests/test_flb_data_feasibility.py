@@ -939,6 +939,56 @@ class TestFlbCalibrationArtifact:
         assert "too permissive" in captured.err
         assert not output_path.exists()
 
+    def test_cli_returns_sample_gate_exit_for_thin_calibration_source(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        output_path = tmp_path / "flb-calibration.csv"
+        _write_warehouse_csv(
+            input_path,
+            [
+                _warehouse_row(
+                    market_id="longshot-1",
+                    entry_yes_price="0.05",
+                    yes_payout="0",
+                    no_payout="1",
+                ),
+                _warehouse_row(
+                    market_id="favorite-1",
+                    entry_yes_price="0.95",
+                    yes_payout="1",
+                    no_payout="0",
+                ),
+            ],
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--calibration-csv",
+                str(output_path),
+                "--calibration-source-label",
+                "warehouse-flb-v1",
+            ],
+        )
+
+        exit_code = main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "insufficient FLB calibration samples" in captured.err
+        assert "ERROR:" not in captured.err
+        assert "# H1 FLB Data Feasibility Report" in captured.out
+        assert not output_path.exists()
+
     def test_cli_requires_explicit_calibration_source_label(
         self,
         tmp_path: Path,

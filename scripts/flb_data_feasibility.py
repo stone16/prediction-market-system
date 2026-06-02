@@ -1363,6 +1363,9 @@ def main() -> int:
         print(f"CSV written to {args.csv}", file=sys.stderr)
 
     if args.calibration_csv:
+        if not gate.passed:
+            print(_sample_gate_failure_message(gate), file=sys.stderr)
+            return 1
         try:
             calibration_rows = build_flb_calibration_rows(
                 markets,
@@ -1376,6 +1379,19 @@ def main() -> int:
 
     # Return exit code based on gate.
     return 0 if gate.passed else 1
+
+
+def _sample_gate_failure_message(gate: SampleGateResult) -> str:
+    failures: list[str] = []
+    if not gate.longshot_passed:
+        failures.append(
+            f"{LONGSHOT_SIGNAL_NAME} {gate.longshot_count} < {SAMPLE_GATE_MIN}"
+        )
+    if not gate.favorite_passed:
+        failures.append(
+            f"{FAVORITE_SIGNAL_NAME} {gate.favorite_count} < {SAMPLE_GATE_MIN}"
+        )
+    return "insufficient FLB calibration samples: " + "; ".join(failures)
 
 
 def _require_distinct_cli_artifact_paths(
