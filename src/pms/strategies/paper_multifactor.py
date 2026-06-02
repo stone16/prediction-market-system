@@ -18,6 +18,7 @@ _ORDERBOOK_IMBALANCE_EDGE_SCALE = 0.25
 _RESOLUTION_HORIZON_DAYS = 31
 _ROUTER_MIN_YES_PRICE = 0.02
 _ROUTER_MAX_YES_PRICE = 0.98
+_CALIBRATION_SHRINKAGE_FACTOR = 1.0
 
 
 def build_paper_multi_factor_strategy() -> Strategy:
@@ -122,7 +123,7 @@ def build_paper_multi_factor_strategy() -> Strategy:
         ),
         calibration=CalibrationSpec(
             enabled=True,
-            shrinkage_factor=0.35,
+            shrinkage_factor=_CALIBRATION_SHRINKAGE_FACTOR,
             shrinkage_bias=0.0,
             extreme_clamp_low=0.08,
             extreme_clamp_high=0.92,

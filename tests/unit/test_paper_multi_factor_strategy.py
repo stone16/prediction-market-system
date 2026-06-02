@@ -10,6 +10,7 @@ import pytest
 from pms.config import LLMSettings, PMSSettings, RiskSettings
 from pms.controller.factor_snapshot import FactorSnapshot
 from pms.controller.factory import ControllerPipelineFactory
+from pms.controller.pipeline import ControllerPipeline
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import RunMode
 from pms.core.models import MarketSignal, Portfolio, Position
@@ -25,6 +26,7 @@ from pms.strategies.versioning import serialize_strategy_config_json
 
 def _signal(
     *,
+    yes_price: float = 0.50,
     orderbook: dict[str, object] | None = None,
 ) -> MarketSignal:
     return MarketSignal(
@@ -32,7 +34,7 @@ def _signal(
         token_id="phase-a-token",
         venue="polymarket",
         title="Can Phase A produce a simple factor-backed decision?",
-        yes_price=0.50,
+        yes_price=yes_price,
         volume_24h=1_000.0,
         resolves_at=datetime(2026, 6, 1, tzinfo=UTC),
         orderbook=orderbook
@@ -96,7 +98,7 @@ def test_paper_multi_factor_strategy_matches_phase_a_contract() -> None:
 
     assert strategy.config.strategy_id == PAPER_MULTI_FACTOR_STRATEGY_ID
     assert strategy.calibration.enabled is True
-    assert strategy.calibration.shrinkage_factor == pytest.approx(0.35)
+    assert strategy.calibration.shrinkage_factor == pytest.approx(1.0)
     assert strategy.calibration.shrinkage_bias == pytest.approx(0.0)
     assert strategy.calibration.extreme_clamp_low == pytest.approx(0.08)
     assert strategy.calibration.extreme_clamp_high == pytest.approx(0.92)
@@ -183,7 +185,7 @@ def test_paper_multi_factor_config_json_round_trips_enabled_calibration() -> Non
     round_tripped = _strategy_from_config_json(payload)
 
     assert payload["calibration"]["enabled"] is True
-    assert payload["calibration"]["shrinkage_factor"] == pytest.approx(0.35)
+    assert payload["calibration"]["shrinkage_factor"] == pytest.approx(1.0)
     assert payload["calibration"]["shrinkage_bias"] == pytest.approx(0.0)
     assert payload["calibration"]["extreme_clamp_low"] == pytest.approx(0.08)
     assert payload["calibration"]["extreme_clamp_high"] == pytest.approx(0.92)
@@ -192,7 +194,7 @@ def test_paper_multi_factor_config_json_round_trips_enabled_calibration() -> Non
     assert payload["market_selection"]["yes_price_min"] == pytest.approx(0.02)
     assert payload["market_selection"]["yes_price_max"] == pytest.approx(0.98)
     assert round_tripped.calibration.enabled is True
-    assert round_tripped.calibration.shrinkage_factor == pytest.approx(0.35)
+    assert round_tripped.calibration.shrinkage_factor == pytest.approx(1.0)
     assert round_tripped.calibration.shrinkage_bias == pytest.approx(0.0)
     assert round_tripped.calibration.extreme_clamp_low == pytest.approx(0.08)
     assert round_tripped.calibration.extreme_clamp_high == pytest.approx(0.92)
@@ -285,9 +287,43 @@ async def test_paper_multi_factor_can_decide_from_orderbook_imbalance_only() -> 
     assert decision.strategy_id == PAPER_MULTI_FACTOR_STRATEGY_ID
     assert decision.outcome == "YES"
     assert decision.limit_price == pytest.approx(0.501)
-    assert 0.55 < decision.prob_estimate < 0.70
+    assert decision.prob_estimate == pytest.approx(0.7125)
     assert decision.expected_edge > 0.05
     assert decision.notional_usdc == pytest.approx(1.0)
+    assert factor_reader.snapshot_calls
+
+
+@pytest.mark.asyncio
+async def test_paper_multi_factor_does_not_create_longshot_edge_from_near_market_forecast() -> None:
+    strategy = build_paper_multi_factor_strategy()
+    factor_reader = StaticFactorReader(
+        FactorSnapshot(
+            values={},
+            missing_factors=(),
+            snapshot_hash="neutral-longshot-snapshot",
+        )
+    )
+    pipeline = ControllerPipeline(
+        strategy=strategy.to_active(strategy_version_id="phase-a-v1"),
+        factor_reader=factor_reader,
+        forecasters=(),
+        settings=PMSSettings(mode=RunMode.PAPER),
+    )
+
+    decision = await pipeline.decide(
+        _signal(
+            yes_price=0.021,
+            orderbook={
+                "bids": [{"price": 0.02099, "size": 100.0}],
+                "asks": [{"price": 0.02101, "size": 100.0}],
+            },
+        ),
+        portfolio=_portfolio(),
+    )
+
+    assert decision is None
+    assert pipeline.last_diagnostic is not None
+    assert pipeline.last_diagnostic.code == "calibration_clamp_rejected"
     assert factor_reader.snapshot_calls
 
 
