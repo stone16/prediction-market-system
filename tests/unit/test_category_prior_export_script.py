@@ -181,3 +181,42 @@ def test_export_category_prior_observations_rejects_permissive_parent_without_pu
         )
 
     assert output_path.read_text(encoding="utf-8") == "existing artifact\n"
+
+
+def test_export_category_prior_observations_validates_runtime_artifact_before_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "secure"
+    output_dir.mkdir(mode=0o700)
+    output_path = output_dir / "category-prior-observations.csv"
+    output_path.write_text("existing artifact\n", encoding="utf-8")
+    output_path.chmod(0o600)
+
+    monkeypatch.setattr(
+        exporter,
+        "_fetch_closed_market_page",
+        lambda _client, *, limit, offset: [{"conditionId": "market-1"}],
+    )
+    monkeypatch.setattr(
+        exporter,
+        "observation_row_from_gamma_market",
+        lambda _market: CategoryPriorCsvRow(
+            market_id="market-1",
+            category="",
+            yes_payout="1",
+            no_payout="0",
+            resolved_at="2026-06-02T05:14:32Z",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="empty required column value 'category'"):
+        export_category_prior_observations(
+            output_path=output_path,
+            gamma_base_url="https://gamma.example.test",
+            page_limit=1,
+            max_pages=1,
+            min_observations=1,
+        )
+
+    assert output_path.read_text(encoding="utf-8") == "existing artifact\n"

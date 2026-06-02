@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from pms.controller.baselines import load_category_prior_observations_csv
+
 
 DEFAULT_GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 
@@ -333,6 +335,7 @@ def _write_rows(output_path: Path, rows: Sequence[CategoryPriorCsvRow]) -> None:
                     )
                 )
         temp_path.chmod(0o600)
+        load_category_prior_observations_csv(temp_path)
         temp_path.replace(output_path)
         output_path.chmod(0o600)
     except Exception:
