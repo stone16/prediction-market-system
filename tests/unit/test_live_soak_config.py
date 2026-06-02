@@ -33,7 +33,7 @@ def test_live_soak_config_loads_tight_first_live_risk_caps() -> None:
     assert settings.risk.max_drawdown_pct == 20.0
     assert settings.risk.max_daily_loss_usdc == 20.0
     assert settings.risk.max_open_positions == 50
-    assert settings.risk.max_exposure_per_risk_group == 15.0
+    assert settings.risk.max_exposure_per_risk_group == 1.0
     assert settings.risk.max_quantity_shares == 500.0
     assert settings.risk.min_order_usdc == 1.0
     assert settings.risk.slippage_threshold_bps == 50.0

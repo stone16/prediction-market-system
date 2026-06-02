@@ -16,7 +16,10 @@ risk:
   max_drawdown_pct: 20.0
   max_daily_loss_usdc: 20.0
   max_open_positions: 50
-  max_exposure_per_risk_group: 15.0
+  # PAPER soak evidence should not be dominated by one event. Keep the group
+  # cap equal to the minimum order so repeated markets in the same risk group
+  # are rejected until production evidence justifies wider concentration.
+  max_exposure_per_risk_group: 1.0
   min_order_usdc: 1.0
   slippage_threshold_bps: 50.0
   max_quantity_shares: 500.0
