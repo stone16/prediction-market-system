@@ -5,8 +5,20 @@ passphrases into chat, issues, PRs, logs, or config files.
 
 ## PAPER Soak
 
-1. Start from the first-live soak config:
-   `cp config.live-soak.yaml config.local.live-soak.yaml`.
+1. Start from a repo-ignored local copy of the first-live soak config. Local
+   machines may not be able to create root-level `/secure`; use a private
+   user-owned artifact directory and let the helper rewrite local artifact
+   paths:
+
+   ```bash
+   export PMS_SECURE_DIR="${PMS_SECURE_DIR:-$HOME/.local/share/pms/secure}"
+   uv run python scripts/prepare_local_paper_soak_config.py \
+     --secure-dir "$PMS_SECURE_DIR"
+   ```
+
+   Re-run the helper with `--overwrite` only after preserving local edits in
+   `config.local.live-soak.yaml`. Fly/LIVE volume staging still uses
+   `/secure/pms`; this local helper is only for PAPER soak development hosts.
 2. Confirm the risk envelope before every soak run:
    `max_position_per_market=$1`, `max_total_exposure=$50`,
    `max_drawdown_pct=20%`, `max_daily_loss_usdc=$20`,
@@ -192,17 +204,32 @@ strategies:
 
 Replace the static cost fields with paper/live telemetry before promotion.
 
-Generate the artifact from the strict warehouse resolution export with:
+Generate the local PAPER artifact from the strict warehouse resolution export
+with the command below. First stage the external Dune/warehouse export at
+`$PMS_SECURE_DIR/polymarket_resolved_binary.csv`:
 
 ```bash
 uv run python scripts/flb_data_feasibility.py \
   --source warehouse-csv \
-  --input /secure/pms/polymarket_resolved_binary.csv \
-  --output /secure/pms/flb-feasibility.md \
-  --csv /secure/pms/flb-deciles.csv \
-  --calibration-csv /secure/pms/flb-calibration.csv \
+  --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
+  --output "$PMS_SECURE_DIR/flb-feasibility.md" \
+  --csv "$PMS_SECURE_DIR/flb-deciles.csv" \
+  --calibration-csv "$PMS_SECURE_DIR/flb-calibration.csv" \
   --calibration-source-label warehouse-flb-v1
 ```
+
+Generate the optional local category-prior artifact that
+`scripts/prepare_local_paper_soak_config.py` wires into
+`config.local.live-soak.yaml`:
+
+```bash
+uv run python scripts/export_category_prior_observations.py \
+  --output "$PMS_SECURE_DIR/category-prior-observations.csv" \
+  --min-observations 100
+```
+
+For Fly/LIVE volume staging, keep the same artifact filenames under
+`/secure/pms`, including `/secure/pms/flb-calibration.csv`.
 
 Before starting the paper-soak API, run the local artifact check. It uses the
 same FLB calibration and optional category-prior CSV loaders as runtime

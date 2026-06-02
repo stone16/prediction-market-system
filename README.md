@@ -52,7 +52,7 @@ Six things remain between the current branch and real capital:
    `config.live-soak.yaml`: `max_position_per_market=$1`,
    `max_total_exposure=$50`, `max_drawdown_pct=20%`,
    `max_daily_loss_usdc=$20`, `max_open_positions=50`,
-   `max_exposure_per_risk_group=$15`, `min_order_usdc=$1`,
+   `max_exposure_per_risk_group=$1`, `min_order_usdc=$1`,
    `slippage_threshold_bps=50`, `max_quantity_shares=500`.
 4. **30-day paper soak** — Run with live Polymarket data and require the
    machine-checkable Go/No-Go report gate to pass before risking capital. See
@@ -132,27 +132,37 @@ docker compose up -d postgres
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_dev
 uv run alembic upgrade head
 
-# 4. Copy and customize the paper soak config
-cp config.live-soak.yaml config.local.live-soak.yaml
+# 4. Create a private artifact directory and repo-ignored local config.
+#    On macOS, root-level /secure may be unavailable; keep local PAPER
+#    artifacts in a user-owned chmod 700 directory and let the helper rewrite
+#    config.local.live-soak.yaml to that directory. Re-run with --overwrite
+#    only after preserving any local edits.
+export PMS_SECURE_DIR="${PMS_SECURE_DIR:-$HOME/.local/share/pms/secure}"
+uv run python scripts/prepare_local_paper_soak_config.py \
+  --secure-dir "$PMS_SECURE_DIR"
 # Edit config.local.live-soak.yaml:
 #   - Adjust risk.max_position_per_market (paper default: $1)
 #   - Adjust risk.max_total_exposure (proposed: $50)
 #   - Adjust risk.max_drawdown_pct (proposed: 20)
-#   - Keep strategies.flb_calibration_path pointed at the secure CSV below
-#   - Set controller.category_prior_observations_path to the secure CSV below
+#   - Keep strategies.flb_calibration_path pointed at the local secure CSV below
+#   - Keep controller.category_prior_observations_path pointed at the local secure CSV below
 
-# 4a. Generate required non-secret launch artifacts outside the repo
-sudo install -d -m 700 -o "$USER" /secure/pms
+# 4a. Generate required non-secret launch artifacts outside the repo.
+#     First stage the strict external warehouse/Dune export at:
+#       $PMS_SECURE_DIR/polymarket_resolved_binary.csv
 uv run python scripts/flb_data_feasibility.py \
   --source warehouse-csv \
-  --input /secure/pms/polymarket_resolved_binary.csv \
-  --output /secure/pms/flb-feasibility.md \
-  --csv /secure/pms/flb-deciles.csv \
-  --calibration-csv /secure/pms/flb-calibration.csv \
+  --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
+  --output "$PMS_SECURE_DIR/flb-feasibility.md" \
+  --csv "$PMS_SECURE_DIR/flb-deciles.csv" \
+  --calibration-csv "$PMS_SECURE_DIR/flb-calibration.csv" \
   --calibration-source-label warehouse-flb-v1
 uv run python scripts/export_category_prior_observations.py \
-  --output /secure/pms/category-prior-observations.csv \
+  --output "$PMS_SECURE_DIR/category-prior-observations.csv" \
   --min-observations 100
+
+# Fly/LIVE volume staging keeps the same artifact names under /secure/pms,
+# for example: --calibration-csv /secure/pms/flb-calibration.csv
 
 # 4b. Fail fast before starting the API; this uses the same artifact loaders
 #     as runtime startup and exits nonzero when required launch artifacts are

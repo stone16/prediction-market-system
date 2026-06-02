@@ -205,6 +205,12 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "--output /secure/pms/paper-soak-go-report.md" in readme_text
     assert "--calibration-csv /secure/pms/flb-calibration.csv" in readme_text
     assert "--calibration-source-label warehouse-flb-v1" in readme_text
+    assert "max_exposure_per_risk_group=$1" in readme_text
+    assert "max_exposure_per_risk_group=$15" not in readme_text
+    assert "scripts/prepare_local_paper_soak_config.py" in readme_text
+    assert "scripts/prepare_local_paper_soak_config.py" in runbook_text
+    assert "PMS_SECURE_DIR" in readme_text
+    assert "PMS_SECURE_DIR" in runbook_text
     assert "scripts/check_paper_soak_artifacts.py" in readme_text
     assert "scripts/check_paper_soak_artifacts.py" in runbook_text
     assert "credentialed preflight artifact is missing/invalid" in readme_text
