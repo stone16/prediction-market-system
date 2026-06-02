@@ -361,10 +361,12 @@ preflight artifact check as startup.
 ```bash
 uv sync
 uv run pytest -q                              # full default suite
-uv run mypy src/ tests/ --strict              # strict type check
 docker compose up -d postgres
 export PMS_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
 PMS_RUN_INTEGRATION=1 uv run pytest -q -m integration   # DB-backed integration + gated live-network tests
+uv run mypy src/ tests/ --strict              # strict type check
+uv run lint-imports                           # import-linter contracts
+(cd dashboard && npm ci && npm run test:ci)   # dashboard Vitest
 ```
 
 Baseline invariants enforced by CI:
@@ -372,6 +374,8 @@ Baseline invariants enforced by CI:
   `PMS_RUN_INTEGRATION=1`, with PostgreSQL-backed checks requiring
   `PMS_TEST_DATABASE_URL`.
 - mypy strict must be clean on every committed source file.
+- import-linter contracts must keep architecture boundaries intact.
+- dashboard Vitest must stay green.
 - Research sweep and worker spec format: `docs/research/backtest-spec-format.md`
 
 ### Isolating dev state

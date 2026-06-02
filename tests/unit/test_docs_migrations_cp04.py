@@ -63,6 +63,18 @@ def test_local_integration_gate_docs_require_compose_backed_database_url() -> No
         assert "PMS_RUN_INTEGRATION=1 uv run pytest -q -m integration" in section_text
 
 
+def test_readme_development_documents_all_ci_gates() -> None:
+    readme_development = _section(
+        README_PATH.read_text(encoding="utf-8"),
+        "## Development",
+    )
+
+    assert "uv run lint-imports" in readme_development
+    assert "(cd dashboard && npm ci && npm run test:ci)" in readme_development
+    assert "import-linter contracts" in readme_development
+    assert "dashboard Vitest" in readme_development
+
+
 def test_migrations_doc_exists_with_required_sections_and_policy() -> None:
     text = MIGRATIONS_DOC_PATH.read_text(encoding="utf-8")
 
