@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -37,7 +38,7 @@ class ExportStats:
     output_path: Path
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Export a no-lookahead category-prior observations CSV from "
@@ -53,20 +54,25 @@ def main() -> None:
     parser.add_argument("--page-limit", type=int, default=100)
     parser.add_argument("--max-pages", type=int, default=25)
     parser.add_argument("--min-observations", type=int, default=100)
-    args = parser.parse_args()
+    args = parser.parse_args(list(argv) if argv is not None else None)
 
-    stats = export_category_prior_observations(
-        output_path=Path(args.output),
-        gamma_base_url=str(args.gamma_base_url),
-        page_limit=int(args.page_limit),
-        max_pages=int(args.max_pages),
-        min_observations=int(args.min_observations),
-    )
+    try:
+        stats = export_category_prior_observations(
+            output_path=Path(args.output),
+            gamma_base_url=str(args.gamma_base_url),
+            page_limit=int(args.page_limit),
+            max_pages=int(args.max_pages),
+            min_observations=int(args.min_observations),
+        )
+    except (OSError, RuntimeError, ValueError, httpx.HTTPError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     print(
         "category-prior observations exported "
         f"written={stats.written} fetched={stats.fetched} "
         f"skipped={stats.skipped} output={stats.output_path}"
     )
+    return 0
 
 
 def export_category_prior_observations(
@@ -363,4 +369,4 @@ def _prepare_private_parent(path: Path) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

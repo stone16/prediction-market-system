@@ -9,6 +9,7 @@ from scripts import export_category_prior_observations as exporter
 from scripts.export_category_prior_observations import (
     CategoryPriorCsvRow,
     export_category_prior_observations,
+    main,
     observation_row_from_gamma_market,
 )
 
@@ -220,3 +221,35 @@ def test_export_category_prior_observations_validates_runtime_artifact_before_pu
         )
 
     assert output_path.read_text(encoding="utf-8") == "existing artifact\n"
+
+
+def test_category_prior_export_cli_reports_operator_errors_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "secure" / "category-prior-observations.csv"
+    monkeypatch.setattr(
+        exporter,
+        "_fetch_closed_market_page",
+        lambda _client, *, limit, offset: [],
+    )
+
+    exit_code = main([
+        "--output",
+        str(output_path),
+        "--gamma-base-url",
+        "https://gamma.example.test",
+        "--max-pages",
+        "1",
+        "--min-observations",
+        "1",
+    ])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "ERROR: insufficient category-prior observations exported: 0 < 1" in (
+        captured.err
+    )
+    assert "Traceback" not in captured.err
+    assert not output_path.exists()
