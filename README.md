@@ -12,12 +12,18 @@ unless `live_trading_enabled=true`, required Polymarket credentials validate,
 and `operator_approval_mode=every_order` keeps each live order behind an
 operator gate during the initial real-money phase.
 
-## Status: Gate 2 CLOSED — Ready for Paper Soak
+## Status: Gate 2 CLOSED — Paper Soak Blocked Pending Launch Artifacts
 
 All core PRs merged as of 2026-05-03. The system is code-complete for
-H1 (FLB contrarian) strategy and ready for live-data paper soaking. H2
-anchoring-lag / LLM-news replay remains research-only until the H1 historical
-data spine proves enough coverage and measurable edge.
+H1 (FLB contrarian) strategy, but the supervised live-data paper soak is
+fail-closed until required non-secret launch artifacts are staged. In
+particular, `config.live-soak.yaml` does not start until
+`/secure/pms/flb-calibration.csv` exists and passes schema/sample validation.
+That file is not a credential; it must be generated from the strict warehouse
+CSV in step 4a below. The checked-in `docs/research/flb-deciles.csv` is an old
+Gamma fallback diagnostic and is not a launch artifact. H2 anchoring-lag /
+LLM-news replay remains research-only until the H1 historical data spine proves
+enough coverage and measurable edge.
 
 | Milestone | Status | PR | Description |
 |-----------|--------|-----|-------------|
@@ -28,31 +34,35 @@ data spine proves enough coverage and measurable edge.
 | FLB Data Pipeline | ✅ | #47 | Historical warehouse source for robust FLB measurement |
 | LLM Forecaster | ✅ | #46 | Provider-switchable (Anthropic/OpenAI) with per-market cache |
 | Strategy Relax | ✅ | #48 | Default strategy required factors relaxed for PAPER |
-| **Gate 2: Edge Validation** | ✅ | — | All gates closed, paper soak unblocked |
+| **Gate 2: Edge Validation** | ⚠️ | — | Code gates closed; paper soak startup still requires secure FLB calibration artifact |
 
 ### What's Needed Before Live Trading
 
-Five things remain between paper soak and real capital:
+Six things remain between the current branch and real capital:
 
-1. **Polymarket credentials** — 6 fields (private_key, api_key, api_secret,
+1. **Non-secret launch artifacts** — Generate `/secure/pms/flb-calibration.csv`
+   from `/secure/pms/polymarket_resolved_binary.csv` with
+   `scripts/flb_data_feasibility.py --source warehouse-csv`; paper-soak startup
+   fails closed until this artifact exists and passes the runtime H1 sample gate.
+2. **Polymarket credentials** — 6 fields (private_key, api_key, api_secret,
    api_passphrase, funder_address, signature_type). For local LIVE, stage them
    in the chmod 600 `local_secret_file` outside the working tree; never put
    them in shell exports, `.env`, or config files.
-2. **Confirm risk envelope** — Ratified PAPER soak defaults from
+3. **Confirm risk envelope** — Ratified PAPER soak defaults from
    `config.live-soak.yaml`: `max_position_per_market=$1`,
    `max_total_exposure=$50`, `max_drawdown_pct=20%`,
    `max_daily_loss_usdc=$20`, `max_open_positions=50`,
    `max_exposure_per_risk_group=$15`, `min_order_usdc=$1`,
    `slippage_threshold_bps=50`, `max_quantity_shares=500`.
-3. **30-day paper soak** — Run with live Polymarket data and require the
+4. **30-day paper soak** — Run with live Polymarket data and require the
    machine-checkable Go/No-Go report gate to pass before risking capital. See
    [Orchestration guide](#orchestration-guide) below.
-4. **Active LIVE strategy** — Confirm the active Postgres strategy version has
+5. **Active LIVE strategy** — Confirm the active Postgres strategy version has
    an explicit `metadata.live_allowed=true` opt-in; `pms-live preflight`
    rejects paper-only or unmarked strategies before writing a final go/no-go
    artifact, and LIVE startup rejects that artifact if the active strategy set
    or projection changes afterward.
-5. **Operator approval rehearsal** — Run `scripts/rehearse_first_order.py`
+6. **Operator approval rehearsal** — Run `scripts/rehearse_first_order.py`
    and keep its PASS report at `live_operator_rehearsal_report_path` so LIVE
    validation can prove the approval gate denies, matches, and consumes
    artefacts before the first real submit.

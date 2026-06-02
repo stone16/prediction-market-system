@@ -41,6 +41,16 @@ def test_readme_paper_api_examples_use_bearer_token_when_token_is_configured() -
     assert "scripts/paper_report.py reads the same token" in readme_text
 
 
+def test_readme_paper_soak_status_mentions_required_launch_artifacts() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    normalized = " ".join(readme_text.split())
+
+    assert "Paper Soak Blocked Pending Launch Artifacts" in readme_text
+    assert "does not start until `/secure/pms/flb-calibration.csv` exists" in normalized
+    assert "not a credential" in normalized
+    assert "not a launch artifact" in normalized
+
+
 def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_gate() -> None:
     runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
         encoding="utf-8"
