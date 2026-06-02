@@ -2462,7 +2462,7 @@ def test_paper_soak_gate_fails_when_daily_pnl_evidence_is_missing() -> None:
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -3076,7 +3076,7 @@ def test_paper_soak_gate_fails_when_secondary_baseline_source_label_is_placehold
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
         strategies={
@@ -3290,7 +3290,7 @@ def test_paper_soak_gate_fails_when_covered_secondary_baseline_lacks_score() -> 
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
         strategies={
@@ -3437,6 +3437,53 @@ def test_metrics_from_api_payloads_uses_decimal_internals_for_position_pnl() -> 
     assert metrics.current_unrealized_pnl == 0.3
 
 
+def test_metrics_from_api_payloads_surfaces_position_mark_sources() -> None:
+    report_date = date(2026, 5, 30)
+
+    metrics = metrics_from_api_payloads(
+        report_date=report_date,
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-29T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(report_date, pnl=0.0)},
+        trades={"trades": []},
+        positions={
+            "positions": [
+                {"locked_usdc": 1.0, "unrealized_pnl": 0.1, "mark_source": "clob"},
+                {"locked_usdc": 1.0, "unrealized_pnl": 0.2, "mark_source": "gamma"},
+                {"locked_usdc": 1.0, "unrealized_pnl": 0.3},
+            ],
+        },
+    )
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert metrics.position_mark_sources == (
+        ("clob", 1),
+        ("gamma", 1),
+        ("unknown", 1),
+    )
+    assert (
+        "positions",
+        "open-position MTM uses non-CLOB mark source",
+        "gamma=1, unknown=1; current open-position MTM is informational",
+    ) in metrics.risk_events
+    assert "## Position Mark Sources" in report
+    assert "| clob | 1 |" in report
+    assert "| gamma | 1 |" in report
+    assert "| unknown | 1 |" in report
+
+
 def test_paper_soak_gate_fails_when_strategies_endpoint_has_no_active_versions() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
@@ -3495,7 +3542,7 @@ def test_paper_soak_gate_fails_when_strategies_endpoint_has_no_active_versions()
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
         strategies={"strategies": []},
@@ -3594,7 +3641,18 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
                 None,
             )
         if path == "/positions":
-            return ({"positions": [{"locked_usdc": 10.0, "unrealized_pnl": 2.0}]}, None)
+            return (
+                {
+                    "positions": [
+                        {
+                            "locked_usdc": 10.0,
+                            "unrealized_pnl": 2.0,
+                            "mark_source": "clob",
+                        }
+                    ]
+                },
+                None,
+            )
         if path.startswith("/metrics"):
             return (
                 {
@@ -3832,7 +3890,7 @@ def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
         trades={"trades": trades},
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -3912,7 +3970,7 @@ def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
         trades={"trades": trades},
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -3993,7 +4051,7 @@ def test_paper_soak_gate_excludes_decisions_outside_soak_window() -> None:
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -4149,7 +4207,7 @@ def test_paper_soak_gate_fails_when_metrics_payload_contains_non_finite_value() 
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -4232,7 +4290,11 @@ def test_paper_soak_gate_fails_when_position_payload_contains_non_finite_value()
         },
         positions={
             "positions": [
-                {"locked_usdc": "nan", "unrealized_pnl": 2.0},
+                {
+                    "locked_usdc": "nan",
+                    "unrealized_pnl": 2.0,
+                    "mark_source": "clob",
+                },
             ],
         },
     )
@@ -4315,7 +4377,7 @@ def test_paper_soak_gate_fails_when_trade_payload_contains_non_finite_fee_value(
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -4399,7 +4461,7 @@ def test_paper_soak_gate_fails_when_decision_payload_contains_non_finite_edge_va
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -4477,7 +4539,7 @@ def test_paper_soak_gate_fails_when_unresolved_incident_evidence_is_missing() ->
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -4556,7 +4618,7 @@ def test_paper_soak_gate_fails_when_status_mode_is_not_paper() -> None:
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -4856,7 +4918,7 @@ def _passing_metrics_from_api_payloads(
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
         strategies={

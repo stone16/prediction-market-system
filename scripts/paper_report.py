@@ -148,6 +148,7 @@ class PaperReportMetrics:
     baseline_evidence: BaselineEvidenceCoverage | None = None
     clamp_rejections: tuple[tuple[str, int], ...] = ()
     selection_funnel: SelectionFunnel | None = None
+    position_mark_sources: tuple[tuple[str, int], ...] = ()
     execution_concentration: ExecutionConcentration | None = None
 
     @classmethod
@@ -352,6 +353,8 @@ def metrics_from_api_payloads(
     )
     position_rows = _list_value(positions, "positions")
     events.extend(_non_finite_position_risk_events(position_rows))
+    position_mark_sources = _position_mark_sources(position_rows)
+    events.extend(_position_mark_source_risk_events(position_mark_sources))
 
     total_exposure = sum(
         (Decimal(str(_float_from_dict(row, "locked_usdc"))) for row in position_rows),
@@ -451,6 +454,7 @@ def metrics_from_api_payloads(
         baseline_evidence=baseline_evidence,
         clamp_rejections=clamp_rejections,
         selection_funnel=_selection_funnel_from_metrics(metric_rows),
+        position_mark_sources=position_mark_sources,
         execution_concentration=execution_concentration,
         risk_events=tuple(events),
     )
@@ -668,6 +672,7 @@ def render_report(
     lines.extend(_render_rejection_reason_section(metrics.rejection_reasons))
     lines.extend(_render_clamp_rejection_section(metrics.clamp_rejections))
     lines.extend(_render_selection_funnel_section(metrics.selection_funnel))
+    lines.extend(_render_position_mark_source_section(metrics.position_mark_sources))
     lines.append("")
     return "\n".join(lines)
 
@@ -1738,6 +1743,19 @@ def _render_selection_funnel_section(funnel: SelectionFunnel | None) -> list[str
     return lines
 
 
+def _render_position_mark_source_section(
+    mark_sources: Sequence[tuple[str, int]],
+) -> list[str]:
+    lines = ["", "## Position Mark Sources", ""]
+    if not mark_sources:
+        lines.append("No open positions recorded.")
+        return lines
+    lines.extend(["| Mark Source | Open Positions |", "|---|---:|"])
+    for source, count in mark_sources:
+        lines.append(f"| {_escape_table_value(source)} | {count} |")
+    return lines
+
+
 def _strategy_evidence_risk_events(
     strategies: dict[str, Any] | None,
 ) -> list[tuple[str, str, str]]:
@@ -2393,6 +2411,43 @@ def _non_finite_position_risk_events(
                 )
             )
     return events
+
+
+def _position_mark_sources(
+    positions: Sequence[Mapping[str, object]],
+) -> tuple[tuple[str, int], ...]:
+    counts: dict[str, int] = {}
+    for row in positions:
+        raw_source = row.get("mark_source")
+        source = (
+            raw_source.strip().lower()
+            if isinstance(raw_source, str) and raw_source.strip()
+            else "unknown"
+        )
+        counts[source] = counts.get(source, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
+def _position_mark_source_risk_events(
+    mark_sources: Sequence[tuple[str, int]],
+) -> list[tuple[str, str, str]]:
+    non_clob_sources = tuple(
+        (source, count)
+        for source, count in mark_sources
+        if source != "clob" and count > 0
+    )
+    if not non_clob_sources:
+        return []
+    detail = ", ".join(
+        f"{source}={count}" for source, count in non_clob_sources
+    )
+    return [
+        (
+            "positions",
+            "open-position MTM uses non-CLOB mark source",
+            f"{detail}; current open-position MTM is informational",
+        )
+    ]
 
 
 def _non_finite_trade_risk_events(
