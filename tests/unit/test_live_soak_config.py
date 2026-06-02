@@ -180,12 +180,12 @@ def test_live_config_example_is_non_secret_and_uses_soak_risk_envelope() -> None
     )
 
     assert payload["risk"] == {
-        "max_position_per_market": 5.0,
+        "max_position_per_market": 1.0,
         "max_total_exposure": 50.0,
         "max_drawdown_pct": 20.0,
         "max_daily_loss_usdc": 20.0,
         "max_open_positions": 5,
-        "max_exposure_per_risk_group": 15.0,
+        "max_exposure_per_risk_group": 1.0,
         "min_order_usdc": 1.0,
         "slippage_threshold_bps": 50.0,
         "max_quantity_shares": 500.0,

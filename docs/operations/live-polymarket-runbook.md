@@ -338,9 +338,10 @@ cp config.live.yaml.example config.live.yaml
 `config.live.yaml` is ignored by git. Do not add Polymarket credential fields
 to it; credentials belong only in `local_secret_file` or the production secret
 manager. Config loading rejects non-null Polymarket credential fields before
-runtime validation. Keep the template's tight risk envelope unless a new
-paper-soak gate and operator ratification explicitly replace it. The template includes
-`secret_source: local_file`, `live_account_reconciliation_required: true`,
+runtime validation. Keep the template's tight risk envelope
+(`max_position_per_market=$1`, `max_exposure_per_risk_group=$1`) unless a new
+paper-soak gate and operator ratification explicitly replace it. The template
+includes `secret_source: local_file`, `live_account_reconciliation_required: true`,
 `live_exit_criteria_ratified_by`, and `live_compliance_jurisdiction`; do not
 remove those lines for LIVE. It also pins `time_in_force: IOC` for the initial
 real-money phase.
