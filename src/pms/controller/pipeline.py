@@ -102,10 +102,11 @@ async def _read_direct_fee_rate_bps(
         fee_rate_bps = await typed_reader(market_id, token_id)
     except Exception as error:  # noqa: BLE001
         logger.warning(
-            "direct fee-rate read failed for %s/%s: %s",
+            "direct fee-rate read failed for %s/%s (%s): %s",
             market_id,
             token_id,
-            error,
+            type(error).__name__,
+            str(error) or "(no message)",
         )
         return None
     if (

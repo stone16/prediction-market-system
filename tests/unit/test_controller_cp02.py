@@ -135,6 +135,12 @@ class StaticDirectBookReader:
         return self.fee_rate_bps if token_id == self.token_id else None
 
 
+class FailingFeeDirectBookReader(StaticDirectBookReader):
+    async def read_fee_rate_bps(self, market_id: str, token_id: str) -> float | None:
+        del market_id, token_id
+        raise RuntimeError
+
+
 class NullForecaster:
     """Forecaster that always returns None — used to exercise the
     no-forecaster-output branch of ``ControllerPipeline.on_signal``."""
@@ -611,6 +617,62 @@ async def test_best_ask_strategy_uses_direct_fee_rate_bps_for_costs() -> None:
     assert pipeline.last_execution_signal.external_signal["fee_rate_bps"] == 300.0
     assert opportunity.composition_trace["fee_rate"] == pytest.approx(0.03)
     assert opportunity.composition_trace["fee_edge"] == pytest.approx(0.018)
+
+
+@pytest.mark.asyncio
+async def test_direct_fee_rate_failure_logs_exception_type(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(
+            ControllerSettings(
+                min_volume=100.0,
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            )
+        ),
+        direct_book_reader=FailingFeeDirectBookReader(
+            token_id="token-cp02",
+            bids=[(0.39, 1_000.0)],
+            asks=[(0.40, 1_000.0)],
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                max_book_age_ms=1_000.0,
+                max_spread_bps=1_000.0,
+            ),
+        ),
+    )
+    now = datetime.now(tz=UTC)
+    signal = replace(
+        _signal(fetched_at=now),
+        resolves_at=now + timedelta(days=1),
+        external_signal={
+            **_signal().external_signal,
+            "raw_event_type": "book",
+            "book_received_at": (now - timedelta(seconds=5)).isoformat(),
+        },
+        orderbook={
+            "bids": [{"price": 0.39, "size": 1_000.0}],
+            "asks": [{"price": 0.40, "size": 1_000.0}],
+        },
+    )
+
+    with caplog.at_level("WARNING"):
+        emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is not None
+    opportunity, _ = emission
+    assert opportunity.composition_trace["fee_rate"] == pytest.approx(0.07)
+    assert any(
+        "RuntimeError" in record.message and "(no message)" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
