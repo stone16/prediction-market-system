@@ -19,6 +19,7 @@ from pms.controller.factory import ControllerPipelineFactory
 from pms.config import (
     PMSSettings,
     live_runtime_dependency_requirements,
+    validate_live_readiness_reports_for_submission,
     validate_live_mode_ready,
 )
 from pms.controller.baselines import load_category_prior_observations_csv
@@ -1211,6 +1212,7 @@ def _runtime_dependencies_check(settings: PMSSettings) -> LivePreflightCheck:
 
 
 def _validate_live_strategy_artifacts(settings: PMSSettings) -> None:
+    validate_live_readiness_reports_for_submission(settings)
     _validate_live_execution_model_artifact(settings)
     _validate_live_paper_backtest_diff_artifact(settings)
     _validate_live_category_prior_artifact(settings)

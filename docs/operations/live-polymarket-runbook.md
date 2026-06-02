@@ -359,7 +359,9 @@ execution model is not trusted enough for promotion. Stage the passing JSON at
 `live_paper_backtest_diff_path`; true LIVE validation and credentialed
 preflight require it, require `strategy_evidence` to match the final paper-soak
 GO report's Summary `Strategy` row, and bind its contents into the preflight
-fingerprint.
+fingerprint. Final submission/preflight artifact validation also revalidates
+the paper-soak GO report and operator rehearsal PASS report content, not just
+their fingerprints.
 
 ## Credential Setup
 
@@ -526,10 +528,11 @@ every required gate check: `soak_days`, `fills`, `fill_rate`,
 non-empty `Detail` cell, because the launch gate treats blank evidence and
 placeholder text such as `TODO` as an invalid report. The `strategy_evidence`
 detail must match the Summary `Strategy` row, so the report cannot mix a
-current strategy label with gate evidence from another run. The committed GO gate
-requires at least 50 simulated fills before the report can pass. Runtime LIVE
-validation also requires the generated `Baseline Evidence Coverage` and
-`Secondary Baseline Brier` sections: `market_implied`, `mid_quote`, and
+current strategy label with gate evidence from another run. Paper-only strategies
+such as `paper_canary_v1` cannot be final GO evidence. The committed GO gate
+requires at least 50 simulated fills before the report can pass.
+Runtime LIVE validation also requires the generated `Baseline Evidence Coverage`
+and `Secondary Baseline Brier` sections: `market_implied`, `mid_quote`, and
 `category_prior` coverage must be complete over the reported decision set, and
 every coverage row must use that same reported-decision denominator. Every
 baseline source label must be concrete, non-placeholder, lowercase `snake_case`

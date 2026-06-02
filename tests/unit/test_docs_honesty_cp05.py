@@ -262,6 +262,8 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "credentialed preflight artifact is missing/invalid" in readme_text
     assert "strategy_id`, `strategy_version_id`" in runbook_text
     assert "strategy_evidence` to match the final paper-soak" in runbook_text
+    assert "Paper-only strategies" in runbook_text
+    assert "`paper_canary_v1` cannot be final GO evidence" in runbook_text
     assert "Create the approval JSON only after preview review" in readme_text
     assert "true LIVE template leaves LLM disabled by default" in readme_text
     assert "The true LIVE template keeps `llm.enabled=false`" in runbook_text

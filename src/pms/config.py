@@ -59,6 +59,12 @@ _REQUIRED_LIVE_PAPER_SOAK_GATE_CHECKS: tuple[str, ...] = (
     "unresolved_incidents",
     "risk_events",
 )
+_PAPER_ONLY_STRATEGY_IDS = frozenset(
+    {
+        "paper_canary_v1",
+        "paper_multi_factor_v1",
+    }
+)
 _REQUIRED_LIVE_PAPER_SOAK_BASELINE_SOURCES: tuple[str, ...] = (
     "market_implied",
     "mid_quote",
@@ -651,6 +657,11 @@ def validate_live_mode_ready(
             ),
         )
     return credentials
+
+
+def validate_live_readiness_reports_for_submission(settings: PMSSettings) -> None:
+    _require_live_paper_soak_go_report(settings)
+    _require_live_operator_rehearsal_report(settings)
 
 
 def _require_live_api_control_plane_auth(settings: PMSSettings) -> None:
@@ -1667,14 +1678,47 @@ def _require_live_paper_soak_strategy_evidence_matches_summary(
         label="LIVE paper soak GO report",
     )
     strategy_evidence = rows["strategy_evidence"][1].strip()
-    if _strategy_label_set(strategy_evidence) == _strategy_label_set(summary_strategy):
-        return
+    evidence_labels = _strategy_label_set(strategy_evidence)
+    summary_labels = _strategy_label_set(summary_strategy)
+    if evidence_labels != summary_labels:
+        msg = (
+            "LIVE paper soak GO report strategy_evidence must match "
+            "Summary Strategy"
+        )
+        raise LiveTradingDisabledError(msg)
 
-    msg = (
-        "LIVE paper soak GO report strategy_evidence must match "
-        "Summary Strategy"
+    invalid_labels = sorted(
+        label
+        for label in summary_labels
+        if (
+            label.lower() == "unknown"
+            or "@" not in label
+            or _looks_like_report_placeholder_detail(label)
+        )
     )
-    raise LiveTradingDisabledError(msg)
+    if invalid_labels:
+        fields = ", ".join(invalid_labels)
+        msg = (
+            "LIVE paper soak GO report strategy_evidence must contain "
+            f"concrete strategy_id@strategy_version_id: {fields}"
+        )
+        raise LiveTradingDisabledError(msg)
+
+    paper_only_labels = sorted(
+        label for label in summary_labels if _is_paper_only_strategy_label(label)
+    )
+    if paper_only_labels:
+        fields = ", ".join(paper_only_labels)
+        msg = (
+            "LIVE paper soak GO report paper-only strategy cannot be "
+            f"final GO evidence: {fields}"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _is_paper_only_strategy_label(label: str) -> bool:
+    strategy_id, _, _strategy_version_id = label.partition("@")
+    return strategy_id.strip().lower() in _PAPER_ONLY_STRATEGY_IDS
 
 
 def _require_live_paper_soak_baseline_evidence(report_text: str) -> None:

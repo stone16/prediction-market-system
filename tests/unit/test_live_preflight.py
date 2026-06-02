@@ -6874,6 +6874,86 @@ async def test_live_preflight_fails_when_paper_report_strategy_row_has_extra_cel
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_fails_when_paper_report_decision_is_no_go(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    paper_report_path = Path(cast(str, settings.live_paper_soak_report_path))
+    paper_report_path.write_text(
+        paper_report_path.read_text(encoding="utf-8").replace(
+            "**Decision:** GO",
+            "**Decision:** NO-GO",
+        ),
+        encoding="utf-8",
+    )
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(
+                _Connection(
+                    active_strategy_rows=(_active_strategy_row(_live_strategy()),)
+                )
+            ),
+        ),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert "paper soak GO report must contain a Go/No-Go GO decision" in (
+        live_config.detail
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_paper_report_includes_paper_only_strategy(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    active_strategy = _live_strategy()
+    active_strategy_label = (
+        f"{active_strategy.config.strategy_id}@"
+        f"{_strategy_version_id(active_strategy)}"
+    )
+    strategy_evidence = (
+        f"{active_strategy_label}, paper_canary_v1@paper-only-version"
+    )
+    _insert_report_summary_strategy(
+        cast(str, settings.live_paper_soak_report_path),
+        strategy_evidence,
+    )
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    diff_payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    diff_payload["strategy_evidence"] = strategy_evidence
+    diff_path.write_text(json.dumps(diff_payload), encoding="utf-8")
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(
+                _Connection(
+                    active_strategy_rows=(_active_strategy_row(active_strategy),)
+                )
+            ),
+        ),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert "paper-only strategy cannot be final GO evidence" in live_config.detail
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_accepts_escaped_pipe_inside_strategy_label(
     tmp_path: Path,
 ) -> None:
@@ -7136,6 +7216,94 @@ def test_live_preflight_artifact_revalidates_strategy_artifact_content(
     validator = getattr(live_preflight_module, "require_live_preflight_artifact")
 
     with pytest.raises(LiveTradingDisabledError, match=expected_detail):
+        validator(settings)
+
+
+def test_live_preflight_artifact_revalidates_paper_report_decision(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    paper_report_path = Path(cast(str, settings.live_paper_soak_report_path))
+    paper_report_path.write_text(
+        paper_report_path.read_text(encoding="utf-8").replace(
+            "**Decision:** GO",
+            "**Decision:** NO-GO",
+        ),
+        encoding="utf-8",
+    )
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="paper soak GO report must contain a Go/No-Go GO decision",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_revalidates_operator_rehearsal_decision(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    rehearsal_report_path = Path(
+        cast(str, settings.live_operator_rehearsal_report_path)
+    )
+    rehearsal_report_path.write_text(
+        rehearsal_report_path.read_text(encoding="utf-8").replace(
+            "**Decision:** PASS",
+            "**Decision:** FAIL",
+        ),
+        encoding="utf-8",
+    )
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="operator rehearsal report must contain a PASS decision",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_revalidates_paper_report_strategy_evidence(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    active_strategy = _live_strategy()
+    active_strategy_label = (
+        f"{active_strategy.config.strategy_id}@"
+        f"{_strategy_version_id(active_strategy)}"
+    )
+    strategy_evidence = (
+        f"{active_strategy_label}, paper_canary_v1@paper-only-version"
+    )
+    _insert_report_summary_strategy(
+        cast(str, settings.live_paper_soak_report_path),
+        strategy_evidence,
+    )
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    diff_payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    diff_payload["strategy_evidence"] = strategy_evidence
+    diff_path.write_text(json.dumps(diff_payload), encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="paper-only strategy cannot be final GO evidence",
+    ):
         validator(settings)
 
 

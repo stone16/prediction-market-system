@@ -11,7 +11,11 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from pms.config import PMSSettings, normalize_webhook_url
+from pms.config import (
+    PMSSettings,
+    normalize_webhook_url,
+    validate_live_readiness_reports_for_submission,
+)
 from pms.core.models import LiveTradingDisabledError
 from pms.research.spec_codec import deserialize_execution_model
 
@@ -151,6 +155,7 @@ def live_preflight_readiness_reports_fingerprint(settings: PMSSettings) -> str:
 
 
 def validate_live_strategy_artifacts_for_submission(settings: PMSSettings) -> None:
+    validate_live_readiness_reports_for_submission(settings)
     _validate_live_execution_model_artifact(settings)
     _validate_live_paper_backtest_diff_artifact(settings)
     _validate_live_category_prior_artifact(settings)
