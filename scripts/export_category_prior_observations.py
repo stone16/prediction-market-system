@@ -83,6 +83,7 @@ def export_category_prior_observations(
     max_pages: int = 25,
     min_observations: int = 100,
 ) -> ExportStats:
+    output_path = output_path.expanduser()
     if page_limit <= 0:
         msg = "page_limit must be positive"
         raise ValueError(msg)

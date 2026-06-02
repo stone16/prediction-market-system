@@ -148,6 +148,40 @@ def test_export_category_prior_observations_publishes_private_artifact(
     assert stat.S_IMODE(output_path.stat().st_mode) == 0o600
 
 
+def test_export_category_prior_observations_reports_expanded_output_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home_path = tmp_path / "home"
+    output_path = Path("~/secure/category-prior-observations.csv")
+    expanded_output_path = home_path / "secure" / "category-prior-observations.csv"
+    monkeypatch.setenv("HOME", str(home_path))
+    monkeypatch.setattr(
+        exporter,
+        "_fetch_closed_market_page",
+        lambda _client, *, limit, offset: [
+            {
+                "conditionId": "market-1",
+                "category": "Politics",
+                "closedTime": "2026-06-02T05:14:32Z",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["1", "0"]',
+            },
+        ],
+    )
+
+    stats = export_category_prior_observations(
+        output_path=output_path,
+        gamma_base_url="https://gamma.example.test",
+        page_limit=1,
+        max_pages=1,
+        min_observations=1,
+    )
+
+    assert expanded_output_path.exists()
+    assert stats.output_path == expanded_output_path
+
+
 def test_export_category_prior_observations_rejects_permissive_parent_without_publishing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
