@@ -367,6 +367,35 @@ def test_load_flb_calibration_csv_parses_model(tmp_path: Path) -> None:
     assert longshot.sample_count == 150
 
 
+@pytest.mark.parametrize(
+    "source_label",
+    [
+        "Gamma API closed markets",
+        "warehouse CSV: /tmp/polymarket.csv",
+        "tests/fixtures/flb-calibration",
+        "placeholder",
+    ],
+)
+def test_load_flb_calibration_csv_rejects_non_auditable_source_label(
+    tmp_path: Path,
+    source_label: str,
+) -> None:
+    model_path = tmp_path / "flb-calibration.csv"
+    model_path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                f"longshot_yes_overpriced_buy_no,0.99,150,{source_label}",
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="source_label"):
+        load_flb_calibration_csv(model_path)
+
+
 def test_load_flb_calibration_csv_rejects_symlink_path(tmp_path: Path) -> None:
     target_path = tmp_path / "target-flb-calibration.csv"
     target_path.write_text(_valid_flb_calibration_csv(), encoding="utf-8")

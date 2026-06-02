@@ -87,7 +87,7 @@ Dashboard、alerting、runbook、incident review。
 
 按优先级排：
 
-把 FLB 的 placeholder edge 换成真实校准模型。 Runtime 已能从 `strategies.flb_calibration_path` 加载 warehouse-calibrated H1 signal probabilities，并拒绝样本不足或扣除入场执行成本 / fee 后净 edge 不达标的 signal；credentialed preflight 现在也会把该 CSV 内容纳入 fingerprint，避免 preflight 后替换模型。`scripts/flb_data_feasibility.py --source warehouse-csv --calibration-csv ...` 已能从严格 warehouse resolution export 生成 runtime artifact。下一步是用真实数据产出并版本化该 artifact，最好继续按 category、time-to-resolution、liquidity、volume、spread、price bucket 估计 conditional actual payout rate。不要把未配置 artifact 的 fixed limit + 2% 路径当 production alpha。
+把 FLB 的 placeholder edge 换成真实校准模型。 Runtime 已能从 `strategies.flb_calibration_path` 加载 warehouse-calibrated H1 signal probabilities，并拒绝样本不足或扣除入场执行成本 / fee 后净 edge 不达标的 signal；credentialed preflight 现在也会把该 CSV 内容纳入 fingerprint，避免 preflight 后替换模型。`scripts/flb_data_feasibility.py --source warehouse-csv --calibration-csv ... --calibration-source-label warehouse-flb-v1` 已能从严格 warehouse resolution export 生成 runtime artifact。下一步是用真实数据产出并版本化该 artifact，最好继续按 category、time-to-resolution、liquidity、volume、spread、price bucket 估计 conditional actual payout rate。不要把未配置 artifact 的 fixed limit + 2% 路径当 production alpha。
 把“套利”和“预测交易”分开。
 预测交易：做概率校准、Brier improvement、edge after costs。
 套利交易：做组合约束、全腿执行、partial fill unwind、最坏情形 payout 检查。

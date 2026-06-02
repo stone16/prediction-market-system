@@ -7697,6 +7697,39 @@ def test_live_preflight_flb_calibration_artifact_rejects_duplicate_csv_header() 
         )
 
 
+@pytest.mark.parametrize(
+    "source_label",
+    [
+        "Gamma API closed markets",
+        "warehouse CSV: /tmp/polymarket.csv",
+        "tests/fixtures/flb-calibration",
+        "placeholder",
+    ],
+)
+def test_live_preflight_flb_calibration_artifact_rejects_non_auditable_source_label(
+    source_label: str,
+) -> None:
+    validator = getattr(
+        live_preflight_artifact_module,
+        "_validate_flb_calibration_rows",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="source_label",
+    ):
+        validator(
+            "\n".join(
+                (
+                    "signal_name,probability_estimate,sample_count,source_label",
+                    f"longshot_yes_overpriced_buy_no,0.99,150,{source_label}",
+                    "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+                )
+            ),
+            min_sample_count=100,
+        )
+
+
 def test_live_preflight_artifact_rejects_duplicate_check_names(
     tmp_path: Path,
 ) -> None:

@@ -15,7 +15,8 @@ Usage:
     uv run python scripts/flb_data_feasibility.py \
         --source warehouse-csv \
         --input exports/polymarket_resolved_binary.csv \
-        --calibration-csv exports/flb_calibration.csv
+        --calibration-csv exports/flb_calibration.csv \
+        --calibration-source-label warehouse-flb-v1
 
 Exit codes:
     0 — H1 viable (sample gate passed)
@@ -57,6 +58,8 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+
+from pms.strategies.flb.source import require_flb_calibration_source_label
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 GAMMA_CLOSED_MARKET_ORDER = "closedTime"
@@ -145,6 +148,21 @@ class FlbCalibrationArtifactRow:
     probability_estimate: float
     sample_count: int
     source_label: str
+
+    def __post_init__(self) -> None:
+        if self.signal_name not in {LONGSHOT_SIGNAL_NAME, FAVORITE_SIGNAL_NAME}:
+            msg = f"unsupported FLB calibration signal_name: {self.signal_name}"
+            raise ValueError(msg)
+        if self.probability_estimate <= 0.0 or self.probability_estimate >= 1.0:
+            msg = "probability_estimate must satisfy 0.0 < value < 1.0"
+            raise ValueError(msg)
+        if not math.isfinite(self.probability_estimate):
+            msg = "probability_estimate must be finite"
+            raise ValueError(msg)
+        if self.sample_count <= 0:
+            msg = "sample_count must be positive"
+            raise ValueError(msg)
+        require_flb_calibration_source_label(self.source_label)
 
 
 # ── Data Fetching ────────────────────────────────────────────────────────────
@@ -1192,9 +1210,26 @@ def main() -> int:
             "Output runtime FLB calibration CSV; requires --source=warehouse-csv"
         ),
     )
+    parser.add_argument(
+        "--calibration-source-label",
+        default=None,
+        help=(
+            "Auditable source slug written into --calibration-csv, for example "
+            "warehouse-flb-v1. Required with --calibration-csv."
+        ),
+    )
     args = parser.parse_args()
     if args.calibration_csv is not None and args.source != "warehouse-csv":
         parser.error("--calibration-csv requires --source=warehouse-csv")
+    if args.calibration_source_label is not None and args.calibration_csv is None:
+        parser.error("--calibration-source-label requires --calibration-csv")
+    if args.calibration_csv is not None and args.calibration_source_label is None:
+        parser.error("--calibration-source-label is required with --calibration-csv")
+    if args.calibration_source_label is not None:
+        try:
+            require_flb_calibration_source_label(args.calibration_source_label)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.source == "warehouse-csv" and args.input is None:
         parser.error("--input is required when --source=warehouse-csv")
     _require_distinct_cli_artifact_paths(
@@ -1297,7 +1332,7 @@ def main() -> int:
         try:
             calibration_rows = build_flb_calibration_rows(
                 markets,
-                source_label=source_label,
+                source_label=args.calibration_source_label,
             )
             save_flb_calibration_csv(calibration_rows, args.calibration_csv)
         except (OSError, ValueError) as exc:

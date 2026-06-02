@@ -885,6 +885,8 @@ class TestFlbCalibrationArtifact:
                 str(input_path),
                 "--calibration-csv",
                 str(output_path),
+                "--calibration-source-label",
+                "warehouse-flb-v1",
             ],
         )
 
@@ -897,6 +899,54 @@ class TestFlbCalibrationArtifact:
         assert exit_code == 2
         assert "FLB calibration CSV output parent" in captured.err
         assert "too permissive" in captured.err
+        assert not output_path.exists()
+
+    def test_cli_requires_explicit_calibration_source_label(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        output_path = tmp_path / "flb-calibration.csv"
+        _write_warehouse_csv(
+            input_path,
+            [
+                _warehouse_row(
+                    market_id=f"longshot-{index}",
+                    entry_yes_price="0.05",
+                    yes_payout="0",
+                    no_payout="1",
+                )
+                for index in range(100)
+            ]
+            + [
+                _warehouse_row(
+                    market_id=f"favorite-{index}",
+                    entry_yes_price="0.95",
+                    yes_payout="1",
+                    no_payout="0",
+                )
+                for index in range(100)
+            ],
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--calibration-csv",
+                str(output_path),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 2
         assert not output_path.exists()
 
     def test_save_flb_calibration_csv_atomic_publish_does_not_mutate_hardlink_swap_target(
@@ -986,6 +1036,8 @@ class TestFlbCalibrationArtifact:
                 str(input_path),
                 "--calibration-csv",
                 str(input_path),
+                "--calibration-source-label",
+                "warehouse-flb-v1",
             ],
         )
 

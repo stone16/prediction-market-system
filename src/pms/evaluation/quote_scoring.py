@@ -20,6 +20,7 @@ class QuoteScorer:
         *,
         quote_lag_seconds: int,
         recorded_at: datetime | None = None,
+        quote_source: str | None = None,
     ) -> QuoteEvalRecord:
         if (
             fill.strategy_id != decision.strategy_id
@@ -41,7 +42,7 @@ class QuoteScorer:
             strategy_version_id=fill.strategy_version_id,
             prob_estimate=decision.prob_estimate,
             quote_price=quote_price,
-            quote_source=self.quote_source,
+            quote_source=quote_source or self.quote_source,
             quote_lag_seconds=quote_lag_seconds,
             quote_score=(decision.prob_estimate - quote_price) ** 2,
             mtm_pnl=_mtm_pnl(fill, decision, quote),

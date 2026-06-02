@@ -194,7 +194,8 @@ uv run python scripts/flb_data_feasibility.py \
   --input /secure/pms/polymarket_resolved_binary.csv \
   --output /secure/pms/flb-feasibility.md \
   --csv /secure/pms/flb-deciles.csv \
-  --calibration-csv /secure/pms/flb-calibration.csv
+  --calibration-csv /secure/pms/flb-calibration.csv \
+  --calibration-source-label warehouse-flb-v1
 ```
 
 When using research backtests to justify a live rollout, do not leave the

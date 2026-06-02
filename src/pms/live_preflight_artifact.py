@@ -64,6 +64,19 @@ _REQUIRED_FLB_SIGNALS = frozenset(
         "favorite_yes_underpriced_buy_yes",
     }
 )
+_FLB_CALIBRATION_SOURCE_LABEL_MAX_LENGTH = 80
+_FLB_CALIBRATION_SOURCE_LABEL_FORBIDDEN_PARTS = frozenset(
+    {
+        "dummy",
+        "example",
+        "fixture",
+        "gamma",
+        "placeholder",
+        "sample",
+        "test",
+        "todo",
+    }
+)
 
 
 def live_preflight_settings_fingerprint(settings: PMSSettings) -> str:
@@ -802,9 +815,10 @@ def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
                 f"{signal_name} sample_count {sample_count} < {min_sample_count}"
             )
             raise LiveTradingDisabledError(msg)
-        if (row.get("source_label") or "").strip() == "":
-            msg = f"LIVE FLB calibration artifact invalid: row {row_number} missing source_label"
-            raise LiveTradingDisabledError(msg)
+        _require_flb_calibration_source_label(
+            row.get("source_label"),
+            row_number=row_number,
+        )
     missing_signals = sorted(_REQUIRED_FLB_SIGNALS - observed_signals)
     if missing_signals:
         msg = (
@@ -812,6 +826,58 @@ def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
             f"signals: {', '.join(missing_signals)}"
         )
         raise LiveTradingDisabledError(msg)
+
+
+def _require_flb_calibration_source_label(
+    raw_value: str | None,
+    *,
+    row_number: int,
+) -> None:
+    value = (raw_value or "").strip()
+    if value == "":
+        msg = f"LIVE FLB calibration artifact invalid: row {row_number} missing source_label"
+        raise LiveTradingDisabledError(msg)
+    if len(value) > _FLB_CALIBRATION_SOURCE_LABEL_MAX_LENGTH:
+        msg = (
+            "LIVE FLB calibration artifact invalid: "
+            f"row {row_number} source_label too long"
+        )
+        raise LiveTradingDisabledError(msg)
+    if not _is_flb_calibration_source_label_slug(value):
+        msg = (
+            "LIVE FLB calibration artifact invalid: "
+            f"row {row_number} source_label must be a lowercase audit slug"
+        )
+        raise LiveTradingDisabledError(msg)
+    parts = {
+        part
+        for separator in ("-", "_")
+        for part in value.split(separator)
+        if part
+    }
+    forbidden = sorted(parts & _FLB_CALIBRATION_SOURCE_LABEL_FORBIDDEN_PARTS)
+    if forbidden:
+        msg = (
+            "LIVE FLB calibration artifact invalid: "
+            f"row {row_number} source_label contains forbidden source marker "
+            f"{forbidden[0]}"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _is_flb_calibration_source_label_slug(value: str) -> bool:
+    if value == "":
+        return False
+    if value[0] < "a" or value[0] > "z":
+        return False
+    if not ("0" <= value[-1] <= "9" or "a" <= value[-1] <= "z"):
+        return False
+    return all(
+        character in {"-", "_"}
+        or "a" <= character <= "z"
+        or "0" <= character <= "9"
+        for character in value
+    )
 
 
 def _require_unique_csv_fieldnames(
