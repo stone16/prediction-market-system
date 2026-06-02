@@ -48,6 +48,12 @@ from pms.execution.fees import market_fee_rate_from_metadata
 from pms.factors.base import EMPTY_OUTER_RING
 from pms.factors.composition import apply_composition, evaluate_branch_probabilities
 from pms.factors.definitions.orderbook_imbalance import OrderbookImbalance
+from pms.metrics import (
+    SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
+    increment_metric,
+)
 from pms.strategies.projections import ActiveStrategy, CalibrationContext, CalibrationSpec
 
 logger = logging.getLogger(__name__)
@@ -1117,6 +1123,9 @@ def _log_pipeline_funnel(
     forecasted_count: int,
     traded_count: int,
 ) -> None:
+    increment_metric(SELECTION_FUNNEL_ROUTED_TOTAL_METRIC)
+    increment_metric(SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC, forecasted_count)
+    increment_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC, traded_count)
     logger.info(
         "controller pipeline funnel market_id=%s forecasted=%d traded=%d",
         signal.market_id,

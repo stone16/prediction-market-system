@@ -15,6 +15,11 @@ from pms.core.models import EvalRecord, TradeDecision
 from pms.metrics import (
     LLM_DAILY_COST_USDC_METRIC,
     LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC,
+    SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_SELECTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
 )
 from scripts.paper_report import (
     ExecutionConcentration,
@@ -2231,6 +2236,35 @@ def test_metrics_from_api_payloads_surfaces_live_clamp_rejection_summary() -> No
     assert "| calibration_clamp_rejected | 37 |" in report
     assert "| aggregate | 37 |" in report
     assert "No clamp rejections recorded." not in report
+
+
+def test_metrics_from_api_payloads_surfaces_live_selection_funnel() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 20,
+            "diagnostics_total": 3,
+            "diagnostic_counts": {"decision_edge_not_positive": 3},
+        },
+        metrics_override={
+            SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC: 120.0,
+            SELECTION_FUNNEL_SELECTED_TOTAL_METRIC: 40.0,
+            SELECTION_FUNNEL_ROUTED_TOTAL_METRIC: 23.0,
+            SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC: 11.0,
+            SELECTION_FUNNEL_TRADED_TOTAL_METRIC: 4.0,
+        },
+    )
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert metrics.selection_funnel is not None
+    assert metrics.selection_funnel.discovered == 120
+    assert metrics.selection_funnel.selected == 40
+    assert metrics.selection_funnel.routed == 23
+    assert metrics.selection_funnel.forecasted == 11
+    assert metrics.selection_funnel.traded == 4
+    assert "| Discovered | 120 |" in report
+    assert "| Forecasted | 11 |" in report
+    assert "No funnel events recorded." not in report
 
 
 def test_paper_soak_gate_fails_without_persisted_runtime_continuity_evidence() -> None:
@@ -4671,6 +4705,7 @@ def _passing_metrics_from_api_payloads(
     decision_payload_count: int | None = None,
     include_runtime_continuity: bool = True,
     runtime_continuity: dict[str, object] | None = None,
+    metrics_override: dict[str, object] | None = None,
 ) -> PaperReportMetrics:
     report_date = date(2026, 5, 30)
     controller_payload: dict[str, object] = {
@@ -4739,6 +4774,7 @@ def _passing_metrics_from_api_payloads(
             "sharpe_ratio": 1.5,
             "pnl_series": _pnl_series(report_date),
             **_baseline_score_metrics(),
+            **(metrics_override or {}),
         },
         decisions=decision_rows,
         trades={

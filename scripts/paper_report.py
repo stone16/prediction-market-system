@@ -24,6 +24,11 @@ from pms.core.models import EvalRecord, TradeDecision
 from pms.metrics import (
     LLM_DAILY_COST_USDC_METRIC,
     LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC,
+    SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_SELECTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
 )
 
 
@@ -443,6 +448,7 @@ def metrics_from_api_payloads(
         trade_costs=_trade_costs_from_decision_rows(decision_rows),
         baseline_evidence=baseline_evidence,
         clamp_rejections=clamp_rejections,
+        selection_funnel=_selection_funnel_from_metrics(metric_rows),
         execution_concentration=execution_concentration,
         risk_events=tuple(events),
     )
@@ -1527,6 +1533,32 @@ def _selection_funnel(log_events: Sequence[Mapping[str, object]]) -> SelectionFu
         forecasted=forecasted,
         traded=traded,
     )
+
+
+def _selection_funnel_from_metrics(
+    metrics: Mapping[str, object],
+) -> SelectionFunnel | None:
+    discovered = _int_metric_value(metrics, SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC)
+    selected = _int_metric_value(metrics, SELECTION_FUNNEL_SELECTED_TOTAL_METRIC)
+    routed = _int_metric_value(metrics, SELECTION_FUNNEL_ROUTED_TOTAL_METRIC)
+    forecasted = _int_metric_value(metrics, SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC)
+    traded = _int_metric_value(metrics, SELECTION_FUNNEL_TRADED_TOTAL_METRIC)
+    if discovered == selected == routed == forecasted == traded == 0:
+        return None
+    return SelectionFunnel(
+        discovered=discovered,
+        selected=selected,
+        routed=routed,
+        forecasted=forecasted,
+        traded=traded,
+    )
+
+
+def _int_metric_value(metrics: Mapping[str, object], key: str) -> int:
+    value = _optional_float_from_mapping(metrics, key)
+    if value is None or not math.isfinite(value) or value <= 0.0:
+        return 0
+    return int(value)
 
 
 def _event_int(event: Mapping[str, object], key: str) -> int:

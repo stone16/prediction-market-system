@@ -16,6 +16,13 @@ MARKETS_SNAPSHOT_LAG_SECONDS_MAX_METRIC = "pms_markets_snapshot_lag_seconds_max"
 LLM_FORECAST_CALLS_TOTAL_METRIC = "pms_llm_forecast_calls_total"
 LLM_ESTIMATED_COST_USDC_TOTAL_METRIC = "pms_llm_estimated_cost_usdc_total"
 LLM_DAILY_COST_USDC_METRIC = "pms_llm_daily_cost_usdc"
+SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC = (
+    "pms_selection_funnel_discovered_total"
+)
+SELECTION_FUNNEL_SELECTED_TOTAL_METRIC = "pms_selection_funnel_selected_total"
+SELECTION_FUNNEL_ROUTED_TOTAL_METRIC = "pms_selection_funnel_routed_total"
+SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC = "pms_selection_funnel_forecasted_total"
+SELECTION_FUNNEL_TRADED_TOTAL_METRIC = "pms_selection_funnel_traded_total"
 
 
 _metrics_lock = Lock()
@@ -27,6 +34,11 @@ _metrics: dict[str, float] = {
     LLM_FORECAST_CALLS_TOTAL_METRIC: 0.0,
     LLM_ESTIMATED_COST_USDC_TOTAL_METRIC: 0.0,
     LLM_DAILY_COST_USDC_METRIC: 0.0,
+    SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC: 0.0,
+    SELECTION_FUNNEL_SELECTED_TOTAL_METRIC: 0.0,
+    SELECTION_FUNNEL_ROUTED_TOTAL_METRIC: 0.0,
+    SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC: 0.0,
+    SELECTION_FUNNEL_TRADED_TOTAL_METRIC: 0.0,
 }
 
 

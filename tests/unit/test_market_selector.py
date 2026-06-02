@@ -9,6 +9,11 @@ from typing import Any, cast
 import pytest
 
 from pms.core.models import BookSummary, Market, Token, Venue
+from pms.metrics import (
+    SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC,
+    SELECTION_FUNNEL_SELECTED_TOTAL_METRIC,
+    get_metric,
+)
 from pms.strategies.projections import MarketSelectionSpec
 
 
@@ -18,6 +23,24 @@ def _load_symbol(module_name: str, symbol_name: str) -> Any:
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised in red phase
         pytest.fail(f"{module_name} is missing: {exc}")
     return getattr(module, symbol_name)
+
+
+def test_selector_funnel_log_updates_live_metrics() -> None:
+    log_selector_funnel = _load_symbol(
+        "pms.market_selection.selector",
+        "_log_selector_funnel",
+    )
+    discovered_before = get_metric(SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC) or 0.0
+    selected_before = get_metric(SELECTION_FUNNEL_SELECTED_TOTAL_METRIC) or 0.0
+
+    log_selector_funnel(12, 5)
+
+    assert (
+        get_metric(SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC) or 0.0
+    ) == pytest.approx(discovered_before + 12.0)
+    assert (
+        get_metric(SELECTION_FUNNEL_SELECTED_TOTAL_METRIC) or 0.0
+    ) == pytest.approx(selected_before + 5.0)
 
 
 def _eligible_market(

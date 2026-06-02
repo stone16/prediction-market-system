@@ -9,11 +9,21 @@ import pytest
 from pms.config import ControllerSettings, PMSSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.outcome_tokens import OutcomeTokens
-from pms.controller.pipeline import ControllerPipeline, _decision_cost_edges
+from pms.controller.pipeline import (
+    ControllerPipeline,
+    _decision_cost_edges,
+    _log_pipeline_funnel,
+)
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import RunMode
 from pms.core.models import BookLevel, BookSnapshot, MarketSignal, Portfolio, Position
+from pms.metrics import (
+    SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
+    get_metric,
+)
 from pms.strategies.projections import (
     ActiveStrategy,
     EvalSpec,
@@ -33,6 +43,24 @@ class StaticForecaster:
     async def forecast(self, signal: MarketSignal) -> float:
         del signal
         return 0.67
+
+
+def test_pipeline_funnel_log_updates_live_metrics() -> None:
+    routed_before = get_metric(SELECTION_FUNNEL_ROUTED_TOTAL_METRIC) or 0.0
+    forecasted_before = get_metric(SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC) or 0.0
+    traded_before = get_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC) or 0.0
+
+    _log_pipeline_funnel(_signal(), forecasted_count=2, traded_count=1)
+
+    assert (get_metric(SELECTION_FUNNEL_ROUTED_TOTAL_METRIC) or 0.0) == pytest.approx(
+        routed_before + 1.0
+    )
+    assert (
+        get_metric(SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC) or 0.0
+    ) == pytest.approx(forecasted_before + 2.0)
+    assert (get_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC) or 0.0) == pytest.approx(
+        traded_before + 1.0
+    )
 
 
 class BearishForecaster:

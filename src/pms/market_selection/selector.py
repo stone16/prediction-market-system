@@ -10,6 +10,11 @@ from pms.core.interfaces import MarketDataStore, StrategySelectionRegistry
 from pms.core.models import Market, Token
 from pms.core.venue_support import kalshi_stub_error, normalize_venue
 from pms.market_selection.merge import MergePolicy, MergeResult, StrategyMarketSet
+from pms.metrics import (
+    SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC,
+    SELECTION_FUNNEL_SELECTED_TOTAL_METRIC,
+    increment_metric,
+)
 from pms.strategies.projections import MarketSelectionSpec
 
 
@@ -140,6 +145,8 @@ class MarketSelector:
 
 
 def _log_selector_funnel(discovered_count: int, selected_count: int) -> None:
+    increment_metric(SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC, discovered_count)
+    increment_metric(SELECTION_FUNNEL_SELECTED_TOTAL_METRIC, selected_count)
     logger.info(
         "market selector funnel discovered=%d selected=%d",
         discovered_count,
