@@ -22,7 +22,7 @@ from pms.config import (
     validate_live_readiness_reports_for_submission,
     validate_live_mode_ready,
 )
-from pms.controller.baselines import load_category_prior_observations_csv
+from pms.core.category_prior import load_category_prior_observations_csv
 from pms.core.enums import RunMode
 from pms.core.models import (
     LiveTradingDisabledError,

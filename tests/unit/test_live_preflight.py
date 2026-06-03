@@ -7214,6 +7214,32 @@ def test_live_preflight_artifact_rejects_swapped_readiness_report(
         validator(settings)
 
 
+def test_live_strategy_artifact_submission_accepts_runtime_valid_category_prior_decimals(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    prior_path = Path(cast(str, settings.controller.category_prior_observations_path))
+    rows = ["market_id,category,yes_payout,no_payout,resolved_at"]
+    for index in range(1, 121):
+        category = "politics" if index % 2 == 0 else "sports"
+        yes_payout, no_payout = (
+            ("1.0", "0.0") if index % 3 == 0 else ("0.0", "1.0")
+        )
+        rows.append(
+            f"m-{index},{category},{yes_payout},{no_payout},"
+            f"2026-05-{(index % 20) + 1:02d}T12:00:00Z"
+        )
+    prior_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    validator(settings)
+
+
 @pytest.mark.parametrize(
     ("artifact_name", "expected_detail"),
     [
@@ -8013,24 +8039,33 @@ def test_live_preflight_artifact_requires_skip_credentials_false(
         validator(settings)
 
 
-def test_live_preflight_category_prior_artifact_rejects_duplicate_csv_header() -> None:
+def test_live_strategy_artifact_submission_rejects_duplicate_category_prior_csv_header(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    prior_path = Path(cast(str, settings.controller.category_prior_observations_path))
+    prior_path.write_text(
+        "\n".join(
+            (
+                "market_id,category,category,yes_payout,no_payout,resolved_at",
+                "m-1,politics,shadowed,1,0,2026-05-01T12:00:00Z",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     validator = getattr(
         live_preflight_artifact_module,
-        "_count_category_prior_observations",
+        "validate_live_strategy_artifacts_for_submission",
     )
 
     with pytest.raises(
         LiveTradingDisabledError,
         match="duplicate CSV column: category",
     ):
-        validator(
-            "\n".join(
-                (
-                    "market_id,category,category,yes_payout,no_payout,resolved_at",
-                    "m-1,politics,shadowed,1,0,2026-05-01T12:00:00Z",
-                )
-            )
-        )
+        validator(settings)
 
 
 def test_live_preflight_flb_calibration_artifact_rejects_duplicate_csv_header() -> None:

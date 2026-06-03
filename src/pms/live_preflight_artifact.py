@@ -16,6 +16,7 @@ from pms.config import (
     normalize_webhook_url,
     validate_live_readiness_reports_for_submission,
 )
+from pms.core.category_prior import load_category_prior_observations_csv
 from pms.core.models import LiveTradingDisabledError
 from pms.research.spec_codec import deserialize_execution_model
 from pms.strategies.flb.artifacts import (
@@ -59,9 +60,6 @@ _LIVE_PAPER_BACKTEST_DIFF_EMPTY_LIST_FIELDS: tuple[tuple[str, str], ...] = (
     ("paper_only_decision_ids", "paper-only decisions"),
     ("backtest_only_decision_ids", "backtest-only decisions"),
     ("status_mismatches", "status mismatches"),
-)
-_REQUIRED_CATEGORY_PRIOR_COLUMNS = frozenset(
-    {"market_id", "category", "yes_payout", "no_payout", "resolved_at"}
 )
 _REQUIRED_FLB_CALIBRATION_COLUMNS = frozenset(
     {"signal_name", "probability_estimate", "sample_count", "source_label"}
@@ -522,8 +520,12 @@ def _validate_live_category_prior_artifact(settings: PMSSettings) -> None:
         raw_path,
         label="LIVE category-prior artifact",
     )
-    text = _read_strategy_artifact_text(path, label="LIVE category-prior artifact")
-    observation_count = _count_category_prior_observations(text)
+    try:
+        loaded = load_category_prior_observations_csv(path)
+    except ValueError as exc:
+        msg = f"LIVE category-prior artifact invalid: {exc}"
+        raise LiveTradingDisabledError(msg) from exc
+    observation_count = len(loaded.observations)
     minimum = settings.controller.category_prior_min_global_samples
     if observation_count < minimum:
         msg = (
@@ -801,65 +803,6 @@ def _require_paper_backtest_diff_threshold_number(
         )
         raise LiveTradingDisabledError(msg)
     return value
-
-
-def _count_category_prior_observations(text: str) -> int:
-    reader = csv.DictReader(text.splitlines())
-    _require_unique_csv_fieldnames(
-        reader.fieldnames,
-        label="LIVE category-prior artifact invalid",
-    )
-    fieldnames = set(reader.fieldnames or ())
-    missing_columns = sorted(_REQUIRED_CATEGORY_PRIOR_COLUMNS - fieldnames)
-    if missing_columns:
-        msg = (
-            "LIVE category-prior artifact invalid: missing columns: "
-            f"{', '.join(missing_columns)}"
-        )
-        raise LiveTradingDisabledError(msg)
-    seen_market_ids: set[str] = set()
-    observation_count = 0
-    for row_number, row in enumerate(reader, start=2):
-        market_id = (row.get("market_id") or "").strip()
-        if market_id == "":
-            msg = f"LIVE category-prior artifact invalid: row {row_number} missing market_id"
-            raise LiveTradingDisabledError(msg)
-        if market_id in seen_market_ids:
-            msg = f"LIVE category-prior artifact invalid: duplicate market_id {market_id}"
-            raise LiveTradingDisabledError(msg)
-        seen_market_ids.add(market_id)
-        if (row.get("category") or "").strip() == "":
-            msg = f"LIVE category-prior artifact invalid: row {row_number} missing category"
-            raise LiveTradingDisabledError(msg)
-        _parse_category_prior_resolved_at(row, row_number=row_number)
-        yes_payout = (row.get("yes_payout") or "").strip()
-        no_payout = (row.get("no_payout") or "").strip()
-        if (yes_payout, no_payout) == ("0.5", "0.5"):
-            continue
-        if (yes_payout, no_payout) not in {("1", "0"), ("0", "1")}:
-            msg = (
-                "LIVE category-prior artifact invalid: "
-                f"row {row_number} has non-settled payout vector"
-            )
-            raise LiveTradingDisabledError(msg)
-        observation_count += 1
-    return observation_count
-
-
-def _parse_category_prior_resolved_at(
-    row: Mapping[str, str | None],
-    *,
-    row_number: int,
-) -> None:
-    raw_value = (row.get("resolved_at") or "").strip()
-    if raw_value == "":
-        msg = f"LIVE category-prior artifact invalid: row {row_number} missing resolved_at"
-        raise LiveTradingDisabledError(msg)
-    try:
-        datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        msg = f"LIVE category-prior artifact invalid: row {row_number} invalid resolved_at"
-        raise LiveTradingDisabledError(msg) from exc
 
 
 def _validate_flb_calibration_rows(
