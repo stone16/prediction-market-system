@@ -52,6 +52,7 @@ _PAPER_ONLY_STRATEGY_IDS = frozenset(
         "paper_multi_factor_v1",
     }
 )
+_READINESS_NOT_SUPPLIED = object()
 
 
 @dataclass(frozen=True)
@@ -264,6 +265,7 @@ def metrics_from_api_payloads(
     *,
     report_date: date,
     status: dict[str, Any],
+    readiness: object = _READINESS_NOT_SUPPLIED,
     trades: dict[str, Any],
     positions: dict[str, Any],
     metrics: dict[str, Any] | None = None,
@@ -276,6 +278,7 @@ def metrics_from_api_payloads(
     events.extend(_strategy_evidence_risk_events(strategies))
     events.extend(_strategy_metrics_risk_events(strategies, strategy_metrics))
     events.extend(_run_mode_risk_events(status))
+    events.extend(_readiness_risk_events(readiness))
     events.extend(_sensor_risk_events(status))
     events.extend(_actuator_risk_events(status))
     events.extend(_unresolved_incident_evidence_risk_events(status))
@@ -510,6 +513,16 @@ def load_live_metrics(
         )
 
     events: list[tuple[str, str, str]] = []
+    readiness, readiness_error = _fetch_api_json(
+        api_base_url=api_base_url,
+        path="/readiness",
+        api_token=api_token,
+    )
+    readiness_payload: object = readiness
+    if readiness_error is not None:
+        events.append(("report generation", "/readiness unavailable", readiness_error))
+        readiness_payload = _READINESS_NOT_SUPPLIED
+
     snapshot_cutoff = datetime.now(tz=UTC).isoformat()
     snapshot_query: Mapping[str, object] = {"until": snapshot_cutoff}
     trade_rows, trades_error = _fetch_api_list_pages(
@@ -592,6 +605,7 @@ def load_live_metrics(
     return metrics_from_api_payloads(
         report_date=report_date,
         status=status,
+        readiness=readiness_payload,
         decisions=decisions,
         trades=trades,
         positions=positions,
@@ -1979,6 +1993,53 @@ def _run_mode_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
             "report generation",
             "paper mode evidence missing",
             "status.mode must be paper for paper-soak GO reports",
+        )
+    ]
+
+
+def _readiness_risk_events(readiness: object) -> list[tuple[str, str, str]]:
+    if readiness is _READINESS_NOT_SUPPLIED:
+        return []
+    if not isinstance(readiness, Mapping):
+        return [
+            (
+                "report generation",
+                "readiness evidence missing",
+                "/readiness snapshot is required for paper-soak GO reports",
+            )
+        ]
+
+    status = readiness.get("status")
+    status_text = status if isinstance(status, str) and status else "missing"
+    raw_checks = readiness.get("checks")
+    if not isinstance(raw_checks, Mapping):
+        return [
+            (
+                "readiness",
+                "readiness not ready",
+                f"status={status_text}; checks=missing",
+            )
+        ]
+
+    not_ready_checks = {
+        str(name): value
+        for name, value in raw_checks.items()
+        if isinstance(name, str)
+        and isinstance(value, str)
+        and value not in {"ready", "disabled"}
+    }
+    if status_text == "ready" and not not_ready_checks:
+        return []
+
+    parts = [f"status={status_text}"]
+    parts.extend(
+        f"{name}={not_ready_checks[name]}" for name in sorted(not_ready_checks)
+    )
+    return [
+        (
+            "readiness",
+            "readiness not ready",
+            "; ".join(parts),
         )
     ]
 

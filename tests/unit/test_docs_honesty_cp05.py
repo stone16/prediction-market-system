@@ -101,6 +101,24 @@ def test_runtime_smoke_docs_capture_readiness_snapshots_for_machine_checkers() -
     assert "scripts/check_h1_flb_smoke.py" in runbook_text
 
 
+def test_paper_go_report_docs_state_readiness_endpoint_is_gated() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    normalized_readme = _normalized_doc_text(readme_text)
+    normalized_runbook = _normalized_doc_text(runbook_text)
+
+    expected = (
+        "`scripts/paper_report.py --require-go` also fetches `/readiness` "
+        "and records a NO-GO risk event unless readiness status is `ready` "
+        "and every check is `ready` or `disabled`."
+    )
+
+    assert expected in normalized_readme
+    assert expected in normalized_runbook
+
+
 def test_paper_soak_docs_verify_database_target_before_migrations() -> None:
     readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
     runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(

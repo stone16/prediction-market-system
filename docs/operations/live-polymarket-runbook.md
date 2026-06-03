@@ -237,6 +237,10 @@ uv run python scripts/paper_report.py \
   --require-go
 ```
 
+`scripts/paper_report.py --require-go` also fetches `/readiness` and records a
+NO-GO risk event unless readiness status is `ready` and every check is `ready`
+or `disabled`.
+
 Persisted report files include a `Report Provenance` section with
 `artifact_mode` set to `persisted` and a parseable `generated_at` timestamp.
 Dry-run output is marked `dry_run` and is rejected by true LIVE validation even

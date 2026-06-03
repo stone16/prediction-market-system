@@ -3786,6 +3786,19 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
                 },
                 None,
             )
+        if path == "/readiness":
+            return (
+                {
+                    "status": "ready",
+                    "checks": {
+                        "sensors": "ready",
+                        "event_loop": "ready",
+                        "halt_subscriber": "disabled",
+                        "eod_scheduler": "disabled",
+                    },
+                },
+                None,
+            )
         if path.startswith("/metrics"):
             return (
                 {
@@ -3863,6 +3876,7 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
         "since": ["2026-04-30T00:00:00+00:00"],
         "until": ["2026-05-31T00:00:00+00:00"],
     }
+    assert "/readiness" in fetched_json_paths
     strategy_metrics_path = next(
         path for path in fetched_json_paths if path.startswith("/strategies/metrics")
     )
@@ -4808,6 +4822,27 @@ def test_metrics_from_api_payloads_records_missing_status_as_risk_event() -> Non
     ) in metrics.risk_events
 
 
+def test_paper_soak_gate_fails_when_readiness_is_not_ready() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        readiness={
+            "status": "not_ready",
+            "checks": {
+                "sensors": "ready",
+                "event_loop": "shutting_down",
+                "halt_subscriber": "disabled",
+            },
+        }
+    )
+
+    assert (
+        "readiness",
+        "readiness not ready",
+        "status=not_ready; event_loop=shutting_down",
+    ) in metrics.risk_events
+    gate = evaluate_paper_soak_gate(metrics, risk=RiskSettings())
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
 def test_paper_report_renders_calibration_and_cost_diagnostics() -> None:
     diagnostics = build_paper_report_diagnostics(
         eval_records=[
@@ -4973,6 +5008,7 @@ def _passing_metrics_from_api_payloads(
     decision_payload_count: int | None = None,
     include_runtime_continuity: bool = True,
     runtime_continuity: dict[str, object] | None = None,
+    readiness: dict[str, object] | None = None,
     metrics_override: dict[str, object] | None = None,
 ) -> PaperReportMetrics:
     report_date = date(2026, 5, 30)
@@ -5045,6 +5081,19 @@ def _passing_metrics_from_api_payloads(
             **(metrics_override or {}),
         },
         decisions=decision_rows,
+        readiness=(
+            {
+                "status": "ready",
+                "checks": {
+                    "sensors": "ready",
+                    "event_loop": "ready",
+                    "halt_subscriber": "disabled",
+                    "eod_scheduler": "disabled",
+                },
+            }
+            if readiness is None
+            else readiness
+        ),
         trades={
             "trades": [
                 {

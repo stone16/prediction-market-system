@@ -268,6 +268,10 @@ uv run python scripts/paper_report.py \
   --output /secure/pms/paper-soak-go-report.md \
   --require-go
 
+# `scripts/paper_report.py --require-go` also fetches `/readiness` and records
+# a NO-GO risk event unless readiness status is `ready` and every check is
+# `ready` or `disabled`.
+
 # 1. Stage Polymarket credentials in a chmod 600 local secret file,
 #    never shell exports or .env:
 #    ~/.config/pms/polymarket.local-secrets.yaml
