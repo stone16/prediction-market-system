@@ -131,7 +131,9 @@ disabled for the first real-money path unless you separately stage
 ### Step-by-Step: From Zero to Paper Soak
 
 ```bash
-# 1. Install dependencies for live-data paper mode, Polymarket SDK, and the LLM forecaster
+# 1. Install dependencies for live-data paper mode, Polymarket SDK, and
+#    optional LLM parity checks. H1 FLB keeps `llm.enabled: false` for the
+#    launch soak unless an operator explicitly opts in and stages PMS_LLM__API_KEY.
 uv sync --extra live --extra llm
 
 # 2. Start PostgreSQL (required for market data persistence)

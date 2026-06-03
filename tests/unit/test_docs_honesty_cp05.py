@@ -151,6 +151,19 @@ def test_live_runbook_llm_guidance_matches_live_soak_config() -> None:
     assert "committed paper-soak config enables the LLM forecaster" not in runbook_text
 
 
+def test_readme_llm_guidance_matches_live_soak_config() -> None:
+    config_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    normalized_readme = _normalized_doc_text(readme_text)
+
+    assert _configured_llm_enabled(config_text) is False
+    assert (
+        "H1 FLB keeps `llm.enabled: false` for the launch soak"
+        in normalized_readme
+    )
+    assert "and the LLM forecaster" not in readme_text
+
+
 def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_gate() -> None:
     runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
         encoding="utf-8"
