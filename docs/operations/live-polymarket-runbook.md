@@ -143,6 +143,27 @@ passphrases into chat, issues, PRs, logs, or config files.
    empty or versionless `/strategies` response blocks a final GO report.
 7. Confirm `/trades`, `/positions`, and evaluator metrics update when the
    selected strategy emits paper decisions.
+
+   For H1 FLB runtime smoke, capture `/status`, `/strategies`, `/markets`,
+   `/decisions`, `/trades`, `/positions`, and `/metrics` JSON snapshots while
+   the runner is still running, then validate the snapshots with the H1 checker:
+
+   ```bash
+   uv run python scripts/check_h1_flb_smoke.py \
+     --status-json "$H1_FLB_EVIDENCE_DIR/status.json" \
+     --strategies-json "$H1_FLB_EVIDENCE_DIR/strategies.json" \
+     --markets-json "$H1_FLB_EVIDENCE_DIR/markets.json" \
+     --decisions-json "$H1_FLB_EVIDENCE_DIR/decisions.json" \
+     --trades-json "$H1_FLB_EVIDENCE_DIR/trades.json" \
+     --positions-json "$H1_FLB_EVIDENCE_DIR/positions.json" \
+     --metrics-json "$H1_FLB_EVIDENCE_DIR/metrics.json" \
+     --min-decisions 1 \
+     --min-trades 1 \
+     --min-positions 1
+   ```
+
+   The H1 FLB runtime smoke is plumbing evidence only; it does not satisfy the
+   30-day paper-soak GO gate.
 8. Review order notional, slippage, rejected orders, and portfolio exposure.
 9. Keep `live_trading_enabled=false` until the 30-day soak and compliance
    checklist are accepted.

@@ -61,6 +61,28 @@ def test_paper_soak_docs_explicitly_start_runner_after_api_control_plane() -> No
     assert expected_start_command in runbook_text
 
 
+def test_h1_flb_runtime_smoke_docs_use_machine_checker_and_scope_evidence() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    normalized_readme = _normalized_doc_text(readme_text)
+    normalized_runbook = _normalized_doc_text(runbook_text)
+    expected_scope = (
+        "The H1 FLB runtime smoke is plumbing evidence only; it does not "
+        "satisfy the 30-day paper-soak GO gate."
+    )
+
+    assert "scripts/check_h1_flb_smoke.py" in readme_text
+    assert "scripts/check_h1_flb_smoke.py" in runbook_text
+    assert "--min-decisions 1" in readme_text
+    assert "--min-decisions 1" in runbook_text
+    assert "--min-trades 1" in readme_text
+    assert "--min-trades 1" in runbook_text
+    assert expected_scope in normalized_readme
+    assert expected_scope in normalized_runbook
+
+
 def test_paper_soak_docs_verify_database_target_before_migrations() -> None:
     readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
     runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(

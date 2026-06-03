@@ -230,6 +230,24 @@ curl -X POST \
 curl -H "Authorization: Bearer $PMS_API_TOKEN" \
   http://127.0.0.1:8000/status
 
+# Optional H1 FLB runtime smoke after launch artifacts pass startup gates.
+# Capture /status, /strategies, /markets, /decisions, /trades, /positions,
+# and /metrics JSON snapshots into H1_FLB_EVIDENCE_DIR, then validate them.
+uv run python scripts/check_h1_flb_smoke.py \
+  --status-json "$H1_FLB_EVIDENCE_DIR/status.json" \
+  --strategies-json "$H1_FLB_EVIDENCE_DIR/strategies.json" \
+  --markets-json "$H1_FLB_EVIDENCE_DIR/markets.json" \
+  --decisions-json "$H1_FLB_EVIDENCE_DIR/decisions.json" \
+  --trades-json "$H1_FLB_EVIDENCE_DIR/trades.json" \
+  --positions-json "$H1_FLB_EVIDENCE_DIR/positions.json" \
+  --metrics-json "$H1_FLB_EVIDENCE_DIR/metrics.json" \
+  --min-decisions 1 \
+  --min-trades 1 \
+  --min-positions 1
+
+# The H1 FLB runtime smoke is plumbing evidence only; it does not satisfy the
+# 30-day paper-soak GO gate.
+
 # 7. Generate daily paper soak report
 uv run python scripts/paper_report.py --date 2026-05-03
 ```
