@@ -107,6 +107,7 @@ _POLYMARKET_TEXT_CREDENTIAL_CONFIG_FIELDS: frozenset[str] = (
     _POLYMARKET_CREDENTIAL_CONFIG_FIELDS - {"signature_type"}
 )
 _POLYMARKET_SIGNATURE_TYPES: frozenset[int] = frozenset({0, 1, 2, 3})
+_GAMMA_KEYSET_MAX_PAGE_LIMIT = 100
 
 
 def _read_text_no_follow(path: Path) -> str:
@@ -327,7 +328,11 @@ class SensorSettings(BaseModel):
     max_reconnect_interval_s: float = 60.0
     market_data_ws_max_size_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
     max_subscription_asset_ids: int | None = Field(default=100, ge=1)
-    discovery_page_limit: int = Field(default=500, ge=1, le=500)
+    discovery_page_limit: int = Field(
+        default=_GAMMA_KEYSET_MAX_PAGE_LIMIT,
+        ge=1,
+        le=500,
+    )
     discovery_max_pages: int = Field(default=1, ge=1)
     discovery_pagination_mode: Literal["keyset", "offset"] = "keyset"
     discovery_order: DiscoveryOrder | None = None
@@ -339,6 +344,18 @@ class SensorSettings(BaseModel):
     discovery_http_keepalive_expiry_s: float = Field(default=120.0, ge=0.0)
     persist_discovery_price_snapshots: bool = False
     persist_price_changes: bool = False
+
+    @model_validator(mode="after")
+    def _validate_keyset_page_limit(self) -> Self:
+        if (
+            self.discovery_pagination_mode == "keyset"
+            and self.discovery_page_limit > _GAMMA_KEYSET_MAX_PAGE_LIMIT
+        ):
+            raise ValueError(
+                "sensor.discovery_page_limit for keyset discovery_pagination_mode "
+                f"must be <= {_GAMMA_KEYSET_MAX_PAGE_LIMIT}"
+            )
+        return self
 
 
 class DashboardSettings(BaseModel):

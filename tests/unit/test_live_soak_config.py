@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pms.config import PMSSettings
+from pms.config import PMSSettings, SensorSettings
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -92,6 +92,30 @@ def test_live_soak_config_tunes_gamma_discovery_http_pool() -> None:
     assert settings.sensor.discovery_http_max_keepalive_connections == 5
     assert settings.sensor.discovery_http_keepalive_expiry_s == pytest.approx(120.0)
     assert settings.sensor.max_subscription_asset_ids == 100
+
+
+def test_default_keyset_discovery_page_limit_matches_gamma_cap() -> None:
+    settings = SensorSettings()
+
+    assert settings.discovery_pagination_mode == "keyset"
+    assert settings.discovery_page_limit == 100
+
+
+def test_keyset_discovery_rejects_page_limit_above_gamma_cap() -> None:
+    with pytest.raises(ValueError, match="discovery_page_limit.*keyset.*100"):
+        SensorSettings(
+            discovery_pagination_mode="keyset",
+            discovery_page_limit=101,
+        )
+
+
+def test_offset_discovery_keeps_legacy_page_limit_cap() -> None:
+    settings = SensorSettings(
+        discovery_pagination_mode="offset",
+        discovery_page_limit=500,
+    )
+
+    assert settings.discovery_page_limit == 500
 
 
 def test_live_soak_config_uses_distinct_audit_sinks() -> None:
