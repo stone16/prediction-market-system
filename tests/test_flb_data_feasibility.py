@@ -451,9 +451,9 @@ class TestWarehouseCsvLoading:
         with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
             load_warehouse_markets(path)
 
-    def test_mixed_timezone_timestamps_are_normalized(self, tmp_path: Path) -> None:
-        """Naive and Z-suffixed ISO fields should compare as UTC instants."""
-        path = tmp_path / "mixed_timezone.csv"
+    def test_rejects_naive_entry_timestamp(self, tmp_path: Path) -> None:
+        """Warehouse chronology must not silently treat local-time entries as UTC."""
+        path = tmp_path / "naive_entry_timestamp.csv"
         _write_warehouse_csv(path, [
             _warehouse_row(
                 entry_timestamp="2025-12-01T00:00:00",
@@ -461,9 +461,21 @@ class TestWarehouseCsvLoading:
             )
         ])
 
-        markets, _ = load_warehouse_markets(path)
+        with pytest.raises(ValueError, match="entry_timestamp must include timezone"):
+            load_warehouse_markets(path)
 
-        assert len(markets) == 1
+    def test_rejects_naive_resolved_at(self, tmp_path: Path) -> None:
+        """Warehouse resolution times must carry explicit timezone provenance."""
+        path = tmp_path / "naive_resolved_at.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                entry_timestamp="2025-12-01T00:00:00Z",
+                resolved_at="2026-01-01T00:00:00",
+            )
+        ])
+
+        with pytest.raises(ValueError, match="resolved_at must include timezone"):
+            load_warehouse_markets(path)
 
     def test_mixed_dataset_normal_and_fifty_fifty_resolutions(
         self, tmp_path: Path
@@ -495,11 +507,11 @@ class TestWarehouseCsvLoading:
         assert markets[0].resolved_yes is True
         assert markets[1].resolved_yes is False
 
-    def test_mixed_timezone_post_resolution_entry_is_validation_error(
+    def test_rejects_naive_post_resolution_entry_before_order_check(
         self, tmp_path: Path
     ) -> None:
-        """Mixed timezone formats should not raise TypeError on unsafe rows."""
-        path = tmp_path / "mixed_timezone_bad_order.csv"
+        """Timezone validation should run before chronology ordering."""
+        path = tmp_path / "naive_post_resolution_entry.csv"
         _write_warehouse_csv(path, [
             _warehouse_row(
                 entry_timestamp="2026-01-02T00:00:00",
@@ -507,7 +519,7 @@ class TestWarehouseCsvLoading:
             )
         ])
 
-        with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
+        with pytest.raises(ValueError, match="entry_timestamp must include timezone"):
             load_warehouse_markets(path)
 
     def test_warehouse_longshot_contracts_do_not_imply_signal_viability(

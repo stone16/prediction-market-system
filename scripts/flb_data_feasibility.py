@@ -532,8 +532,10 @@ def _parse_iso_datetime(value: str, *, column: str, row_number: int) -> datetime
         raise ValueError(
             f"warehouse row {row_number}: {column} must be ISO-8601"
         ) from exc
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(
+            f"warehouse row {row_number}: {column} must include timezone"
+        )
     return parsed.astimezone(UTC)
 
 

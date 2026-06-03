@@ -294,7 +294,7 @@ def _parse_datetime(value: str) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return parsed.replace(tzinfo=UTC)
+        return None
     return parsed.astimezone(UTC)
 
 

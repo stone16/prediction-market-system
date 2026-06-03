@@ -70,6 +70,20 @@ def test_observation_row_from_gamma_market_skips_unresolved_prices() -> None:
     assert row is None
 
 
+def test_observation_row_from_gamma_market_skips_naive_resolution_time() -> None:
+    row = observation_row_from_gamma_market(
+        {
+            "conditionId": "0xmarket",
+            "category": "Politics",
+            "closedTime": "2026-06-02T05:14:32",
+            "outcomes": '["Yes", "No"]',
+            "outcomePrices": '["1", "0"]',
+        }
+    )
+
+    assert row is None
+
+
 def test_observation_row_from_gamma_market_skips_non_binary_markets() -> None:
     row = observation_row_from_gamma_market(
         {

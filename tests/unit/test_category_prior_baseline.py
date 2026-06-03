@@ -391,6 +391,24 @@ def test_load_category_prior_observations_csv_rejects_price_like_payouts(
         load_category_prior_observations_csv(export_path)
 
 
+def test_load_category_prior_observations_csv_rejects_naive_resolved_at(
+    tmp_path: Path,
+) -> None:
+    export_path = tmp_path / "category-prior.csv"
+    export_path.write_text(
+        "\n".join(
+            (
+                "market_id,category,yes_payout,no_payout,resolved_at",
+                "m-1,politics,1,0,2026-05-01T12:00:00",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="resolved_at must include timezone"):
+        load_category_prior_observations_csv(export_path)
+
+
 def test_load_category_prior_observations_csv_rejects_duplicate_markets(
     tmp_path: Path,
 ) -> None:

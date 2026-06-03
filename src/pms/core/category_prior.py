@@ -241,7 +241,11 @@ def _parse_csv_datetime(
 ) -> datetime:
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
-        return aware_utc_datetime(datetime.fromisoformat(normalized))
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
         msg = f"{path}:{row_number}: invalid ISO datetime: {value!r}"
         raise ValueError(msg) from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        msg = f"{path}:{row_number}: resolved_at must include timezone"
+        raise ValueError(msg)
+    return parsed.astimezone(UTC)
