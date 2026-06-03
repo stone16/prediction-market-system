@@ -106,9 +106,7 @@ async def list_strategy_metrics(
     since = None if since is None else _coerce_aware_datetime(since)
     until = None if until is None else _coerce_aware_datetime(until)
     registry = PostgresStrategyRegistry(pg_pool)
-    strategy_rows = [
-        row for row in await registry.list_strategies() if row.active_version_id is not None
-    ]
+    strategy_rows = await registry.list_active_strategy_rows()
     eval_store = EvalStore(pg_pool)
     records_by_strategy = _filter_records_by_window(
         await _load_records_by_strategy(eval_store, strategy_rows),
@@ -179,6 +177,7 @@ async def _load_execution_snapshots(
                 SELECT strategy_id, active_version_id AS strategy_version_id
                 FROM strategies
                 WHERE active_version_id IS NOT NULL
+                  AND archived IS NOT TRUE
             ),
             decision_stats AS (
                 SELECT strategy_id, strategy_version_id, COUNT(*)::integer AS decision_count

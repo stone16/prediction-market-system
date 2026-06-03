@@ -222,6 +222,25 @@ class PostgresStrategyRegistry:
             for row in rows
         ]
 
+    async def list_active_strategy_rows(self) -> list[StrategyRow]:
+        query = """
+        SELECT strategy_id, active_version_id, created_at
+        FROM strategies
+        WHERE active_version_id IS NOT NULL
+          AND archived IS NOT TRUE
+        ORDER BY strategy_id ASC
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query)
+        return [
+            StrategyRow(
+                strategy_id=row["strategy_id"],
+                active_version_id=row["active_version_id"],
+                created_at=_ensure_utc(row["created_at"]),
+            )
+            for row in rows
+        ]
+
     async def list_versions(self, strategy_id: str) -> list[StrategyVersion]:
         query = """
         SELECT strategy_id, strategy_version_id, created_at

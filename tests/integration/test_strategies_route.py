@@ -687,6 +687,52 @@ async def test_strategy_metrics_route_windows_eval_execution_and_quote_rows(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_strategy_metrics_route_excludes_archived_active_strategies(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    async with pg_pool.acquire() as connection:
+        await _seed_strategy(
+            connection,
+            strategy_id="archived-metrics",
+            strategy_version_id="archived-metrics-v1",
+        )
+        await connection.execute(
+            """
+            UPDATE strategies
+            SET archived = TRUE
+            WHERE strategy_id = 'archived-metrics'
+            """
+        )
+        await _seed_eval_record(
+            connection,
+            decision_id="archived-metrics-eval",
+            strategy_id="archived-metrics",
+            strategy_version_id="archived-metrics-v1",
+            brier_score=0.09,
+            pnl=3.0,
+            slippage_bps=10.0,
+            recorded_at=datetime(2026, 5, 30, 0, 0, tzinfo=UTC),
+        )
+        await _seed_decision_row(
+            connection,
+            decision_id="archived-metrics-decision",
+            opportunity_id="archived-metrics-opportunity",
+            strategy_id="archived-metrics",
+            strategy_version_id="archived-metrics-v1",
+            created_at=datetime(2026, 5, 30, 0, 0, tzinfo=UTC),
+        )
+
+    async with _app_client(pg_pool) as client:
+        response = await client.get("/strategies/metrics")
+
+    assert response.status_code == 200
+    strategy_ids = {
+        row["strategy_id"] for row in response.json()["strategies"]
+    }
+    assert "archived-metrics" not in strategy_ids
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_strategy_metrics_route_uses_execution_and_quote_metrics_before_resolution(
     pg_pool: asyncpg.Pool,
 ) -> None:
