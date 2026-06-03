@@ -32,7 +32,7 @@ FIRST_TRADE_TIME_SECONDS_METRIC = "pms.ui.first_trade_time_seconds"
 _ACCEPTED_DECISION_STATUSES = frozenset(
     {"accepted", "queued", "submitted", "partially_filled", "filled"}
 )
-_BAD_SENSOR_STATUSES = frozenset({"failed", "stale", "stopped"})
+_BAD_SENSOR_STATUSES = frozenset({"failed", "stopped"})
 _SELECTION_FUNNEL_METRICS = (
     SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC,
     SELECTION_FUNNEL_SELECTED_TOTAL_METRIC,

@@ -220,6 +220,44 @@ def test_check_h1_flb_smoke_passes_with_filled_h1_paper_trade(
     assert "[PASS] quote_calibration:" in captured.out
 
 
+def test_check_h1_flb_smoke_tolerates_degraded_stale_sensor_status(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _module()
+    paths = _passing_snapshot_paths(tmp_path)
+    status = json.loads(paths["status"].read_text(encoding="utf-8"))
+    status["sensors"][1]["status"] = "stale"
+    status["sensors"][1]["last_signal_age_seconds"] = 1_600.0
+    status["sensors"][1]["stale_after_seconds"] = 300.0
+    _write_json(paths["status"], status)
+
+    exit_code = module.main(_argv(paths))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "[PASS] sensor_activity:" in captured.out
+    assert "MarketDataSensor:stale" in captured.out
+
+
+def test_check_h1_flb_smoke_rejects_failed_sensor_status(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _module()
+    paths = _passing_snapshot_paths(tmp_path)
+    status = json.loads(paths["status"].read_text(encoding="utf-8"))
+    status["sensors"][1]["status"] = "failed"
+    _write_json(paths["status"], status)
+
+    exit_code = module.main(_argv(paths))
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[FAIL] sensor_activity:" in captured.out
+    assert "MarketDataSensor:failed" in captured.out
+
+
 def test_check_h1_flb_smoke_rejects_stale_strategy_version_rows(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
