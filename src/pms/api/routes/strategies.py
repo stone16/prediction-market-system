@@ -183,7 +183,7 @@ async def _load_execution_snapshots(
                 SELECT strategy_id, strategy_version_id, COUNT(*)::integer AS decision_count
                 FROM decisions
                 WHERE ($1::timestamptz IS NULL OR created_at >= $1)
-                  AND ($2::timestamptz IS NULL OR created_at <= $2)
+                  AND ($2::timestamptz IS NULL OR created_at < $2)
                 GROUP BY strategy_id, strategy_version_id
             ),
             fill_stats AS (
@@ -195,7 +195,7 @@ async def _load_execution_snapshots(
                         AS executed_notional_usdc
                 FROM fills
                 WHERE ($1::timestamptz IS NULL OR ts >= $1)
-                  AND ($2::timestamptz IS NULL OR ts <= $2)
+                  AND ($2::timestamptz IS NULL OR ts < $2)
                 GROUP BY strategy_id, strategy_version_id
             ),
             quote_rows AS (
@@ -211,7 +211,7 @@ async def _load_execution_snapshots(
                     ) AS fill_mark_rank
                 FROM quote_eval_records
                 WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
-                  AND ($2::timestamptz IS NULL OR recorded_at <= $2)
+                  AND ($2::timestamptz IS NULL OR recorded_at < $2)
             ),
             quote_stats AS (
                 SELECT
@@ -283,7 +283,7 @@ def _filter_records_by_window(
             record
             for record in records
             if (since is None or record.recorded_at >= since)
-            and (until is None or record.recorded_at <= until)
+            and (until is None or record.recorded_at < until)
         ]
         for key, records in records_by_strategy.items()
     }

@@ -222,7 +222,7 @@ class FillStore:
                     ON fill_payloads.fill_id = fills.fill_id
                 LEFT JOIN markets
                     ON markets.condition_id = fills.market_id
-                WHERE ($1::timestamptz IS NULL OR fills.ts <= $1)
+                WHERE ($1::timestamptz IS NULL OR fills.ts < $1)
                 ORDER BY fills.ts DESC, fills.fill_id DESC
                 LIMIT $2
                 OFFSET $3

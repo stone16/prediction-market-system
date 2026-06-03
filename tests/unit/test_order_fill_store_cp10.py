@@ -518,3 +518,17 @@ async def test_fill_store_read_trades_maps_joined_market_rows_and_skips_missing_
         )
     ]
     assert connection.fetch_calls[0][1] == (None, 10, 0)
+
+
+@pytest.mark.asyncio
+async def test_fill_store_read_trades_uses_half_open_until_cutoff() -> None:
+    connection = _RecordingConnection()
+    store = FillStore(cast(asyncpg.Pool, _RecordingPool(connection)))
+    until = datetime(2026, 5, 31, 0, 0, tzinfo=UTC)
+
+    await store.read_trades(limit=10, until=until)
+
+    query, args = connection.fetch_calls[0]
+    assert "fills.ts < $1" in query
+    assert "fills.ts <= $1" not in query
+    assert args == (until, 10, 0)

@@ -580,6 +580,7 @@ async def test_strategy_metrics_route_windows_eval_execution_and_quote_rows(
 ) -> None:
     old_at = datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
     in_window_at = datetime(2026, 5, 30, 0, 0, tzinfo=UTC)
+    boundary_at = datetime(2026, 5, 31, 0, 0, tzinfo=UTC)
     async with pg_pool.acquire() as connection:
         await _seed_strategy(
             connection,
@@ -606,6 +607,16 @@ async def test_strategy_metrics_route_windows_eval_execution_and_quote_rows(
             slippage_bps=10.0,
             recorded_at=in_window_at,
         )
+        await _seed_eval_record(
+            connection,
+            decision_id="windowed-boundary-eval",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            brier_score=0.01,
+            pnl=50.0,
+            slippage_bps=2.0,
+            recorded_at=boundary_at,
+        )
         await _seed_decision_row(
             connection,
             decision_id="windowed-old-decision",
@@ -621,6 +632,14 @@ async def test_strategy_metrics_route_windows_eval_execution_and_quote_rows(
             strategy_id="windowed",
             strategy_version_id="windowed-v1",
             created_at=in_window_at,
+        )
+        await _seed_decision_row(
+            connection,
+            decision_id="windowed-boundary-decision",
+            opportunity_id="windowed-boundary-opportunity",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            created_at=boundary_at,
         )
         await _seed_fill_row(
             connection,
@@ -642,6 +661,16 @@ async def test_strategy_metrics_route_windows_eval_execution_and_quote_rows(
             filled_at=in_window_at,
             fill_notional_usdc=2.0,
         )
+        await _seed_fill_row(
+            connection,
+            fill_id="windowed-boundary-fill",
+            order_id="windowed-boundary-order",
+            market_id="windowed-market",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            filled_at=boundary_at,
+            fill_notional_usdc=50.0,
+        )
         await _seed_quote_eval_row(
             connection,
             fill_id="windowed-old-fill",
@@ -661,6 +690,16 @@ async def test_strategy_metrics_route_windows_eval_execution_and_quote_rows(
             mtm_pnl=0.5,
             quote_score=0.05,
             recorded_at=in_window_at,
+        )
+        await _seed_quote_eval_row(
+            connection,
+            fill_id="windowed-boundary-fill",
+            decision_id="windowed-boundary-decision",
+            strategy_id="windowed",
+            strategy_version_id="windowed-v1",
+            mtm_pnl=50.0,
+            quote_score=0.01,
+            recorded_at=boundary_at,
         )
 
     async with _app_client(pg_pool) as client:
