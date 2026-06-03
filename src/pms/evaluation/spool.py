@@ -130,14 +130,16 @@ class EvalSpool:
             )
             return
         try:
-            quote = _quote_from_decision_evidence(decision_evidence, fill)
-            quote_source = _quote_source_from_decision_evidence(decision_evidence)
-            if quote is None and self.quote_reader is not None:
+            quote = None
+            quote_source = None
+            if self.quote_reader is not None:
                 quote = await self.quote_reader.latest_book_summary(
                     fill.market_id,
                     fill.token_id,
                 )
-                quote_source = None
+            if quote is None:
+                quote = _quote_from_decision_evidence(decision_evidence, fill)
+                quote_source = _quote_source_from_decision_evidence(decision_evidence)
             if quote is None:
                 logger.info(
                     "skipping unresolved fill without quote in evaluator spool: %s",

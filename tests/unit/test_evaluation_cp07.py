@@ -521,10 +521,10 @@ async def test_eval_spool_skips_unresolved_fills_and_keeps_running(
 
 
 @pytest.mark.asyncio
-async def test_eval_spool_scores_unresolved_fill_from_decision_time_book_evidence(
+async def test_eval_spool_prefers_fresh_quote_reader_for_unresolved_fill_mtm(
 ) -> None:
     quote_store = _InMemoryQuoteEvalStore()
-    stale_reader = _StaticQuoteReader(
+    fresh_reader = _StaticQuoteReader(
         BookSummary(
             best_bid=0.10,
             best_ask=0.20,
@@ -542,7 +542,7 @@ async def test_eval_spool_scores_unresolved_fill_from_decision_time_book_evidenc
         store=cast(EvalStore, InMemoryEvalStore()),
         scorer=Scorer(),
         quote_store=cast(QuoteEvalStore, quote_store),
-        quote_reader=stale_reader,
+        quote_reader=fresh_reader,
     )
     await spool.start()
     try:
@@ -562,7 +562,47 @@ async def test_eval_spool_scores_unresolved_fill_from_decision_time_book_evidenc
     finally:
         await spool.stop()
 
-    assert stale_reader.calls == []
+    assert fresh_reader.calls == [("m-cp07", "t-yes")]
+    assert len(quote_store.records) == 1
+    record = quote_store.records[0]
+    assert record.quote_source == "postgres_snapshot"
+    assert record.quote_price == pytest.approx(0.15)
+    assert record.mtm_pnl == pytest.approx((0.10 - 0.50) * 10.0)
+    assert record.book_ts == datetime(2026, 4, 14, 10, 59, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_falls_back_to_decision_time_book_evidence(
+) -> None:
+    quote_store = _InMemoryQuoteEvalStore()
+    fill = _fill(
+        decision_id="d-evidence-quote",
+        resolved_outcome=None,
+        fill_price=0.50,
+    )
+    spool = EvalSpool(
+        store=cast(EvalStore, InMemoryEvalStore()),
+        scorer=Scorer(),
+        quote_store=cast(QuoteEvalStore, quote_store),
+    )
+    await spool.start()
+    try:
+        spool.enqueue(
+            fill,
+            _decision(decision_id="d-evidence-quote", prob=0.70, price=0.50),
+            decision_evidence={
+                "direct_outcome_book_source": "venue_direct",
+                "book_age_ms": 25.0,
+                "book_top_levels": {
+                    "bids": [{"price": 0.62, "size": 100.0}],
+                    "asks": [{"price": 0.64, "size": 100.0}],
+                },
+            },
+        )
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
     assert len(quote_store.records) == 1
     record = quote_store.records[0]
     assert record.quote_source == "venue_direct"
