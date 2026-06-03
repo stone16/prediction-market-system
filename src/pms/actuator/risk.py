@@ -65,6 +65,13 @@ class RiskTradeResult:
     trace_id: str | None = None
 
 
+@dataclass(frozen=True)
+class _OpenOrderRiskReservation:
+    market_id: str
+    risk_group_id: str | None
+    remaining_notional_usdc: float
+
+
 @dataclass
 class RiskManager:
     risk: RiskSettings = field(default_factory=RiskSettings)
@@ -89,7 +96,7 @@ class RiskManager:
         default_factory=dict,
         init=False,
     )
-    _open_order_risk_reservations: dict[str, tuple[str, float]] = field(
+    _open_order_risk_reservations: dict[str, _OpenOrderRiskReservation] = field(
         default_factory=dict,
         init=False,
     )
@@ -120,17 +127,22 @@ class RiskManager:
             return RiskDecision(False, "partial_reduction_unsupported")
         reduces_position = reduction.reducing_shares > 0.0
         residual_notional = 0.0 if reduces_position else notional
+        open_order_exposure = self._open_order_total_exposure()
         if residual_notional > 0.0 and notional < self.risk.min_order_usdc:
             return RiskDecision(False, "min_order_usdc")
 
         if residual_notional > 0.0:
             market_exposure = (
-                _market_exposure(portfolio, decision.market_id) + residual_notional
+                _market_exposure(portfolio, decision.market_id)
+                + self._open_order_market_exposure(decision.market_id)
+                + residual_notional
             )
             if market_exposure > self.risk.max_position_per_market:
                 return RiskDecision(False, "max_position_per_market")
 
-            total_exposure = portfolio.locked_usdc + residual_notional
+            total_exposure = (
+                portfolio.locked_usdc + open_order_exposure + residual_notional
+            )
             if total_exposure > self.risk.max_total_exposure:
                 return RiskDecision(False, "max_total_exposure")
 
@@ -166,7 +178,7 @@ class RiskManager:
         if decision.max_slippage_bps > self.risk.slippage_threshold_bps:
             return RiskDecision(False, "slippage_threshold_bps")
 
-        if residual_notional > portfolio.free_usdc:
+        if residual_notional > portfolio.free_usdc - open_order_exposure:
             return RiskDecision(False, "insufficient_free_usdc")
 
         if (
@@ -299,15 +311,17 @@ class RiskManager:
 
     def record_open_order_state(self, order_state: OrderState) -> None:
         if (
-            order_state.risk_group_id is None
-            or order_state.remaining_notional_usdc <= 1e-9
+            order_state.remaining_notional_usdc <= 1e-9
+            or _is_exposure_reducing_open_order(order_state)
         ):
             self._open_order_risk_reservations.pop(order_state.order_id, None)
             return
-        self._open_order_risk_reservations[order_state.order_id] = (
-            order_state.risk_group_id,
-            order_state.remaining_notional_usdc,
+        reservation = _OpenOrderRiskReservation(
+            market_id=order_state.market_id,
+            risk_group_id=order_state.risk_group_id,
+            remaining_notional_usdc=order_state.remaining_notional_usdc,
         )
+        self._open_order_risk_reservations[order_state.order_id] = reservation
 
     def record_order_filled(self, order_id: str) -> None:
         self._open_order_submitted_at.pop(order_id, None)
@@ -331,9 +345,22 @@ class RiskManager:
 
     def _open_order_risk_group_exposure(self, risk_group_id: str) -> float:
         return sum(
-            remaining_notional
-            for group_id, remaining_notional in self._open_order_risk_reservations.values()
-            if group_id == risk_group_id
+            reservation.remaining_notional_usdc
+            for reservation in self._open_order_risk_reservations.values()
+            if reservation.risk_group_id == risk_group_id
+        )
+
+    def _open_order_market_exposure(self, market_id: str) -> float:
+        return sum(
+            reservation.remaining_notional_usdc
+            for reservation in self._open_order_risk_reservations.values()
+            if reservation.market_id == market_id
+        )
+
+    def _open_order_total_exposure(self) -> float:
+        return sum(
+            reservation.remaining_notional_usdc
+            for reservation in self._open_order_risk_reservations.values()
         )
 
     def _halt(
@@ -405,6 +432,10 @@ def _risk_group_exposure(portfolio: Portfolio, risk_group_id: str) -> float:
         for position in portfolio.open_positions
         if position.risk_group_id == risk_group_id
     )
+
+
+def _is_exposure_reducing_open_order(order_state: OrderState) -> bool:
+    return str(order_state.action or "").upper() == "SELL"
 
 
 def _has_open_position(portfolio: Portfolio, decision: TradeDecision) -> bool:

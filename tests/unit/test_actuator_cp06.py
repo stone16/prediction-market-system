@@ -140,6 +140,10 @@ def _order_state(
         strategy_id=decision.strategy_id,
         strategy_version_id=decision.strategy_version_id,
         filled_quantity=filled_quantity,
+        action=decision.action,
+        outcome=decision.outcome,
+        time_in_force=decision.time_in_force.value,
+        intent_key=decision.intent_key,
         risk_group_id=decision.risk_group_id,
     )
 
@@ -917,6 +921,132 @@ def test_risk_manager_reserves_risk_group_exposure_for_live_open_orders() -> Non
                 notional_usdc=5.0,
             ),
             risk_group_id="event:risk-group",
+        ),
+        _portfolio(),
+    )
+    assert approved.approved is True
+
+
+def test_risk_manager_reserves_total_exposure_for_live_open_orders() -> None:
+    manager = RiskManager(
+        RiskSettings(max_position_per_market=100.0, max_total_exposure=10.0)
+    )
+    first_decision = _decision(
+        decision_id="total-open-order",
+        market_id="m-total-a",
+        notional_usdc=6.0,
+    )
+    first_order = _order_state(
+        first_decision,
+        status=OrderStatus.LIVE.value,
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+
+    manager.record_open_order_state(first_order)
+
+    rejected = manager.check(
+        _decision(
+            decision_id="total-next-order",
+            market_id="m-total-b",
+            notional_usdc=5.0,
+        ),
+        _portfolio(),
+    )
+    assert rejected.approved is False
+    assert rejected.reason == "max_total_exposure"
+
+
+def test_risk_manager_reserves_market_exposure_for_live_open_orders() -> None:
+    manager = RiskManager(
+        RiskSettings(max_position_per_market=10.0, max_total_exposure=1000.0)
+    )
+    first_decision = _decision(
+        decision_id="market-open-order",
+        market_id="m-market-cap",
+        notional_usdc=6.0,
+    )
+    first_order = _order_state(
+        first_decision,
+        status=OrderStatus.LIVE.value,
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+
+    manager.record_open_order_state(first_order)
+
+    rejected = manager.check(
+        _decision(
+            decision_id="market-next-order",
+            market_id="m-market-cap",
+            notional_usdc=5.0,
+        ),
+        _portfolio(),
+    )
+    assert rejected.approved is False
+    assert rejected.reason == "max_position_per_market"
+
+
+def test_risk_manager_reserves_free_cash_for_live_open_orders() -> None:
+    manager = RiskManager(
+        RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
+    )
+    first_decision = _decision(
+        decision_id="cash-open-order",
+        market_id="m-cash-a",
+        notional_usdc=6.0,
+    )
+    first_order = _order_state(
+        first_decision,
+        status=OrderStatus.LIVE.value,
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+
+    manager.record_open_order_state(first_order)
+
+    rejected = manager.check(
+        _decision(
+            decision_id="cash-next-order",
+            market_id="m-cash-b",
+            notional_usdc=5.0,
+        ),
+        Portfolio(
+            total_usdc=10.0,
+            free_usdc=10.0,
+            locked_usdc=0.0,
+            open_positions=[],
+        ),
+    )
+    assert rejected.approved is False
+    assert rejected.reason == "insufficient_free_usdc"
+
+
+def test_risk_manager_does_not_reserve_exposure_for_live_open_sell_orders() -> None:
+    manager = RiskManager(
+        RiskSettings(max_position_per_market=10.0, max_total_exposure=10.0)
+    )
+    exit_decision = _decision(
+        decision_id="sell-open-order",
+        market_id="m-open-sell",
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+        notional_usdc=6.0,
+    )
+    exit_order = _order_state(
+        exit_decision,
+        status=OrderStatus.LIVE.value,
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+
+    manager.record_open_order_state(exit_order)
+
+    approved = manager.check(
+        _decision(
+            decision_id="buy-after-open-sell",
+            market_id="m-open-sell",
+            notional_usdc=10.0,
         ),
         _portfolio(),
     )
