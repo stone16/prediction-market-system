@@ -70,6 +70,7 @@ import httpx
 from scripts.artifact_path_safety import require_path_outside_working_tree
 from pms.strategies.flb.artifacts import (
     file_sha256_no_follow,
+    flb_calibration_provenance_path,
     flb_calibration_provenance_payload,
 )
 from pms.strategies.flb.source import require_flb_calibration_source_label
@@ -1331,6 +1332,18 @@ def main() -> int:
         parser.error("--calibration-source-label requires --calibration-csv")
     if args.calibration_provenance_json is not None and args.calibration_csv is None:
         parser.error("--calibration-provenance-json requires --calibration-csv")
+    if args.calibration_provenance_json is not None and args.calibration_csv is not None:
+        expected_provenance_path = flb_calibration_provenance_path(
+            args.calibration_csv
+        )
+        if not _path_identities_match(
+            args.calibration_provenance_json,
+            expected_provenance_path,
+        ):
+            parser.error(
+                "--calibration-provenance-json must be the sidecar next to "
+                f"--calibration-csv: {expected_provenance_path}"
+            )
     if args.calibration_csv is not None and args.calibration_source_label is None:
         parser.error("--calibration-source-label is required with --calibration-csv")
     if args.calibration_source_label is not None:
@@ -1544,6 +1557,10 @@ def _path_identities(path: Path) -> frozenset[Path]:
             expanded.resolve(strict=False),
         )
     )
+
+
+def _path_identities_match(left: Path, right: Path) -> bool:
+    return bool(_path_identities(left) & _path_identities(right))
 
 
 def _path_identities_overlap(left: frozenset[Path], right: frozenset[Path]) -> bool:

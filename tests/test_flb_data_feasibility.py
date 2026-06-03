@@ -1122,6 +1122,60 @@ class TestFlbCalibrationArtifact:
             calibration_path.read_bytes()
         ).hexdigest()
 
+    def test_cli_rejects_calibration_provenance_not_beside_calibration_csv(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        rows = [
+            _warehouse_row(
+                market_id=f"longshot-{index}",
+                entry_yes_price="0.05",
+                yes_payout="0",
+                no_payout="1",
+            )
+            for index in range(120)
+        ] + [
+            _warehouse_row(
+                market_id=f"favorite-{index}",
+                entry_yes_price="0.95",
+                yes_payout="1",
+                no_payout="0",
+            )
+            for index in range(120)
+        ]
+        _write_warehouse_csv(input_path, rows)
+        calibration_path = tmp_path / "flb-calibration.csv"
+        provenance_path = tmp_path / "elsewhere" / "flb-calibration.csv.provenance.json"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--calibration-csv",
+                str(calibration_path),
+                "--calibration-source-label",
+                "warehouse-flb-v1",
+                "--calibration-provenance-json",
+                str(provenance_path),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        captured = capsys.readouterr()
+
+        assert exc_info.value.code == 2
+        assert "must be the sidecar next to --calibration-csv" in captured.err
+        assert not calibration_path.exists()
+        assert not provenance_path.exists()
+
     def test_cli_returns_sample_gate_exit_for_thin_calibration_source(
         self,
         tmp_path: Path,
