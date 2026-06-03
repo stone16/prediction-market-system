@@ -9009,6 +9009,44 @@ async def test_live_preflight_ignores_archived_strategies_for_launch_tokens() ->
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_launch_tokens_apply_selector_spread_depth_filters() -> None:
+    connection = _Connection(missing_subscribed_usable_token_count=0)
+
+    await live_preflight_module._fresh_usable_launch_token_missing_count(
+        cast(asyncpg.Pool, _Pool(connection)),
+        max_age_s=300.0,
+    )
+
+    query = next(
+        query for query in connection.fetchval_calls if "active_strategy_specs" in query
+    )
+    assert "active_strategy_specs.spread_max_bps IS NULL" in query
+    assert "markets.spread_bps IS NOT NULL" in query
+    assert "markets.spread_bps <= active_strategy_specs.spread_max_bps" in query
+    assert "active_strategy_specs.depth_min_usdc IS NULL" in query
+    assert "markets.liquidity IS NOT NULL" in query
+    assert "markets.liquidity >= active_strategy_specs.depth_min_usdc" in query
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_launch_tokens_use_legacy_selector_defaults() -> None:
+    connection = _Connection(missing_subscribed_usable_token_count=0)
+
+    await live_preflight_module._fresh_usable_launch_token_missing_count(
+        cast(asyncpg.Pool, _Pool(connection)),
+        max_age_s=300.0,
+    )
+
+    query = next(
+        query for query in connection.fetchval_calls if "active_strategy_specs" in query
+    )
+    compact_query = " ".join(query.split())
+    assert "ELSE 100.0" in query
+    assert "ELSE 250.0" in query
+    assert ")::boolean, true ) AS accepting_orders" in compact_query
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_scopes_risk_metadata_to_fresh_usable_launch_markets() -> None:
     connection = _Connection(missing_market_risk_metadata_count=0)
 

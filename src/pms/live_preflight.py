@@ -2409,7 +2409,30 @@ manual_tokens AS (
     WHERE source = 'user'
 ),
 active_strategy_specs AS (
-    SELECT versions.config_json->'market_selection' AS market_selection
+    SELECT
+        versions.config_json->'market_selection' AS market_selection,
+        CASE
+            WHEN versions.config_json->'market_selection' ? 'spread_max_bps'
+                THEN NULLIF(
+                    versions.config_json->'market_selection'->>'spread_max_bps',
+                    ''
+                )::double precision
+            ELSE 100.0
+        END AS spread_max_bps,
+        CASE
+            WHEN versions.config_json->'market_selection' ? 'depth_min_usdc'
+                THEN NULLIF(
+                    versions.config_json->'market_selection'->>'depth_min_usdc',
+                    ''
+                )::double precision
+            ELSE 250.0
+        END AS depth_min_usdc,
+        COALESCE(
+            (
+                versions.config_json->'market_selection'->>'accepting_orders'
+            )::boolean,
+            true
+        ) AS accepting_orders
     FROM strategies
     JOIN strategy_versions AS versions
         ON versions.strategy_version_id = strategies.active_version_id
@@ -2478,12 +2501,7 @@ active_strategy_tokens AS (
           )
       )
       AND (
-          COALESCE(
-              (
-                  active_strategy_specs.market_selection->>'accepting_orders'
-              )::boolean,
-              false
-          ) IS NOT TRUE
+          active_strategy_specs.accepting_orders IS NOT TRUE
           OR markets.accepting_orders IS NOT FALSE
       )
       AND (
@@ -2497,6 +2515,20 @@ active_strategy_tokens AS (
                   active_strategy_specs.market_selection->>'liquidity_min_usdc',
                   ''
               )::double precision
+          )
+      )
+      AND (
+          active_strategy_specs.spread_max_bps IS NULL
+          OR (
+              markets.spread_bps IS NOT NULL
+              AND markets.spread_bps <= active_strategy_specs.spread_max_bps
+          )
+      )
+      AND (
+          active_strategy_specs.depth_min_usdc IS NULL
+          OR (
+              markets.liquidity IS NOT NULL
+              AND markets.liquidity >= active_strategy_specs.depth_min_usdc
           )
       )
       AND (
