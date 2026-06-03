@@ -96,10 +96,46 @@ def _prepare_local_paper_soak_config(
         )
         text = _replace_single(
             text,
+            (
+                "  # Historical resolution export used to attach a no-lookahead "
+                "category-prior\n"
+                "  # baseline to each controller decision. The launch soak requires this\n"
+                "  # artifact so the final LIVE GO report can satisfy baseline coverage gates."
+            ),
+            (
+                "  # PAPER canary plumbing smoke intentionally leaves the "
+                "category-prior artifact null.\n"
+                "  # The real H1 launch soak still requires this artifact; use this "
+                "config only\n"
+                "  # for no-credential live-data/controller/paper-actuator plumbing checks."
+            ),
+            field_name="controller.category_prior_observations_path comment",
+        )
+        text = _replace_single(
+            text,
             "  category_prior_observations_path: "
             "/secure/pms/category-prior-observations.csv",
             "  category_prior_observations_path: null",
             field_name="controller.category_prior_observations_path",
+        )
+        text = _replace_single(
+            text,
+            (
+                "  # Warehouse-calibrated H1 FLB model. This is intentionally "
+                "required for the\n"
+                "  # launch soak: startup fails closed when the artifact is "
+                "missing or when\n"
+                "  # schema/sample gates fail.\n"
+                "  # CSV columns: signal_name, probability_estimate, sample_count, source_label.\n"
+                "  # Required sidecar: /secure/pms/flb-calibration.csv.provenance.json."
+            ),
+            (
+                "  # PAPER canary plumbing smoke intentionally leaves the FLB "
+                "calibration artifact null.\n"
+                "  # The real H1 launch soak still requires this artifact and its "
+                "provenance sidecar."
+            ),
+            field_name="strategies.flb_calibration_path comment",
         )
         text = _replace_single(
             text,

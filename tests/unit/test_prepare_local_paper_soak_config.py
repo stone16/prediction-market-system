@@ -212,10 +212,30 @@ def test_prepare_local_paper_soak_config_can_write_paper_canary_plumbing_config(
                 "paper_soak_archive_default: true",
                 "controller:",
                 (
+                    "  # Historical resolution export used to attach a "
+                    "no-lookahead category-prior"
+                ),
+                "  # baseline to each controller decision. The launch soak requires this",
+                (
+                    "  # artifact so the final LIVE GO report can satisfy "
+                    "baseline coverage gates."
+                ),
+                (
                     "  category_prior_observations_path: "
                     "/secure/pms/category-prior-observations.csv"
                 ),
                 "strategies:",
+                (
+                    "  # Warehouse-calibrated H1 FLB model. This is intentionally "
+                    "required for the"
+                ),
+                (
+                    "  # launch soak: startup fails closed when the artifact is "
+                    "missing or when"
+                ),
+                "  # schema/sample gates fail.",
+                "  # CSV columns: signal_name, probability_estimate, sample_count, source_label.",
+                "  # Required sidecar: /secure/pms/flb-calibration.csv.provenance.json.",
                 "  flb_calibration_path: /secure/pms/flb-calibration.csv",
             ]
         )
@@ -241,4 +261,16 @@ def test_prepare_local_paper_soak_config_can_write_paper_canary_plumbing_config(
     assert "paper_soak_archive_default: false" in rendered
     assert "category_prior_observations_path: null" in rendered
     assert "flb_calibration_path: null" in rendered
+    assert (
+        "# PAPER canary plumbing smoke intentionally leaves the category-prior "
+        "artifact null."
+    ) in rendered
+    assert (
+        "# PAPER canary plumbing smoke intentionally leaves the FLB calibration "
+        "artifact null."
+    ) in rendered
+    assert "The launch soak requires this" not in rendered
+    assert "This is intentionally required for the" not in rendered
+    assert "CSV columns:" not in rendered
+    assert "Required sidecar:" not in rendered
     assert "/secure/pms" not in rendered
