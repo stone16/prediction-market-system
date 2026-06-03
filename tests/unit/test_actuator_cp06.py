@@ -1342,6 +1342,7 @@ def _stage_readiness_fingerprint_files(settings: PMSSettings, root: Path) -> Non
                 "price_invalidation_streak": 10,
                 "replay_window_ms": 86_400_000,
                 "calibration_source": "telemetry_calibrated",
+                "input_csv_sha256": "c" * 64,
                 "min_samples": 10,
                 "telemetry_sample_count": 10,
                 "adverse_selection_sample_count": 10,

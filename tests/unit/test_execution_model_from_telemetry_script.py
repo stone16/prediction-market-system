@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from hashlib import sha256
 import json
 import os
 import stat
@@ -468,6 +469,9 @@ def test_cli_writes_execution_model_artifact(tmp_path: Path) -> None:
     assert isinstance(payload["generated_at"], str)
     assert payload["calibration_source"] == "telemetry_calibrated"
     assert payload["adverse_selection_bps"] == pytest.approx(9.0)
+    assert payload["input_csv_sha256"] == sha256(
+        telemetry_path.read_bytes()
+    ).hexdigest()
     assert payload["min_samples"] == 2
     assert payload["telemetry_sample_count"] == 2
     assert payload["adverse_selection_sample_count"] == 2
@@ -524,6 +528,9 @@ def test_cli_writes_execution_model_strategy_evidence(tmp_path: Path) -> None:
 
     assert exit_code == 0
     payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["input_csv_sha256"] == sha256(
+        telemetry_path.read_bytes()
+    ).hexdigest()
     assert payload["strategy_evidence"] == "h1_flb@h1-flb-v1"
 
 

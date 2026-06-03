@@ -250,6 +250,7 @@ def _validate_live_execution_model_artifact(settings: PMSSettings) -> None:
         artifact_label="LIVE execution-model artifact",
         expected_labels=_paper_soak_report_strategy_labels(settings),
     )
+    _require_live_execution_model_input_hash(payload)
     try:
         execution_model = deserialize_execution_model(payload)
     except (KeyError, TypeError, ValueError) as exc:
@@ -670,6 +671,16 @@ def _require_paper_backtest_diff_input_hashes(payload: Mapping[str, object]) -> 
                 f"input_csv_sha256.{field_name} must be a sha256 hex digest"
             )
             raise LiveTradingDisabledError(msg)
+
+
+def _require_live_execution_model_input_hash(payload: Mapping[str, object]) -> None:
+    digest = payload.get("input_csv_sha256")
+    if not isinstance(digest, str) or not is_sha256_hexdigest(digest):
+        msg = (
+            "LIVE execution-model artifact input_csv_sha256 "
+            "must be a sha256 hex digest"
+        )
+        raise LiveTradingDisabledError(msg)
 
 
 def _require_paper_backtest_diff_metric_number(

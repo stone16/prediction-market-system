@@ -599,6 +599,7 @@ def _write_valid_execution_model_json(path: Path) -> None:
                 "price_invalidation_streak": 10,
                 "replay_window_ms": 86_400_000,
                 "calibration_source": "telemetry_calibrated",
+                "input_csv_sha256": "c" * 64,
                 "min_samples": 10,
                 "telemetry_sample_count": 10,
                 "adverse_selection_sample_count": 10,
@@ -5827,6 +5828,33 @@ async def test_live_preflight_fails_when_execution_model_staleness_is_infinite(
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_fails_when_execution_model_lacks_input_hash(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    payload.pop("input_csv_sha256", None)
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert (
+        "execution-model artifact input_csv_sha256 must be a sha256 hex digest"
+        in live_config.detail
+    )
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_when_execution_model_lacks_sample_contract(
     tmp_path: Path,
 ) -> None:
@@ -7645,6 +7673,28 @@ def test_live_preflight_artifact_rejects_missing_execution_model_strategy_eviden
     with pytest.raises(
         LiveTradingDisabledError,
         match="execution-model artifact strategy_evidence is required",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_rejects_missing_execution_model_input_hash(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    payload.pop("input_csv_sha256", None)
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="execution-model artifact input_csv_sha256 must be a sha256 hex digest",
     ):
         validator(settings)
 

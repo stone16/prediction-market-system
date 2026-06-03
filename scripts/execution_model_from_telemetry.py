@@ -18,6 +18,7 @@ from argparse import ArgumentParser
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -43,6 +44,7 @@ class ExecutionModelTelemetryEvidence:
     telemetry_sample_count: int
     adverse_selection_sample_count: int
     require_adverse_selection: bool
+    input_csv_sha256: str
 
 
 def build_execution_model_from_telemetry_csv(
@@ -104,7 +106,8 @@ def build_execution_model_artifact_from_telemetry_csv(
     latency_ms_samples: list[float] = []
     adverse_selection_bps_samples: list[float] = []
 
-    with io.StringIO(_read_text_no_follow(path), newline="") as f:
+    raw_input_bytes = _read_bytes_no_follow(path)
+    with io.StringIO(raw_input_bytes.decode("utf-8"), newline="") as f:
         reader = csv.DictReader(f)
         _require_unique_csv_fieldnames(reader.fieldnames)
         fieldnames = set(reader.fieldnames or ())
@@ -184,6 +187,7 @@ def build_execution_model_artifact_from_telemetry_csv(
         telemetry_sample_count=min(len(slippage_bps_samples), len(latency_ms_samples)),
         adverse_selection_sample_count=len(adverse_selection_bps_samples),
         require_adverse_selection=require_adverse_selection,
+        input_csv_sha256=sha256(raw_input_bytes).hexdigest(),
     )
     return model, evidence
 
@@ -245,6 +249,7 @@ def execution_model_to_json_dict(
                 "require_adverse_selection": (
                     telemetry_evidence.require_adverse_selection
                 ),
+                "input_csv_sha256": telemetry_evidence.input_csv_sha256,
             }
         )
     if strategy_evidence is not None:
@@ -364,7 +369,7 @@ def _required_float(
         ) from exc
 
 
-def _read_text_no_follow(path: Path) -> str:
+def _read_bytes_no_follow(path: Path) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = -1
     try:
@@ -378,7 +383,7 @@ def _read_text_no_follow(path: Path) -> str:
             raise OSError(
                 f"execution telemetry CSV cannot be read safely: {path}"
             )
-        with os.fdopen(fd, "r", encoding="utf-8") as file:
+        with os.fdopen(fd, "rb") as file:
             fd = -1
             return file.read()
     except OSError as exc:
