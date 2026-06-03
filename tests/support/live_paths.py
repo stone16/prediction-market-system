@@ -119,6 +119,10 @@ def make_live_paper_backtest_diff_path(
                     "default@"
                     "4d326514fa853b9278502ad43750b9648ac8f4f6ad8685ba522b2a4aa5f47d25"
                 ),
+                "input_csv_sha256": {
+                    "paper": "a" * 64,
+                    "backtest": "b" * 64,
+                },
                 "final_go_no_go_valid": True,
                 "thresholds": {
                     "min_matched_decisions": 10,

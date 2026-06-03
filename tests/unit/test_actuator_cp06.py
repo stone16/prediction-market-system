@@ -1359,6 +1359,10 @@ def _stage_readiness_fingerprint_files(settings: PMSSettings, root: Path) -> Non
                 "artifact_mode": "paper_backtest_execution_diff",
                 "generated_at": generated_at.isoformat(),
                 "strategy_evidence": _LIVE_FIXTURE_STRATEGY_EVIDENCE,
+                "input_csv_sha256": {
+                    "paper": "a" * 64,
+                    "backtest": "b" * 64,
+                },
                 "final_go_no_go_valid": True,
                 "thresholds": {
                     "min_matched_decisions": 10,

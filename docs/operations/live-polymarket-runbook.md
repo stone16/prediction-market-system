@@ -485,16 +485,16 @@ uv run python scripts/paper_backtest_execution_diff.py \
 Both CSVs must contain `decision_id`, `strategy_id`, `strategy_version_id`,
 `market_id`, `status`, `slippage_bps`, `pnl`, and `rejection_reason`. The
 script rejects paper/backtest exports whose `strategy_id@strategy_version_id`
-sets differ, and the JSON output records that set as `strategy_evidence`. The
-diff fails on unmatched decision ids, fill/rejection status mismatches, thin
-matched samples, or threshold breaches. A failing artifact means the current
-execution model is not trusted enough for promotion. Stage the passing JSON at
-`live_paper_backtest_diff_path`; true LIVE validation and credentialed
-preflight require it, require `strategy_evidence` to match the final paper-soak
-GO report's Summary `Strategy` row, and bind its contents into the preflight
-fingerprint. Final submission/preflight artifact validation also revalidates
-the paper-soak GO report and operator rehearsal PASS report content, not just
-their fingerprints.
+sets differ, and the JSON output records that set as `strategy_evidence` plus
+`input_csv_sha256.paper` and `input_csv_sha256.backtest` for the exact source
+CSV bytes compared. The diff fails on unmatched decision ids, fill/rejection
+status mismatches, thin matched samples, or threshold breaches. A failing
+artifact means the current execution model is not trusted enough for promotion.
+Stage the passing JSON at `live_paper_backtest_diff_path`; true LIVE validation
+and credentialed preflight require it, require `strategy_evidence` to match the final paper-soak GO report's Summary `Strategy` row, require the input CSV hash
+provenance fields, and bind its contents into the preflight fingerprint. Final
+submission/preflight artifact validation also revalidates the paper-soak GO
+report and operator rehearsal PASS report content, not just their fingerprints.
 
 Before moving to credentialed preflight, run the credential-free LIVE
 submission artifact check against the config that carries the final private

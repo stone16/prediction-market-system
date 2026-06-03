@@ -12,6 +12,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal, cast
 from uuid import uuid4
@@ -51,6 +52,7 @@ class ExecutionDiff:
     artifact_mode: str
     generated_at: str
     strategy_evidence: str
+    input_csv_sha256: Mapping[str, str]
     final_go_no_go_valid: bool
     thresholds: Mapping[str, float]
     metrics: Mapping[str, float | int | None]
@@ -93,8 +95,10 @@ def build_execution_diff(
         ),
         "min_matched_decisions": float(min_matched_decisions_value),
     }
-    paper_rows = _load_execution_rows(paper_path, label="paper")
-    backtest_rows = _load_execution_rows(backtest_path, label="backtest")
+    paper_input = _load_execution_rows(paper_path, label="paper")
+    backtest_input = _load_execution_rows(backtest_path, label="backtest")
+    paper_rows = paper_input.rows
+    backtest_rows = backtest_input.rows
     strategy_evidence = _strategy_evidence(
         paper_rows=paper_rows,
         backtest_rows=backtest_rows,
@@ -162,6 +166,10 @@ def build_execution_diff(
         artifact_mode=ARTIFACT_MODE,
         generated_at=datetime.now(tz=UTC).isoformat(),
         strategy_evidence=strategy_evidence,
+        input_csv_sha256={
+            "paper": paper_input.csv_sha256,
+            "backtest": backtest_input.csv_sha256,
+        },
         final_go_no_go_valid=not failures,
         thresholds=thresholds,
         metrics=metrics,
@@ -192,6 +200,7 @@ def execution_diff_to_json_dict(diff: ExecutionDiff) -> dict[str, object]:
         "artifact_mode": diff.artifact_mode,
         "generated_at": diff.generated_at,
         "strategy_evidence": diff.strategy_evidence,
+        "input_csv_sha256": dict(diff.input_csv_sha256),
         "final_go_no_go_valid": diff.final_go_no_go_valid,
         "thresholds": dict(diff.thresholds),
         "metrics": dict(diff.metrics),
@@ -202,8 +211,16 @@ def execution_diff_to_json_dict(diff: ExecutionDiff) -> dict[str, object]:
     }
 
 
-def _load_execution_rows(path: Path, *, label: str) -> tuple[ExecutionRow, ...]:
-    with io.StringIO(_read_text_no_follow(path, label=label), newline="") as f:
+@dataclass(frozen=True, slots=True)
+class _LoadedExecutionRows:
+    rows: tuple[ExecutionRow, ...]
+    csv_sha256: str
+
+
+def _load_execution_rows(path: Path, *, label: str) -> _LoadedExecutionRows:
+    raw_bytes = _read_bytes_no_follow(path, label=label)
+    text = raw_bytes.decode("utf-8")
+    with io.StringIO(text, newline="") as f:
         reader = csv.DictReader(f)
         _require_unique_csv_fieldnames(reader.fieldnames)
         fieldnames = set(reader.fieldnames or ())
@@ -226,7 +243,10 @@ def _load_execution_rows(path: Path, *, label: str) -> tuple[ExecutionRow, ...]:
             rows.append(parsed)
     if not rows:
         raise ValueError(f"{label} execution CSV must contain at least one row")
-    return tuple(rows)
+    return _LoadedExecutionRows(
+        rows=tuple(rows),
+        csv_sha256=sha256(raw_bytes).hexdigest(),
+    )
 
 
 def _parse_execution_row(
@@ -490,7 +510,7 @@ def _positive_int(value: int, field_name: str) -> int:
     return value
 
 
-def _read_text_no_follow(path: Path, *, label: str) -> str:
+def _read_bytes_no_follow(path: Path, *, label: str) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = -1
     try:
@@ -500,7 +520,7 @@ def _read_text_no_follow(path: Path, *, label: str) -> str:
             raise OSError(f"{label} execution CSV cannot be read safely: {path}")
         if path_stat.st_nlink != 1:
             raise OSError(f"{label} execution CSV cannot be read safely: {path}")
-        with os.fdopen(fd, "r", encoding="utf-8") as file:
+        with os.fdopen(fd, "rb") as file:
             fd = -1
             return file.read()
     except OSError as exc:

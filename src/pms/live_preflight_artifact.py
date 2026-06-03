@@ -397,6 +397,7 @@ def _validate_live_paper_backtest_diff_artifact(settings: PMSSettings) -> None:
         artifact_label="LIVE paper-vs-backtest execution diff artifact",
         expected_labels=_paper_soak_report_strategy_labels(settings),
     )
+    _require_paper_backtest_diff_input_hashes(payload)
     if payload.get("final_go_no_go_valid") is not True:
         msg = "LIVE paper-vs-backtest execution diff artifact must be final GO"
         raise LiveTradingDisabledError(msg)
@@ -649,6 +650,24 @@ def _require_paper_backtest_diff_empty_lists(payload: Mapping[str, object]) -> N
             msg = (
                 "LIVE paper-vs-backtest execution diff artifact contains "
                 f"{label}"
+            )
+            raise LiveTradingDisabledError(msg)
+
+
+def _require_paper_backtest_diff_input_hashes(payload: Mapping[str, object]) -> None:
+    raw_value = payload.get("input_csv_sha256")
+    if not isinstance(raw_value, dict):
+        msg = (
+            "LIVE paper-vs-backtest execution diff artifact "
+            "input_csv_sha256 is required"
+        )
+        raise LiveTradingDisabledError(msg)
+    for field_name in ("paper", "backtest"):
+        digest = raw_value.get(field_name)
+        if not isinstance(digest, str) or not is_sha256_hexdigest(digest):
+            msg = (
+                "LIVE paper-vs-backtest execution diff artifact "
+                f"input_csv_sha256.{field_name} must be a sha256 hex digest"
             )
             raise LiveTradingDisabledError(msg)
 

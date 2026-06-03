@@ -537,6 +537,10 @@ def _write_valid_paper_backtest_diff_json(
                     datetime.now(tz=UTC) - timedelta(seconds=60)
                 ).isoformat(),
                 "strategy_evidence": strategy_evidence,
+                "input_csv_sha256": {
+                    "paper": "a" * 64,
+                    "backtest": "b" * 64,
+                },
                 "final_go_no_go_valid": True,
                 "thresholds": {
                     "min_matched_decisions": 10,
@@ -7597,6 +7601,28 @@ def test_live_preflight_artifact_revalidates_paper_report_strategy_evidence(
     with pytest.raises(
         LiveTradingDisabledError,
         match="paper-only strategy cannot be final GO evidence",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_rejects_missing_paper_backtest_input_hashes(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    payload.pop("input_csv_sha256", None)
+    diff_path.write_text(json.dumps(payload), encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="paper-vs-backtest execution diff artifact input_csv_sha256 is required",
     ):
         validator(settings)
 

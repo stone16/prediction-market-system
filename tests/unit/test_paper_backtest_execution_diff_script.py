@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from hashlib import sha256
 import json
 import os
 import stat
@@ -181,6 +182,10 @@ def test_build_execution_diff_writes_pass_artifact(tmp_path: Path) -> None:
     assert payload["generated_by"] == "scripts/paper_backtest_execution_diff.py"
     assert payload["artifact_mode"] == "paper_backtest_execution_diff"
     assert payload["strategy_evidence"] == "h1_flb@h1-flb-v1"
+    assert payload["input_csv_sha256"] == {
+        "paper": sha256(paper_path.read_bytes()).hexdigest(),
+        "backtest": sha256(backtest_path.read_bytes()).hexdigest(),
+    }
     assert payload["final_go_no_go_valid"] is True
     assert payload["metrics"]["paper_fill_rate"] == pytest.approx(0.8)
     assert payload["metrics"]["backtest_fill_rate"] == pytest.approx(0.8)
