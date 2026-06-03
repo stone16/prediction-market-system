@@ -48,6 +48,7 @@ INNER_RING_NOT_NULL_TABLES = [
     *STRATEGY_TABLES,
     "alpha_competition_snapshots",
     "strategy_performance_peaks",
+    "backtest_execution_rows",
     "strategy_runs",
     "strategy_run_slices",
     "backtest_live_comparisons",
