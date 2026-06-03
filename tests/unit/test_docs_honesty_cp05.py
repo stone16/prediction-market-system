@@ -85,6 +85,25 @@ def _configured_flb_fee_rate(config_text: str) -> str:
     raise AssertionError("config.live-soak.yaml missing flb_fee_rate")
 
 
+def _configured_llm_enabled(config_text: str) -> bool:
+    in_llm_section = False
+    for line in config_text.splitlines():
+        if line.startswith("llm:"):
+            in_llm_section = True
+            continue
+        if in_llm_section and line and not line.startswith(" "):
+            break
+        stripped = line.strip()
+        if in_llm_section and stripped.startswith("enabled:"):
+            raw_value = stripped.split(":", maxsplit=1)[1].strip()
+            if raw_value == "true":
+                return True
+            if raw_value == "false":
+                return False
+            raise AssertionError(f"unexpected llm.enabled value: {raw_value}")
+    raise AssertionError("config.live-soak.yaml missing llm.enabled")
+
+
 def test_readme_paper_soak_status_mentions_required_launch_artifacts() -> None:
     readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
     normalized = " ".join(readme_text.split())
@@ -115,6 +134,21 @@ def test_launch_fee_rate_docs_match_live_soak_config() -> None:
     assert f"confirm `{fee_rate}`" in readiness_text
     assert "--fee-rate 0.04" not in runbook_text
     assert "`strategies.flb_fee_rate=0.04`" not in readiness_text
+
+
+def test_live_runbook_llm_guidance_matches_live_soak_config() -> None:
+    config_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
+    runbook_text = (
+        ROOT / "docs" / "operations" / "live-polymarket-runbook.md"
+    ).read_text(encoding="utf-8")
+    normalized_runbook = _normalized_doc_text(runbook_text)
+
+    assert _configured_llm_enabled(config_text) is False
+    assert (
+        "The committed paper-soak config keeps `llm.enabled: false`"
+        in normalized_runbook
+    )
+    assert "committed paper-soak config enables the LLM forecaster" not in runbook_text
 
 
 def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_gate() -> None:
@@ -302,7 +336,10 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "`paper_canary_v1` cannot be final GO evidence" in runbook_text
     assert "Create the approval JSON only after preview review" in readme_text
     assert "true LIVE template leaves LLM disabled by default" in readme_text
-    assert "The true LIVE template keeps `llm.enabled=false`" in runbook_text
+    assert (
+        "The committed paper-soak config keeps `llm.enabled: false`"
+        in _normalized_doc_text(runbook_text)
+    )
     assert "PMS_LLM__API_KEY is required only if you explicitly enable LLM" in runbook_text
     assert "PMS_RUN_LIVE_PREFLIGHT=1" in runbook_text
     assert "tests/integration/test_live_credentialed_preflight.py" in runbook_text

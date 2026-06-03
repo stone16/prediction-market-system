@@ -376,11 +376,12 @@ their fingerprints.
 
 ## Credential Setup
 
-Install the live SDK in the runtime environment. The committed paper-soak
-config enables the LLM forecaster, so paper-soak environments also install the
-LLM extra. The true LIVE template keeps `llm.enabled=false` so the first
-real-money path does not require a second provider secret. True LIVE validation
-always requires `py_clob_client_v2` to be importable before runner startup:
+Install the live SDK in the runtime environment. The committed paper-soak config
+keeps `llm.enabled: false`; H1 FLB does not use an LLM forecaster, so the first
+real-money path does not require a second provider secret. Keep installing the
+LLM extra in launch environments when you want preflight/runtime parity with
+operator opt-in LLM checks, but true LIVE validation always requires
+`py_clob_client_v2` to be importable before runner startup:
 
 ```bash
 uv sync --extra live --extra llm
