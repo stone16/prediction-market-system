@@ -454,6 +454,10 @@ uv run python scripts/export_backtest_execution_from_db.py \
   --output /secure/pms/backtest-execution-export.csv
 ```
 
+The exporter refuses to read execution rows from a queued, running, failed, or
+cancelled backtest run. Use the `run_id` for the completed replay that used the
+same telemetry-calibrated execution model staged for launch.
+
 ```bash
 uv run python scripts/paper_backtest_execution_diff.py \
   --paper /secure/pms/paper-execution-export.csv \

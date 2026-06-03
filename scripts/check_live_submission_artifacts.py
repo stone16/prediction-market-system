@@ -226,8 +226,8 @@ def _paper_backtest_diff_remediation() -> str:
         "run: uv run python scripts/export_paper_execution_from_api.py "
         '--execution-output "$PMS_SECURE_DIR/paper-execution-export.csv" '
         '--telemetry-output "$PMS_SECURE_DIR/paper-execution-telemetry.csv" '
-        "--require-adverse-selection; then run the matching research "
-        "backtest, then run: "
+        "--require-adverse-selection; then run the completed matching "
+        "research backtest, then run: "
         "uv run python scripts/export_backtest_execution_from_db.py "
         "--run-id <backtest-run-id> "
         '--output "$PMS_SECURE_DIR/backtest-execution-export.csv"; then run: '

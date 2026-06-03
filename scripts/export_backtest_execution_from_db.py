@@ -88,6 +88,21 @@ async def _fetch_backtest_execution_rows(
 ) -> tuple[Mapping[str, object], ...]:
     connection = await asyncpg.connect(database_url)
     try:
+        run_row = await connection.fetchrow(
+            """
+            SELECT status
+            FROM backtest_runs
+            WHERE run_id = $1::uuid
+            """,
+            run_id,
+        )
+        if run_row is None:
+            msg = f"backtest run not found: {run_id}"
+            raise ValueError(msg)
+        status = str(cast(object, run_row["status"]))
+        if status != "completed":
+            msg = f"backtest run {run_id} is not completed: status={status}"
+            raise ValueError(msg)
         rows = await connection.fetch(
             """
             SELECT
@@ -391,7 +406,11 @@ def _parser() -> argparse.ArgumentParser:
             "then PMS_DATABASE_URL."
         ),
     )
-    parser.add_argument("--run-id", required=True)
+    parser.add_argument(
+        "--run-id",
+        required=True,
+        help="Completed backtest_runs.run_id to export.",
+    )
     parser.add_argument("--output", required=True)
     return parser
 

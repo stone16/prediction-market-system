@@ -4,12 +4,60 @@ import csv
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from scripts import export_backtest_execution_from_db
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+class _FakeConnection:
+    def __init__(self, *, status: str | None) -> None:
+        self.status = status
+        self.fetch_called = False
+        self.closed = False
+
+    async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+        del query, args
+        if self.status is None:
+            return None
+        return {"status": self.status}
+
+    async def fetch(self, query: str, *args: object) -> tuple[dict[str, object], ...]:
+        del query, args
+        self.fetch_called = True
+        return ()
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_fetch_backtest_execution_rows_refuses_non_completed_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _FakeConnection(status="running")
+
+    async def _connect(database_url: str) -> _FakeConnection:
+        assert database_url == "postgresql://example"
+        return connection
+
+    monkeypatch.setattr(
+        "scripts.export_backtest_execution_from_db.asyncpg.connect",
+        _connect,
+    )
+
+    with pytest.raises(ValueError, match="status=running"):
+        await export_backtest_execution_from_db._fetch_backtest_execution_rows(
+            database_url="postgresql://example",
+            run_id="11111111-1111-1111-1111-111111111111",
+        )
+
+    assert connection.fetch_called is False
+    assert connection.closed is True
 
 
 def test_export_backtest_execution_writes_strict_diff_csv(tmp_path: Path) -> None:
