@@ -64,6 +64,43 @@ def test_check_paper_soak_artifacts_passes_with_staged_flb_calibration(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     calibration_path = tmp_path / "flb-calibration.csv"
+    category_prior_path = tmp_path / "category-prior.csv"
+    _write_flb_calibration(calibration_path)
+    _write_category_prior(category_prior_path, rows=2)
+    config_path = tmp_path / "live-soak.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
+                "controller:",
+                f"  category_prior_observations_path: {category_prior_path}",
+                "  category_prior_min_global_samples: 2",
+                "strategies:",
+                f"  flb_calibration_path: {calibration_path}",
+                "  flb_min_calibration_samples: 100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = check_paper_soak_artifacts.main(["--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "[PASS] paper_mode:" in captured.out
+    assert "[PASS] h1_flb_strategy:" in captured.out
+    assert "[PASS] flb_calibration:" in captured.out
+    assert "[PASS] category_prior:" in captured.out
+    assert "loaded 2 resolved rows" in captured.out
+
+
+def test_check_paper_soak_artifacts_fails_when_category_prior_missing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calibration_path = tmp_path / "flb-calibration.csv"
     _write_flb_calibration(calibration_path)
     config_path = tmp_path / "live-soak.yaml"
     config_path.write_text(
@@ -83,12 +120,9 @@ def test_check_paper_soak_artifacts_passes_with_staged_flb_calibration(
     exit_code = check_paper_soak_artifacts.main(["--config", str(config_path)])
 
     captured = capsys.readouterr()
-    assert exit_code == 0
-    assert "[PASS] paper_mode:" in captured.out
-    assert "[PASS] h1_flb_strategy:" in captured.out
-    assert "[PASS] flb_calibration:" in captured.out
-    assert "[PASS] category_prior:" in captured.out
-    assert "not configured" in captured.out
+    assert exit_code == 1
+    assert "[FAIL] category_prior:" in captured.out
+    assert "controller.category_prior_observations_path is required" in captured.out
 
 
 def test_check_paper_soak_artifacts_fails_when_default_strategy_not_archived(

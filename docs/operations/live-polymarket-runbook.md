@@ -277,7 +277,7 @@ uv run python scripts/flb_data_feasibility.py \
   --calibration-source-label warehouse-flb-v1
 ```
 
-Generate the optional local category-prior artifact that
+Generate the required local category-prior artifact that
 `scripts/prepare_local_paper_soak_config.py` wires into
 `config.local.live-soak.yaml`:
 
@@ -291,7 +291,7 @@ For Fly/LIVE volume staging, keep the same artifact filenames under
 `/secure/pms`, including `/secure/pms/flb-calibration.csv`.
 
 Before starting the paper-soak API, run the local artifact check. It uses the
-same FLB calibration and optional category-prior CSV loaders as runtime
+same FLB calibration and category-prior CSV loaders as runtime
 startup, and it also verifies each configured private artifact parent before
 the API process gets as far as `Runner(...)` construction. A missing,
 malformed, or permissively staged launch artifact fails here instead of during

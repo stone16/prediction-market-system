@@ -107,8 +107,11 @@ def _check_category_prior(settings: PMSSettings) -> PaperSoakArtifactCheck:
     if raw_path is None or raw_path.strip() == "":
         return PaperSoakArtifactCheck(
             "category_prior",
-            True,
-            "not configured; skipped for PAPER soak startup",
+            False,
+            (
+                "controller.category_prior_observations_path is required "
+                "for the h1_flb launch paper soak"
+            ),
         )
     path = Path(raw_path).expanduser()
     try:
