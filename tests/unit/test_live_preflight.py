@@ -8994,6 +8994,21 @@ async def test_live_preflight_checks_launch_tokens_from_manual_and_active_strate
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_ignores_archived_strategies_for_launch_tokens() -> None:
+    connection = _Connection(missing_subscribed_usable_token_count=0)
+
+    await live_preflight_module._fresh_usable_launch_token_missing_count(
+        cast(asyncpg.Pool, _Pool(connection)),
+        max_age_s=300.0,
+    )
+
+    query = next(
+        query for query in connection.fetchval_calls if "active_strategy_specs" in query
+    )
+    assert "strategies.archived IS NOT TRUE" in query
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_scopes_risk_metadata_to_fresh_usable_launch_markets() -> None:
     connection = _Connection(missing_market_risk_metadata_count=0)
 

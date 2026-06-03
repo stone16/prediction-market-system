@@ -2414,6 +2414,7 @@ active_strategy_specs AS (
     JOIN strategy_versions AS versions
         ON versions.strategy_version_id = strategies.active_version_id
     WHERE strategies.active_version_id IS NOT NULL
+      AND strategies.archived IS NOT TRUE
 ),
 active_strategy_tokens AS (
     SELECT tokens.token_id
