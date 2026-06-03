@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import stat
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
-from scripts.artifact_path_safety import require_path_outside_working_tree
+from scripts.artifact_path_safety import (
+    require_path_outside_working_tree,
+    require_private_parent,
+)
 from pms.config import PMSSettings
 from pms.controller.baselines import load_category_prior_observations_csv
 from pms.core.enums import RunMode
@@ -90,7 +92,7 @@ def _check_flb_calibration(settings: PMSSettings) -> PaperSoakArtifactCheck:
     path = Path(raw_path).expanduser()
     try:
         require_path_outside_working_tree(path, label="FLB calibration artifact")
-        _require_private_parent(path, label="FLB calibration artifact")
+        require_private_parent(path, label="FLB calibration artifact")
         model = load_flb_calibration_csv(
             path,
             min_sample_count=settings.strategies.flb_min_calibration_samples,
@@ -104,7 +106,7 @@ def _check_flb_calibration(settings: PMSSettings) -> PaperSoakArtifactCheck:
             provenance_path,
             label="FLB calibration provenance JSON",
         )
-        _require_private_parent(
+        require_private_parent(
             provenance_path,
             label="FLB calibration provenance JSON",
         )
@@ -145,7 +147,7 @@ def _check_category_prior(settings: PMSSettings) -> PaperSoakArtifactCheck:
     path = Path(raw_path).expanduser()
     try:
         require_path_outside_working_tree(path, label="category-prior artifact")
-        _require_private_parent(path, label="category-prior artifact")
+        require_private_parent(path, label="category-prior artifact")
         loaded = load_category_prior_observations_csv(path)
     except (OSError, ValueError) as exc:
         return PaperSoakArtifactCheck("category_prior", False, str(exc))
@@ -170,25 +172,6 @@ def _check_category_prior(settings: PMSSettings) -> PaperSoakArtifactCheck:
             f"(skipped_ambiguous_count={loaded.skipped_ambiguous_count})"
         ),
     )
-
-
-def _require_private_parent(path: Path, *, label: str) -> None:
-    parent = path.parent
-    try:
-        mode = parent.lstat().st_mode
-    except FileNotFoundError as exc:
-        msg = f"{label} parent directory does not exist: {parent}"
-        raise ValueError(msg) from exc
-    if not stat.S_ISDIR(mode):
-        msg = f"{label} parent directory is not a directory: {parent}"
-        raise ValueError(msg)
-    permissions = stat.S_IMODE(mode)
-    if permissions & 0o077:
-        msg = f"{label} parent directory {parent} is too permissive; run chmod 700"
-        raise ValueError(msg)
-    if not permissions & stat.S_IWUSR:
-        msg = f"{label} parent directory {parent} is not owner-writable; run chmod 700"
-        raise ValueError(msg)
 
 
 def _format_plain(checks: Sequence[PaperSoakArtifactCheck]) -> str:
