@@ -93,6 +93,7 @@ def export_flb_warehouse_from_dune(
         output_path,
         label="Dune warehouse export output path",
     )
+    _prepare_private_parent(output_path)
 
     sql = sql_path.read_text(encoding="utf-8").strip()
     if sql == "":

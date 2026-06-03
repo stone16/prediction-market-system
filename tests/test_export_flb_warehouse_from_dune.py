@@ -221,6 +221,65 @@ def test_dune_export_rejects_output_inside_working_tree_without_publishing(
     assert not output_path.exists()
 
 
+def test_dune_export_rejects_permissive_output_parent_before_network(
+    tmp_path: Path,
+) -> None:
+    sql_path = tmp_path / "query.sql"
+    sql_path.write_text("select * from launch_source", encoding="utf-8")
+    output_dir = tmp_path / "shared"
+    output_dir.mkdir()
+    output_dir.chmod(0o777)
+    output_path = output_dir / "polymarket_resolved_binary.csv"
+    requests: list[httpx.Request] = []
+    csv_text = _warehouse_csv([
+        _warehouse_row(market_id="longshot-1"),
+        _warehouse_row(
+            market_id="favorite-1",
+            entry_yes_price="0.95",
+            yes_payout="1",
+            no_payout="0",
+        ),
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/sql/execute":
+            return httpx.Response(200, json={"execution_id": "exec-1"})
+        if request.url.path == "/api/v1/execution/exec-1/status":
+            return httpx.Response(
+                200,
+                json={
+                    "execution_id": "exec-1",
+                    "is_execution_finished": True,
+                    "state": "QUERY_STATE_COMPLETED",
+                },
+            )
+        if request.url.path == "/api/v1/execution/exec-1/results/csv":
+            return httpx.Response(200, text=csv_text)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    try:
+        with httpx.Client(
+            transport=httpx.MockTransport(handler),
+            base_url="https://api.dune.com/api/v1",
+        ) as client:
+            with pytest.raises(ValueError, match="too permissive"):
+                export_flb_warehouse_from_dune(
+                    sql_path=sql_path,
+                    output_path=output_path,
+                    api_key="redacted-api-key",
+                    poll_interval_s=0.0,
+                    timeout_s=1.0,
+                    require_sample_gate=False,
+                    http_client=client,
+                )
+    finally:
+        output_dir.chmod(0o700)
+
+    assert requests == []
+    assert not output_path.exists()
+
+
 def test_dune_export_requires_runtime_sample_gate_before_publishing(
     tmp_path: Path,
 ) -> None:
