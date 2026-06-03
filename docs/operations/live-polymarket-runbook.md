@@ -46,9 +46,14 @@ passphrases into chat, issues, PRs, logs, or config files.
    the active strategy. After applying migrations, install the canary as the
    only active strategy:
 
+   Before running migrations or installing a canary strategy, verify that
+   `DATABASE_URL` points at the intended Postgres server and database; another
+   local Postgres on port 5432 can silently catch `localhost` traffic.
+
    ```bash
    docker compose up -d postgres
    export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
+   psql "$DATABASE_URL" -Atc "select current_database(), inet_server_addr(), inet_server_port(), version();"
    uv run alembic upgrade head
    uv run python scripts/install_paper_canary_strategy.py \
      --database-url "$DATABASE_URL" \

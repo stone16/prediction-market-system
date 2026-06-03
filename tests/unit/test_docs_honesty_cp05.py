@@ -61,6 +61,31 @@ def test_paper_soak_docs_explicitly_start_runner_after_api_control_plane() -> No
     assert expected_start_command in runbook_text
 
 
+def test_paper_soak_docs_verify_database_target_before_migrations() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    normalized_readme = _normalized_doc_text(readme_text)
+    normalized_runbook = _normalized_doc_text(runbook_text)
+
+    expected_warning = (
+        "Before running migrations or installing a canary strategy, verify "
+        "that `DATABASE_URL` points at the intended Postgres server and "
+        "database; another local Postgres on port 5432 can silently catch "
+        "`localhost` traffic."
+    )
+    expected_probe = (
+        "psql \"$DATABASE_URL\" -Atc "
+        "\"select current_database(), inet_server_addr(), inet_server_port(), version();\""
+    )
+
+    assert expected_warning in normalized_readme
+    assert expected_warning in normalized_runbook
+    assert expected_probe in readme_text
+    assert expected_probe in runbook_text
+
+
 def test_readme_autostart_example_mentions_required_discord_webhook() -> None:
     readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
     normalized = _normalized_doc_text(readme_text)

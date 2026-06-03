@@ -141,6 +141,10 @@ docker compose up -d postgres
 
 # 3. Apply migrations
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
+# Before running migrations or installing a canary strategy, verify that
+# `DATABASE_URL` points at the intended Postgres server and database; another
+# local Postgres on port 5432 can silently catch `localhost` traffic.
+psql "$DATABASE_URL" -Atc "select current_database(), inet_server_addr(), inet_server_port(), version();"
 uv run alembic upgrade head
 
 # 4. Create a private artifact directory and repo-ignored local config.
@@ -315,6 +319,10 @@ uv sync
 
 # 3. Point PMS at the compose-created database and apply migrations
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
+# Before running migrations or installing a canary strategy, verify that
+# `DATABASE_URL` points at the intended Postgres server and database; another
+# local Postgres on port 5432 can silently catch `localhost` traffic.
+psql "$DATABASE_URL" -Atc "select current_database(), inet_server_addr(), inet_server_port(), version();"
 uv run alembic upgrade head
 
 # Escape hatch: roll back to the pre-migration state for the current DATABASE_URL
