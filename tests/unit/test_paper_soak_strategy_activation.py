@@ -164,6 +164,10 @@ async def test_runner_installs_configured_h1_flb_strategy_before_soak(
     assert metadata["alpha_source"] == "warehouse_flb_decile_model_v1"
     assert metadata["edge_model_source"] == "flb_calibration_model_v1"
     assert metadata["calibration_source"] == "warehouse_flb_v1"
+    assert metadata["flb_calibration_csv_sha256"] == sha256(
+        calibration_path.read_bytes()
+    ).hexdigest()
+    assert metadata["flb_calibration_source_label"] == "warehouse-flb-v1"
     assert strategy.calibration.enabled is True
     assert strategy.forecaster.forecasters == (("flb", ()),)
     assert activate is False

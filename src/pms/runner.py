@@ -1156,7 +1156,10 @@ class Runner:
             if self._flb_calibration_model is None:
                 msg = "h1_flb paper soak requires strategies.flb_calibration_path"
                 raise ValueError(msg)
-            strategy = build_h1_flb_strategy()
+            strategy = _h1_flb_strategy_from_settings(
+                self.config,
+                calibration_model=self._flb_calibration_model,
+            )
         else:
             msg = (
                 "Unsupported paper_soak_strategy_id: "
@@ -4254,6 +4257,25 @@ def _flb_calibration_model_from_settings(
         },
     )
     return model
+
+
+def _h1_flb_strategy_from_settings(
+    settings: PMSSettings,
+    *,
+    calibration_model: FlbCalibrationModel,
+) -> Strategy:
+    raw_path = settings.strategies.flb_calibration_path
+    if raw_path is None or raw_path.strip() == "":
+        msg = "h1_flb strategy requires strategies.flb_calibration_path"
+        raise ValueError(msg)
+    provenance = require_flb_calibration_provenance_for_model(
+        Path(raw_path).expanduser(),
+        model=calibration_model,
+    )
+    return build_h1_flb_strategy(
+        calibration_csv_sha256=provenance.calibration_csv_sha256,
+        calibration_source_label=provenance.calibration_source_label,
+    )
 
 
 def _market_implied_baseline_prob_estimate(decision: TradeDecision) -> float:

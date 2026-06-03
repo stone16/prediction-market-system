@@ -13,24 +13,39 @@ from pms.strategies.projections import (
 H1_FLB_STRATEGY_ID = "h1_flb"
 
 
-def build_h1_flb_strategy() -> Strategy:
+def build_h1_flb_strategy(
+    *,
+    calibration_csv_sha256: str | None = None,
+    calibration_source_label: str | None = None,
+) -> Strategy:
+    metadata: tuple[tuple[str, str], ...] = (
+        ("owner", "system"),
+        ("tier", "live_candidate"),
+        ("phase", "H1"),
+        ("purpose", "calibrated_h1_flb_paper_soak"),
+        ("price_reference", "best_ask"),
+        ("live_allowed", "true"),
+        ("requires_strict_factor_gates", "true"),
+        ("alpha_source", "warehouse_flb_decile_model_v1"),
+        ("edge_model_source", "flb_calibration_model_v1"),
+        ("calibration_source", "warehouse_flb_v1"),
+        ("evidence_source", "paper_soak_go_report_v1"),
+    )
+    if calibration_csv_sha256 is not None:
+        metadata = (
+            *metadata,
+            ("flb_calibration_csv_sha256", calibration_csv_sha256),
+        )
+    if calibration_source_label is not None:
+        metadata = (
+            *metadata,
+            ("flb_calibration_source_label", calibration_source_label),
+        )
     return Strategy(
         config=StrategyConfig(
             strategy_id=H1_FLB_STRATEGY_ID,
             factor_composition=(),
-            metadata=(
-                ("owner", "system"),
-                ("tier", "live_candidate"),
-                ("phase", "H1"),
-                ("purpose", "calibrated_h1_flb_paper_soak"),
-                ("price_reference", "best_ask"),
-                ("live_allowed", "true"),
-                ("requires_strict_factor_gates", "true"),
-                ("alpha_source", "warehouse_flb_decile_model_v1"),
-                ("edge_model_source", "flb_calibration_model_v1"),
-                ("calibration_source", "warehouse_flb_v1"),
-                ("evidence_source", "paper_soak_go_report_v1"),
-            ),
+            metadata=metadata,
         ),
         risk=RiskParams(
             max_position_notional_usdc=1.0,

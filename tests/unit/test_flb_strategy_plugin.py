@@ -27,7 +27,9 @@ from pms.strategies.flb.source import (
     FlbMarketSnapshot,
     load_flb_calibration_csv,
 )
+from pms.strategies.flb.projection import build_h1_flb_strategy
 from pms.strategies.flb.strategy import FlbStrategyModule
+from pms.strategies.versioning import compute_strategy_version_id
 from pms.strategies.intents import StrategyContext, TradeIntent
 
 
@@ -182,6 +184,23 @@ def test_flb_components_satisfy_strategy_protocols() -> None:
     assert controller is module.controller
     assert agent is module.agent
     assert strategy_module.strategy_id == "h1_flb"
+
+
+def test_h1_flb_strategy_version_includes_calibration_artifact_identity() -> None:
+    first = build_h1_flb_strategy(
+        calibration_csv_sha256="a" * 64,
+        calibration_source_label="warehouse-flb-v1",
+    )
+    second = build_h1_flb_strategy(
+        calibration_csv_sha256="b" * 64,
+        calibration_source_label="warehouse-flb-v1",
+    )
+
+    assert dict(first.config.metadata)["flb_calibration_csv_sha256"] == "a" * 64
+    assert (
+        compute_strategy_version_id(*first.snapshot())
+        != compute_strategy_version_id(*second.snapshot())
+    )
 
 
 @pytest.mark.asyncio
