@@ -10,9 +10,14 @@ from typing import Any, cast
 import pytest
 
 from pms.config import PMSSettings, RiskSettings
-from pms.core.enums import RunMode, TimeInForce
-from pms.core.models import MarketSignal, Position, TradeDecision, Venue
-from pms.runner import Runner, StrategyControllerRuntime, _estimated_decision_quantity
+from pms.core.enums import OrderStatus, RunMode, TimeInForce
+from pms.core.models import MarketSignal, OrderState, Position, TradeDecision, Venue
+from pms.runner import (
+    ActuatorWorkItem,
+    Runner,
+    StrategyControllerRuntime,
+    _estimated_decision_quantity,
+)
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -94,6 +99,43 @@ def _runner(*, max_open_positions: int | None = 2) -> Runner:
     return Runner(config=settings, historical_data_path=FIXTURE_PATH)
 
 
+def _live_runner(*, max_open_positions: int | None = 2) -> Runner:
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        risk=RiskSettings(
+            max_open_positions=max_open_positions,
+            max_quantity_shares=500.0,
+        ),
+    )
+    return Runner(config=settings, historical_data_path=FIXTURE_PATH)
+
+
+def _open_order_state(decision: TradeDecision) -> OrderState:
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    return OrderState(
+        order_id=f"open-{decision.decision_id}",
+        decision_id=decision.decision_id,
+        status=OrderStatus.LIVE.value,
+        market_id=decision.market_id,
+        token_id=decision.token_id,
+        venue=decision.venue,
+        requested_notional_usdc=decision.notional_usdc,
+        filled_notional_usdc=0.0,
+        remaining_notional_usdc=decision.notional_usdc,
+        fill_price=None,
+        submitted_at=now,
+        last_updated_at=now,
+        raw_status="open",
+        strategy_id=decision.strategy_id,
+        strategy_version_id=decision.strategy_version_id,
+        action=decision.action,
+        outcome=decision.outcome,
+        time_in_force=decision.time_in_force.value,
+        intent_key=decision.intent_key,
+        risk_group_id=decision.risk_group_id,
+    )
+
+
 class _RecordingDecisionStore:
     def __init__(self) -> None:
         self.transitions: list[tuple[str, str, str, datetime]] = []
@@ -118,6 +160,42 @@ class _RecordingDedupStore:
 
     async def release(self, decision_id: str, outcome: str) -> None:
         self.release_calls.append((decision_id, outcome))
+
+
+class _RecordingOrderStore:
+    def __init__(self) -> None:
+        self.orders: list[OrderState] = []
+
+    async def insert(self, order_state: OrderState) -> None:
+        self.orders.append(order_state)
+
+
+class _RecordingRisk:
+    def __init__(self) -> None:
+        self.open_orders: list[OrderState] = []
+        self.filled_order_ids: list[str] = []
+
+    def record_open_order_state(self, order_state: OrderState) -> None:
+        self.open_orders.append(order_state)
+
+    def record_order_filled(self, order_id: str) -> None:
+        self.filled_order_ids.append(order_id)
+
+
+class _StaticOpenOrderExecutor:
+    def __init__(self, order_state: OrderState) -> None:
+        self.order_state = order_state
+        self.risk = _RecordingRisk()
+
+    async def execute(
+        self,
+        decision: TradeDecision,
+        portfolio: object,
+        *,
+        dedup_acquired: bool = False,
+    ) -> OrderState:
+        del decision, portfolio, dedup_acquired
+        return self.order_state
 
 
 class _HeartbeatPool:
@@ -357,6 +435,79 @@ class TestWouldExceedPositionCapacity:
 
         assert enqueued is False
         assert runner._decision_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_actuator_loop_keeps_live_open_order_capacity_reserved(self) -> None:
+        runner = _live_runner(max_open_positions=2)
+        runner.portfolio = replace(
+            runner.portfolio,
+            open_positions=[_position()],
+        )
+        first = _decision(market_id="market-b", token_id="token-b")
+        second = replace(
+            _decision(market_id="market-c", token_id="token-c"),
+            decision_id="decision-cap-2",
+        )
+        order_state = _open_order_state(first)
+        executor = _StaticOpenOrderExecutor(order_state)
+        runner.actuator_executor = cast(Any, executor)
+        runner.order_store = cast(Any, _RecordingOrderStore())
+        runner.decision_store = cast(Any, _RecordingDecisionStore())
+        assert runner._reserve_position_capacity(first) is not None
+        await runner._decision_queue.put(  # noqa: SLF001
+            ActuatorWorkItem(decision=first, signal=None)
+        )
+
+        actuator_task = asyncio.create_task(runner._actuator_loop())  # noqa: SLF001
+        await asyncio.wait_for(runner._decision_queue.join(), timeout=1.0)  # noqa: SLF001
+        runner._stop_event.set()  # noqa: SLF001
+        await asyncio.wait_for(actuator_task, timeout=1.0)
+
+        assert runner._would_exceed_position_capacity(second)  # noqa: SLF001
+        assert executor.risk.open_orders == [order_state]
+        assert executor.risk.filled_order_ids == []
+
+    @pytest.mark.asyncio
+    async def test_actuator_loop_keeps_live_open_exit_key_reserved(self) -> None:
+        runner = _live_runner(max_open_positions=50)
+        decision = replace(
+            _decision(market_id="market-exit", token_id="token-exit"),
+            decision_id="decision-exit",
+            side="SELL",
+            action="SELL",
+            stop_conditions=["position_exit:stop_loss"],
+        )
+        exit_key_value = (
+            decision.strategy_id,
+            decision.strategy_version_id,
+            decision.market_id,
+            decision.token_id,
+            "stop_loss",
+        )
+        runner._emitted_position_exit_keys.add(exit_key_value)  # noqa: SLF001
+        runner._position_exit_keys_by_decision[decision.decision_id] = (  # noqa: SLF001
+            exit_key_value
+        )
+        order_state = _open_order_state(decision)
+        executor = _StaticOpenOrderExecutor(order_state)
+        runner.actuator_executor = cast(Any, executor)
+        runner.order_store = cast(Any, _RecordingOrderStore())
+        runner.decision_store = cast(Any, _RecordingDecisionStore())
+        await runner._decision_queue.put(  # noqa: SLF001
+            ActuatorWorkItem(decision=decision, signal=None)
+        )
+
+        actuator_task = asyncio.create_task(runner._actuator_loop())  # noqa: SLF001
+        await asyncio.wait_for(runner._decision_queue.join(), timeout=1.0)  # noqa: SLF001
+        runner._stop_event.set()  # noqa: SLF001
+        await asyncio.wait_for(actuator_task, timeout=1.0)
+
+        assert exit_key_value in runner._emitted_position_exit_keys  # noqa: SLF001
+        assert (  # noqa: SLF001
+            runner._position_exit_keys_by_decision[decision.decision_id]
+            == exit_key_value
+        )
+        assert executor.risk.open_orders == [order_state]
 
     @pytest.mark.asyncio
     async def test_enqueue_rejects_and_releases_accepted_decision_when_capacity_fills(
