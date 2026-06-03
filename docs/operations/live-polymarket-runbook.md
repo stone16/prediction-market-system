@@ -404,6 +404,23 @@ paper/live telemetry and include both `displayed_depth_fill_ratio` and
 eligibility, so tight limits that would drift out of reach do not appear as
 free fills in promotion reports.
 
+First export strict PAPER execution CSVs from the PMS API. The exporter reads
+`/decisions` and `/trades`, computes filled-row slippage and latency from
+decision/trade timestamps and prices, and fails closed when launch-critical
+fields such as explicit execution PnL or adverse-selection evidence are absent:
+
+```bash
+uv run python scripts/export_paper_execution_from_api.py \
+  --execution-output /secure/pms/paper-execution-export.csv \
+  --telemetry-output /secure/pms/paper-execution-telemetry.csv \
+  --require-adverse-selection
+```
+
+Both outputs must live outside the repo in a private owner-writable directory.
+Use `--decisions-json` and `--trades-json` only for captured API payload
+replays; final launch artifacts should be generated against the completed PAPER
+soak API snapshot.
+
 Generate the execution-model artifact from paper/live telemetry with:
 
 ```bash
