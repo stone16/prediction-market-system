@@ -6307,6 +6307,12 @@ async def test_live_preflight_fails_when_paper_backtest_diff_hides_mismatch_list
             (datetime.now(tz=UTC) - timedelta(days=8)).isoformat(),
             "paper-vs-backtest execution diff artifact is stale",
         ),
+        (
+            (datetime.now(tz=UTC) - timedelta(seconds=60))
+            .replace(tzinfo=None)
+            .isoformat(),
+            "paper-vs-backtest execution diff artifact generated_at must include timezone",
+        ),
     ],
 )
 async def test_live_preflight_fails_with_bad_paper_backtest_diff_generated_at(
@@ -7214,6 +7220,38 @@ def test_live_preflight_artifact_rejects_swapped_readiness_report(
         validator(settings)
 
 
+def test_live_preflight_artifact_rejects_naive_generated_at(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    artifact_path = Path(
+        make_live_preflight_artifact_path(
+            prefix="pms-live-preflight-naive-generated-at-",
+            settings=settings,
+        )
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["generated_at"] = (
+        (datetime.now(tz=UTC) - timedelta(seconds=20))
+        .replace(tzinfo=None)
+        .isoformat()
+    )
+    artifact_path.write_text(
+        json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    settings.live_preflight_artifact_path = str(artifact_path)
+    validator = getattr(live_preflight_module, "require_live_preflight_artifact")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="generated_at must include timezone",
+    ):
+        validator(settings)
+
+
 def test_live_strategy_artifact_submission_accepts_runtime_valid_category_prior_decimals(
     tmp_path: Path,
 ) -> None:
@@ -7238,6 +7276,54 @@ def test_live_strategy_artifact_submission_accepts_runtime_valid_category_prior_
     )
 
     validator(settings)
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "expected_detail"),
+    [
+        (
+            "execution_model",
+            "execution-model artifact generated_at must include timezone",
+        ),
+        (
+            "paper_backtest_diff",
+            "paper-vs-backtest execution diff artifact generated_at must include timezone",
+        ),
+    ],
+)
+def test_live_strategy_artifact_submission_rejects_naive_generated_at(
+    tmp_path: Path,
+    artifact_name: str,
+    expected_detail: str,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+
+    if artifact_name == "execution_model":
+        payload_path = Path(cast(str, settings.live_execution_model_path))
+    elif artifact_name == "paper_backtest_diff":
+        payload_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    else:
+        raise AssertionError(f"unknown artifact_name: {artifact_name}")
+
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    payload["generated_at"] = (
+        (datetime.now(tz=UTC) - timedelta(seconds=60))
+        .replace(tzinfo=None)
+        .isoformat()
+    )
+    payload_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match=expected_detail):
+        validator(settings)
 
 
 @pytest.mark.parametrize(
@@ -7620,6 +7706,77 @@ def test_live_preflight_artifact_rejects_malformed_emergency_audit_record(
         match="emergency audit record invalid",
     ):
         validator(settings)
+
+
+def test_live_preflight_artifact_rejects_naive_emergency_audit_timestamp(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    artifact_path = Path(
+        make_live_preflight_artifact_path(
+            prefix="pms-live-preflight-naive-emergency-audit-",
+            settings=settings,
+        )
+    )
+    audit_path = Path(settings.live_emergency_audit_path)
+    audit_path.write_text(
+        json.dumps(
+            {
+                "timestamp": (
+                    (datetime.now(tz=UTC) - timedelta(seconds=10))
+                    .replace(tzinfo=None)
+                    .isoformat()
+                ),
+                "phase": "manual_emergency_stop",
+                "event": "manual_emergency_stop",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings.live_preflight_artifact_path = str(artifact_path)
+    validator = getattr(live_preflight_module, "require_live_preflight_artifact")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="timestamp must include timezone",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_module_rejects_naive_emergency_audit_timestamp(
+    tmp_path: Path,
+) -> None:
+    audit_path = tmp_path / "live-emergency-audit.jsonl"
+    audit_path.write_text(
+        json.dumps(
+            {
+                "timestamp": (
+                    (datetime.now(tz=UTC) - timedelta(seconds=10))
+                    .replace(tzinfo=None)
+                    .isoformat()
+                ),
+                "phase": "manual_emergency_stop",
+                "event": "manual_emergency_stop",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    validator = getattr(
+        live_preflight_artifact_module,
+        "latest_live_emergency_audit_timestamp",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="timestamp must include timezone",
+    ):
+        validator(str(audit_path))
 
 
 def test_live_preflight_artifact_rejects_placeholder_artifact_path(

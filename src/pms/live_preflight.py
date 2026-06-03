@@ -762,12 +762,14 @@ def _require_preflight_generated_at(artifact: Mapping[str, object]) -> datetime:
     except ValueError as exc:
         msg = "LIVE credentialed preflight artifact generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    if generated_at_dt.tzinfo is None:
-        generated_at_dt = generated_at_dt.replace(tzinfo=UTC)
-    if generated_at_dt.astimezone(UTC) > datetime.now(tz=UTC):
+    generated_at_utc = _require_timezone_aware_datetime(
+        generated_at_dt,
+        label="LIVE credentialed preflight artifact",
+    )
+    if generated_at_utc > datetime.now(tz=UTC):
         msg = "LIVE credentialed preflight artifact generated_at is in the future"
         raise LiveTradingDisabledError(msg)
-    return generated_at_dt.astimezone(UTC)
+    return generated_at_utc
 
 
 def _require_preflight_after_readiness(
@@ -923,7 +925,14 @@ def _emergency_audit_record_timestamp(
             f"chronology: {path}:{line_number} invalid timestamp"
         )
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_preflight_datetime(parsed)
+    return _require_timezone_aware_datetime(
+        parsed,
+        label=(
+            "LIVE emergency audit record invalid for credentialed preflight "
+            f"chronology: {path}:{line_number}"
+        ),
+        field_name="timestamp",
+    )
 
 
 def _readiness_report_generated_at_values(
@@ -989,7 +998,7 @@ def _json_artifact_generated_at(raw_path: str | None, *, label: str) -> datetime
     except ValueError as exc:
         msg = f"{label} generated_at is invalid for credentialed preflight chronology"
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_preflight_datetime(parsed)
+    return _require_timezone_aware_datetime(parsed, label=label)
 
 
 def _readiness_report_generated_at(raw_path: str | None, *, label: str) -> datetime:
@@ -1012,7 +1021,11 @@ def _readiness_report_generated_at(raw_path: str | None, *, label: str) -> datet
     except ValueError as exc:
         msg = f"{label} persisted provenance generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_preflight_datetime(generated_at)
+    return _require_timezone_aware_datetime(
+        generated_at,
+        label=label,
+        field_name="persisted provenance generated_at",
+    )
 
 
 def _markdown_report_provenance_value(
@@ -1063,6 +1076,18 @@ def _require_preflight_fresh(
 def _coerce_preflight_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _require_timezone_aware_datetime(
+    value: datetime,
+    *,
+    label: str,
+    field_name: str = "generated_at",
+) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        msg = f"{label} {field_name} must include timezone"
+        raise LiveTradingDisabledError(msg)
     return value.astimezone(UTC)
 
 
@@ -1582,7 +1607,7 @@ def _require_json_artifact_generated_at(
     except ValueError as exc:
         msg = f"{label} generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    generated_at = _coerce_preflight_datetime(generated_at)
+    generated_at = _require_timezone_aware_datetime(generated_at, label=label)
     now = datetime.now(tz=UTC)
     if generated_at > now:
         msg = f"{label} generated_at is in the future"

@@ -617,7 +617,7 @@ def _require_json_artifact_generated_at(
     except ValueError as exc:
         msg = f"{label} generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    generated_at = _coerce_datetime(generated_at)
+    generated_at = _require_timezone_aware_datetime(generated_at, label=label)
     now = datetime.now(tz=UTC)
     if generated_at > now:
         msg = f"{label} generated_at is in the future"
@@ -1006,7 +1006,7 @@ def _json_artifact_generated_at(raw_path: str | None, *, label: str) -> datetime
     except ValueError as exc:
         msg = f"{label} generated_at is invalid for credentialed preflight chronology"
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_datetime(parsed)
+    return _require_timezone_aware_datetime(parsed, label=label)
 
 
 def canonical_sha256(payload: Mapping[str, object]) -> str:
@@ -1120,12 +1120,25 @@ def _emergency_audit_record_timestamp(
             f"chronology: {path}:{line_number} invalid timestamp"
         )
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_datetime(parsed)
+    return _require_timezone_aware_datetime(
+        parsed,
+        label=(
+            "LIVE emergency audit record invalid for credentialed preflight "
+            f"chronology: {path}:{line_number}"
+        ),
+        field_name="timestamp",
+    )
 
 
-def _coerce_datetime(value: datetime) -> datetime:
+def _require_timezone_aware_datetime(
+    value: datetime,
+    *,
+    label: str,
+    field_name: str = "generated_at",
+) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=UTC)
+        msg = f"{label} {field_name} must include timezone"
+        raise LiveTradingDisabledError(msg)
     return value.astimezone(UTC)
 
 
@@ -1149,7 +1162,11 @@ def _readiness_report_generated_at(raw_path: str | None, *, label: str) -> datet
     except ValueError as exc:
         msg = f"{label} persisted provenance generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_datetime(generated_at)
+    return _require_timezone_aware_datetime(
+        generated_at,
+        label=label,
+        field_name="persisted provenance generated_at",
+    )
 
 
 def _paper_soak_report_strategy_labels(settings: PMSSettings) -> tuple[str, ...]:

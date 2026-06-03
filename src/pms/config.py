@@ -2197,11 +2197,27 @@ def _require_report_generated_at(
         msg = f"{label} persisted provenance generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
 
-    aware_generated_at = _coerce_aware_datetime(generated_at)
+    aware_generated_at = _require_aware_datetime(
+        generated_at,
+        label=label,
+        field_name="persisted provenance generated_at",
+    )
     if aware_generated_at > datetime.now(tz=UTC):
         msg = f"{label} persisted provenance generated_at is in the future"
         raise LiveTradingDisabledError(msg)
     return aware_generated_at
+
+
+def _require_aware_datetime(
+    value: datetime,
+    *,
+    label: str,
+    field_name: str,
+) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        msg = f"{label} {field_name} must include timezone"
+        raise LiveTradingDisabledError(msg)
+    return value.astimezone(UTC)
 
 
 def _require_report_fresh(

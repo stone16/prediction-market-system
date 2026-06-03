@@ -1767,6 +1767,50 @@ def test_live_mode_rejects_stale_paper_soak_report_generated_at() -> None:
         validate_live_mode_ready(settings)
 
 
+@pytest.mark.parametrize(
+    ("report_name", "expected_detail"),
+    [
+        (
+            "paper_soak",
+            "paper soak GO report persisted provenance generated_at must include timezone",
+        ),
+        (
+            "operator_rehearsal",
+            "operator rehearsal report persisted provenance generated_at must include timezone",
+        ),
+    ],
+)
+def test_live_mode_rejects_naive_readiness_report_generated_at(
+    report_name: str,
+    expected_detail: str,
+) -> None:
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix="pms-live-naive-readiness-report-"
+    )
+    naive_generated_at = (
+        (datetime.now(tz=UTC) - timedelta(seconds=30))
+        .replace(tzinfo=None)
+        .isoformat()
+    )
+    target_path = (
+        paper_report_path
+        if report_name == "paper_soak"
+        else rehearsal_report_path
+    )
+    _replace_report_provenance_field(
+        target_path,
+        field_name="generated_at",
+        value=naive_generated_at,
+    )
+    settings = _live_settings(
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match=expected_detail):
+        validate_live_mode_ready(settings)
+
+
 def test_live_mode_rejects_no_go_paper_soak_report(tmp_path: Path) -> None:
     report_path = tmp_path / "paper-soak-no-go.md"
     report_path.write_text(
