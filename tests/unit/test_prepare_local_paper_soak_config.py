@@ -120,6 +120,46 @@ def test_prepare_local_paper_soak_config_refuses_symlink_output_with_overwrite(
     assert output.is_symlink()
 
 
+def test_prepare_local_paper_soak_config_rejects_symlink_secure_dir_without_chmod(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "config.live-soak.yaml"
+    output = tmp_path / "config.local.live-soak.yaml"
+    target_dir = tmp_path / "target-secure"
+    secure_dir = tmp_path / "secure-link"
+    source.write_text(
+        "\n".join(
+            [
+                "controller:",
+                "  category_prior_observations_path: null",
+                "strategies:",
+                "  flb_calibration_path: /secure/pms/flb-calibration.csv",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    target_dir.mkdir()
+    target_dir.chmod(0o755)
+    secure_dir.symlink_to(target_dir, target_is_directory=True)
+
+    exit_code = prepare_local_paper_soak_config.main(
+        [
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+            "--secure-dir",
+            str(secure_dir),
+        ]
+    )
+
+    assert exit_code == 1
+    assert not output.exists()
+    assert secure_dir.is_symlink()
+    assert stat.S_IMODE(target_dir.stat().st_mode) == 0o755
+
+
 def test_prepare_local_paper_soak_config_requires_expected_source_paths(
     tmp_path: Path,
 ) -> None:

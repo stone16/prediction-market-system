@@ -138,13 +138,13 @@ def _replace_single(
 
 def _prepare_private_artifact_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    path.chmod(0o700)
     mode = path.lstat().st_mode
     if not stat.S_ISDIR(mode):
         msg = f"local artifact path is not a directory: {path}"
         raise OSError(msg)
-    permissions = stat.S_IMODE(mode)
-    if permissions != 0o700:
+    path.chmod(0o700)
+    updated_permissions = stat.S_IMODE(path.lstat().st_mode)
+    if updated_permissions != 0o700:
         msg = f"local artifact directory must be chmod 700: {path}"
         raise OSError(msg)
 
