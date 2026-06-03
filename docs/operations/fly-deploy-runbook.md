@@ -72,15 +72,16 @@ resolved at boot. The image command intentionally does not pass `--config`;
 `fly.toml` selects the supervised paper-soak config with
 `PMS_CONFIG_PATH=/app/config.live-soak.yaml`.
 
-The supervised paper-soak config now requires the calibrated H1 FLB artifact at
-`/secure/pms/flb-calibration.csv` plus
+The supervised paper-soak config now requires the category-prior baseline at
+`/secure/pms/category-prior-observations.csv` plus the calibrated H1 FLB
+artifact at `/secure/pms/flb-calibration.csv` and
 `/secure/pms/flb-calibration.csv.provenance.json`. Bootstrap the app volume and
-stage both artifacts before the first machine starts; otherwise `Runner` fails
-closed while loading the config.
+stage all three artifacts before the first machine starts; otherwise `Runner`
+fails closed while loading the config.
 
-Generate the artifact from the checked-in Dune export first. `DUNE_API_KEY` is
-a credential; load it from the operator secret store into the staging shell and
-do not commit or paste it:
+Generate the FLB artifacts from the checked-in Dune export first. `DUNE_API_KEY`
+is a credential; load it from the operator secret store into the staging shell
+and do not commit or paste it:
 
 ```bash
 install -d -m 700 /secure/pms
@@ -99,12 +100,21 @@ uv run python scripts/flb_data_feasibility.py \
     /secure/pms/flb-calibration.csv.provenance.json
 ```
 
+Generate the category-prior artifact from resolved Gamma markets:
+
+```bash
+uv run python scripts/export_category_prior_observations.py \
+  --output /secure/pms/category-prior-observations.csv \
+  --min-observations 100
+```
+
 Then create the Fly paper-soak volume and deploy while copying the non-secret
-artifact into the mounted path:
+artifacts into the mounted path:
 
 ```bash
 fly volumes create pms_paper_soak_secure --region iad
 fly deploy \
+  --file-local /secure/pms/category-prior-observations.csv=/secure/pms/category-prior-observations.csv \
   --file-local /secure/pms/flb-calibration.csv=/secure/pms/flb-calibration.csv \
   --file-local \
     /secure/pms/flb-calibration.csv.provenance.json=/secure/pms/flb-calibration.csv.provenance.json

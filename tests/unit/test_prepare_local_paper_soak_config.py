@@ -20,7 +20,10 @@ def test_prepare_local_paper_soak_config_rewrites_artifact_paths_and_secures_dir
             [
                 "mode: paper",
                 "controller:",
-                "  category_prior_observations_path: null",
+                (
+                    "  category_prior_observations_path: "
+                    "/secure/pms/category-prior-observations.csv"
+                ),
                 "strategies:",
                 "  flb_calibration_path: /secure/pms/flb-calibration.csv",
             ]
@@ -64,7 +67,10 @@ def test_prepare_local_paper_soak_config_refuses_to_overwrite_without_flag(
         "\n".join(
             [
                 "controller:",
-                "  category_prior_observations_path: null",
+                (
+                    "  category_prior_observations_path: "
+                    "/secure/pms/category-prior-observations.csv"
+                ),
                 "strategies:",
                 "  flb_calibration_path: /secure/pms/flb-calibration.csv",
             ]
@@ -92,7 +98,10 @@ def test_prepare_local_paper_soak_config_refuses_symlink_output_with_overwrite(
         "\n".join(
             [
                 "controller:",
-                "  category_prior_observations_path: null",
+                (
+                    "  category_prior_observations_path: "
+                    "/secure/pms/category-prior-observations.csv"
+                ),
                 "strategies:",
                 "  flb_calibration_path: /secure/pms/flb-calibration.csv",
             ]
@@ -131,7 +140,10 @@ def test_prepare_local_paper_soak_config_rejects_symlink_secure_dir_without_chmo
         "\n".join(
             [
                 "controller:",
-                "  category_prior_observations_path: null",
+                (
+                    "  category_prior_observations_path: "
+                    "/secure/pms/category-prior-observations.csv"
+                ),
                 "strategies:",
                 "  flb_calibration_path: /secure/pms/flb-calibration.csv",
             ]
@@ -199,7 +211,10 @@ def test_prepare_local_paper_soak_config_can_write_paper_canary_plumbing_config(
                 "paper_soak_strategy_id: h1_flb",
                 "paper_soak_archive_default: true",
                 "controller:",
-                "  category_prior_observations_path: null",
+                (
+                    "  category_prior_observations_path: "
+                    "/secure/pms/category-prior-observations.csv"
+                ),
                 "strategies:",
                 "  flb_calibration_path: /secure/pms/flb-calibration.csv",
             ]

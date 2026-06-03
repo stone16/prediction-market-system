@@ -20,6 +20,21 @@ def test_fly_binds_api_host_via_env_and_checks_readiness() -> None:
     assert fly_config["http_service"]["checks"][0]["path"] == "/readiness"
 
 
+def test_fly_paper_soak_deploy_runbook_stages_required_artifacts() -> None:
+    runbook = Path("docs/operations/fly-deploy-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    normalized = " ".join(runbook.split())
+
+    assert "scripts/export_category_prior_observations.py" in runbook
+    assert "--output /secure/pms/category-prior-observations.csv" in runbook
+    assert (
+        "--file-local "
+        "/secure/pms/category-prior-observations.csv="
+        "/secure/pms/category-prior-observations.csv"
+    ) in normalized
+
+
 def test_docker_cmd_uses_pms_api_host_env_not_deprecated_host_flag() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 

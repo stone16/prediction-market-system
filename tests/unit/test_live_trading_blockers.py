@@ -2625,6 +2625,28 @@ def test_live_mode_rejects_paper_soak_go_decision_outside_gate_section(
         validate_live_mode_ready(settings)
 
 
+def test_live_mode_rejects_paper_soak_go_report_with_conflicting_gate_decisions() -> None:
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix="pms-live-conflicting-paper-decision-"
+    )
+    report_path = Path(paper_report_path)
+    report_path.write_text(
+        report_path.read_text(encoding="utf-8").replace(
+            "\n| Check | Status | Detail |",
+            "\n**Decision:** NO-GO\n\n| Check | Status | Detail |",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    settings = _live_settings(
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="decision"):
+        validate_live_mode_ready(settings)
+
+
 def test_live_mode_rejects_future_dated_paper_soak_go_report() -> None:
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-live-future-paper-report-"

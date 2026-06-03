@@ -18,9 +18,10 @@ All core PRs merged as of 2026-05-03. The system is code-complete for
 H1 (FLB contrarian) strategy, but the supervised live-data paper soak is
 fail-closed until required non-secret launch artifacts are staged. In
 particular, `config.live-soak.yaml` does not start until
-`/secure/pms/flb-calibration.csv` and its `.provenance.json` sidecar exist and
-pass schema/sample validation. Those files are not credentials; they must be
-generated from the strict warehouse CSV in step 4a below. The checked-in
+`/secure/pms/category-prior-observations.csv`,
+`/secure/pms/flb-calibration.csv`, and the FLB `.provenance.json` sidecar exist
+and pass schema/sample validation. Those files are not credentials; they must
+be generated with the artifact commands in step 4a below. The checked-in
 `docs/research/flb-deciles.csv` is an old Gamma fallback diagnostic and is not a
 launch artifact. H2 anchoring-lag /
 LLM-news replay remains research-only until the H1 historical data spine proves
@@ -41,12 +42,16 @@ enough coverage and measurable edge.
 
 Six things remain between the current branch and real capital:
 
-1. **Non-secret launch artifacts** — Generate `/secure/pms/flb-calibration.csv`
-   and `/secure/pms/flb-calibration.csv.provenance.json` from
-   `/secure/pms/polymarket_resolved_binary.csv` with the checked-in Dune export
-   SQL plus `scripts/flb_data_feasibility.py --source warehouse-csv`; paper-soak
-   startup fails closed until these artifacts exist and pass the runtime H1
-   sample gate. The Dune API key is a credential; the export and calibration
+1. **Non-secret launch artifacts** — Generate
+   `/secure/pms/category-prior-observations.csv`,
+   `/secure/pms/flb-calibration.csv`, and
+   `/secure/pms/flb-calibration.csv.provenance.json`. The FLB artifacts come
+   from `/secure/pms/polymarket_resolved_binary.csv` with the checked-in Dune
+   export SQL plus `scripts/flb_data_feasibility.py --source warehouse-csv`;
+   the category-prior artifact comes from
+   `scripts/export_category_prior_observations.py`. Paper-soak startup fails
+   closed until these artifacts exist and pass runtime sample gates. The Dune
+   API key is a credential; the export, category-prior, and calibration
    artifacts are not.
 2. **Polymarket credentials** — 6 fields (private_key, api_key, api_secret,
    api_passphrase, funder_address, signature_type). For local LIVE, stage them

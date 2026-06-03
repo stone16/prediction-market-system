@@ -96,6 +96,13 @@ def _prepare_local_paper_soak_config(
         )
         text = _replace_single(
             text,
+            "  category_prior_observations_path: "
+            "/secure/pms/category-prior-observations.csv",
+            "  category_prior_observations_path: null",
+            field_name="controller.category_prior_observations_path",
+        )
+        text = _replace_single(
+            text,
             "  flb_calibration_path: /secure/pms/flb-calibration.csv",
             "  flb_calibration_path: null",
             field_name="strategies.flb_calibration_path",
@@ -103,7 +110,8 @@ def _prepare_local_paper_soak_config(
     else:
         text = _replace_single(
             text,
-            "  category_prior_observations_path: null",
+            "  category_prior_observations_path: "
+            "/secure/pms/category-prior-observations.csv",
             f"  category_prior_observations_path: {_yaml_string(category_prior_path)}",
             field_name="controller.category_prior_observations_path",
         )

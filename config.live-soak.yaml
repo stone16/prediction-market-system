@@ -69,10 +69,10 @@ controller:
   venue_book_refresh_timeout_s: 5.0
   direct_quote_min_notional_usdc: 100.0
   dual_quote_max_price_delta_bps: 25.0
-  # Optional historical resolution export used to attach a no-lookahead
-  # category-prior baseline to each controller decision. Keep null until the
-  # file exists; if set, startup fails closed when the file/schema is invalid.
-  category_prior_observations_path: null
+  # Historical resolution export used to attach a no-lookahead category-prior
+  # baseline to each controller decision. The launch soak requires this
+  # artifact so the final LIVE GO report can satisfy baseline coverage gates.
+  category_prior_observations_path: /secure/pms/category-prior-observations.csv
   category_prior_min_category_samples: 20
   category_prior_min_global_samples: 100
   category_prior_smoothing_alpha: 1.0

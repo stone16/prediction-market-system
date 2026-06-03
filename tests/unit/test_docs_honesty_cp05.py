@@ -83,8 +83,9 @@ def test_readme_paper_soak_status_mentions_required_launch_artifacts() -> None:
 
     assert "Paper Soak Blocked Pending Launch Artifacts" in readme_text
     assert (
-        "does not start until `/secure/pms/flb-calibration.csv` and its "
-        "`.provenance.json` sidecar exist"
+        "does not start until `/secure/pms/category-prior-observations.csv`, "
+        "`/secure/pms/flb-calibration.csv`, and the FLB `.provenance.json` "
+        "sidecar exist"
     ) in normalized
     assert "not credentials" in normalized
     assert "not a launch artifact" in normalized
@@ -286,6 +287,7 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "fly.live.toml.example" in fly_runbook_text
     assert "fly volumes create pms_paper_soak_secure" in fly_runbook_text
     assert "install -d -m 700 /secure/pms" in fly_runbook_text
+    assert "/secure/pms/category-prior-observations.csv" in fly_runbook_text
     assert "/secure/pms/flb-calibration.csv" in fly_runbook_text
     assert "/secure/pms/flb-calibration.csv.provenance.json" in fly_runbook_text
     assert "fly deploy -c fly.live.toml" in fly_runbook_text

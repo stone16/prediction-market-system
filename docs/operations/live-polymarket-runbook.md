@@ -226,8 +226,9 @@ fingerprint binds the staged CSV contents, so replacing the category-prior
 artifact after preflight invalidates the launch artifact.
 
 The launch paper-soak config (`config.live-soak.yaml`) is bound to H1 FLB and
-requires `strategies.flb_calibration_path` to point at a staged warehouse model
-artifact. The CSV schema is
+requires `controller.category_prior_observations_path` and
+`strategies.flb_calibration_path` to point at staged warehouse artifacts. The
+FLB CSV schema is
 `signal_name,probability_estimate,sample_count,source_label`, and the same
 directory must contain the required
 `flb-calibration.csv.provenance.json` sidecar. The CSV must contain both
@@ -295,7 +296,8 @@ uv run python scripts/export_category_prior_observations.py \
 ```
 
 For Fly/LIVE volume staging, keep the same artifact filenames under
-`/secure/pms`, including `/secure/pms/flb-calibration.csv` and
+`/secure/pms`, including `/secure/pms/category-prior-observations.csv`,
+`/secure/pms/flb-calibration.csv`, and
 `/secure/pms/flb-calibration.csv.provenance.json`.
 
 Before starting the paper-soak API, run the local artifact check. It uses the

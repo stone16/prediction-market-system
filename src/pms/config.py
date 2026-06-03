@@ -2486,6 +2486,7 @@ def _require_live_operator_rehearsal_report_date_not_future(
 
 def _markdown_section_decision(report_text: str, *, heading: str) -> str | None:
     in_section = False
+    decisions: list[str] = []
     for raw_line in report_text.splitlines():
         line = raw_line.strip()
         if line.startswith("## "):
@@ -2493,8 +2494,13 @@ def _markdown_section_decision(report_text: str, *, heading: str) -> str | None:
             continue
         if not in_section or not line.startswith("**Decision:**"):
             continue
-        return line.removeprefix("**Decision:**").strip().strip("*").upper()
-    return None
+        decisions.append(line.removeprefix("**Decision:**").strip().strip("*").upper())
+    if len(decisions) > 1:
+        msg = f"{heading} contains multiple decision rows"
+        raise LiveTradingDisabledError(msg)
+    if not decisions:
+        return None
+    return decisions[0]
 
 
 def _require_live_operator_rehearsal_persisted_provenance(

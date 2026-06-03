@@ -56,6 +56,9 @@ def test_live_soak_config_uses_tradeable_paper_strategy() -> None:
 
     assert settings.paper_soak_strategy_id == "h1_flb"
     assert settings.paper_soak_archive_default is True
+    assert settings.controller.category_prior_observations_path == (
+        "/secure/pms/category-prior-observations.csv"
+    )
     assert settings.strategies.flb_calibration_path == (
         "/secure/pms/flb-calibration.csv"
     )
