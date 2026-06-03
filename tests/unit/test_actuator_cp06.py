@@ -1799,6 +1799,54 @@ async def test_polymarket_actuator_rejects_incomplete_preflight_artifact_for_dir
 
 
 @pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_naive_preflight_generated_at_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    _write_final_live_preflight_artifact(
+        settings,
+        artifact_path,
+        generated_at=datetime.now(UTC).replace(tzinfo=None),
+    )
+    approval_path = Path(cast(str, settings.polymarket.first_live_order_approval_path))
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=settings.polymarket.operator_approval_max_age_s,
+    )
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    try:
+        with pytest.raises(
+            LiveTradingDisabledError,
+            match="generated_at must include timezone",
+        ):
+            await actuator.execute(_decision(), _portfolio())
+    finally:
+        approval_path.unlink(missing_ok=True)
+        _sidecar_path(approval_path).unlink(missing_ok=True)
+
+    assert client.submitted == []
+
+
+@pytest.mark.asyncio
 async def test_polymarket_actuator_rejects_wrong_settings_preflight_artifact_for_direct_live_submit(
     tmp_path: Path,
     live_sdk_dependency_available: None,

@@ -1475,8 +1475,9 @@ def _require_fresh_live_preflight_artifact_timestamp(
     except ValueError as exc:
         msg = "LIVE credentialed preflight artifact generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    if generated_at.tzinfo is None:
-        generated_at = generated_at.replace(tzinfo=UTC)
+    if generated_at.tzinfo is None or generated_at.utcoffset() is None:
+        msg = "LIVE credentialed preflight artifact generated_at must include timezone"
+        raise LiveTradingDisabledError(msg)
     generated_at = generated_at.astimezone(UTC)
     now = datetime.now(tz=UTC)
     if generated_at > now:
