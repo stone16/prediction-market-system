@@ -62,6 +62,54 @@ passphrases into chat, issues, PRs, logs, or config files.
    export PMS_API_TOKEN="$(openssl rand -hex 32)"
    PMS_CONFIG_PATH=config.local.paper-canary.yaml uv run pms-api
    ```
+
+   In a second shell with the same `PMS_API_TOKEN`, start the runner, wait
+   until `/status.controller.decisions_total` and `/status.actuator.fills_total`
+   are nonzero, then capture the smoke snapshots while the runner is still
+   running:
+
+   ```bash
+   export PAPER_CANARY_EVIDENCE_DIR="$(mktemp -d)"
+   curl -fsS -X POST \
+     -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/run/start
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/status \
+     > "$PAPER_CANARY_EVIDENCE_DIR/status.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/strategies \
+     > "$PAPER_CANARY_EVIDENCE_DIR/strategies.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     "http://127.0.0.1:8000/markets?limit=5" \
+     > "$PAPER_CANARY_EVIDENCE_DIR/markets.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     "http://127.0.0.1:8000/decisions?limit=50" \
+     > "$PAPER_CANARY_EVIDENCE_DIR/decisions.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     "http://127.0.0.1:8000/trades?limit=50" \
+     > "$PAPER_CANARY_EVIDENCE_DIR/trades.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/positions \
+     > "$PAPER_CANARY_EVIDENCE_DIR/positions.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/metrics \
+     > "$PAPER_CANARY_EVIDENCE_DIR/metrics.json"
+
+   uv run python scripts/check_paper_canary_smoke.py \
+     --status-json "$PAPER_CANARY_EVIDENCE_DIR/status.json" \
+     --strategies-json "$PAPER_CANARY_EVIDENCE_DIR/strategies.json" \
+     --markets-json "$PAPER_CANARY_EVIDENCE_DIR/markets.json" \
+     --decisions-json "$PAPER_CANARY_EVIDENCE_DIR/decisions.json" \
+     --trades-json "$PAPER_CANARY_EVIDENCE_DIR/trades.json" \
+     --positions-json "$PAPER_CANARY_EVIDENCE_DIR/positions.json" \
+     --metrics-json "$PAPER_CANARY_EVIDENCE_DIR/metrics.json"
+   ```
+
+   The checker must pass before treating the canary as plumbing evidence. A
+   pass only proves live market data, controller fan-out, paper actuator fill
+   persistence, and selection-funnel metrics for `paper_canary_v1`; it still
+   cannot satisfy H1 launch artifact readiness or the 30-day paper-soak GO
+   gate.
 3. Start the PAPER soak API control plane against live market data with the
    soak config. Keep the token private; `scripts/paper_report.py` reads the
    same token from `PMS_API_TOKEN` when polling protected paper API endpoints.

@@ -147,6 +147,28 @@ export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
 psql "$DATABASE_URL" -Atc "select current_database(), inet_server_addr(), inet_server_port(), version();"
 uv run alembic upgrade head
 
+# Optional no-credential plumbing smoke before launch artifacts are staged.
+# This verifies live-data -> controller -> paper-actuator flow only; it is not
+# H1 paper-soak performance evidence and cannot satisfy the final GO gate.
+uv run python scripts/prepare_local_paper_soak_config.py \
+  --output config.local.paper-canary.yaml \
+  --paper-canary
+uv run python scripts/install_paper_canary_strategy.py \
+  --database-url "$DATABASE_URL" \
+  --archive-default \
+  --sample-modulus 1
+# Start the API with config.local.paper-canary.yaml, POST /run/start from a
+# second shell, save /status, /strategies, /markets, /decisions, /trades,
+# /positions, and /metrics JSON snapshots, then validate them with:
+uv run python scripts/check_paper_canary_smoke.py \
+  --status-json "$PAPER_CANARY_EVIDENCE_DIR/status.json" \
+  --strategies-json "$PAPER_CANARY_EVIDENCE_DIR/strategies.json" \
+  --markets-json "$PAPER_CANARY_EVIDENCE_DIR/markets.json" \
+  --decisions-json "$PAPER_CANARY_EVIDENCE_DIR/decisions.json" \
+  --trades-json "$PAPER_CANARY_EVIDENCE_DIR/trades.json" \
+  --positions-json "$PAPER_CANARY_EVIDENCE_DIR/positions.json" \
+  --metrics-json "$PAPER_CANARY_EVIDENCE_DIR/metrics.json"
+
 # 4. Create a private artifact directory and repo-ignored local config.
 #    On macOS, root-level /secure may be unavailable; keep local PAPER
 #    artifacts in a user-owned chmod 700 directory and let the helper rewrite
