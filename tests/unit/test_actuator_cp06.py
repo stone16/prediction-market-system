@@ -1277,6 +1277,29 @@ def _stage_readiness_fingerprint_files(settings: PMSSettings, root: Path) -> Non
         + "\n",
         encoding="utf-8",
     )
+    Path(f"{flb_calibration_path}.provenance.json").write_text(
+        json.dumps(
+            {
+                "artifact_type": "flb_calibration_provenance",
+                "generated_by": "scripts/flb_data_feasibility.py",
+                "source": "warehouse-csv",
+                "generated_at": generated_at.isoformat(),
+                "warehouse_csv_sha256": sha256(
+                    b"unit warehouse provenance fixture"
+                ).hexdigest(),
+                "warehouse_market_count": 301,
+                "warehouse_longshot_count": 150,
+                "warehouse_favorite_count": 151,
+                "calibration_csv_sha256": sha256(
+                    flb_calibration_path.read_bytes()
+                ).hexdigest(),
+                "calibration_source_label": "warehouse-flb-v1",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     settings.live_execution_model_path = str(execution_model_path)
     settings.live_paper_backtest_diff_path = str(paper_backtest_diff_path)
     settings.controller.category_prior_observations_path = str(category_prior_path)

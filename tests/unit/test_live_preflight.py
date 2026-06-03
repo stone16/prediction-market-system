@@ -443,6 +443,7 @@ def _settings(
         Path(paper_report_path).parent / "paper-backtest-execution-diff.json"
     )
     _write_valid_flb_calibration_csv(flb_calibration_path)
+    _write_valid_flb_calibration_provenance_json(flb_calibration_path)
     _write_valid_category_prior_csv(category_prior_path)
     _write_valid_execution_model_json(execution_model_path)
     _write_valid_paper_backtest_diff_json(paper_backtest_diff_path)
@@ -590,6 +591,33 @@ def _write_valid_flb_calibration_csv(path: Path) -> None:
                 "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
             )
         ),
+        encoding="utf-8",
+    )
+
+
+def _write_valid_flb_calibration_provenance_json(calibration_path: Path) -> None:
+    provenance_path = Path(f"{calibration_path}.provenance.json")
+    provenance_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "flb_calibration_provenance",
+                "generated_by": "scripts/flb_data_feasibility.py",
+                "source": "warehouse-csv",
+                "generated_at": "2026-06-01T00:00:00+00:00",
+                "warehouse_csv_sha256": sha256(
+                    b"unit warehouse provenance fixture"
+                ).hexdigest(),
+                "warehouse_market_count": 301,
+                "warehouse_longshot_count": 150,
+                "warehouse_favorite_count": 151,
+                "calibration_csv_sha256": sha256(
+                    calibration_path.read_bytes()
+                ).hexdigest(),
+                "calibration_source_label": "warehouse-flb-v1",
+            },
+            sort_keys=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -1435,6 +1463,30 @@ def test_live_preflight_readiness_fingerprint_binds_flb_calibration_artifact(
     assert after != before
 
 
+def test_live_preflight_readiness_fingerprint_binds_flb_calibration_provenance(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    before = live_preflight_module.live_preflight_readiness_reports_fingerprint(
+        settings
+    )
+
+    calibration_path = Path(cast(str, settings.strategies.flb_calibration_path))
+    provenance_path = Path(f"{calibration_path}.provenance.json")
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["warehouse_csv_sha256"] = "b" * 64
+    provenance_path.write_text(
+        json.dumps(provenance, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    after = live_preflight_module.live_preflight_readiness_reports_fingerprint(settings)
+
+    assert after != before
+
+
 @pytest.mark.parametrize(
     ("artifact_name", "expected_detail"),
     [
@@ -1588,6 +1640,7 @@ def test_live_preflight_readiness_fingerprint_opens_reports_with_no_follow_when_
         Path(cast(str, settings.live_paper_backtest_diff_path)),
         Path(cast(str, settings.controller.category_prior_observations_path)),
         Path(cast(str, settings.strategies.flb_calibration_path)),
+        Path(f"{cast(str, settings.strategies.flb_calibration_path)}.provenance.json"),
     }
     observed: list[tuple[Path, int]] = []
     real_open = os.open
@@ -5533,6 +5586,28 @@ async def test_live_preflight_fails_without_flb_calibration_artifact_path(
     assert result.ok is False
     assert live_config.ok is False
     assert "FLB calibration artifact path is required" in live_config.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_without_flb_calibration_provenance_sidecar(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    calibration_path = Path(cast(str, settings.strategies.flb_calibration_path))
+    Path(f"{calibration_path}.provenance.json").unlink()
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert "FLB calibration provenance JSON" in live_config.detail
 
 
 @pytest.mark.parametrize(

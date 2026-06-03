@@ -18,6 +18,10 @@ from pms.config import (
 )
 from pms.core.models import LiveTradingDisabledError
 from pms.research.spec_codec import deserialize_execution_model
+from pms.strategies.flb.artifacts import (
+    flb_calibration_provenance_path,
+    validate_flb_calibration_provenance_json,
+)
 
 
 _LIVE_PAPER_BACKTEST_DIFF_GENERATED_BY = "scripts/paper_backtest_execution_diff.py"
@@ -149,6 +153,12 @@ def live_preflight_readiness_reports_fingerprint(settings: PMSSettings) -> str:
         "flb_calibration": _readiness_report_fingerprint_payload(
             settings.strategies.flb_calibration_path,
             label="LIVE FLB calibration artifact",
+        ),
+        "flb_calibration_provenance": _readiness_report_fingerprint_payload(
+            _flb_calibration_provenance_raw_path(
+                settings.strategies.flb_calibration_path
+            ),
+            label="LIVE FLB calibration provenance JSON",
         ),
     }
     return canonical_sha256(payload)
@@ -544,10 +554,29 @@ def _validate_live_flb_calibration_artifact(settings: PMSSettings) -> None:
         label="LIVE FLB calibration artifact",
     )
     text = _read_strategy_artifact_text(path, label="LIVE FLB calibration artifact")
-    _validate_flb_calibration_rows(
+    source_labels, signal_sample_counts = _validate_flb_calibration_rows(
         text,
         min_sample_count=settings.strategies.flb_min_calibration_samples,
     )
+    provenance_path = _require_live_strategy_artifact_path(
+        str(flb_calibration_provenance_path(path)),
+        label="LIVE FLB calibration provenance JSON",
+    )
+    provenance_text = _read_strategy_artifact_text(
+        provenance_path,
+        label="LIVE FLB calibration provenance JSON",
+    )
+    try:
+        validate_flb_calibration_provenance_json(
+            provenance_text,
+            calibration_csv_sha256=sha256(text.encode("utf-8")).hexdigest(),
+            source_labels=source_labels,
+            signal_sample_counts=signal_sample_counts,
+            min_sample_count=settings.strategies.flb_min_calibration_samples,
+        )
+    except ValueError as exc:
+        msg = f"LIVE FLB calibration provenance JSON invalid: {exc}"
+        raise LiveTradingDisabledError(msg) from exc
 
 
 def _require_live_strategy_artifact_path(raw_path: str, *, label: str) -> Path:
@@ -833,7 +862,11 @@ def _parse_category_prior_resolved_at(
         raise LiveTradingDisabledError(msg) from exc
 
 
-def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
+def _validate_flb_calibration_rows(
+    text: str,
+    *,
+    min_sample_count: int,
+) -> tuple[tuple[str, ...], dict[str, int]]:
     reader = csv.DictReader(text.splitlines())
     _require_unique_csv_fieldnames(
         reader.fieldnames,
@@ -848,6 +881,8 @@ def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
         )
         raise LiveTradingDisabledError(msg)
     observed_signals: set[str] = set()
+    source_labels: list[str] = []
+    signal_sample_counts: dict[str, int] = {}
     for row_number, row in enumerate(reader, start=2):
         signal_name = (row.get("signal_name") or "").strip()
         if signal_name == "":
@@ -871,6 +906,7 @@ def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
             row_number=row_number,
         )
         sample_count = _require_sample_count(row.get("sample_count"), row_number=row_number)
+        signal_sample_counts[signal_name] = sample_count
         if sample_count < min_sample_count:
             msg = (
                 "LIVE FLB calibration artifact invalid: "
@@ -881,6 +917,7 @@ def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
             row.get("source_label"),
             row_number=row_number,
         )
+        source_labels.append((row.get("source_label") or "").strip())
     missing_signals = sorted(_REQUIRED_FLB_SIGNALS - observed_signals)
     if missing_signals:
         msg = (
@@ -888,6 +925,13 @@ def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
             f"signals: {', '.join(missing_signals)}"
         )
         raise LiveTradingDisabledError(msg)
+    return tuple(source_labels), signal_sample_counts
+
+
+def _flb_calibration_provenance_raw_path(raw_path: str | None) -> str | None:
+    if raw_path is None or raw_path.strip() == "":
+        return None
+    return str(flb_calibration_provenance_path(raw_path))
 
 
 def _require_flb_calibration_source_label(

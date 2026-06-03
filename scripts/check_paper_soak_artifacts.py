@@ -19,6 +19,11 @@ from scripts.artifact_path_safety import require_path_outside_working_tree
 from pms.config import PMSSettings
 from pms.controller.baselines import load_category_prior_observations_csv
 from pms.core.enums import RunMode
+from pms.strategies.flb.artifacts import (
+    file_sha256_no_follow,
+    flb_calibration_provenance_path,
+    load_flb_calibration_provenance_json,
+)
 from pms.strategies.flb.source import load_flb_calibration_csv
 
 
@@ -89,6 +94,28 @@ def _check_flb_calibration(settings: PMSSettings) -> PaperSoakArtifactCheck:
         model = load_flb_calibration_csv(
             path,
             min_sample_count=settings.strategies.flb_min_calibration_samples,
+        )
+        calibration_sha256 = file_sha256_no_follow(
+            path,
+            label="FLB calibration artifact",
+        )
+        provenance_path = flb_calibration_provenance_path(path)
+        require_path_outside_working_tree(
+            provenance_path,
+            label="FLB calibration provenance JSON",
+        )
+        _require_private_parent(
+            provenance_path,
+            label="FLB calibration provenance JSON",
+        )
+        load_flb_calibration_provenance_json(
+            provenance_path,
+            calibration_csv_sha256=calibration_sha256,
+            source_labels=tuple(row.source_label for row in model.calibrations),
+            signal_sample_counts={
+                row.signal_name: row.sample_count for row in model.calibrations
+            },
+            min_sample_count=model.min_sample_count,
         )
     except (OSError, ValueError) as exc:
         return PaperSoakArtifactCheck("flb_calibration", False, str(exc))

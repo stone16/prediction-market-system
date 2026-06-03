@@ -76,7 +76,9 @@ uv run python scripts/flb_data_feasibility.py \
   --output "$PMS_SECURE_DIR/flb-feasibility.md" \
   --csv "$PMS_SECURE_DIR/flb-deciles.csv" \
   --calibration-csv "$PMS_SECURE_DIR/flb-calibration.csv" \
-  --calibration-source-label warehouse-flb-v1
+  --calibration-source-label warehouse-flb-v1 \
+  --calibration-provenance-json \
+    "$PMS_SECURE_DIR/flb-calibration.csv.provenance.json"
 ```
 
 The script returns:

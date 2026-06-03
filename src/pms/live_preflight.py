@@ -41,6 +41,11 @@ from pms.redaction import redact_database_error, redact_live_error_values
 from pms.research.spec_codec import deserialize_execution_model
 from pms.storage.schema_check import ensure_schema_current
 from pms.storage.strategy_registry import PostgresStrategyRegistry
+from pms.strategies.flb.artifacts import (
+    file_sha256_no_follow,
+    flb_calibration_provenance_path,
+    load_flb_calibration_provenance_json,
+)
 from pms.strategies.flb.source import load_flb_calibration_csv
 from pms.strategies.projections import ActiveStrategy
 from pms.strategies.versioning import serialize_strategy_config_json
@@ -1795,12 +1800,33 @@ def _validate_live_flb_calibration_artifact(settings: PMSSettings) -> None:
         label="LIVE FLB calibration artifact",
     )
     try:
-        load_flb_calibration_csv(
+        model = load_flb_calibration_csv(
             flb_path,
             min_sample_count=settings.strategies.flb_min_calibration_samples,
         )
+        calibration_sha256 = file_sha256_no_follow(
+            flb_path,
+            label="LIVE FLB calibration artifact",
+        )
     except ValueError as exc:
         msg = f"LIVE FLB calibration artifact invalid: {exc}"
+        raise LiveTradingDisabledError(msg) from exc
+    provenance_path = _require_live_strategy_artifact_path(
+        str(flb_calibration_provenance_path(flb_path)),
+        label="LIVE FLB calibration provenance JSON",
+    )
+    try:
+        load_flb_calibration_provenance_json(
+            provenance_path,
+            calibration_csv_sha256=calibration_sha256,
+            source_labels=tuple(row.source_label for row in model.calibrations),
+            signal_sample_counts={
+                row.signal_name: row.sample_count for row in model.calibrations
+            },
+            min_sample_count=model.min_sample_count,
+        )
+    except ValueError as exc:
+        msg = f"LIVE FLB calibration provenance JSON invalid: {exc}"
         raise LiveTradingDisabledError(msg) from exc
 
 

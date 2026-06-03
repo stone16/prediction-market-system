@@ -82,8 +82,11 @@ def test_readme_paper_soak_status_mentions_required_launch_artifacts() -> None:
     normalized = " ".join(readme_text.split())
 
     assert "Paper Soak Blocked Pending Launch Artifacts" in readme_text
-    assert "does not start until `/secure/pms/flb-calibration.csv` exists" in normalized
-    assert "not a credential" in normalized
+    assert (
+        "does not start until `/secure/pms/flb-calibration.csv` and its "
+        "`.provenance.json` sidecar exist"
+    ) in normalized
+    assert "not credentials" in normalized
     assert "not a launch artifact" in normalized
 
 
@@ -243,6 +246,11 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "--output /secure/pms/paper-soak-go-report.md" in readme_text
     assert "--calibration-csv /secure/pms/flb-calibration.csv" in readme_text
     assert "--calibration-source-label warehouse-flb-v1" in readme_text
+    normalized_readme_text = " ".join(readme_text.split())
+    assert (
+        "--calibration-provenance-json "
+        "/secure/pms/flb-calibration.csv.provenance.json"
+    ) in normalized_readme_text
     assert "max_exposure_per_risk_group=$1" in readme_text
     assert "max_exposure_per_risk_group=$15" not in readme_text
     assert "scripts/prepare_local_paper_soak_config.py" in readme_text
@@ -278,5 +286,6 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "fly volumes create pms_paper_soak_secure" in fly_runbook_text
     assert "install -d -m 700 /secure/pms" in fly_runbook_text
     assert "/secure/pms/flb-calibration.csv" in fly_runbook_text
+    assert "/secure/pms/flb-calibration.csv.provenance.json" in fly_runbook_text
     assert "fly deploy -c fly.live.toml" in fly_runbook_text
     assert "DATABASE_URL" in fly_runbook_text

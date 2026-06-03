@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,32 @@ def _write_flb_calibration(path: Path) -> None:
                 "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
                 "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
             ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_flb_calibration_provenance(path: Path, calibration_path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "flb_calibration_provenance",
+                "generated_by": "scripts/flb_data_feasibility.py",
+                "source": "warehouse-csv",
+                "generated_at": "2026-06-01T00:00:00+00:00",
+                "warehouse_csv_sha256": sha256(
+                    b"unit warehouse provenance fixture"
+                ).hexdigest(),
+                "warehouse_market_count": 301,
+                "warehouse_longshot_count": 150,
+                "warehouse_favorite_count": 151,
+                "calibration_csv_sha256": sha256(
+                    calibration_path.read_bytes()
+                ).hexdigest(),
+                "calibration_source_label": "warehouse-flb-v1",
+            },
+            sort_keys=True,
         )
         + "\n",
         encoding="utf-8",
@@ -59,13 +87,91 @@ def test_check_paper_soak_artifacts_fails_when_flb_calibration_missing(
     assert f"FLB calibration CSV does not exist: {missing_path}" in captured.out
 
 
-def test_check_paper_soak_artifacts_passes_with_staged_flb_calibration(
+def test_check_paper_soak_artifacts_fails_when_flb_calibration_provenance_missing(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     calibration_path = tmp_path / "flb-calibration.csv"
     category_prior_path = tmp_path / "category-prior.csv"
     _write_flb_calibration(calibration_path)
+    _write_category_prior(category_prior_path, rows=2)
+    config_path = tmp_path / "live-soak.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
+                "controller:",
+                f"  category_prior_observations_path: {category_prior_path}",
+                "  category_prior_min_global_samples: 2",
+                "strategies:",
+                f"  flb_calibration_path: {calibration_path}",
+                "  flb_min_calibration_samples: 100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = check_paper_soak_artifacts.main(["--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[FAIL] flb_calibration:" in captured.out
+    assert "FLB calibration provenance JSON does not exist" in captured.out
+
+
+def test_check_paper_soak_artifacts_rejects_placeholder_provenance_hash(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calibration_path = tmp_path / "flb-calibration.csv"
+    provenance_path = Path(f"{calibration_path}.provenance.json")
+    category_prior_path = tmp_path / "category-prior.csv"
+    _write_flb_calibration(calibration_path)
+    _write_flb_calibration_provenance(provenance_path, calibration_path)
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["warehouse_csv_sha256"] = "a" * 64
+    provenance_path.write_text(
+        json.dumps(provenance, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _write_category_prior(category_prior_path, rows=2)
+    config_path = tmp_path / "live-soak.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
+                "controller:",
+                f"  category_prior_observations_path: {category_prior_path}",
+                "  category_prior_min_global_samples: 2",
+                "strategies:",
+                f"  flb_calibration_path: {calibration_path}",
+                "  flb_min_calibration_samples: 100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = check_paper_soak_artifacts.main(["--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[FAIL] flb_calibration:" in captured.out
+    assert "warehouse_csv_sha256 must not be a placeholder hash" in captured.out
+
+
+def test_check_paper_soak_artifacts_passes_with_staged_flb_calibration(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calibration_path = tmp_path / "flb-calibration.csv"
+    provenance_path = Path(f"{calibration_path}.provenance.json")
+    category_prior_path = tmp_path / "category-prior.csv"
+    _write_flb_calibration(calibration_path)
+    _write_flb_calibration_provenance(provenance_path, calibration_path)
     _write_category_prior(category_prior_path, rows=2)
     config_path = tmp_path / "live-soak.yaml"
     config_path.write_text(

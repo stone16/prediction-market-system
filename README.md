@@ -18,10 +18,11 @@ All core PRs merged as of 2026-05-03. The system is code-complete for
 H1 (FLB contrarian) strategy, but the supervised live-data paper soak is
 fail-closed until required non-secret launch artifacts are staged. In
 particular, `config.live-soak.yaml` does not start until
-`/secure/pms/flb-calibration.csv` exists and passes schema/sample validation.
-That file is not a credential; it must be generated from the strict warehouse
-CSV in step 4a below. The checked-in `docs/research/flb-deciles.csv` is an old
-Gamma fallback diagnostic and is not a launch artifact. H2 anchoring-lag /
+`/secure/pms/flb-calibration.csv` and its `.provenance.json` sidecar exist and
+pass schema/sample validation. Those files are not credentials; they must be
+generated from the strict warehouse CSV in step 4a below. The checked-in
+`docs/research/flb-deciles.csv` is an old Gamma fallback diagnostic and is not a
+launch artifact. H2 anchoring-lag /
 LLM-news replay remains research-only until the H1 historical data spine proves
 enough coverage and measurable edge.
 
@@ -41,11 +42,12 @@ enough coverage and measurable edge.
 Six things remain between the current branch and real capital:
 
 1. **Non-secret launch artifacts** — Generate `/secure/pms/flb-calibration.csv`
-   from `/secure/pms/polymarket_resolved_binary.csv` with the checked-in Dune
-   export SQL plus `scripts/flb_data_feasibility.py --source warehouse-csv`;
-   paper-soak startup fails closed until this artifact exists and passes the
-   runtime H1 sample gate. The Dune API key is a credential; the export and
-   calibration artifacts are not.
+   and `/secure/pms/flb-calibration.csv.provenance.json` from
+   `/secure/pms/polymarket_resolved_binary.csv` with the checked-in Dune export
+   SQL plus `scripts/flb_data_feasibility.py --source warehouse-csv`; paper-soak
+   startup fails closed until these artifacts exist and pass the runtime H1
+   sample gate. The Dune API key is a credential; the export and calibration
+   artifacts are not.
 2. **Polymarket credentials** — 6 fields (private_key, api_key, api_secret,
    api_passphrase, funder_address, signature_type). For local LIVE, stage them
    in the chmod 600 `local_secret_file` outside the working tree; never put
@@ -163,13 +165,16 @@ uv run python scripts/flb_data_feasibility.py \
   --output "$PMS_SECURE_DIR/flb-feasibility.md" \
   --csv "$PMS_SECURE_DIR/flb-deciles.csv" \
   --calibration-csv "$PMS_SECURE_DIR/flb-calibration.csv" \
-  --calibration-source-label warehouse-flb-v1
+  --calibration-source-label warehouse-flb-v1 \
+  --calibration-provenance-json \
+    "$PMS_SECURE_DIR/flb-calibration.csv.provenance.json"
 uv run python scripts/export_category_prior_observations.py \
   --output "$PMS_SECURE_DIR/category-prior-observations.csv" \
   --min-observations 100
 
 # Fly/LIVE volume staging keeps the same artifact names under /secure/pms,
-# for example: --calibration-csv /secure/pms/flb-calibration.csv
+# for example: --calibration-csv /secure/pms/flb-calibration.csv and
+# --calibration-provenance-json /secure/pms/flb-calibration.csv.provenance.json
 
 # 4b. Fail fast before starting the API; this uses the same artifact loaders
 #     as runtime startup, also verifies each configured private artifact parent,

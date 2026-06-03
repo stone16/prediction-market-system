@@ -227,11 +227,14 @@ artifact after preflight invalidates the launch artifact.
 The launch paper-soak config (`config.live-soak.yaml`) is bound to H1 FLB and
 requires `strategies.flb_calibration_path` to point at a staged warehouse model
 artifact. The CSV schema is
-`signal_name,probability_estimate,sample_count,source_label`, and it must
-contain both `longshot_yes_overpriced_buy_no` and
-`favorite_yes_underpriced_buy_yes`. Startup fails closed when either signal is
-missing, `sample_count < strategies.flb_min_calibration_samples`, or the
-probability is outside `(0, 1)`. When configured, FLB uses the artifact
+`signal_name,probability_estimate,sample_count,source_label`, and the same
+directory must contain the required
+`flb-calibration.csv.provenance.json` sidecar. The CSV must contain both
+`longshot_yes_overpriced_buy_no` and `favorite_yes_underpriced_buy_yes`.
+Startup fails closed when either signal is missing,
+`sample_count < strategies.flb_min_calibration_samples`, the probability is
+outside `(0, 1)`, or the provenance sidecar does not bind the CSV to the
+warehouse source counts and hash. When configured, FLB uses the artifact
 probability and suppresses signals whose net edge is below `min_expected_edge`;
 do not run the launch soak with a null FLB calibration path. Net edge subtracts
 `strategies.flb_entry_execution_cost_bps`
@@ -275,7 +278,9 @@ uv run python scripts/flb_data_feasibility.py \
   --output "$PMS_SECURE_DIR/flb-feasibility.md" \
   --csv "$PMS_SECURE_DIR/flb-deciles.csv" \
   --calibration-csv "$PMS_SECURE_DIR/flb-calibration.csv" \
-  --calibration-source-label warehouse-flb-v1
+  --calibration-source-label warehouse-flb-v1 \
+  --calibration-provenance-json \
+    "$PMS_SECURE_DIR/flb-calibration.csv.provenance.json"
 ```
 
 Generate the required local category-prior artifact that
@@ -289,7 +294,8 @@ uv run python scripts/export_category_prior_observations.py \
 ```
 
 For Fly/LIVE volume staging, keep the same artifact filenames under
-`/secure/pms`, including `/secure/pms/flb-calibration.csv`.
+`/secure/pms`, including `/secure/pms/flb-calibration.csv` and
+`/secure/pms/flb-calibration.csv.provenance.json`.
 
 Before starting the paper-soak API, run the local artifact check. It uses the
 same FLB calibration and category-prior CSV loaders as runtime

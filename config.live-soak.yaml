@@ -83,6 +83,7 @@ strategies:
   # launch soak: startup fails closed when the artifact is missing or when
   # schema/sample gates fail.
   # CSV columns: signal_name, probability_estimate, sample_count, source_label.
+  # Required sidecar: /secure/pms/flb-calibration.csv.provenance.json.
   flb_calibration_path: /secure/pms/flb-calibration.csv
   flb_min_calibration_samples: 100
   flb_entry_execution_cost_bps: 15.0

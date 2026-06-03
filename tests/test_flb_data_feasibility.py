@@ -7,11 +7,13 @@ sample gate, report generation) without hitting the Gamma API.
 from __future__ import annotations
 
 import csv
+import json
 import os
 import stat
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from types import TracebackType
 from typing import IO, ClassVar, cast
@@ -36,6 +38,7 @@ from scripts.flb_data_feasibility import (
     markets_to_contracts,
     save_decile_csv,
     save_flb_calibration_csv,
+    save_flb_calibration_provenance_json,
 )
 from pms.strategies.flb.source import load_flb_calibration_csv
 
@@ -650,6 +653,72 @@ class TestFlbCalibrationArtifact:
             "longshot_yes_overpriced_buy_no"
         ).probability_estimate == pytest.approx(0.99)
 
+    def test_save_flb_calibration_provenance_json_binds_calibration_and_warehouse(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        rows = [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=0.99,
+                sample_count=150,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=0.97,
+                sample_count=151,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+        warehouse_path = tmp_path / "warehouse.csv"
+        _write_warehouse_csv(
+            warehouse_path,
+            [
+                _warehouse_row(
+                    market_id=f"longshot-{index}",
+                    entry_yes_price="0.05",
+                    yes_payout="0",
+                    no_payout="1",
+                )
+                for index in range(150)
+            ]
+            + [
+                _warehouse_row(
+                    market_id=f"favorite-{index}",
+                    entry_yes_price="0.95",
+                    yes_payout="1",
+                    no_payout="0",
+                )
+                for index in range(151)
+            ],
+        )
+        calibration_path = tmp_path / "flb-calibration.csv"
+        provenance_path = tmp_path / "flb-calibration.csv.provenance.json"
+
+        save_flb_calibration_csv(rows, calibration_path)
+        save_flb_calibration_provenance_json(
+            rows,
+            warehouse_csv_path=warehouse_path,
+            warehouse_market_count=301,
+            calibration_csv_path=calibration_path,
+            output_path=provenance_path,
+            generated_at=datetime(2026, 6, 1, tzinfo=UTC),
+        )
+
+        payload = json.loads(provenance_path.read_text(encoding="utf-8"))
+        assert payload["artifact_type"] == "flb_calibration_provenance"
+        assert payload["source"] == "warehouse-csv"
+        assert payload["warehouse_csv_sha256"] == sha256(
+            warehouse_path.read_bytes()
+        ).hexdigest()
+        assert payload["calibration_csv_sha256"] == sha256(
+            calibration_path.read_bytes()
+        ).hexdigest()
+        assert payload["warehouse_longshot_count"] == 150
+        assert payload["warehouse_favorite_count"] == 151
+        assert payload["calibration_source_label"] == "warehouse-flb-v1"
+
     def test_save_flb_calibration_csv_creates_output_parent_private(
         self,
         tmp_path: Path,
@@ -979,6 +1048,67 @@ class TestFlbCalibrationArtifact:
         assert "FLB calibration CSV output parent" in captured.err
         assert "too permissive" in captured.err
         assert not output_path.exists()
+
+    def test_cli_writes_flb_calibration_provenance_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        rows = [
+            _warehouse_row(
+                market_id=f"longshot-{index}",
+                entry_yes_price="0.05",
+                yes_payout="0",
+                no_payout="1",
+            )
+            for index in range(120)
+        ] + [
+            _warehouse_row(
+                market_id=f"favorite-{index}",
+                entry_yes_price="0.95",
+                yes_payout="1",
+                no_payout="0",
+            )
+            for index in range(120)
+        ]
+        _write_warehouse_csv(input_path, rows)
+        calibration_path = tmp_path / "flb-calibration.csv"
+        provenance_path = Path(f"{calibration_path}.provenance.json")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--calibration-csv",
+                str(calibration_path),
+                "--calibration-source-label",
+                "warehouse-flb-v1",
+                "--calibration-provenance-json",
+                str(provenance_path),
+            ],
+        )
+
+        exit_code = main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert calibration_path.exists()
+        assert provenance_path.exists()
+        assert "FLB calibration CSV written" in captured.err
+        assert "FLB calibration provenance JSON written" in captured.err
+        payload = json.loads(provenance_path.read_text(encoding="utf-8"))
+        assert payload["warehouse_market_count"] == 240
+        assert payload["warehouse_longshot_count"] == 120
+        assert payload["warehouse_favorite_count"] == 120
+        assert payload["calibration_csv_sha256"] == sha256(
+            calibration_path.read_bytes()
+        ).hexdigest()
 
     def test_cli_returns_sample_gate_exit_for_thin_calibration_source(
         self,

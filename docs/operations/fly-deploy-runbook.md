@@ -73,9 +73,10 @@ resolved at boot. The image command intentionally does not pass `--config`;
 `PMS_CONFIG_PATH=/app/config.live-soak.yaml`.
 
 The supervised paper-soak config now requires the calibrated H1 FLB artifact at
-`/secure/pms/flb-calibration.csv`. Bootstrap the app volume and stage the
-artifact before the first machine starts; otherwise `Runner` fails closed while
-loading the config.
+`/secure/pms/flb-calibration.csv` plus
+`/secure/pms/flb-calibration.csv.provenance.json`. Bootstrap the app volume and
+stage both artifacts before the first machine starts; otherwise `Runner` fails
+closed while loading the config.
 
 Generate the artifact from the checked-in Dune export first. `DUNE_API_KEY` is
 a credential; load it from the operator secret store into the staging shell and
@@ -93,7 +94,9 @@ uv run python scripts/flb_data_feasibility.py \
   --output /secure/pms/flb-feasibility.md \
   --csv /secure/pms/flb-deciles.csv \
   --calibration-csv /secure/pms/flb-calibration.csv \
-  --calibration-source-label warehouse-flb-v1
+  --calibration-source-label warehouse-flb-v1 \
+  --calibration-provenance-json \
+    /secure/pms/flb-calibration.csv.provenance.json
 ```
 
 Then create the Fly paper-soak volume and deploy while copying the non-secret
@@ -102,7 +105,9 @@ artifact into the mounted path:
 ```bash
 fly volumes create pms_paper_soak_secure --region iad
 fly deploy \
-  --file-local /secure/pms/flb-calibration.csv=/secure/pms/flb-calibration.csv
+  --file-local /secure/pms/flb-calibration.csv=/secure/pms/flb-calibration.csv \
+  --file-local \
+    /secure/pms/flb-calibration.csv.provenance.json=/secure/pms/flb-calibration.csv.provenance.json
 ```
 
 For LIVE capital, do not edit `fly.toml`. Prepare the separate ignored config
@@ -124,6 +129,7 @@ mounted volume before starting the runner:
 - `/secure/pms/paper-backtest-execution-diff.json`
 - `/secure/pms/category-prior-observations.csv`
 - `/secure/pms/flb-calibration.csv`
+- `/secure/pms/flb-calibration.csv.provenance.json`
 - `/secure/pms/credentialed-preflight.json`
 
 The paper-soak report path must match

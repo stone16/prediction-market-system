@@ -20,7 +20,9 @@ Usage:
         --source warehouse-csv \
         --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
         --calibration-csv "$PMS_SECURE_DIR/flb-calibration.csv" \
-        --calibration-source-label warehouse-flb-v1
+        --calibration-source-label warehouse-flb-v1 \
+        --calibration-provenance-json \
+          "$PMS_SECURE_DIR/flb-calibration.csv.provenance.json"
 
 Exit codes:
     0 — H1 viable (sample gate passed)
@@ -66,6 +68,10 @@ from uuid import uuid4
 import httpx
 
 from scripts.artifact_path_safety import require_path_outside_working_tree
+from pms.strategies.flb.artifacts import (
+    file_sha256_no_follow,
+    flb_calibration_provenance_payload,
+)
 from pms.strategies.flb.source import require_flb_calibration_source_label
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
@@ -1031,6 +1037,54 @@ def save_flb_calibration_csv(
     )
 
 
+def save_flb_calibration_provenance_json(
+    rows: list[FlbCalibrationArtifactRow],
+    *,
+    warehouse_csv_path: Path,
+    warehouse_market_count: int,
+    calibration_csv_path: Path,
+    output_path: Path,
+    generated_at: datetime,
+) -> None:
+    """Save the runtime FLB calibration provenance sidecar."""
+    source_labels = {row.source_label for row in rows}
+    if len(source_labels) != 1:
+        msg = "FLB calibration provenance requires one calibration source label"
+        raise ValueError(msg)
+    by_signal = {row.signal_name: row for row in rows}
+    try:
+        longshot_count = by_signal[LONGSHOT_SIGNAL_NAME].sample_count
+        favorite_count = by_signal[FAVORITE_SIGNAL_NAME].sample_count
+    except KeyError as exc:
+        msg = f"FLB calibration provenance missing signal row: {exc.args[0]}"
+        raise ValueError(msg) from exc
+
+    payload = flb_calibration_provenance_payload(
+        generated_at=generated_at,
+        warehouse_csv_sha256=file_sha256_no_follow(
+            warehouse_csv_path,
+            label="FLB warehouse CSV input path",
+        ),
+        warehouse_market_count=warehouse_market_count,
+        warehouse_longshot_count=longshot_count,
+        warehouse_favorite_count=favorite_count,
+        calibration_csv_sha256=file_sha256_no_follow(
+            calibration_csv_path,
+            label="FLB calibration CSV output path",
+        ),
+        calibration_source_label=next(iter(source_labels)),
+    )
+    _prepare_private_output_parent(
+        output_path,
+        label="FLB calibration provenance JSON output parent",
+    )
+    _write_text_no_follow(
+        output_path,
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        label="FLB calibration provenance JSON output path",
+    )
+
+
 def _write_text_no_follow(path: Path, content: str, *, label: str) -> None:
     _require_regular_file_or_absent(path, label=label)
     fd, temp_path = _open_output_temp_file(path, label=label)
@@ -1259,11 +1313,22 @@ def main() -> int:
             "warehouse-flb-v1. Required with --calibration-csv."
         ),
     )
+    parser.add_argument(
+        "--calibration-provenance-json",
+        type=Path,
+        default=None,
+        help=(
+            "Output runtime FLB calibration provenance sidecar JSON; use "
+            "flb-calibration.csv.provenance.json for launch artifacts."
+        ),
+    )
     args = parser.parse_args()
     if args.calibration_csv is not None and args.source != "warehouse-csv":
         parser.error("--calibration-csv requires --source=warehouse-csv")
     if args.calibration_source_label is not None and args.calibration_csv is None:
         parser.error("--calibration-source-label requires --calibration-csv")
+    if args.calibration_provenance_json is not None and args.calibration_csv is None:
+        parser.error("--calibration-provenance-json requires --calibration-csv")
     if args.calibration_csv is not None and args.calibration_source_label is None:
         parser.error("--calibration-source-label is required with --calibration-csv")
     if args.calibration_source_label is not None:
@@ -1282,6 +1347,10 @@ def main() -> int:
             ("FLB report output path", args.output),
             ("FLB decile CSV output path", args.csv),
             ("FLB calibration CSV output path", args.calibration_csv),
+            (
+                "FLB calibration provenance JSON output path",
+                args.calibration_provenance_json,
+            ),
         ],
     )
 
@@ -1379,10 +1448,28 @@ def main() -> int:
                 source_label=args.calibration_source_label,
             )
             save_flb_calibration_csv(calibration_rows, args.calibration_csv)
+            if args.calibration_provenance_json is not None:
+                if args.input is None:
+                    msg = "warehouse CSV input path is required for calibration provenance"
+                    raise ValueError(msg)
+                save_flb_calibration_provenance_json(
+                    calibration_rows,
+                    warehouse_csv_path=args.input,
+                    warehouse_market_count=len(markets),
+                    calibration_csv_path=args.calibration_csv,
+                    output_path=args.calibration_provenance_json,
+                    generated_at=fetched_at,
+                )
         except (OSError, ValueError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         print(f"FLB calibration CSV written to {args.calibration_csv}", file=sys.stderr)
+        if args.calibration_provenance_json is not None:
+            print(
+                "FLB calibration provenance JSON written to "
+                f"{args.calibration_provenance_json}",
+                file=sys.stderr,
+            )
 
     # Return exit code based on gate.
     return 0 if gate.passed else 1
