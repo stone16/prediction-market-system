@@ -150,6 +150,8 @@ class PaperReportMetrics:
     average_fee_bps: float | None = None
     average_net_edge_bps: float | None = None
     sharpe_ratio: float | None = None
+    readiness_status: str = "missing"
+    readiness_checks: tuple[tuple[str, str], ...] = ()
     unresolved_incidents: int = 0
     rejection_reasons: tuple[tuple[str, int], ...] = ()
     risk_events: tuple[tuple[str, str, str], ...] = ()
@@ -254,6 +256,7 @@ def evaluate_paper_soak_gate(
             config.min_average_net_edge_bps,
         ),
         _check_optional_gt("sharpe_ratio", metrics.sharpe_ratio, 0.0),
+        _check_readiness(metrics),
         _check_strategy_evidence(metrics.strategy),
         _check_zero("unresolved_incidents", metrics.unresolved_incidents, "unresolved"),
         _check_zero("risk_events", len(metrics.risk_events), "risk event(s)"),
@@ -464,6 +467,8 @@ def metrics_from_api_payloads(
             ),
         ),
         sharpe_ratio=_optional_float_from_dict(metric_rows, "sharpe_ratio"),
+        readiness_status=_readiness_status(readiness),
+        readiness_checks=_readiness_checks(readiness),
         unresolved_incidents=_int_from_dict(
             supervision,
             "unresolved_feedback_total",
@@ -1307,6 +1312,47 @@ def _is_paper_only_strategy_label(label: str) -> bool:
     return normalized in _PAPER_ONLY_STRATEGY_IDS
 
 
+def _check_readiness(metrics: PaperReportMetrics) -> PaperSoakGateCheck:
+    not_ready_checks = {
+        name: value
+        for name, value in metrics.readiness_checks
+        if value not in {"ready", "disabled"}
+    }
+    if metrics.readiness_status == "ready" and not not_ready_checks:
+        return PaperSoakGateCheck(
+            "readiness",
+            True,
+            _readiness_gate_detail(
+                status=metrics.readiness_status,
+                checks=metrics.readiness_checks,
+                only_non_ready=False,
+            ),
+        )
+    return PaperSoakGateCheck(
+        "readiness",
+        False,
+        _readiness_gate_detail(
+            status=metrics.readiness_status,
+            checks=tuple(sorted(not_ready_checks.items())),
+            only_non_ready=True,
+        ),
+    )
+
+
+def _readiness_gate_detail(
+    *,
+    status: str,
+    checks: tuple[tuple[str, str], ...],
+    only_non_ready: bool,
+) -> str:
+    parts = [f"status={status or 'missing'}"]
+    if checks:
+        parts.extend(f"{name}={value}" for name, value in sorted(checks))
+    elif only_non_ready:
+        parts.append("checks=missing")
+    return "; ".join(parts)
+
+
 def _looks_like_placeholder(value: str) -> bool:
     normalized = value.strip().lower()
     if normalized == "":
@@ -2042,6 +2088,28 @@ def _readiness_risk_events(readiness: object) -> list[tuple[str, str, str]]:
             "; ".join(parts),
         )
     ]
+
+
+def _readiness_status(readiness: object) -> str:
+    if not isinstance(readiness, Mapping):
+        return "missing"
+    status = readiness.get("status")
+    return status if isinstance(status, str) and status else "missing"
+
+
+def _readiness_checks(readiness: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(readiness, Mapping):
+        return ()
+    checks = readiness.get("checks")
+    if not isinstance(checks, Mapping):
+        return ()
+    return tuple(
+        sorted(
+            (name, value)
+            for name, value in checks.items()
+            if isinstance(name, str) and isinstance(value, str)
+        )
+    )
 
 
 def _sensor_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:

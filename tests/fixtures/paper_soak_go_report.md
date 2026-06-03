@@ -41,6 +41,7 @@
 | average_edge_bps | PASS | 50.0 >= 5.0 |
 | average_net_edge_bps | PASS | 20.0 >= 0.0 |
 | sharpe_ratio | PASS | 0.5000 > 0.0000 |
+| readiness | PASS | status=ready; eod_scheduler=disabled; event_loop=ready; halt_subscriber=disabled; sensors=ready |
 | strategy_evidence | PASS | default@4d326514fa853b9278502ad43750b9648ac8f4f6ad8685ba522b2a4aa5f47d25 |
 | unresolved_incidents | PASS | 0 unresolved |
 | risk_events | PASS | 0 risk event(s) |

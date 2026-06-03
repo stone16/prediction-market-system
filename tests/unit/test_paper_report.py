@@ -155,6 +155,10 @@ def test_paper_soak_gate_passes_when_metrics_meet_go_live_thresholds() -> None:
 
     assert gate.ok is True
     assert all(check.ok for check in gate.checks)
+    assert gate.require_check("readiness").detail == (
+        "status=ready; eod_scheduler=disabled; event_loop=ready; "
+        "halt_subscriber=disabled; sensors=ready"
+    )
     assert gate.require_check("brier_improvement").detail == "0.0500 > 0.0000"
     assert gate.require_check("distinct_markets").detail == "3 >= 3"
     assert gate.require_check("distinct_risk_groups").detail == "3 >= 3"
@@ -191,6 +195,24 @@ def test_paper_soak_gate_fails_missing_or_bad_production_metrics() -> None:
     assert gate.require_check("average_net_edge_bps").detail == "-1.0000 <= 0.0000"
     assert gate.require_check("unresolved_incidents").detail == "1 unresolved"
     assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_without_ready_readiness_evidence() -> None:
+    metrics = _passing_gate_metrics(
+        readiness_status="not_ready",
+        readiness_checks=(
+            ("sensors", "ready"),
+            ("event_loop", "shutting_down"),
+            ("halt_subscriber", "disabled"),
+        ),
+    )
+
+    gate = evaluate_paper_soak_gate(metrics, risk=RiskSettings())
+
+    assert gate.ok is False
+    assert gate.require_check("readiness").detail == (
+        "status=not_ready; event_loop=shutting_down"
+    )
 
 
 def test_paper_soak_gate_fails_concentrated_execution_sample() -> None:
@@ -4919,6 +4941,13 @@ def _passing_gate_metrics(
     average_net_edge_bps: float | None = 5.0,
     unresolved_incidents: int = 0,
     risk_events: tuple[tuple[str, str, str], ...] = (),
+    readiness_status: str = "ready",
+    readiness_checks: tuple[tuple[str, str], ...] = (
+        ("sensors", "ready"),
+        ("event_loop", "ready"),
+        ("halt_subscriber", "disabled"),
+        ("eod_scheduler", "disabled"),
+    ),
 ) -> PaperReportMetrics:
     return PaperReportMetrics(
         report_date=date(2026, 5, 30),
@@ -4942,6 +4971,8 @@ def _passing_gate_metrics(
         average_fee_bps=2.0,
         average_net_edge_bps=average_net_edge_bps,
         sharpe_ratio=sharpe_ratio,
+        readiness_status=readiness_status,
+        readiness_checks=readiness_checks,
         unresolved_incidents=unresolved_incidents,
         risk_events=risk_events,
         execution_concentration=ExecutionConcentration(

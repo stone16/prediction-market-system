@@ -55,6 +55,7 @@ _REQUIRED_LIVE_PAPER_SOAK_GATE_CHECKS: tuple[str, ...] = (
     "average_edge_bps",
     "average_net_edge_bps",
     "sharpe_ratio",
+    "readiness",
     "strategy_evidence",
     "unresolved_incidents",
     "risk_events",

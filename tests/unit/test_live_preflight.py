@@ -6992,6 +6992,43 @@ async def test_live_preflight_fails_when_paper_report_decision_is_no_go(
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_fails_when_paper_report_lacks_readiness_gate(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    paper_report_path = Path(cast(str, settings.live_paper_soak_report_path))
+    paper_report_path.write_text(
+        "\n".join(
+            line
+            for line in paper_report_path.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("| readiness |")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(
+                _Connection(
+                    active_strategy_rows=(_active_strategy_row(_live_strategy()),)
+                )
+            ),
+        ),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert "missing required gate checks: readiness" in live_config.detail
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_when_paper_report_includes_paper_only_strategy(
     tmp_path: Path,
 ) -> None:
