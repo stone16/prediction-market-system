@@ -217,7 +217,9 @@ def _execution_model_remediation() -> str:
         '--input "$PMS_SECURE_DIR/paper-execution-telemetry.csv" '
         '--output "$PMS_SECURE_DIR/execution-model.json" --fee-rate 0.07 '
         "--staleness-ms 120000 --displayed-depth-fill-ratio 0.75 "
-        "--require-adverse-selection --min-samples 30; configure "
+        "--require-adverse-selection --min-samples 30 "
+        "--strategy-id h1_flb --strategy-version-id <h1-flb-version-id>; "
+        "configure "
         "live_execution_model_path to that private path"
     )
 

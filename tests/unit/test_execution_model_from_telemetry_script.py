@@ -467,6 +467,50 @@ def test_cli_writes_execution_model_artifact(tmp_path: Path) -> None:
     assert payload["require_adverse_selection"] is True
 
 
+def test_cli_writes_execution_model_strategy_evidence(tmp_path: Path) -> None:
+    telemetry_path = tmp_path / "paper-execution-telemetry.csv"
+    _write_telemetry_csv(
+        telemetry_path,
+        [
+            {
+                "slippage_bps": "2",
+                "latency_ms": "101",
+                "adverse_selection_bps": "1",
+            },
+            {
+                "slippage_bps": "12",
+                "latency_ms": "500",
+                "adverse_selection_bps": "9",
+            },
+        ],
+    )
+    output_path = tmp_path / "execution-model.json"
+
+    exit_code = main(
+        [
+            "--input",
+            str(telemetry_path),
+            "--output",
+            str(output_path),
+            "--fee-rate",
+            "0.04",
+            "--staleness-ms",
+            "120000",
+            "--require-adverse-selection",
+            "--min-samples",
+            "2",
+            "--strategy-id",
+            "h1_flb",
+            "--strategy-version-id",
+            "h1-flb-v1",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["strategy_evidence"] == "h1_flb@h1-flb-v1"
+
+
 def test_save_execution_model_json_creates_output_parent_private(
     tmp_path: Path,
 ) -> None:

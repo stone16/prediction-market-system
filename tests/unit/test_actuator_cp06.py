@@ -1330,6 +1330,7 @@ def _stage_readiness_fingerprint_files(settings: PMSSettings, root: Path) -> Non
                 "artifact_mode": "telemetry_execution_model",
                 "generated_at": generated_at.isoformat(),
                 "generated_by": "scripts/execution_model_from_telemetry.py",
+                "strategy_evidence": _LIVE_FIXTURE_STRATEGY_EVIDENCE,
                 "fee_rate": 0.04,
                 "slippage_bps": 6.0,
                 "latency_ms": 500.0,

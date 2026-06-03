@@ -574,12 +574,16 @@ def _write_valid_paper_backtest_diff_json(
 
 
 def _write_valid_execution_model_json(path: Path) -> None:
+    strategy = _live_strategy()
     path.write_text(
         json.dumps(
             {
                 "generated_by": "scripts/execution_model_from_telemetry.py",
                 "artifact_mode": "telemetry_execution_model",
                 "generated_at": datetime.now(tz=UTC).isoformat(),
+                "strategy_evidence": (
+                    f"{strategy.config.strategy_id}@{_strategy_version_id(strategy)}"
+                ),
                 "fee_rate": 0.04,
                 "slippage_bps": 6.0,
                 "latency_ms": 500.0,
@@ -6876,6 +6880,10 @@ async def test_live_preflight_accepts_h1_flb_live_candidate_strategy(
     diff_payload = json.loads(diff_path.read_text(encoding="utf-8"))
     diff_payload["strategy_evidence"] = active_strategy_label
     diff_path.write_text(json.dumps(diff_payload), encoding="utf-8")
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    model_payload = json.loads(model_path.read_text(encoding="utf-8"))
+    model_payload["strategy_evidence"] = active_strategy_label
+    model_path.write_text(json.dumps(model_payload), encoding="utf-8")
 
     result = await run_live_preflight(
         settings,
@@ -7589,6 +7597,50 @@ def test_live_preflight_artifact_revalidates_paper_report_strategy_evidence(
     with pytest.raises(
         LiveTradingDisabledError,
         match="paper-only strategy cannot be final GO evidence",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_rejects_missing_execution_model_strategy_evidence(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    payload.pop("strategy_evidence", None)
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="execution-model artifact strategy_evidence is required",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_rejects_execution_model_strategy_mismatch(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    payload["strategy_evidence"] = "paper_canary_v1@paper-only-version"
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="execution-model artifact strategy_evidence must match active strategies",
     ):
         validator(settings)
 

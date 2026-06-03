@@ -165,6 +165,7 @@ def save_execution_model_json(
     path: Path,
     *,
     telemetry_evidence: ExecutionModelTelemetryEvidence | None = None,
+    strategy_evidence: str | None = None,
 ) -> None:
     _prepare_private_output_parent(path)
     _write_text_no_follow(
@@ -173,6 +174,7 @@ def save_execution_model_json(
             execution_model_to_json_dict(
                 model,
                 telemetry_evidence=telemetry_evidence,
+                strategy_evidence=strategy_evidence,
             ),
             allow_nan=False,
             indent=2,
@@ -186,6 +188,7 @@ def execution_model_to_json_dict(
     model: ExecutionModel,
     *,
     telemetry_evidence: ExecutionModelTelemetryEvidence | None = None,
+    strategy_evidence: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "generated_by": GENERATED_BY,
@@ -216,7 +219,52 @@ def execution_model_to_json_dict(
                 ),
             }
         )
+    if strategy_evidence is not None:
+        payload["strategy_evidence"] = _strategy_evidence_value(strategy_evidence)
     return payload
+
+
+def _strategy_scope_evidence(
+    *,
+    strategy_id: str | None,
+    strategy_version_id: str | None,
+) -> str | None:
+    if strategy_id is None and strategy_version_id is None:
+        return None
+    if strategy_id is None or strategy_version_id is None:
+        msg = "strategy-id and strategy-version-id must be provided together"
+        raise ValueError(msg)
+    return (
+        f"{_strategy_identity_value(strategy_id, 'strategy_id')}@"
+        f"{_strategy_identity_value(strategy_version_id, 'strategy_version_id')}"
+    )
+
+
+def _strategy_identity_value(value: str, field_name: str) -> str:
+    stripped = value.strip()
+    if stripped == "":
+        raise ValueError(f"{field_name} must not be empty")
+    if "," in stripped or "@" in stripped:
+        raise ValueError(f"{field_name} must not contain ',' or '@'")
+    return stripped
+
+
+def _strategy_evidence_value(value: str) -> str:
+    stripped = value.strip()
+    if stripped == "":
+        raise ValueError("strategy_evidence must not be empty")
+    labels = tuple(label.strip() for label in stripped.split(",") if label.strip())
+    if not labels:
+        raise ValueError("strategy_evidence must not be empty")
+    if len(set(labels)) != len(labels):
+        raise ValueError("strategy_evidence must not contain duplicate labels")
+    for label in labels:
+        if label.lower() == "unknown" or "@" not in label:
+            raise ValueError(
+                "strategy_evidence must contain concrete "
+                "strategy_id@strategy_version_id labels"
+            )
+    return ", ".join(labels)
 
 
 def _required_float(
@@ -408,6 +456,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             model,
             output_path,
             telemetry_evidence=telemetry_evidence,
+            strategy_evidence=_strategy_scope_evidence(
+                strategy_id=cast(str | None, args.strategy_id),
+                strategy_version_id=cast(str | None, args.strategy_version_id),
+            ),
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -481,6 +533,17 @@ def _parser() -> ArgumentParser:
         type=int,
         default=86_400_000,
         help="Maximum replay lookup window in milliseconds.",
+    )
+    parser.add_argument(
+        "--strategy-id",
+        help="Optional strategy_id whose telemetry calibrated this artifact.",
+    )
+    parser.add_argument(
+        "--strategy-version-id",
+        help=(
+            "Optional strategy_version_id whose telemetry calibrated this "
+            "artifact. Must be provided with --strategy-id."
+        ),
     )
     return parser
 

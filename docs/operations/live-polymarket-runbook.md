@@ -435,19 +435,23 @@ uv run python scripts/execution_model_from_telemetry.py \
   --staleness-ms 120000 \
   --displayed-depth-fill-ratio 0.75 \
   --require-adverse-selection \
-  --min-samples 30
+  --min-samples 30 \
+  --strategy-id h1_flb \
+  --strategy-version-id <h1-flb-version-id>
 ```
 
 The telemetry CSV must contain `slippage_bps` and `latency_ms`; live-promotion
 artifacts should also include `adverse_selection_bps`. The JSON output is the
 `execution_model` object to embed in the research backtest spec, plus telemetry
 sample metadata (`min_samples`, `telemetry_sample_count`,
-`adverse_selection_sample_count`, and `require_adverse_selection`). Stage the
+`adverse_selection_sample_count`, and `require_adverse_selection`) and
+`strategy_evidence` matching the final H1 active strategy version. Stage the
 same artifact at `live_execution_model_path`; true LIVE validation and
 credentialed preflight reject missing artifacts, static calibration sources,
 profiles with no positive `adverse_selection_bps`, artifacts without the sample
-contract, or sample contracts below the LIVE floor of 10 observations, and the
-preflight fingerprint binds the artifact contents.
+contract, sample contracts below the LIVE floor of 10 observations, or
+strategy-mismatched model artifacts, and the preflight fingerprint binds the
+artifact contents.
 
 Before treating a research backtest as launch evidence, compare the paper
 execution export against the matching backtest replay export:

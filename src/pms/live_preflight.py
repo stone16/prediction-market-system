@@ -1284,6 +1284,11 @@ def _validate_live_execution_model_artifact(settings: PMSSettings) -> None:
         payload,
         max_age_s=settings.live_readiness_report_max_age_s,
     )
+    _require_strategy_artifact_strategy_evidence(
+        payload,
+        artifact_label="LIVE execution-model artifact",
+        expected_labels=_paper_soak_report_strategy_labels(settings),
+    )
     try:
         execution_model = deserialize_execution_model(payload)
     except (KeyError, TypeError, ValueError) as exc:
@@ -1447,8 +1452,9 @@ def _validate_live_paper_backtest_diff_artifact(settings: PMSSettings) -> None:
         label="LIVE paper-vs-backtest execution diff artifact",
         max_age_s=settings.live_readiness_report_max_age_s,
     )
-    _require_paper_backtest_diff_strategy_evidence(
+    _require_strategy_artifact_strategy_evidence(
         payload,
+        artifact_label="LIVE paper-vs-backtest execution diff artifact",
         expected_labels=_paper_soak_report_strategy_labels(settings),
     )
     if payload.get("final_go_no_go_valid") is not True:
@@ -1540,25 +1546,22 @@ def _require_paper_backtest_diff_metric_number(
     return value
 
 
-def _require_paper_backtest_diff_strategy_evidence(
+def _require_strategy_artifact_strategy_evidence(
     payload: Mapping[str, object],
     *,
+    artifact_label: str,
     expected_labels: Sequence[str],
 ) -> None:
     raw_value = payload.get("strategy_evidence")
     if not isinstance(raw_value, str) or raw_value.strip() == "":
-        msg = (
-            "LIVE paper-vs-backtest execution diff artifact "
-            "strategy_evidence is required"
-        )
+        msg = f"{artifact_label} strategy_evidence is required"
         raise LiveTradingDisabledError(msg)
-    observed_labels = _strategy_evidence_labels(raw_value)
+    observed_labels = _strategy_evidence_labels(raw_value, artifact_label=artifact_label)
     expected = set(expected_labels)
     observed = set(observed_labels)
     if observed != expected:
         msg = (
-            "LIVE paper-vs-backtest execution diff artifact "
-            "strategy_evidence must match active strategies from "
+            f"{artifact_label} strategy_evidence must match active strategies from "
             "paper-soak GO report: "
             f"expected={', '.join(sorted(expected))}; "
             f"observed={', '.join(sorted(observed))}"
@@ -1566,7 +1569,11 @@ def _require_paper_backtest_diff_strategy_evidence(
         raise LiveTradingDisabledError(msg)
 
 
-def _strategy_evidence_labels(raw_value: str) -> tuple[str, ...]:
+def _strategy_evidence_labels(
+    raw_value: str,
+    *,
+    artifact_label: str,
+) -> tuple[str, ...]:
     labels = tuple(
         label.strip()
         for label in raw_value.split(",")
@@ -1583,8 +1590,8 @@ def _strategy_evidence_labels(raw_value: str) -> tuple[str, ...]:
         )
     ):
         msg = (
-            "LIVE paper-vs-backtest execution diff artifact "
-            "strategy_evidence must contain concrete strategy_id@strategy_version_id"
+            f"{artifact_label} strategy_evidence must contain concrete "
+            "strategy_id@strategy_version_id"
         )
         raise LiveTradingDisabledError(msg)
     return labels

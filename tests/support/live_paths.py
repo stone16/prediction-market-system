@@ -74,6 +74,10 @@ def make_live_execution_model_path(
                 "generated_by": "scripts/execution_model_from_telemetry.py",
                 "artifact_mode": "telemetry_execution_model",
                 "generated_at": datetime.now(tz=UTC).isoformat(),
+                "strategy_evidence": (
+                    "default@"
+                    "4d326514fa853b9278502ad43750b9648ac8f4f6ad8685ba522b2a4aa5f47d25"
+                ),
                 "fee_rate": 0.04,
                 "slippage_bps": 6.0,
                 "latency_ms": 500.0,
