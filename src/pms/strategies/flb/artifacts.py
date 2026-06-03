@@ -7,7 +7,7 @@ import os
 import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 
@@ -301,10 +301,18 @@ def _required_datetime(
 ) -> datetime:
     value = _required_text(payload, field_name, label=label)
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         msg = f"{label}: invalid {field_name}"
         raise ValueError(msg) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        msg = f"{label}: {field_name} must include timezone"
+        raise ValueError(msg)
+    normalized = parsed.astimezone(UTC)
+    if normalized > datetime.now(tz=UTC):
+        msg = f"{label}: {field_name} is in the future"
+        raise ValueError(msg)
+    return normalized
 
 
 def _required_sha256(
