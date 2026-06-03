@@ -211,6 +211,7 @@ def _execution_model_remediation() -> str:
         "run: uv run python scripts/export_paper_execution_from_api.py "
         '--execution-output "$PMS_SECURE_DIR/paper-execution-export.csv" '
         '--telemetry-output "$PMS_SECURE_DIR/paper-execution-telemetry.csv" '
+        "--strategy-id h1_flb --strategy-version-id <h1-flb-version-id> "
         "--require-adverse-selection; then run: "
         "uv run python scripts/execution_model_from_telemetry.py "
         '--input "$PMS_SECURE_DIR/paper-execution-telemetry.csv" '
@@ -226,6 +227,7 @@ def _paper_backtest_diff_remediation() -> str:
         "run: uv run python scripts/export_paper_execution_from_api.py "
         '--execution-output "$PMS_SECURE_DIR/paper-execution-export.csv" '
         '--telemetry-output "$PMS_SECURE_DIR/paper-execution-telemetry.csv" '
+        "--strategy-id h1_flb --strategy-version-id <h1-flb-version-id> "
         "--require-adverse-selection; then run the completed matching "
         "research backtest, then run: "
         "uv run python scripts/export_backtest_execution_from_db.py "

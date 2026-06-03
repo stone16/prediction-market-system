@@ -413,13 +413,17 @@ fields such as explicit execution PnL or adverse-selection evidence are absent:
 uv run python scripts/export_paper_execution_from_api.py \
   --execution-output /secure/pms/paper-execution-export.csv \
   --telemetry-output /secure/pms/paper-execution-telemetry.csv \
+  --strategy-id h1_flb \
+  --strategy-version-id <h1-flb-version-id> \
   --require-adverse-selection
 ```
 
 Both outputs must live outside the repo in a private owner-writable directory.
 Use `--decisions-json` and `--trades-json` only for captured API payload
 replays; final launch artifacts should be generated against the completed PAPER
-soak API snapshot.
+soak API snapshot. Keep `--strategy-id` and `--strategy-version-id` pinned to
+the final H1 active strategy version so canary or rehearsal decisions cannot
+enter the execution-model or paper/backtest-diff evidence.
 
 Generate the execution-model artifact from paper/live telemetry with:
 

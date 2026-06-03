@@ -83,6 +83,8 @@ def export_paper_execution_artifacts(
     telemetry_output: Path,
     require_adverse_selection: bool = False,
     allow_open: bool = False,
+    strategy_id: str | None = None,
+    strategy_version_id: str | None = None,
 ) -> None:
     """Write strict execution and telemetry CSV artifacts from API payloads."""
     executions = _execution_rows_from_payloads(
@@ -90,6 +92,10 @@ def export_paper_execution_artifacts(
         trades=trades,
         require_adverse_selection=require_adverse_selection,
         allow_open=allow_open,
+        strategy_scope=_strategy_scope(
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+        ),
     )
     execution_rows = [_execution_csv_row(execution) for execution in executions]
     telemetry_rows = [
@@ -123,11 +129,20 @@ def _execution_rows_from_payloads(
     trades: Sequence[Mapping[str, object]],
     require_adverse_selection: bool,
     allow_open: bool,
+    strategy_scope: tuple[str, str] | None,
 ) -> tuple[_FilledExecution | _RejectedExecution, ...]:
-    trades_by_decision = _trades_by_decision_id(trades)
+    scoped_decisions = _decisions_in_strategy_scope(decisions, strategy_scope)
+    scoped_decision_ids = {
+        _required_text(decision, "decision_id", label="decision")
+        for decision in scoped_decisions
+    }
+    trades_by_decision = _trades_by_decision_id(
+        trades,
+        decision_ids=scoped_decision_ids,
+    )
     rows: list[_FilledExecution | _RejectedExecution] = []
     for decision in sorted(
-        decisions,
+        scoped_decisions,
         key=lambda row: (
             _datetime_value(row, "created_at", label="decision").timestamp(),
             _required_text(row, "decision_id", label="decision"),
@@ -154,9 +169,47 @@ def _execution_rows_from_payloads(
         msg = f"non-terminal PAPER decision without fill: {decision_id} status={status}"
         raise ValueError(msg)
     if not rows:
-        msg = "paper execution export has no terminal decisions"
+        if strategy_scope is None:
+            msg = "paper execution export has no terminal decisions"
+        else:
+            strategy_id, strategy_version_id = strategy_scope
+            msg = (
+                "paper execution export has no terminal decisions for "
+                f"{strategy_id}@{strategy_version_id}"
+            )
         raise ValueError(msg)
     return tuple(rows)
+
+
+def _strategy_scope(
+    *,
+    strategy_id: str | None,
+    strategy_version_id: str | None,
+) -> tuple[str, str] | None:
+    if strategy_id is None and strategy_version_id is None:
+        return None
+    if strategy_id is None or strategy_version_id is None:
+        msg = "strategy-id and strategy-version-id must be provided together"
+        raise ValueError(msg)
+    return (
+        _strategy_identity_value(strategy_id, "strategy_id"),
+        _strategy_identity_value(strategy_version_id, "strategy_version_id"),
+    )
+
+
+def _decisions_in_strategy_scope(
+    decisions: Sequence[Mapping[str, object]],
+    strategy_scope: tuple[str, str] | None,
+) -> tuple[Mapping[str, object], ...]:
+    if strategy_scope is None:
+        return tuple(decisions)
+    strategy_id, strategy_version_id = strategy_scope
+    return tuple(
+        decision
+        for decision in decisions
+        if _strategy_component(decision, "strategy_id") == strategy_id
+        and _strategy_component(decision, "strategy_version_id") == strategy_version_id
+    )
 
 
 def _filled_execution(
@@ -255,10 +308,14 @@ def _telemetry_csv_row(execution: _FilledExecution) -> dict[str, str]:
 
 def _trades_by_decision_id(
     trades: Sequence[Mapping[str, object]],
+    *,
+    decision_ids: set[str],
 ) -> dict[str, Mapping[str, object]]:
     by_id: dict[str, Mapping[str, object]] = {}
     for trade in trades:
         decision_id = _required_text(trade, "decision_id", label="trade")
+        if decision_id not in decision_ids:
+            continue
         if decision_id in by_id:
             msg = f"multiple trades for PAPER decision {decision_id}"
             raise ValueError(msg)
@@ -284,6 +341,10 @@ def _required_pnl(
 
 def _strategy_component(row: Mapping[str, object], field_name: str) -> str:
     value = _required_text(row, field_name, label="decision")
+    return _strategy_identity_value(value, field_name)
+
+
+def _strategy_identity_value(value: str, field_name: str) -> str:
     if "," in value or "@" in value:
         msg = f"{field_name} must not contain ',' or '@'"
         raise ValueError(msg)
@@ -445,6 +506,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             telemetry_output=Path(cast(str, args.telemetry_output)),
             require_adverse_selection=bool(args.require_adverse_selection),
             allow_open=bool(args.allow_open),
+            strategy_id=cast(str | None, args.strategy_id),
+            strategy_version_id=cast(str | None, args.strategy_version_id),
         )
     except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -472,6 +535,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--trades-json", help="Captured /trades JSON path.")
     parser.add_argument("--execution-output", required=True)
     parser.add_argument("--telemetry-output", required=True)
+    parser.add_argument(
+        "--strategy-id",
+        help="Optional strategy_id to include in the export.",
+    )
+    parser.add_argument(
+        "--strategy-version-id",
+        help="Required with --strategy-id; immutable strategy_version_id to include.",
+    )
     parser.add_argument("--require-adverse-selection", action="store_true")
     parser.add_argument(
         "--allow-open",

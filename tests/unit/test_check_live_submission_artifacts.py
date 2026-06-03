@@ -52,6 +52,12 @@ def test_check_live_submission_artifacts_reports_all_missing_paths(
     assert "scripts/export_paper_execution_from_api.py" in checks_by_name[
         "execution_model"
     ]["remediation"]
+    assert "--strategy-id h1_flb" in checks_by_name[
+        "execution_model"
+    ]["remediation"]
+    assert "--strategy-version-id <h1-flb-version-id>" in checks_by_name[
+        "execution_model"
+    ]["remediation"]
     assert "scripts/export_paper_execution_from_api.py" in checks_by_name[
         "paper_backtest_diff"
     ]["remediation"]
@@ -59,6 +65,12 @@ def test_check_live_submission_artifacts_reports_all_missing_paths(
         "paper_backtest_diff"
     ]["remediation"]
     assert "completed matching research backtest" in checks_by_name[
+        "paper_backtest_diff"
+    ]["remediation"]
+    assert "--strategy-id h1_flb" in checks_by_name[
+        "paper_backtest_diff"
+    ]["remediation"]
+    assert "--strategy-version-id <h1-flb-version-id>" in checks_by_name[
         "paper_backtest_diff"
     ]["remediation"]
 
