@@ -134,6 +134,7 @@ from pms.strategies.anchoring import (
 )
 from pms.strategies.anchoring.source import AnchoringMarketSnapshotReader
 from pms.strategies.flb import FlbAgent, FlbController, FlbStrategyModule
+from pms.strategies.flb.artifacts import require_flb_calibration_provenance_for_model
 from pms.strategies.flb.source import (
     FlbCalibrationModel,
     FlbMarketSnapshot,
@@ -4221,6 +4222,7 @@ def _flb_calibration_model_from_settings(
         raw_path,
         min_sample_count=settings.strategies.flb_min_calibration_samples,
     )
+    require_flb_calibration_provenance_for_model(raw_path, model=model)
     logger.info(
         "loaded FLB calibration model",
         extra={

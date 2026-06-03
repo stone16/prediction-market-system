@@ -11,7 +11,10 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 
-from pms.strategies.flb.source import require_flb_calibration_source_label
+from pms.strategies.flb.source import (
+    FlbCalibrationModel,
+    require_flb_calibration_source_label,
+)
 
 
 FLB_CALIBRATION_PROVENANCE_SUFFIX = ".provenance.json"
@@ -100,6 +103,27 @@ def load_flb_calibration_provenance_json(
         source_labels=source_labels,
         signal_sample_counts=signal_sample_counts,
         min_sample_count=min_sample_count,
+    )
+
+
+def require_flb_calibration_provenance_for_model(
+    calibration_path: str | Path,
+    *,
+    model: FlbCalibrationModel,
+) -> FlbCalibrationProvenance:
+    """Validate the provenance sidecar beside a loaded FLB calibration model."""
+    path = Path(calibration_path).expanduser()
+    return load_flb_calibration_provenance_json(
+        flb_calibration_provenance_path(path),
+        calibration_csv_sha256=file_sha256_no_follow(
+            path,
+            label="FLB calibration artifact",
+        ),
+        source_labels=tuple(row.source_label for row in model.calibrations),
+        signal_sample_counts={
+            row.signal_name: row.sample_count for row in model.calibrations
+        },
+        min_sample_count=model.min_sample_count,
     )
 
 

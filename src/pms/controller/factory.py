@@ -26,6 +26,7 @@ from pms.controller.pipeline import ControllerPipeline, DirectBookSnapshotReader
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.interfaces import IForecaster
+from pms.strategies.flb.artifacts import require_flb_calibration_provenance_for_model
 from pms.strategies.flb.source import load_flb_calibration_csv
 from pms.strategies.projections import ActiveStrategy, FactorCompositionStep
 
@@ -140,11 +141,16 @@ def _build_forecaster(
         if raw_path is None or raw_path.strip() == "":
             msg = "flb forecaster requires strategies.flb_calibration_path"
             raise ValueError(msg)
+        calibration_model = load_flb_calibration_csv(
+            raw_path,
+            min_sample_count=settings.strategies.flb_min_calibration_samples,
+        )
+        require_flb_calibration_provenance_for_model(
+            raw_path,
+            model=calibration_model,
+        )
         return FlbForecaster(
-            calibration_model=load_flb_calibration_csv(
-                raw_path,
-                min_sample_count=settings.strategies.flb_min_calibration_samples,
-            )
+            calibration_model=calibration_model,
         )
     if name == "paper_canary":
         if mode != RunMode.PAPER:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from hashlib import sha256
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -91,6 +93,27 @@ def _write_flb_calibration(path: Path) -> Path:
                 "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
                 "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
             )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    Path(f"{path}.provenance.json").write_text(
+        json.dumps(
+            {
+                "artifact_type": "flb_calibration_provenance",
+                "generated_by": "scripts/flb_data_feasibility.py",
+                "source": "warehouse-csv",
+                "generated_at": "2026-06-01T00:00:00+00:00",
+                "warehouse_csv_sha256": sha256(
+                    b"unit warehouse provenance fixture"
+                ).hexdigest(),
+                "warehouse_market_count": 301,
+                "warehouse_longshot_count": 150,
+                "warehouse_favorite_count": 151,
+                "calibration_csv_sha256": sha256(path.read_bytes()).hexdigest(),
+                "calibration_source_label": "warehouse-flb-v1",
+            },
+            sort_keys=True,
         )
         + "\n",
         encoding="utf-8",
