@@ -458,6 +458,22 @@ fingerprint. Final submission/preflight artifact validation also revalidates
 the paper-soak GO report and operator rehearsal PASS report content, not just
 their fingerprints.
 
+Before moving to credentialed preflight, run the credential-free LIVE
+submission artifact check against the config that carries the final private
+artifact paths:
+
+```bash
+uv run python scripts/check_live_submission_artifacts.py \
+  --config config.live-soak.yaml
+```
+
+This validates the paper-soak GO report, operator rehearsal PASS report,
+execution model, paper-vs-backtest diff, category-prior CSV, FLB calibration
+CSV, and FLB provenance sidecar with the same content validators used by LIVE
+preflight artifact binding. It does not read Polymarket credentials or contact
+the venue. Use `--json` for machine-readable evidence and treat any `FAIL`
+row as a launch-blocking artifact gap.
+
 ## Credential Setup
 
 Install the live SDK in the runtime environment. The committed paper-soak config
