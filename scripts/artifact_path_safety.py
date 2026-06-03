@@ -2,17 +2,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TypeVar
-
-
-_ExceptionT = TypeVar("_ExceptionT", bound=Exception)
 
 
 def require_path_outside_working_tree(
     path: Path,
     *,
     label: str,
-    error_type: type[_ExceptionT] = ValueError,
+    error_type: type[Exception] = ValueError,
 ) -> None:
     configured_path = _absolute_path_without_symlink_resolution(path)
     resolved_path = path.expanduser().resolve(strict=False)
