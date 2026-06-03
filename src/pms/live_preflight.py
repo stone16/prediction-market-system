@@ -2450,6 +2450,7 @@ active_strategy_tokens AS (
     JOIN tokens
         ON tokens.condition_id = markets.condition_id
     WHERE tokens.token_id IS NOT NULL
+      AND tokens.outcome IN ('YES', 'NO')
       AND (
           COALESCE(
               NULLIF(
