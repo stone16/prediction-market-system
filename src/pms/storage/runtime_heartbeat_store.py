@@ -103,6 +103,14 @@ class RuntimeHeartbeatStore:
                             WHERE
                                 COALESCE((component_status_json->>'running')::boolean, false) IS NOT TRUE
                                 OR COALESCE((component_status_json->>'sensor_tasks')::integer, 0) <= 0
+                                OR COALESCE(
+                                    (component_status_json->>'sensor_running')::boolean,
+                                    COALESCE((component_status_json->>'sensor_tasks')::integer, 0)
+                                        = COALESCE(
+                                            (component_status_json->>'sensor_tasks_total')::integer,
+                                            COALESCE((component_status_json->>'sensor_tasks')::integer, 0)
+                                        )
+                                ) IS NOT TRUE
                                 OR COALESCE((component_status_json->>'controller_runtimes')::integer, 0) <= 0
                         ) AS unhealthy_heartbeat_count,
                         MIN(

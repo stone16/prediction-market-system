@@ -107,6 +107,28 @@ async def test_runtime_continuity_reports_unhealthy_controller_heartbeats() -> N
     assert "controller_runtimes" in pool.last_query
 
 
+@pytest.mark.asyncio
+async def test_runtime_continuity_consults_sensor_running_component_health() -> None:
+    pool = _Pool(
+        {
+            "first_started_at": datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            "first_observed_at": datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+            "last_observed_at": datetime(2026, 1, 31, 0, 0, tzinfo=UTC),
+            "heartbeat_count": 30,
+            "max_gap_seconds": 60.0,
+            "unhealthy_heartbeat_count": 1,
+            "min_controller_runtimes": 1,
+        }
+    )
+    store = RuntimeHeartbeatStore(pool=cast(Any, pool))
+
+    continuity = await store.continuity(run_id="run-sensor-partial-failure")
+
+    assert continuity is not None
+    assert continuity.unhealthy_heartbeat_count == 1
+    assert "sensor_running" in pool.last_query
+
+
 class _Pool:
     def __init__(self, row: Mapping[str, object]) -> None:
         row_with_clock = dict(row)

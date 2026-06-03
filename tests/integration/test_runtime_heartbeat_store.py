@@ -143,6 +143,60 @@ async def test_runtime_continuity_excludes_heartbeats_after_report_cutoff(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_runtime_continuity_marks_partial_sensor_liveness_unhealthy(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    run_id = "runtime-heartbeat-partial-sensor-liveness"
+    started_at = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    store = RuntimeHeartbeatStore(pg_pool)
+    async with pg_pool.acquire() as connection:
+        await connection.execute(
+            "DELETE FROM runtime_heartbeats WHERE run_id = $1",
+            run_id,
+        )
+
+    observations: tuple[tuple[datetime, dict[str, object]], ...] = (
+        (
+            started_at,
+            {
+                "running": True,
+                "sensor_tasks": 2,
+                "sensor_tasks_total": 2,
+                "controller_runtimes": 1,
+            },
+        ),
+        (
+            started_at + timedelta(minutes=1),
+            {
+                "running": True,
+                "sensor_tasks": 1,
+                "sensor_tasks_total": 2,
+                "controller_runtimes": 1,
+            },
+        ),
+    )
+    for observed_at, component_status in observations:
+        await store.append(
+            run_id=run_id,
+            mode="paper",
+            started_at=started_at,
+            observed_at=observed_at,
+            strategy_fingerprint="strategy-fingerprint",
+            component_status=component_status,
+        )
+
+    continuity = await store.continuity(
+        run_id=run_id,
+        observed_until=started_at + timedelta(minutes=1),
+    )
+
+    assert continuity is not None
+    assert continuity.heartbeat_count == 2
+    assert continuity.unhealthy_heartbeat_count == 1
+    assert continuity.min_controller_runtimes == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_runtime_continuity_measures_healthy_days_to_report_clock(
     pg_pool: asyncpg.Pool,
 ) -> None:
