@@ -75,12 +75,30 @@ def test_h1_flb_runtime_smoke_docs_use_machine_checker_and_scope_evidence() -> N
 
     assert "scripts/check_h1_flb_smoke.py" in readme_text
     assert "scripts/check_h1_flb_smoke.py" in runbook_text
+    assert "--readiness-json" in readme_text
+    assert "--readiness-json" in runbook_text
     assert "--min-decisions 1" in readme_text
     assert "--min-decisions 1" in runbook_text
     assert "--min-trades 1" in readme_text
     assert "--min-trades 1" in runbook_text
     assert expected_scope in normalized_readme
     assert expected_scope in normalized_runbook
+
+
+def test_runtime_smoke_docs_capture_readiness_snapshots_for_machine_checkers() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "readiness.json" in readme_text
+    assert "readiness.json" in runbook_text
+    assert "/readiness" in readme_text
+    assert "/readiness" in runbook_text
+    assert "scripts/check_paper_canary_smoke.py" in readme_text
+    assert "scripts/check_paper_canary_smoke.py" in runbook_text
+    assert "scripts/check_h1_flb_smoke.py" in readme_text
+    assert "scripts/check_h1_flb_smoke.py" in runbook_text
 
 
 def test_paper_soak_docs_verify_database_target_before_migrations() -> None:

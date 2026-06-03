@@ -158,10 +158,11 @@ uv run python scripts/install_paper_canary_strategy.py \
   --archive-default \
   --sample-modulus 1
 # Start the API with config.local.paper-canary.yaml, POST /run/start from a
-# second shell, save /status, /strategies, /markets, /decisions, /trades,
-# /positions, and /metrics JSON snapshots, then validate them with:
+# second shell, save /status, /readiness, /strategies, /markets, /decisions,
+# /trades, /positions, and /metrics JSON snapshots, then validate them with:
 uv run python scripts/check_paper_canary_smoke.py \
   --status-json "$PAPER_CANARY_EVIDENCE_DIR/status.json" \
+  --readiness-json "$PAPER_CANARY_EVIDENCE_DIR/readiness.json" \
   --strategies-json "$PAPER_CANARY_EVIDENCE_DIR/strategies.json" \
   --markets-json "$PAPER_CANARY_EVIDENCE_DIR/markets.json" \
   --decisions-json "$PAPER_CANARY_EVIDENCE_DIR/decisions.json" \
@@ -231,10 +232,12 @@ curl -H "Authorization: Bearer $PMS_API_TOKEN" \
   http://127.0.0.1:8000/status
 
 # Optional H1 FLB runtime smoke after launch artifacts pass startup gates.
-# Capture /status, /strategies, /markets, /decisions, /trades, /positions,
-# and /metrics JSON snapshots into H1_FLB_EVIDENCE_DIR, then validate them.
+# Capture /status, /readiness, /strategies, /markets, /decisions, /trades,
+# /positions, and /metrics JSON snapshots into H1_FLB_EVIDENCE_DIR, then
+# validate them.
 uv run python scripts/check_h1_flb_smoke.py \
   --status-json "$H1_FLB_EVIDENCE_DIR/status.json" \
+  --readiness-json "$H1_FLB_EVIDENCE_DIR/readiness.json" \
   --strategies-json "$H1_FLB_EVIDENCE_DIR/strategies.json" \
   --markets-json "$H1_FLB_EVIDENCE_DIR/markets.json" \
   --decisions-json "$H1_FLB_EVIDENCE_DIR/decisions.json" \

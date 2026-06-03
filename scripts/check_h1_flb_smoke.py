@@ -61,6 +61,7 @@ class H1FlbSmokeCheck:
 def check_h1_flb_smoke(
     *,
     status: object,
+    readiness: object,
     strategies: object,
     markets: object,
     decisions: object,
@@ -83,6 +84,7 @@ def check_h1_flb_smoke(
     )
     return (
         _check_paper_mode(status_obj),
+        _check_readiness(readiness),
         _check_runtime_continuity(status_obj, min_heartbeats=min_heartbeats),
         _check_sensor_activity(status_obj),
         _check_active_strategy(active_version_id),
@@ -114,6 +116,27 @@ def check_h1_flb_smoke(
             min_positions=min_positions,
         ),
     )
+
+
+def _check_readiness(readiness: object) -> H1FlbSmokeCheck:
+    readiness_obj = _as_mapping(readiness)
+    checks = _as_mapping(readiness_obj.get("checks"))
+    status = _string(readiness_obj.get("status"))
+    detail = _readiness_detail(status=status, checks=checks)
+    if status != "ready":
+        return H1FlbSmokeCheck("readiness", False, detail)
+    not_ready_checks = {
+        name: value
+        for name, value in checks.items()
+        if _string(value) not in {"ready", "disabled"}
+    }
+    if not_ready_checks:
+        return H1FlbSmokeCheck(
+            "readiness",
+            False,
+            _readiness_detail(status=status, checks=not_ready_checks),
+        )
+    return H1FlbSmokeCheck("readiness", True, detail)
 
 
 def _check_paper_mode(status: Mapping[str, object]) -> H1FlbSmokeCheck:
@@ -599,6 +622,19 @@ def _format_number(value: float) -> str:
     return f"{value:g}"
 
 
+def _readiness_detail(*, status: str, checks: Mapping[str, object]) -> str:
+    check_detail = "; ".join(
+        f"{name}={_readiness_value(value)}" for name, value in sorted(checks.items())
+    )
+    if check_detail:
+        return f"status={status!r}; {check_detail}"
+    return f"status={status!r}; checks=<missing>"
+
+
+def _readiness_value(value: object) -> str:
+    return _string(value) or repr(value)
+
+
 def _read_json(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -624,6 +660,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Validate saved H1 FLB PAPER smoke API snapshots."
     )
     parser.add_argument("--status-json", required=True, help="Saved /status JSON.")
+    parser.add_argument(
+        "--readiness-json",
+        required=True,
+        help="Saved /readiness JSON.",
+    )
     parser.add_argument(
         "--strategies-json",
         required=True,
@@ -653,6 +694,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         checks = check_h1_flb_smoke(
             status=_read_json(Path(str(args.status_json))),
+            readiness=_read_json(Path(str(args.readiness_json))),
             strategies=_read_json(Path(str(args.strategies_json))),
             markets=_read_json(Path(str(args.markets_json))),
             decisions=_read_json(Path(str(args.decisions_json))),

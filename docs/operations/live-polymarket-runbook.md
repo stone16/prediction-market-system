@@ -77,6 +77,9 @@ passphrases into chat, issues, PRs, logs, or config files.
      http://127.0.0.1:8000/status \
      > "$PAPER_CANARY_EVIDENCE_DIR/status.json"
    curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/readiness \
+     > "$PAPER_CANARY_EVIDENCE_DIR/readiness.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
      http://127.0.0.1:8000/strategies \
      > "$PAPER_CANARY_EVIDENCE_DIR/strategies.json"
    curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
@@ -97,6 +100,7 @@ passphrases into chat, issues, PRs, logs, or config files.
 
    uv run python scripts/check_paper_canary_smoke.py \
      --status-json "$PAPER_CANARY_EVIDENCE_DIR/status.json" \
+     --readiness-json "$PAPER_CANARY_EVIDENCE_DIR/readiness.json" \
      --strategies-json "$PAPER_CANARY_EVIDENCE_DIR/strategies.json" \
      --markets-json "$PAPER_CANARY_EVIDENCE_DIR/markets.json" \
      --decisions-json "$PAPER_CANARY_EVIDENCE_DIR/decisions.json" \
@@ -144,13 +148,15 @@ passphrases into chat, issues, PRs, logs, or config files.
 7. Confirm `/trades`, `/positions`, and evaluator metrics update when the
    selected strategy emits paper decisions.
 
-   For H1 FLB runtime smoke, capture `/status`, `/strategies`, `/markets`,
-   `/decisions`, `/trades`, `/positions`, and `/metrics` JSON snapshots while
-   the runner is still running, then validate the snapshots with the H1 checker:
+   For H1 FLB runtime smoke, capture `/status`, `/readiness`, `/strategies`,
+   `/markets`, `/decisions`, `/trades`, `/positions`, and `/metrics` JSON
+   snapshots while the runner is still running, then validate the snapshots
+   with the H1 checker:
 
    ```bash
    uv run python scripts/check_h1_flb_smoke.py \
      --status-json "$H1_FLB_EVIDENCE_DIR/status.json" \
+     --readiness-json "$H1_FLB_EVIDENCE_DIR/readiness.json" \
      --strategies-json "$H1_FLB_EVIDENCE_DIR/strategies.json" \
      --markets-json "$H1_FLB_EVIDENCE_DIR/markets.json" \
      --decisions-json "$H1_FLB_EVIDENCE_DIR/decisions.json" \

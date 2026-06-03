@@ -54,6 +54,7 @@ class PaperCanarySmokeCheck:
 def check_paper_canary_smoke(
     *,
     status: object,
+    readiness: object,
     strategies: object,
     markets: object,
     decisions: object,
@@ -71,6 +72,7 @@ def check_paper_canary_smoke(
     active_version_id = _active_canary_version_id(strategies)
     return (
         _check_paper_mode(status_obj),
+        _check_readiness(readiness),
         _check_runtime_continuity(status_obj, min_heartbeats=min_heartbeats),
         _check_sensor_activity(status_obj),
         _check_active_strategy(active_version_id),
@@ -91,6 +93,27 @@ def check_paper_canary_smoke(
         _check_selection_funnel(metrics_obj),
         _check_first_trade_time(metrics_obj),
     )
+
+
+def _check_readiness(readiness: object) -> PaperCanarySmokeCheck:
+    readiness_obj = _as_mapping(readiness)
+    checks = _as_mapping(readiness_obj.get("checks"))
+    status = _string(readiness_obj.get("status"))
+    detail = _readiness_detail(status=status, checks=checks)
+    if status != "ready":
+        return PaperCanarySmokeCheck("readiness", False, detail)
+    not_ready_checks = {
+        name: value
+        for name, value in checks.items()
+        if _string(value) not in {"ready", "disabled"}
+    }
+    if not_ready_checks:
+        return PaperCanarySmokeCheck(
+            "readiness",
+            False,
+            _readiness_detail(status=status, checks=not_ready_checks),
+        )
+    return PaperCanarySmokeCheck("readiness", True, detail)
 
 
 def _check_paper_mode(status: Mapping[str, object]) -> PaperCanarySmokeCheck:
@@ -499,6 +522,19 @@ def _format_number(value: float) -> str:
     return f"{value:g}"
 
 
+def _readiness_detail(*, status: str, checks: Mapping[str, object]) -> str:
+    check_detail = "; ".join(
+        f"{name}={_readiness_value(value)}" for name, value in sorted(checks.items())
+    )
+    if check_detail:
+        return f"status={status!r}; {check_detail}"
+    return f"status={status!r}; checks=<missing>"
+
+
+def _readiness_value(value: object) -> str:
+    return _string(value) or repr(value)
+
+
 def _read_json(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -524,6 +560,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Validate saved PAPER canary smoke API snapshots."
     )
     parser.add_argument("--status-json", required=True, help="Saved /status JSON.")
+    parser.add_argument(
+        "--readiness-json",
+        required=True,
+        help="Saved /readiness JSON.",
+    )
     parser.add_argument(
         "--strategies-json",
         required=True,
@@ -552,6 +593,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         checks = check_paper_canary_smoke(
             status=_read_json(Path(str(args.status_json))),
+            readiness=_read_json(Path(str(args.readiness_json))),
             strategies=_read_json(Path(str(args.strategies_json))),
             markets=_read_json(Path(str(args.markets_json))),
             decisions=_read_json(Path(str(args.decisions_json))),

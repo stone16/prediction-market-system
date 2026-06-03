@@ -66,6 +66,18 @@ def _passing_snapshot_paths(tmp_path: Path) -> dict[str, Path]:
                 },
             },
         ),
+        "readiness": _write_json(
+            tmp_path / "readiness.json",
+            {
+                "status": "ready",
+                "checks": {
+                    "sensors": "ready",
+                    "event_loop": "ready",
+                    "halt_subscriber": "disabled",
+                    "eod_scheduler": "disabled",
+                },
+            },
+        ),
         "strategies": _write_json(
             tmp_path / "strategies.json",
             {
@@ -179,6 +191,8 @@ def _argv(paths: dict[str, Path], *extra: str) -> list[str]:
     return [
         "--status-json",
         str(paths["status"]),
+        "--readiness-json",
+        str(paths["readiness"]),
         "--strategies-json",
         str(paths["strategies"]),
         "--markets-json",
@@ -207,6 +221,7 @@ def test_check_paper_canary_smoke_passes_with_live_data_controller_and_paper_fil
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "[PASS] paper_mode:" in captured.out
+    assert "[PASS] readiness:" in captured.out
     assert "[PASS] active_strategy:" in captured.out
     assert "[PASS] paper_trades:" in captured.out
     assert "[PASS] selection_funnel:" in captured.out
@@ -270,6 +285,34 @@ def test_check_paper_canary_smoke_rejects_stale_strategy_version_rows(
     assert "[FAIL] controller_decisions:" in captured.out
     assert "paper_canary_v1@canary-version" in captured.out
     assert "stale-canary-version" in captured.out
+
+
+def test_check_paper_canary_smoke_rejects_not_ready_readiness_snapshot(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _module()
+    paths = _passing_snapshot_paths(tmp_path)
+    _write_json(
+        paths["readiness"],
+        {
+            "status": "not_ready",
+            "checks": {
+                "sensors": "ready",
+                "event_loop": "not_started",
+                "halt_subscriber": "disabled",
+                "eod_scheduler": "disabled",
+            },
+        },
+    )
+
+    exit_code = module.main(_argv(paths))
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[FAIL] readiness:" in captured.out
+    assert "status='not_ready'" in captured.out
+    assert "event_loop=not_started" in captured.out
 
 
 def test_check_paper_canary_smoke_json_output_is_machine_readable(
