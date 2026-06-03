@@ -210,8 +210,9 @@ traded token's implied probability. Configure
 to load that prior from a historical resolution CSV export with columns
 `market_id,category,yes_payout,no_payout,resolved_at`. Startup fails closed if
 the file is missing, has duplicate `market_id` rows, or contains price-like
-payouts such as `0.99,0.01`; only exact settled vectors `1,0` / `0,1` are
-scored, while `0.5,0.5` refund rows are skipped. The loader feeds
+payouts such as `0.99,0.01`; Decimal-equivalent settled vectors such as
+`1,0`, `1.0,0.0`, `0,1`, and `0.0,1.0` are scored, while `0.5,0.5` refund
+rows are skipped. The loader feeds
 `pms.controller.baselines.CategoryPriorBaselineEstimator`, which filters out
 observations resolved at or after the signal timestamp and falls back from
 category to global only when the configured sample gates are met. Resolved

@@ -261,6 +261,7 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "--sample-modulus 1" in runbook_text
     assert "paper_soak_strategy_id: null" in runbook_text
     assert "flb_calibration_path: null" in runbook_text
+    assert "Decimal-equivalent settled vectors" in runbook_text
     assert "PMS_SECURE_DIR" in readme_text
     assert "PMS_SECURE_DIR" in runbook_text
     assert "private artifact parent" in readme_text
