@@ -314,6 +314,58 @@ def test_live_controller_factory_builds_h1_flb_with_calibration_artifact(
     assert tuple(type(item) for item in pipeline.forecasters) == (FlbForecaster,)
 
 
+def test_live_controller_factory_rejects_h1_flb_calibration_inside_working_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    artifact_dir = repo_dir / "private"
+    artifact_dir.mkdir(mode=0o700)
+    calibration_path = _write_valid_flb_calibration_csv(
+        artifact_dir / "flb-calibration.csv"
+    )
+    monkeypatch.chdir(repo_dir)
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        strategies=StrategyRuntimeSettings(
+            flb_calibration_path=str(calibration_path),
+        ),
+    )
+    strategy = build_h1_flb_strategy().to_active(
+        strategy_version_id="h1-flb-test-v1"
+    )
+
+    with pytest.raises(ValueError, match="outside the working tree"):
+        factory_cls(settings=settings).build(strategy)
+
+
+def test_live_controller_factory_rejects_h1_flb_calibration_permissive_parent(
+    tmp_path: Path,
+) -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    artifact_dir = tmp_path / "permissive"
+    artifact_dir.mkdir()
+    artifact_dir.chmod(0o755)
+    calibration_path = _write_valid_flb_calibration_csv(
+        artifact_dir / "flb-calibration.csv"
+    )
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        strategies=StrategyRuntimeSettings(
+            flb_calibration_path=str(calibration_path),
+        ),
+    )
+    strategy = build_h1_flb_strategy().to_active(
+        strategy_version_id="h1-flb-test-v1"
+    )
+
+    with pytest.raises(ValueError, match="too permissive"):
+        factory_cls(settings=settings).build(strategy)
+
+
 def test_live_controller_factory_rejects_h1_flb_without_calibration_provenance(
     tmp_path: Path,
 ) -> None:

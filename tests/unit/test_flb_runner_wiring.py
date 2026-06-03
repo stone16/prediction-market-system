@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from pms.config import PMSSettings, RiskSettings, StrategyRuntimeSettings
+from pms.config import (
+    ControllerSettings,
+    PMSSettings,
+    RiskSettings,
+    StrategyRuntimeSettings,
+)
 from pms.core.enums import RunMode
 from pms.runner import Runner
 from pms.strategies.flb import FlbAgent, FlbController, FlbStrategyModule, LiveFlbSource
@@ -136,6 +141,21 @@ def _write_flb_calibration(
     return path
 
 
+def _write_category_prior(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            [
+                "market_id,category,yes_payout,no_payout,resolved_at",
+                "m-1,politics,1,0,2026-01-01T00:00:00Z",
+                "m-2,politics,0,1,2026-01-02T00:00:00Z",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _market(**overrides: object) -> FlbMarketSnapshot:
     data = {
         "market_id": "market-flb-1",
@@ -227,6 +247,96 @@ def test_runner_rejects_configured_flb_calibration_without_provenance(
                 risk=RiskSettings(max_position_per_market=5.0),
                 strategies=StrategyRuntimeSettings(
                     flb_calibration_path=str(model_path),
+                ),
+            ),
+        )
+
+
+def test_runner_rejects_configured_flb_calibration_inside_working_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    artifact_dir = repo_dir / "private"
+    artifact_dir.mkdir(mode=0o700)
+    model_path = _write_flb_calibration(artifact_dir / "flb-calibration.csv")
+    monkeypatch.chdir(repo_dir)
+
+    with pytest.raises(ValueError, match="outside the working tree"):
+        Runner(
+            config=PMSSettings(
+                mode=RunMode.PAPER,
+                risk=RiskSettings(max_position_per_market=5.0),
+                strategies=StrategyRuntimeSettings(
+                    flb_calibration_path=str(model_path),
+                ),
+            ),
+        )
+
+
+def test_runner_rejects_configured_flb_calibration_permissive_parent(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "permissive"
+    artifact_dir.mkdir()
+    artifact_dir.chmod(0o755)
+    model_path = _write_flb_calibration(artifact_dir / "flb-calibration.csv")
+
+    with pytest.raises(ValueError, match="too permissive"):
+        Runner(
+            config=PMSSettings(
+                mode=RunMode.PAPER,
+                risk=RiskSettings(max_position_per_market=5.0),
+                strategies=StrategyRuntimeSettings(
+                    flb_calibration_path=str(model_path),
+                ),
+            ),
+        )
+
+
+def test_runner_rejects_configured_category_prior_inside_working_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    artifact_dir = repo_dir / "private"
+    artifact_dir.mkdir(mode=0o700)
+    category_prior_path = _write_category_prior(artifact_dir / "category-prior.csv")
+    monkeypatch.chdir(repo_dir)
+
+    with pytest.raises(ValueError, match="outside the working tree"):
+        Runner(
+            config=PMSSettings(
+                mode=RunMode.PAPER,
+                risk=RiskSettings(max_position_per_market=5.0),
+                controller=ControllerSettings(
+                    category_prior_observations_path=str(category_prior_path),
+                    category_prior_min_global_samples=2,
+                ),
+            ),
+        )
+
+
+def test_runner_rejects_configured_category_prior_permissive_parent(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "permissive"
+    artifact_dir.mkdir()
+    artifact_dir.chmod(0o755)
+    category_prior_path = _write_category_prior(artifact_dir / "category-prior.csv")
+
+    with pytest.raises(ValueError, match="too permissive"):
+        Runner(
+            config=PMSSettings(
+                mode=RunMode.PAPER,
+                risk=RiskSettings(max_position_per_market=5.0),
+                controller=ControllerSettings(
+                    category_prior_observations_path=str(category_prior_path),
+                    category_prior_min_global_samples=2,
                 ),
             ),
         )

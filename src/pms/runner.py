@@ -75,6 +75,10 @@ from pms.core.models import (
     VenueAccountSnapshot as VenueAccountSnapshot,
     VenueCredentials,
 )
+from pms.artifact_path_safety import (
+    require_path_outside_working_tree,
+    require_private_parent,
+)
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
 from pms.evaluation.metrics import (
@@ -134,7 +138,10 @@ from pms.strategies.anchoring import (
 )
 from pms.strategies.anchoring.source import AnchoringMarketSnapshotReader
 from pms.strategies.flb import FlbAgent, FlbController, FlbStrategyModule
-from pms.strategies.flb.artifacts import require_flb_calibration_provenance_for_model
+from pms.strategies.flb.artifacts import (
+    flb_calibration_provenance_path,
+    require_flb_calibration_provenance_for_model,
+)
 from pms.strategies.flb.source import (
     FlbCalibrationModel,
     FlbMarketSnapshot,
@@ -4192,7 +4199,10 @@ def _category_prior_estimator_from_settings(
     if raw_path is None or raw_path.strip() == "":
         return None
 
-    loaded = load_category_prior_observations_csv(raw_path)
+    path = Path(raw_path).expanduser()
+    require_path_outside_working_tree(path, label="category-prior artifact")
+    require_private_parent(path, label="category-prior artifact")
+    loaded = load_category_prior_observations_csv(path)
     logger.info(
         "loaded category prior observations",
         extra={
@@ -4218,11 +4228,22 @@ def _flb_calibration_model_from_settings(
     if raw_path is None or raw_path.strip() == "":
         return None
 
+    path = Path(raw_path).expanduser()
+    require_path_outside_working_tree(path, label="FLB calibration artifact")
+    require_private_parent(path, label="FLB calibration artifact")
+    require_path_outside_working_tree(
+        flb_calibration_provenance_path(path),
+        label="FLB calibration provenance JSON",
+    )
+    require_private_parent(
+        flb_calibration_provenance_path(path),
+        label="FLB calibration provenance JSON",
+    )
     model = load_flb_calibration_csv(
-        raw_path,
+        path,
         min_sample_count=settings.strategies.flb_min_calibration_samples,
     )
-    require_flb_calibration_provenance_for_model(raw_path, model=model)
+    require_flb_calibration_provenance_for_model(path, model=model)
     logger.info(
         "loaded FLB calibration model",
         extra={

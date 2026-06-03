@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from pms.artifact_path_safety import (
+    require_path_outside_working_tree,
+    require_private_parent,
+)
 from pms.config import PMSSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.factor_snapshot import (
@@ -26,7 +31,10 @@ from pms.controller.pipeline import ControllerPipeline, DirectBookSnapshotReader
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.interfaces import IForecaster
-from pms.strategies.flb.artifacts import require_flb_calibration_provenance_for_model
+from pms.strategies.flb.artifacts import (
+    flb_calibration_provenance_path,
+    require_flb_calibration_provenance_for_model,
+)
 from pms.strategies.flb.source import load_flb_calibration_csv
 from pms.strategies.projections import ActiveStrategy, FactorCompositionStep
 
@@ -141,12 +149,24 @@ def _build_forecaster(
         if raw_path is None or raw_path.strip() == "":
             msg = "flb forecaster requires strategies.flb_calibration_path"
             raise ValueError(msg)
+        path = Path(raw_path).expanduser()
+        require_path_outside_working_tree(path, label="FLB calibration artifact")
+        require_private_parent(path, label="FLB calibration artifact")
+        provenance_path = flb_calibration_provenance_path(path)
+        require_path_outside_working_tree(
+            provenance_path,
+            label="FLB calibration provenance JSON",
+        )
+        require_private_parent(
+            provenance_path,
+            label="FLB calibration provenance JSON",
+        )
         calibration_model = load_flb_calibration_csv(
-            raw_path,
+            path,
             min_sample_count=settings.strategies.flb_min_calibration_samples,
         )
         require_flb_calibration_provenance_for_model(
-            raw_path,
+            path,
             model=calibration_model,
         )
         return FlbForecaster(
