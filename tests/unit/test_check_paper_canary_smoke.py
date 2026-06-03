@@ -246,6 +246,32 @@ def test_check_paper_canary_smoke_fails_when_selection_funnel_never_traded(
     assert "pms_selection_funnel_traded_total=0" in captured.out
 
 
+def test_check_paper_canary_smoke_rejects_stale_strategy_version_rows(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _module()
+    paths = _passing_snapshot_paths(tmp_path)
+    stale_version = "stale-canary-version"
+    decisions = json.loads(paths["decisions"].read_text(encoding="utf-8"))
+    trades = json.loads(paths["trades"].read_text(encoding="utf-8"))
+    positions = json.loads(paths["positions"].read_text(encoding="utf-8"))
+    decisions[0]["strategy_version_id"] = stale_version
+    trades["trades"][0]["strategy_version_id"] = stale_version
+    positions["positions"][0]["strategy_version_id"] = stale_version
+    _write_json(paths["decisions"], decisions)
+    _write_json(paths["trades"], trades)
+    _write_json(paths["positions"], positions)
+
+    exit_code = module.main(_argv(paths))
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[FAIL] controller_decisions:" in captured.out
+    assert "paper_canary_v1@canary-version" in captured.out
+    assert "stale-canary-version" in captured.out
+
+
 def test_check_paper_canary_smoke_json_output_is_machine_readable(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

@@ -68,19 +68,26 @@ def check_paper_canary_smoke(
     """Return machine-checkable paper canary smoke checks."""
     status_obj = _as_mapping(status)
     metrics_obj = _as_mapping(metrics)
+    active_version_id = _active_canary_version_id(strategies)
     return (
         _check_paper_mode(status_obj),
         _check_runtime_continuity(status_obj, min_heartbeats=min_heartbeats),
         _check_sensor_activity(status_obj),
-        _check_active_strategy(strategies),
+        _check_active_strategy(active_version_id),
         _check_market_discovery(markets, min_markets=min_markets),
         _check_controller_decisions(
             status_obj,
             decisions,
+            active_version_id=active_version_id,
             min_decisions=min_decisions,
         ),
-        _check_paper_trades(status_obj, trades, min_trades=min_trades),
-        _check_open_positions(positions),
+        _check_paper_trades(
+            status_obj,
+            trades,
+            active_version_id=active_version_id,
+            min_trades=min_trades,
+        ),
+        _check_open_positions(positions, active_version_id=active_version_id),
         _check_selection_funnel(metrics_obj),
         _check_first_trade_time(metrics_obj),
     )
@@ -178,18 +185,18 @@ def _check_sensor_activity(status: Mapping[str, object]) -> PaperCanarySmokeChec
     return PaperCanarySmokeCheck("sensor_activity", True, statuses)
 
 
-def _check_active_strategy(strategies: object) -> PaperCanarySmokeCheck:
+def _active_canary_version_id(strategies: object) -> str | None:
     rows = _rows_from_payload(strategies, "strategies")
     for row in rows:
         if _string(row.get("strategy_id")) != PAPER_CANARY_STRATEGY_ID:
             continue
         active_version_id = _string(row.get("active_version_id"))
-        if active_version_id == "":
-            return PaperCanarySmokeCheck(
-                "active_strategy",
-                False,
-                "paper_canary_v1 has no active_version_id",
-            )
+        return active_version_id or None
+    return None
+
+
+def _check_active_strategy(active_version_id: str | None) -> PaperCanarySmokeCheck:
+    if active_version_id is not None:
         return PaperCanarySmokeCheck(
             "active_strategy",
             True,
@@ -198,7 +205,7 @@ def _check_active_strategy(strategies: object) -> PaperCanarySmokeCheck:
     return PaperCanarySmokeCheck(
         "active_strategy",
         False,
-        "paper_canary_v1 is not present in /strategies",
+        "paper_canary_v1 is not present in /strategies or has no active_version_id",
     )
 
 
@@ -224,6 +231,7 @@ def _check_controller_decisions(
     status: Mapping[str, object],
     decisions: object,
     *,
+    active_version_id: str | None,
     min_decisions: int,
 ) -> PaperCanarySmokeCheck:
     controller = _as_mapping(status.get("controller"))
@@ -233,9 +241,33 @@ def _check_controller_decisions(
         for row in _rows_from_payload(decisions, "decisions")
         if _string(row.get("strategy_id")) == PAPER_CANARY_STRATEGY_ID
     ]
+    mismatched_versions = sorted(
+        {
+            _string(row.get("strategy_version_id")) or "<missing>"
+            for row in rows
+            if active_version_id is not None
+            and _string(row.get("strategy_version_id")) != active_version_id
+        }
+    )
+    if mismatched_versions:
+        return PaperCanarySmokeCheck(
+            "controller_decisions",
+            False,
+            (
+                f"paper_canary_v1 decision rows must match active "
+                f"paper_canary_v1@{active_version_id}; saw "
+                f"{', '.join(mismatched_versions)}"
+            ),
+        )
     accepted_rows = [
         row
         for row in rows
+        if active_version_id is None
+        or _string(row.get("strategy_version_id")) == active_version_id
+    ]
+    accepted_rows = [
+        row
+        for row in accepted_rows
         if _string(row.get("status")) in _ACCEPTED_DECISION_STATUSES
     ]
     if status_decisions < min_decisions:
@@ -265,6 +297,7 @@ def _check_paper_trades(
     status: Mapping[str, object],
     trades: object,
     *,
+    active_version_id: str | None,
     min_trades: int,
 ) -> PaperCanarySmokeCheck:
     actuator = _as_mapping(status.get("actuator"))
@@ -279,6 +312,30 @@ def _check_paper_trades(
         row
         for row in _rows_from_payload(trades, "trades")
         if _string(row.get("strategy_id")) == PAPER_CANARY_STRATEGY_ID
+    ]
+    mismatched_versions = sorted(
+        {
+            _string(row.get("strategy_version_id")) or "<missing>"
+            for row in rows
+            if active_version_id is not None
+            and _string(row.get("strategy_version_id")) != active_version_id
+        }
+    )
+    if mismatched_versions:
+        return PaperCanarySmokeCheck(
+            "paper_trades",
+            False,
+            (
+                f"paper_canary_v1 trade rows must match active "
+                f"paper_canary_v1@{active_version_id}; saw "
+                f"{', '.join(mismatched_versions)}"
+            ),
+        )
+    rows = [
+        row
+        for row in rows
+        if active_version_id is None
+        or _string(row.get("strategy_version_id")) == active_version_id
     ]
     rows = [
         row
@@ -300,11 +357,41 @@ def _check_paper_trades(
     )
 
 
-def _check_open_positions(positions: object) -> PaperCanarySmokeCheck:
+def _check_open_positions(
+    positions: object,
+    *,
+    active_version_id: str | None,
+) -> PaperCanarySmokeCheck:
     rows = [
         row
         for row in _rows_from_payload(positions, "positions")
         if _string(row.get("strategy_id")) == PAPER_CANARY_STRATEGY_ID
+    ]
+    mismatched_versions = sorted(
+        {
+            _string(row.get("strategy_version_id")) or "<missing>"
+            for row in rows
+            if active_version_id is not None
+            and _string(row.get("strategy_version_id")) != active_version_id
+        }
+    )
+    if mismatched_versions:
+        return PaperCanarySmokeCheck(
+            "open_positions",
+            False,
+            (
+                f"paper_canary_v1 position rows must match active "
+                f"paper_canary_v1@{active_version_id}; saw "
+                f"{', '.join(mismatched_versions)}"
+            ),
+        )
+    rows = [
+        row
+        for row in rows
+        if (
+            active_version_id is None
+            or _string(row.get("strategy_version_id")) == active_version_id
+        )
         and _float_value(row.get("shares_held")) > 0.0
     ]
     if not rows:
