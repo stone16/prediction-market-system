@@ -515,9 +515,10 @@ credentials anyway. Surfaced explicitly so they are not silently assumed:
    enrichment so `default` trades, or (c) ship FLB live. Until then, paper
    trades via `paper_multi_factor_v1`; no LIVE-allowed Polymarket-only
    strategy exists.
-2. **Polymarket fee rate.** Paper fills now use `strategies.flb_fee_rate=0.04`
-   (the repo's own canonical estimate, also in `ExecutionModel.polymarket_live_estimate`).
-   **Decision needed:** confirm `0.04` against Polymarket's actual fee
+2. **Polymarket fee rate.** Paper fills now use `strategies.flb_fee_rate=0.07`
+   as the conservative launch fallback, and prefer venue `fee_rate_bps`
+   metadata when the feed provides market-specific fee evidence.
+   **Decision needed:** confirm `0.07` against Polymarket's actual fee
    schedule before the final GO (operator-tunable via config; set to `0`
    if Polymarket charges no taker fee on the target markets).
 

@@ -77,6 +77,14 @@ def _normalized_doc_text(text: str) -> str:
     return " ".join(" ".join(lines).split())
 
 
+def _configured_flb_fee_rate(config_text: str) -> str:
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("flb_fee_rate:"):
+            return stripped.split(":", maxsplit=1)[1].strip()
+    raise AssertionError("config.live-soak.yaml missing flb_fee_rate")
+
+
 def test_readme_paper_soak_status_mentions_required_launch_artifacts() -> None:
     readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
     normalized = " ".join(readme_text.split())
@@ -89,6 +97,24 @@ def test_readme_paper_soak_status_mentions_required_launch_artifacts() -> None:
     ) in normalized
     assert "not credentials" in normalized
     assert "not a launch artifact" in normalized
+
+
+def test_launch_fee_rate_docs_match_live_soak_config() -> None:
+    config_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
+    runbook_text = (
+        ROOT / "docs" / "operations" / "live-polymarket-runbook.md"
+    ).read_text(encoding="utf-8")
+    readiness_text = (
+        ROOT / "agent_docs" / "production-readiness-2026-05.md"
+    ).read_text(encoding="utf-8")
+    fee_rate = _configured_flb_fee_rate(config_text)
+
+    assert f"flb_fee_rate: {fee_rate}" in runbook_text
+    assert f"--fee-rate {fee_rate}" in runbook_text
+    assert f"`strategies.flb_fee_rate={fee_rate}`" in readiness_text
+    assert f"confirm `{fee_rate}`" in readiness_text
+    assert "--fee-rate 0.04" not in runbook_text
+    assert "`strategies.flb_fee_rate=0.04`" not in readiness_text
 
 
 def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_gate() -> None:

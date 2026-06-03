@@ -326,7 +326,7 @@ Generate the execution-model artifact from paper/live telemetry with:
 uv run python scripts/execution_model_from_telemetry.py \
   --input /secure/pms/paper-execution-telemetry.csv \
   --output /secure/pms/execution-model.json \
-  --fee-rate 0.04 \
+  --fee-rate 0.07 \
   --staleness-ms 120000 \
   --displayed-depth-fill-ratio 0.75 \
   --require-adverse-selection \
