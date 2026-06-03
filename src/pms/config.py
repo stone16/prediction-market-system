@@ -1554,9 +1554,9 @@ def _live_paper_soak_gate_detail_semantic_errors(
         ("fill_rate", 0.0, True),
         ("cumulative_pnl", 0.0, True),
         ("brier_improvement", 0.0, True),
-        ("hit_rate", 0.45, False),
-        ("average_edge_bps", 5.0, False),
-        ("average_net_edge_bps", 0.0, False),
+        ("hit_rate", 0.45, True),
+        ("average_edge_bps", 5.0, True),
+        ("average_net_edge_bps", 0.0, True),
         ("sharpe_ratio", 0.0, True),
     ):
         value, error = _paper_soak_numeric_gate_detail_value(rows, check_name)

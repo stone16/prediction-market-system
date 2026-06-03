@@ -185,6 +185,26 @@ def _replace_report_provenance_field(
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _replace_report_gate_detail(
+    report_path: str,
+    *,
+    check_name: str,
+    detail: str,
+) -> None:
+    path = Path(report_path)
+    replaced = False
+    lines: list[str] = []
+    prefix = f"| {check_name} |"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(prefix):
+            lines.append(f"| {check_name} | PASS | {detail} |")
+            replaced = True
+        else:
+            lines.append(line)
+    assert replaced
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _insert_report_summary_strategy(report_path: str, strategy_label: str) -> None:
     path = Path(report_path)
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -6989,6 +7009,48 @@ async def test_live_preflight_fails_when_paper_report_decision_is_no_go(
     assert "paper soak GO report must contain a Go/No-Go GO decision" in (
         live_config.detail
     )
+
+
+@pytest.mark.parametrize(
+    ("check_name", "detail"),
+    (
+        ("hit_rate", "0.45 >= 0.45"),
+        ("average_edge_bps", "5.0 >= 5.0"),
+        ("average_net_edge_bps", "0.0 >= 0.0"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_paper_report_strict_gt_gate_uses_equality(
+    tmp_path: Path,
+    check_name: str,
+    detail: str,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    _replace_report_gate_detail(
+        cast(str, settings.live_paper_soak_report_path),
+        check_name=check_name,
+        detail=detail,
+    )
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(
+                _Connection(
+                    active_strategy_rows=(_active_strategy_row(_live_strategy()),)
+                )
+            ),
+        ),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert f"{check_name} detail below LIVE threshold" in live_config.detail
 
 
 @pytest.mark.asyncio
