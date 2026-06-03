@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -34,6 +35,7 @@ class PaperSoakArtifactCheck:
     name: str
     passed: bool
     detail: str
+    remediation: str | None = None
 
 
 def check_paper_soak_artifacts(settings: PMSSettings) -> tuple[PaperSoakArtifactCheck, ...]:
@@ -88,6 +90,7 @@ def _check_flb_calibration(settings: PMSSettings) -> PaperSoakArtifactCheck:
             "flb_calibration",
             False,
             "strategies.flb_calibration_path is required for h1_flb paper soak",
+            _flb_calibration_remediation(None),
         )
     path = Path(raw_path).expanduser()
     try:
@@ -120,7 +123,12 @@ def _check_flb_calibration(settings: PMSSettings) -> PaperSoakArtifactCheck:
             min_sample_count=model.min_sample_count,
         )
     except (OSError, ValueError) as exc:
-        return PaperSoakArtifactCheck("flb_calibration", False, str(exc))
+        return PaperSoakArtifactCheck(
+            "flb_calibration",
+            False,
+            str(exc),
+            _flb_calibration_remediation(path),
+        )
     source_labels = sorted({row.source_label for row in model.calibrations})
     return PaperSoakArtifactCheck(
         "flb_calibration",
@@ -143,6 +151,7 @@ def _check_category_prior(settings: PMSSettings) -> PaperSoakArtifactCheck:
                 "controller.category_prior_observations_path is required "
                 "for the h1_flb launch paper soak"
             ),
+            _category_prior_remediation(None, minimum=None),
         )
     path = Path(raw_path).expanduser()
     try:
@@ -150,7 +159,15 @@ def _check_category_prior(settings: PMSSettings) -> PaperSoakArtifactCheck:
         require_private_parent(path, label="category-prior artifact")
         loaded = load_category_prior_observations_csv(path)
     except (OSError, ValueError) as exc:
-        return PaperSoakArtifactCheck("category_prior", False, str(exc))
+        return PaperSoakArtifactCheck(
+            "category_prior",
+            False,
+            str(exc),
+            _category_prior_remediation(
+                path,
+                minimum=settings.controller.category_prior_min_global_samples,
+            ),
+        )
     observation_count = len(loaded.observations)
     minimum = settings.controller.category_prior_min_global_samples
     if observation_count < minimum:
@@ -162,6 +179,7 @@ def _check_category_prior(settings: PMSSettings) -> PaperSoakArtifactCheck:
                 f"{path}; requires "
                 f"category_prior_min_global_samples={minimum}"
             ),
+            _category_prior_remediation(path, minimum=minimum),
         )
     return PaperSoakArtifactCheck(
         "category_prior",
@@ -179,6 +197,8 @@ def _format_plain(checks: Sequence[PaperSoakArtifactCheck]) -> str:
     for check in checks:
         status = "PASS" if check.passed else "FAIL"
         lines.append(f"[{status}] {check.name}: {check.detail}")
+        if check.remediation is not None:
+            lines.append(f"  next: {check.remediation}")
     return "\n".join(lines)
 
 
@@ -220,6 +240,51 @@ def cast_str(value: object) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+
+def _flb_calibration_remediation(path: Path | None) -> str:
+    if path is None:
+        return (
+            "configure strategies.flb_calibration_path to a private artifact "
+            "path, load DUNE_API_KEY from the operator secret store, then run "
+            "scripts/export_flb_warehouse_from_dune.py followed by "
+            "scripts/flb_data_feasibility.py --source warehouse-csv with "
+            "--calibration-csv and --calibration-provenance-json"
+        )
+    warehouse_path = path.parent / "polymarket_resolved_binary.csv"
+    report_path = path.parent / "flb-feasibility.md"
+    decile_path = path.parent / "flb-deciles.csv"
+    provenance_path = flb_calibration_provenance_path(path)
+    return (
+        "load DUNE_API_KEY from the operator secret store, then run: "
+        "uv run python scripts/export_flb_warehouse_from_dune.py "
+        f"--output {_shell_quote(warehouse_path)} --performance large; "
+        "uv run python scripts/flb_data_feasibility.py --source warehouse-csv "
+        f"--input {_shell_quote(warehouse_path)} "
+        f"--output {_shell_quote(report_path)} "
+        f"--csv {_shell_quote(decile_path)} "
+        f"--calibration-csv {_shell_quote(path)} "
+        "--calibration-source-label warehouse-flb-v1 "
+        f"--calibration-provenance-json {_shell_quote(provenance_path)}"
+    )
+
+
+def _category_prior_remediation(path: Path | None, *, minimum: int | None) -> str:
+    minimum_value = minimum if minimum is not None else 100
+    if path is None:
+        return (
+            "configure controller.category_prior_observations_path to a private "
+            "artifact path, then run scripts/export_category_prior_observations.py "
+            f"--output <configured-path> --min-observations {minimum_value}"
+        )
+    return (
+        "run: uv run python scripts/export_category_prior_observations.py "
+        f"--output {_shell_quote(path)} --min-observations {minimum_value}"
+    )
+
+
+def _shell_quote(path: Path) -> str:
+    return shlex.quote(str(path))
 
 
 if __name__ == "__main__":

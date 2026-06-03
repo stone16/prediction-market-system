@@ -87,6 +87,41 @@ def test_check_paper_soak_artifacts_fails_when_flb_calibration_missing(
     assert f"FLB calibration CSV does not exist: {missing_path}" in captured.out
 
 
+def test_check_paper_soak_artifacts_reports_flb_generation_remediation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "live-soak.yaml"
+    missing_path = tmp_path / "secure" / "flb-calibration.csv"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
+                "strategies:",
+                f"  flb_calibration_path: {missing_path}",
+                "  flb_min_calibration_samples: 100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = check_paper_soak_artifacts.main(["--config", str(config_path), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    flb_check = next(
+        check for check in payload["checks"] if check["name"] == "flb_calibration"
+    )
+    assert exit_code == 1
+    assert flb_check["passed"] is False
+    assert "scripts/export_flb_warehouse_from_dune.py" in flb_check["remediation"]
+    assert "scripts/flb_data_feasibility.py" in flb_check["remediation"]
+    assert str(missing_path) in flb_check["remediation"]
+    assert f"{missing_path}.provenance.json" in flb_check["remediation"]
+
+
 def test_check_paper_soak_artifacts_fails_when_flb_calibration_provenance_missing(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -313,6 +348,41 @@ def test_check_paper_soak_artifacts_fails_when_category_prior_missing(
     assert exit_code == 1
     assert "[FAIL] category_prior:" in captured.out
     assert "controller.category_prior_observations_path is required" in captured.out
+
+
+def test_check_paper_soak_artifacts_reports_category_prior_generation_remediation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calibration_path = tmp_path / "flb-calibration.csv"
+    category_prior_path = tmp_path / "secure" / "category-prior-observations.csv"
+    _write_flb_calibration(calibration_path)
+    config_path = tmp_path / "live-soak.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "paper_soak_strategy_id: h1_flb",
+                "paper_soak_archive_default: true",
+                "controller:",
+                f"  category_prior_observations_path: {category_prior_path}",
+                "  category_prior_min_global_samples: 100",
+                "strategies:",
+                f"  flb_calibration_path: {calibration_path}",
+                "  flb_min_calibration_samples: 100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = check_paper_soak_artifacts.main(["--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "[FAIL] category_prior:" in captured.out
+    assert "scripts/export_category_prior_observations.py" in captured.out
+    assert str(category_prior_path) in captured.out
+    assert "--min-observations 100" in captured.out
 
 
 def test_check_paper_soak_artifacts_rejects_naive_category_prior_resolved_at(
