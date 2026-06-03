@@ -227,8 +227,10 @@ def _paper_backtest_diff_remediation() -> str:
         '--execution-output "$PMS_SECURE_DIR/paper-execution-export.csv" '
         '--telemetry-output "$PMS_SECURE_DIR/paper-execution-telemetry.csv" '
         "--require-adverse-selection; then run the matching research "
-        "backtest export to create "
-        '"$PMS_SECURE_DIR/backtest-execution-export.csv"; then run: '
+        "backtest, then run: "
+        "uv run python scripts/export_backtest_execution_from_db.py "
+        "--run-id <backtest-run-id> "
+        '--output "$PMS_SECURE_DIR/backtest-execution-export.csv"; then run: '
         "uv run python scripts/paper_backtest_execution_diff.py "
         '--paper "$PMS_SECURE_DIR/paper-execution-export.csv" '
         '--backtest "$PMS_SECURE_DIR/backtest-execution-export.csv" '

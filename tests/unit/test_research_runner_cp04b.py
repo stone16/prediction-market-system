@@ -157,6 +157,25 @@ class _PipelineFactory:
         return self._pipeline
 
 
+class _GtcUnfilledPipeline(_PortfolioRecordingPipeline):
+    async def on_signal(
+        self,
+        signal: MarketSignal,
+        portfolio: Portfolio | None = None,
+    ) -> tuple[Opportunity, TradeDecision] | None:
+        emission = await super().on_signal(signal, portfolio=portfolio)
+        assert emission is not None
+        opportunity, decision = emission
+        return (
+            opportunity,
+            replace(
+                decision,
+                time_in_force=TimeInForce.GTC,
+                limit_price=0.4,
+            ),
+        )
+
+
 def _active_strategy() -> ActiveStrategy:
     return ActiveStrategy(
         strategy_id="alpha",
@@ -321,6 +340,11 @@ async def test_backtest_runner_updates_portfolio_between_replay_signals() -> Non
     assert pipeline.portfolios[1].open_positions[0].shares_held == pytest.approx(
         10.0 / expected_fill_price
     )
+    assert accumulator.execution_rows[0].decision_id == "decision-1"
+    assert accumulator.execution_rows[0].status == "filled"
+    assert accumulator.execution_rows[0].market_id == "research-runner-market"
+    assert accumulator.execution_rows[0].slippage_bps == pytest.approx(0.0)
+    assert accumulator.execution_rows[0].pnl is not None
 
 
 @pytest.mark.asyncio
@@ -382,6 +406,8 @@ class _InsertTrackingConnection:
         del args
         if "INSERT INTO strategy_runs" in query:
             self._journal.append("INSERT strategy_runs")
+        if "INSERT INTO backtest_execution_rows" in query:
+            self._journal.append("INSERT backtest_execution_rows")
         if "INSERT INTO strategy_run_slices" in query:
             self._journal.append("INSERT strategy_run_slices")
         return "INSERT 1"
@@ -612,6 +638,41 @@ async def test_insert_strategy_runs_atomically_persists_slice_rows() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_insert_strategy_runs_atomically_persists_execution_rows() -> None:
+    pipeline = _PortfolioRecordingPipeline()
+    runner = BacktestRunner(
+        writable_pool=cast(Any, object()),
+        readonly_pool=cast(Any, object()),
+        replay_engine=_ReplayEngine([_signal(datetime(2026, 4, 20, 0, 0, tzinfo=UTC))]),
+        controller_factory=_PipelineFactory(pipeline),
+    )
+    accumulator = await runner._run_strategy(
+        strategy=_active_strategy(),
+        spec=_spec(),
+        exec_config=BacktestExecutionConfig(),
+    )
+    journal: list[str] = []
+    insert_runner = BacktestRunner(
+        writable_pool=cast(Any, _InsertTrackingPool(journal)),
+        readonly_pool=cast(Any, object()),
+    )
+
+    await insert_runner._insert_strategy_runs_atomically(
+        run_id="11111111-1111-1111-1111-111111111111",
+        accumulators=[accumulator],
+    )
+
+    assert journal == [
+        "BEGIN",
+        "INSERT strategy_runs",
+        "INSERT backtest_execution_rows",
+        "INSERT strategy_run_slices",
+        "INSERT strategy_run_slices",
+        "COMMIT",
+    ]
+
+
 def _signal_without_resolution(ts: datetime) -> MarketSignal:
     base = _signal(ts)
     return MarketSignal(
@@ -713,3 +774,34 @@ async def test_backtest_runner_execution_model_staleness_budget_can_prevent_fill
 
     assert accumulator.decision_count == 1
     assert accumulator.fill_count == 0
+
+
+@pytest.mark.asyncio
+async def test_backtest_runner_records_session_end_rejection_for_unfilled_gtc_order() -> None:
+    pipeline = _GtcUnfilledPipeline()
+    runner = BacktestRunner(
+        writable_pool=cast(Any, object()),
+        readonly_pool=cast(Any, object()),
+        replay_engine=_ReplayEngine([_signal(datetime(2026, 4, 20, 0, 0, tzinfo=UTC))]),
+        controller_factory=_PipelineFactory(pipeline),
+    )
+    spec = _spec()
+    spec = replace(
+        spec,
+        execution_model=replace(
+            spec.execution_model,
+            fill_policy="good_til_cancelled",
+        ),
+    )
+
+    accumulator = await runner._run_strategy(
+        strategy=_active_strategy(),
+        spec=spec,
+        exec_config=BacktestExecutionConfig(),
+    )
+
+    assert accumulator.decision_count == 1
+    assert accumulator.fill_count == 0
+    assert accumulator.execution_rows[0].decision_id == "decision-1"
+    assert accumulator.execution_rows[0].status == "rejected"
+    assert accumulator.execution_rows[0].rejection_reason == "cancelled_session_end"

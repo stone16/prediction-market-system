@@ -55,6 +55,9 @@ def test_check_live_submission_artifacts_reports_all_missing_paths(
     assert "scripts/export_paper_execution_from_api.py" in checks_by_name[
         "paper_backtest_diff"
     ]["remediation"]
+    assert "scripts/export_backtest_execution_from_db.py" in checks_by_name[
+        "paper_backtest_diff"
+    ]["remediation"]
 
 
 def test_check_live_submission_artifacts_passes_with_private_valid_artifacts(

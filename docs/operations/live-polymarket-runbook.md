@@ -449,6 +449,12 @@ Before treating a research backtest as launch evidence, compare the paper
 execution export against the matching backtest replay export:
 
 ```bash
+uv run python scripts/export_backtest_execution_from_db.py \
+  --run-id <backtest-run-id> \
+  --output /secure/pms/backtest-execution-export.csv
+```
+
+```bash
 uv run python scripts/paper_backtest_execution_diff.py \
   --paper /secure/pms/paper-execution-export.csv \
   --backtest /secure/pms/backtest-execution-export.csv \

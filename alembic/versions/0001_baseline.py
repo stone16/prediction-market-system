@@ -18,6 +18,7 @@ _CREATED_TABLES: Final[tuple[str, ...]] = (
     "runtime_heartbeats",
     "evaluation_reports",
     "strategy_run_slices",
+    "backtest_execution_rows",
     "strategy_runs",
     "backtest_runs",
     "alpha_competition_snapshots",
