@@ -65,6 +65,7 @@ from uuid import uuid4
 
 import httpx
 
+from scripts.artifact_path_safety import require_path_outside_working_tree
 from pms.strategies.flb.source import require_flb_calibration_source_label
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
@@ -1110,6 +1111,7 @@ def _fsync_parent_directory(path: Path) -> None:
 
 
 def _prepare_private_output_parent(path: Path, *, label: str) -> None:
+    require_path_outside_working_tree(path, label=label, error_type=OSError)
     parent = path.parent
     try:
         mode = parent.lstat().st_mode

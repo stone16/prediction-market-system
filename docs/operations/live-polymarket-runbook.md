@@ -261,7 +261,8 @@ credential, but the exported CSV and generated calibration CSV are non-secret
 launch artifacts. The exporter validates the downloaded CSV with the same
 strict warehouse loader as `scripts/flb_data_feasibility.py` and refuses to
 publish an under-sampled launch export unless `--allow-under-sampled` is
-explicitly passed for diagnostics:
+explicitly passed for diagnostics. These artifact generators also reject output
+paths inside the repo working tree:
 
 ```bash
 export DUNE_API_KEY="<load from operator secret store>"

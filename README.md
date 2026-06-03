@@ -150,6 +150,7 @@ uv run python scripts/prepare_local_paper_soak_config.py \
 #   - Keep controller.category_prior_observations_path pointed at the local secure CSV below
 
 # 4a. Generate required non-secret launch artifacts outside the repo.
+#     The artifact exporters reject output paths inside the working tree.
 #     The Dune API key is a credential; keep it in an operator secret store
 #     and load it only into this shell.
 export DUNE_API_KEY="<load from operator secret store>"

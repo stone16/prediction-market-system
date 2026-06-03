@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from scripts.artifact_path_safety import require_path_outside_working_tree
 from pms.controller.baselines import load_category_prior_observations_csv
 
 
@@ -84,6 +85,10 @@ def export_category_prior_observations(
     min_observations: int = 100,
 ) -> ExportStats:
     output_path = output_path.expanduser()
+    require_path_outside_working_tree(
+        output_path,
+        label="category-prior observations output path",
+    )
     if page_limit <= 0:
         msg = "page_limit must be positive"
         raise ValueError(msg)
@@ -317,6 +322,10 @@ def _first_mapping(value: object) -> Mapping[str, object] | None:
 
 def _write_rows(output_path: Path, rows: Sequence[CategoryPriorCsvRow]) -> None:
     output_path = output_path.expanduser()
+    require_path_outside_working_tree(
+        output_path,
+        label="category-prior observations output path",
+    )
     _prepare_private_parent(output_path)
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{output_path.name}.",

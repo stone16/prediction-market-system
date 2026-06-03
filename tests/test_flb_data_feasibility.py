@@ -704,6 +704,38 @@ class TestFlbCalibrationArtifact:
 
         assert not (output_dir / "flb-calibration.csv").exists()
 
+    def test_save_flb_calibration_csv_refuses_output_inside_working_tree(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        rows = [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=0.99,
+                sample_count=150,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=0.97,
+                sample_count=151,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        (repo_dir / ".git").mkdir()
+        output_dir = repo_dir / "artifacts"
+        output_dir.mkdir(mode=0o700)
+        output_path = output_dir / "flb-calibration.csv"
+        monkeypatch.chdir(repo_dir)
+
+        with pytest.raises(OSError, match="working tree"):
+            save_flb_calibration_csv(rows, output_path)
+
+        assert not output_path.exists()
+
     def test_save_flb_calibration_csv_preserves_existing_output_when_write_fails(
         self,
         tmp_path: Path,

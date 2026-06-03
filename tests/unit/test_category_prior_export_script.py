@@ -218,6 +218,43 @@ def test_export_category_prior_observations_rejects_permissive_parent_without_pu
     assert output_path.read_text(encoding="utf-8") == "existing artifact\n"
 
 
+def test_export_category_prior_observations_rejects_output_inside_working_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    output_dir = repo_dir / "secure"
+    output_dir.mkdir(mode=0o700)
+    output_path = output_dir / "category-prior-observations.csv"
+    monkeypatch.chdir(repo_dir)
+    monkeypatch.setattr(
+        exporter,
+        "_fetch_closed_market_page",
+        lambda _client, *, limit, offset: [
+            {
+                "conditionId": "market-1",
+                "category": "Politics",
+                "closedTime": "2026-06-02T05:14:32Z",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["1", "0"]',
+            },
+        ],
+    )
+
+    with pytest.raises(ValueError, match="outside the working tree"):
+        export_category_prior_observations(
+            output_path=output_path,
+            gamma_base_url="https://gamma.example.test",
+            page_limit=1,
+            max_pages=1,
+            min_observations=1,
+        )
+
+    assert not output_path.exists()
+
+
 def test_export_category_prior_observations_validates_runtime_artifact_before_publish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

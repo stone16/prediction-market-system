@@ -182,6 +182,45 @@ def test_dune_export_rejects_invalid_warehouse_csv_without_publishing(
     assert output_path.read_text(encoding="utf-8") == "existing export\n"
 
 
+def test_dune_export_rejects_output_inside_working_tree_without_publishing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    sql_path = repo_dir / "query.sql"
+    sql_path.write_text("select * from launch_source", encoding="utf-8")
+    output_dir = repo_dir / "secure"
+    output_dir.mkdir(mode=0o700)
+    output_path = output_dir / "polymarket_resolved_binary.csv"
+    requests: list[httpx.Request] = []
+    monkeypatch.chdir(repo_dir)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500, json={"error": "should not be called"})
+
+    with httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.dune.com/api/v1",
+    ) as client:
+        with pytest.raises(ValueError, match="outside the working tree"):
+            export_flb_warehouse_from_dune(
+                sql_path=sql_path,
+                output_path=output_path,
+                api_key="redacted-api-key",
+                performance="large",
+                poll_interval_s=0.0,
+                timeout_s=1.0,
+                require_sample_gate=False,
+                http_client=client,
+            )
+
+    assert requests == []
+    assert not output_path.exists()
+
+
 def test_dune_export_requires_runtime_sample_gate_before_publishing(
     tmp_path: Path,
 ) -> None:

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import httpx
 
+from scripts.artifact_path_safety import require_path_outside_working_tree
 from scripts.flb_data_feasibility import (
     FAVORITE_SIGNAL_NAME,
     LONGSHOT_SIGNAL_NAME,
@@ -86,6 +87,12 @@ def export_flb_warehouse_from_dune(
     if timeout_s <= 0.0:
         msg = "timeout_s must be positive"
         raise ValueError(msg)
+
+    output_path = output_path.expanduser()
+    require_path_outside_working_tree(
+        output_path,
+        label="Dune warehouse export output path",
+    )
 
     sql = sql_path.read_text(encoding="utf-8").strip()
     if sql == "":
@@ -237,6 +244,10 @@ def _publish_validated_csv(
     require_sample_gate: bool,
 ) -> DuneExportStats:
     output_path = output_path.expanduser()
+    require_path_outside_working_tree(
+        output_path,
+        label="Dune warehouse export output path",
+    )
     _prepare_private_parent(output_path)
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{output_path.name}.",
