@@ -109,7 +109,12 @@ async def test_runtime_continuity_reports_unhealthy_controller_heartbeats() -> N
 
 class _Pool:
     def __init__(self, row: Mapping[str, object]) -> None:
-        self._row = row
+        row_with_clock = dict(row)
+        row_with_clock.setdefault(
+            "observed_until",
+            row.get("last_observed_at"),
+        )
+        self._row = row_with_clock
         self.last_query = ""
         self.last_args: tuple[object, ...] = ()
 

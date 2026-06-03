@@ -88,9 +88,13 @@ class RuntimeHeartbeatStore:
                         LAG(observed_at) OVER (ORDER BY observed_at ASC) AS prev_observed_at
                     FROM runtime_heartbeats
                     WHERE run_id = $1
+                      AND observed_at <= (
+                          SELECT observed_until FROM report_clock
+                      )
                 ),
                 aggregate AS (
                     SELECT
+                        (SELECT observed_until FROM report_clock) AS observed_until,
                         MIN(started_at) AS first_started_at,
                         MIN(observed_at) AS first_observed_at,
                         MAX(observed_at) AS last_observed_at,
@@ -130,6 +134,7 @@ class RuntimeHeartbeatStore:
                     FROM ordered
                 )
                 SELECT
+                    observed_until,
                     first_started_at,
                     first_observed_at,
                     last_observed_at,
@@ -148,13 +153,17 @@ class RuntimeHeartbeatStore:
         first_started_at = _aware(cast(datetime, row["first_started_at"]))
         first_observed_at = _aware(cast(datetime, row["first_observed_at"]))
         last_observed_at = _aware(cast(datetime, row["last_observed_at"]))
+        report_observed_until = _aware(cast(datetime, row["observed_until"]))
         return RuntimeContinuity(
             run_id=run_id,
             source="postgres_runtime_heartbeats",
             first_observed_at=first_observed_at,
             last_observed_at=last_observed_at,
             heartbeat_count=int(cast(int, row["heartbeat_count"])),
-            healthy_days=_elapsed_whole_days(first_observed_at, last_observed_at),
+            healthy_days=_elapsed_whole_days(
+                first_observed_at,
+                report_observed_until,
+            ),
             max_gap_seconds=float(row["max_gap_seconds"]),
             unhealthy_heartbeat_count=int(cast(int, row["unhealthy_heartbeat_count"])),
             min_controller_runtimes=int(cast(int, row["min_controller_runtimes"])),
