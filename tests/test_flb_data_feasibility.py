@@ -224,6 +224,69 @@ def test_fetch_resolved_markets_orders_gamma_by_recent_close(
     ]
 
 
+def test_fetch_resolved_markets_paginates_when_gamma_caps_page_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gamma may cap responses below the requested limit; keep paginating."""
+
+    def gamma_row(market_id: str, *, last_trade_price: float) -> dict[str, object]:
+        return {
+            "id": market_id,
+            "question": f"Resolved market {market_id}?",
+            "outcomes": '["Yes", "No"]',
+            "outcomePrices": '["1", "0"]',
+            "lastTradePrice": last_trade_price,
+            "volumeNum": 10_000.0,
+            "liquidityNum": 500.0,
+            "endDate": "2026-06-01T23:20:00Z",
+            "slug": f"resolved-market-{market_id}",
+        }
+
+    class CappedGammaClient:
+        calls: ClassVar[list[tuple[str, dict[str, str]]]] = []
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def __enter__(self) -> "CappedGammaClient":
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            del exc_type, exc, traceback
+
+        def get(self, path: str, *, params: dict[str, str]) -> _FakeGammaResponse:
+            self.calls.append((path, dict(params)))
+            offset = params["offset"]
+            if offset == "0":
+                return _FakeGammaResponse(
+                    [gamma_row("page-1", last_trade_price=0.08)]
+                )
+            if offset == "1":
+                return _FakeGammaResponse(
+                    [gamma_row("page-2", last_trade_price=0.92)]
+                )
+            return _FakeGammaResponse([])
+
+    monkeypatch.setattr(
+        "scripts.flb_data_feasibility.httpx.Client",
+        CappedGammaClient,
+    )
+
+    markets = fetch_resolved_markets(limit=500, max_pages=3)
+
+    assert [market.market_id for market in markets] == ["page-1", "page-2"]
+    assert [call[1]["offset"] for call in CappedGammaClient.calls] == [
+        "0",
+        "1",
+        "2",
+    ]
+
+
 def _write_warehouse_csv(path: Path, rows: list[dict[str, str]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=WAREHOUSE_COLUMNS)

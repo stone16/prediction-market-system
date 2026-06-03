@@ -37,11 +37,11 @@ Limitations:
       near resolution time, not at a hypothetical entry point. For a real
       strategy P&L backtest, we would need timestamped price snapshots at
       a defined entry horizon (e.g., 24h before resolution).
-    - **Data source:** The Gamma API ``closed=true`` endpoint returns a
-      small window of recently resolved markets (typically <50). For
-      statistically robust FLB measurement (≥100 contracts per target
-      bucket), we need Dune Analytics on-chain data or a historical
-      warehouse with full Polymarket resolution history.
+    - **Data source:** The Gamma API ``closed=true`` endpoint is paginated
+      and may cap page size below the requested ``--limit``. It is still a
+      recent public window, so statistically robust FLB measurement
+      (≥100 contracts per target bucket) needs Dune Analytics on-chain data
+      or a historical warehouse with full Polymarket resolution history.
     - **This script is a feasibility check**, not a strategy backtest.
       It answers: "Does Polymarket data show measurable FLB?" — not
       "Would FLB trading have been profitable after fees and slippage?"
@@ -219,11 +219,9 @@ def fetch_resolved_markets(
                 if market is not None:
                     markets.append(market)
 
-            offset += limit
-
-            # Stop early if the API returned fewer than requested.
-            if len(payload) < limit:
-                break
+            # Gamma may cap responses below the requested limit. Advance by
+            # the actual row count and let an empty page or max_pages stop us.
+            offset += len(payload)
 
     return markets
 
