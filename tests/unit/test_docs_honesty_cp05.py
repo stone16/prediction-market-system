@@ -164,6 +164,18 @@ def test_readme_llm_guidance_matches_live_soak_config() -> None:
     assert "and the LLM forecaster" not in readme_text
 
 
+def test_live_soak_config_llm_secret_comment_matches_disabled_llm() -> None:
+    config_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
+
+    assert _configured_llm_enabled(config_text) is False
+    assert (
+        "PMS_LLM__API_KEY is required only if you explicitly enable LLM"
+        in config_text
+    )
+    assert "(always required)" not in config_text
+    assert "Required env vars when running this config" not in config_text
+
+
 def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_gate() -> None:
     runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
         encoding="utf-8"
