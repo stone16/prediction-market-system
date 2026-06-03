@@ -109,6 +109,10 @@ def test_export_paper_execution_writes_strict_execution_and_telemetry_csvs(
     ]
     assert _read_csv(telemetry_path) == [
         {
+            "decision_id": "decision-filled",
+            "strategy_id": "h1_flb",
+            "strategy_version_id": "h1-flb-v1",
+            "market_id": "market-1",
             "slippage_bps": "250.000000",
             "latency_ms": "2000.000000",
             "adverse_selection_bps": "4.000000",
@@ -185,6 +189,17 @@ def test_export_paper_execution_filters_to_expected_strategy_identity(
             "slippage_bps": "250.000000",
             "pnl": "1.250000",
             "rejection_reason": "",
+        }
+    ]
+    assert _read_csv(telemetry_path) == [
+        {
+            "decision_id": "decision-h1",
+            "strategy_id": "h1_flb",
+            "strategy_version_id": "h1-flb-v1",
+            "market_id": "market-1",
+            "slippage_bps": "250.000000",
+            "latency_ms": "2000.000000",
+            "adverse_selection_bps": "4.000000",
         }
     ]
 

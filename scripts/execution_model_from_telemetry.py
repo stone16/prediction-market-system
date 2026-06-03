@@ -31,6 +31,10 @@ REQUIRED_TELEMETRY_COLUMNS = frozenset({
     "slippage_bps",
     "latency_ms",
 })
+TELEMETRY_STRATEGY_COLUMNS = frozenset({
+    "strategy_id",
+    "strategy_version_id",
+})
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,8 @@ def build_execution_model_from_telemetry_csv(
     order_ttl_ms: int = 60_000,
     price_invalidation_streak: int = 10,
     replay_window_ms: int = 86_400_000,
+    strategy_id: str | None = None,
+    strategy_version_id: str | None = None,
 ) -> ExecutionModel:
     model, _ = build_execution_model_artifact_from_telemetry_csv(
         path,
@@ -65,6 +71,8 @@ def build_execution_model_from_telemetry_csv(
         order_ttl_ms=order_ttl_ms,
         price_invalidation_streak=price_invalidation_streak,
         replay_window_ms=replay_window_ms,
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
     )
     return model
 
@@ -81,10 +89,16 @@ def build_execution_model_artifact_from_telemetry_csv(
     order_ttl_ms: int = 60_000,
     price_invalidation_streak: int = 10,
     replay_window_ms: int = 86_400_000,
+    strategy_id: str | None = None,
+    strategy_version_id: str | None = None,
 ) -> tuple[ExecutionModel, ExecutionModelTelemetryEvidence]:
     if min_samples <= 0:
         msg = "min_samples must be an integer > 0"
         raise ValueError(msg)
+    strategy_scope = _strategy_scope(
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
+    )
 
     slippage_bps_samples: list[float] = []
     latency_ms_samples: list[float] = []
@@ -100,8 +114,22 @@ def build_execution_model_artifact_from_telemetry_csv(
             raise ValueError(
                 f"execution telemetry CSV missing required columns: {missing_display}"
             )
+        if strategy_scope is not None:
+            missing_strategy_columns = TELEMETRY_STRATEGY_COLUMNS - fieldnames
+            if missing_strategy_columns:
+                missing_display = ", ".join(sorted(missing_strategy_columns))
+                raise ValueError(
+                    "execution telemetry CSV missing required strategy columns: "
+                    f"{missing_display}"
+                )
 
         for row_number, row in enumerate(reader, start=2):
+            if strategy_scope is not None:
+                _require_telemetry_strategy_scope(
+                    row,
+                    row_number=row_number,
+                    strategy_scope=strategy_scope,
+                )
             slippage_bps_samples.append(
                 _required_float(row, "slippage_bps", row_number=row_number)
             )
@@ -229,15 +257,57 @@ def _strategy_scope_evidence(
     strategy_id: str | None,
     strategy_version_id: str | None,
 ) -> str | None:
+    strategy_scope = _strategy_scope(
+        strategy_id=strategy_id,
+        strategy_version_id=strategy_version_id,
+    )
+    if strategy_scope is None:
+        return None
+    scoped_strategy_id, scoped_strategy_version_id = strategy_scope
+    return f"{scoped_strategy_id}@{scoped_strategy_version_id}"
+
+
+def _strategy_scope(
+    *,
+    strategy_id: str | None,
+    strategy_version_id: str | None,
+) -> tuple[str, str] | None:
     if strategy_id is None and strategy_version_id is None:
         return None
     if strategy_id is None or strategy_version_id is None:
         msg = "strategy-id and strategy-version-id must be provided together"
         raise ValueError(msg)
     return (
-        f"{_strategy_identity_value(strategy_id, 'strategy_id')}@"
-        f"{_strategy_identity_value(strategy_version_id, 'strategy_version_id')}"
+        _strategy_identity_value(strategy_id, "strategy_id"),
+        _strategy_identity_value(strategy_version_id, "strategy_version_id"),
     )
+
+
+def _require_telemetry_strategy_scope(
+    row: dict[str, str | None],
+    *,
+    row_number: int,
+    strategy_scope: tuple[str, str],
+) -> None:
+    strategy_id, strategy_version_id = strategy_scope
+    observed_strategy_id = _required_text(row, "strategy_id", row_number=row_number)
+    if observed_strategy_id != strategy_id:
+        msg = (
+            f"execution telemetry row {row_number}: strategy_id must match "
+            f"{strategy_id}"
+        )
+        raise ValueError(msg)
+    observed_strategy_version_id = _required_text(
+        row,
+        "strategy_version_id",
+        row_number=row_number,
+    )
+    if observed_strategy_version_id != strategy_version_id:
+        msg = (
+            f"execution telemetry row {row_number}: strategy_version_id must match "
+            f"{strategy_version_id}"
+        )
+        raise ValueError(msg)
 
 
 def _strategy_identity_value(value: str, field_name: str) -> str:
@@ -267,15 +337,25 @@ def _strategy_evidence_value(value: str) -> str:
     return ", ".join(labels)
 
 
+def _required_text(
+    row: dict[str, str | None],
+    column: str,
+    *,
+    row_number: int,
+) -> str:
+    raw_value = row.get(column)
+    if raw_value is None or not raw_value.strip():
+        raise ValueError(f"execution telemetry row {row_number}: missing {column}")
+    return raw_value.strip()
+
+
 def _required_float(
     row: dict[str, str | None],
     column: str,
     *,
     row_number: int,
 ) -> float:
-    raw_value = row.get(column)
-    if raw_value is None or not raw_value.strip():
-        raise ValueError(f"execution telemetry row {row_number}: missing {column}")
+    raw_value = _required_text(row, column, row_number=row_number)
     try:
         return float(raw_value)
     except ValueError as exc:
@@ -451,15 +531,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             order_ttl_ms=args.order_ttl_ms,
             price_invalidation_streak=args.price_invalidation_streak,
             replay_window_ms=args.replay_window_ms,
+            strategy_id=cast(str | None, args.strategy_id),
+            strategy_version_id=cast(str | None, args.strategy_version_id),
+        )
+        strategy_evidence = _strategy_scope_evidence(
+            strategy_id=cast(str | None, args.strategy_id),
+            strategy_version_id=cast(str | None, args.strategy_version_id),
         )
         save_execution_model_json(
             model,
             output_path,
             telemetry_evidence=telemetry_evidence,
-            strategy_evidence=_strategy_scope_evidence(
-                strategy_id=cast(str | None, args.strategy_id),
-                strategy_version_id=cast(str | None, args.strategy_version_id),
-            ),
+            strategy_evidence=strategy_evidence,
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

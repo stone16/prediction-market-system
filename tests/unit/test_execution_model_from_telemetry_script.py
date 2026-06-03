@@ -24,6 +24,13 @@ TELEMETRY_COLUMNS = [
     "latency_ms",
     "adverse_selection_bps",
 ]
+BOUND_TELEMETRY_COLUMNS = [
+    "decision_id",
+    "strategy_id",
+    "strategy_version_id",
+    "market_id",
+    *TELEMETRY_COLUMNS,
+]
 
 
 class _FailingTextWriter:
@@ -469,6 +476,62 @@ def test_cli_writes_execution_model_artifact(tmp_path: Path) -> None:
 
 def test_cli_writes_execution_model_strategy_evidence(tmp_path: Path) -> None:
     telemetry_path = tmp_path / "paper-execution-telemetry.csv"
+    _write_csv(
+        telemetry_path,
+        fieldnames=BOUND_TELEMETRY_COLUMNS,
+        rows=[
+            {
+                "decision_id": "decision-1",
+                "strategy_id": "h1_flb",
+                "strategy_version_id": "h1-flb-v1",
+                "market_id": "market-1",
+                "slippage_bps": "2",
+                "latency_ms": "101",
+                "adverse_selection_bps": "1",
+            },
+            {
+                "decision_id": "decision-2",
+                "strategy_id": "h1_flb",
+                "strategy_version_id": "h1-flb-v1",
+                "market_id": "market-2",
+                "slippage_bps": "12",
+                "latency_ms": "500",
+                "adverse_selection_bps": "9",
+            },
+        ],
+    )
+    output_path = tmp_path / "execution-model.json"
+
+    exit_code = main(
+        [
+            "--input",
+            str(telemetry_path),
+            "--output",
+            str(output_path),
+            "--fee-rate",
+            "0.04",
+            "--staleness-ms",
+            "120000",
+            "--require-adverse-selection",
+            "--min-samples",
+            "2",
+            "--strategy-id",
+            "h1_flb",
+            "--strategy-version-id",
+            "h1-flb-v1",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["strategy_evidence"] == "h1_flb@h1-flb-v1"
+
+
+def test_cli_rejects_strategy_scope_without_telemetry_strategy_columns(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    telemetry_path = tmp_path / "paper-execution-telemetry.csv"
     _write_telemetry_csv(
         telemetry_path,
         [
@@ -506,9 +569,70 @@ def test_cli_writes_execution_model_strategy_evidence(tmp_path: Path) -> None:
         ]
     )
 
-    assert exit_code == 0
-    payload = json.loads(output_path.read_text(encoding="utf-8"))
-    assert payload["strategy_evidence"] == "h1_flb@h1-flb-v1"
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "missing required strategy columns" in captured.err
+    assert "strategy_id" in captured.err
+    assert "strategy_version_id" in captured.err
+    assert not output_path.exists()
+
+
+def test_cli_rejects_strategy_scope_mismatch_in_telemetry_rows(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    telemetry_path = tmp_path / "paper-execution-telemetry.csv"
+    _write_csv(
+        telemetry_path,
+        fieldnames=BOUND_TELEMETRY_COLUMNS,
+        rows=[
+            {
+                "decision_id": "decision-1",
+                "strategy_id": "h1_flb",
+                "strategy_version_id": "h1-flb-v1",
+                "market_id": "market-1",
+                "slippage_bps": "2",
+                "latency_ms": "101",
+                "adverse_selection_bps": "1",
+            },
+            {
+                "decision_id": "decision-2",
+                "strategy_id": "paper_canary_v1",
+                "strategy_version_id": "paper-canary-v1",
+                "market_id": "market-2",
+                "slippage_bps": "12",
+                "latency_ms": "500",
+                "adverse_selection_bps": "9",
+            },
+        ],
+    )
+    output_path = tmp_path / "execution-model.json"
+
+    exit_code = main(
+        [
+            "--input",
+            str(telemetry_path),
+            "--output",
+            str(output_path),
+            "--fee-rate",
+            "0.04",
+            "--staleness-ms",
+            "120000",
+            "--require-adverse-selection",
+            "--min-samples",
+            "2",
+            "--strategy-id",
+            "h1_flb",
+            "--strategy-version-id",
+            "h1-flb-v1",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "execution telemetry row 3" in captured.err
+    assert "strategy_id must match h1_flb" in captured.err
+    assert not output_path.exists()
 
 
 def test_save_execution_model_json_creates_output_parent_private(

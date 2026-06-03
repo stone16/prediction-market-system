@@ -46,6 +46,10 @@ EXECUTION_COLUMNS = (
     "rejection_reason",
 )
 TELEMETRY_COLUMNS = (
+    "decision_id",
+    "strategy_id",
+    "strategy_version_id",
+    "market_id",
     "slippage_bps",
     "latency_ms",
     "adverse_selection_bps",
@@ -298,10 +302,16 @@ def _execution_csv_row(
 
 def _telemetry_csv_row(execution: _FilledExecution) -> dict[str, str]:
     return {
+        "decision_id": execution.decision_id,
+        "strategy_id": execution.strategy_id,
+        "strategy_version_id": execution.strategy_version_id,
+        "market_id": execution.market_id,
         "slippage_bps": _format_float(execution.slippage_bps),
         "latency_ms": _format_float(execution.latency_ms),
         "adverse_selection_bps": (
-            "" if execution.adverse_selection_bps is None else _format_float(execution.adverse_selection_bps)
+            ""
+            if execution.adverse_selection_bps is None
+            else _format_float(execution.adverse_selection_bps)
         ),
     }
 

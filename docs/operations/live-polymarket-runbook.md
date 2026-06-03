@@ -440,18 +440,21 @@ uv run python scripts/execution_model_from_telemetry.py \
   --strategy-version-id <h1-flb-version-id>
 ```
 
-The telemetry CSV must contain `slippage_bps` and `latency_ms`; live-promotion
-artifacts should also include `adverse_selection_bps`. The JSON output is the
-`execution_model` object to embed in the research backtest spec, plus telemetry
-sample metadata (`min_samples`, `telemetry_sample_count`,
-`adverse_selection_sample_count`, and `require_adverse_selection`) and
-`strategy_evidence` matching the final H1 active strategy version. Stage the
-same artifact at `live_execution_model_path`; true LIVE validation and
-credentialed preflight reject missing artifacts, static calibration sources,
-profiles with no positive `adverse_selection_bps`, artifacts without the sample
-contract, sample contracts below the LIVE floor of 10 observations, or
-strategy-mismatched model artifacts, and the preflight fingerprint binds the
-artifact contents.
+The telemetry CSV must contain `slippage_bps`, `latency_ms`, `strategy_id`,
+and `strategy_version_id`; live-promotion artifacts should also include
+`adverse_selection_bps`. When `--strategy-id` and `--strategy-version-id` are
+provided, the model builder rejects telemetry rows that are missing those
+strategy columns or whose row-level identity does not match the supplied H1
+scope. The JSON output is the `execution_model` object to embed in the research
+backtest spec, plus telemetry sample metadata (`min_samples`,
+`telemetry_sample_count`, `adverse_selection_sample_count`, and
+`require_adverse_selection`) and `strategy_evidence` matching the final H1
+active strategy version. Stage the same artifact at
+`live_execution_model_path`; true LIVE validation and credentialed preflight
+reject missing artifacts, static calibration sources, profiles with no positive
+`adverse_selection_bps`, artifacts without the sample contract, sample
+contracts below the LIVE floor of 10 observations, or strategy-mismatched model
+artifacts, and the preflight fingerprint binds the artifact contents.
 
 Before treating a research backtest as launch evidence, compare the paper
 execution export against the matching backtest replay export:
