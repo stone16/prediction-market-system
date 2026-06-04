@@ -8,6 +8,7 @@
 | generated_at | 2026-05-25T00:00:00+00:00 |
 | artifact_mode | persisted |
 | output_path | docs/paper-reports/2026-05-25.md |
+| input_snapshot_sha256 | 1d46d830e25cc110a2058d39faabcdfa5c5aa29d545ae8a07adcb011cb79dfac |
 
 ## Summary
 

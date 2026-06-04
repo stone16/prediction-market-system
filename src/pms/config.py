@@ -34,6 +34,10 @@ _MAX_LIVE_PREFLIGHT_ARTIFACT_AGE_S = 60 * 60
 _MAX_LIVE_READINESS_REPORT_AGE_S = 7 * 24 * 60 * 60
 _MAX_LIVE_LLM_DAILY_COST_TO_MIN_ORDER_RATIO = 0.05
 _LOOPBACK_API_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"})
+_SHA256_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_PLACEHOLDER_SHA256_DIGESTS = frozenset(
+    character * 64 for character in "0123456789abcdef"
+)
 _REQUIRED_LIVE_PAPER_SOAK_GATE_CHECKS: tuple[str, ...] = (
     "soak_days",
     "decisions_accepted",
@@ -2195,7 +2199,30 @@ def _require_live_paper_soak_persisted_provenance(
         output_path=output_path,
         label="LIVE paper soak GO report",
     )
+    _require_paper_report_input_snapshot_sha256(provenance)
     return generated_at
+
+
+def _require_paper_report_input_snapshot_sha256(provenance: dict[str, str]) -> None:
+    digest = provenance.get("input_snapshot_sha256", "").strip()
+    if digest == "":
+        msg = (
+            "LIVE paper soak GO report persisted provenance missing "
+            "input_snapshot_sha256"
+        )
+        raise LiveTradingDisabledError(msg)
+    if _SHA256_HEX_PATTERN.fullmatch(digest) is None:
+        msg = (
+            "LIVE paper soak GO report persisted provenance "
+            "input_snapshot_sha256 must be a sha256 hex digest"
+        )
+        raise LiveTradingDisabledError(msg)
+    if digest in _PLACEHOLDER_SHA256_DIGESTS:
+        msg = (
+            "LIVE paper soak GO report persisted provenance "
+            "input_snapshot_sha256 must not be a placeholder hash"
+        )
+        raise LiveTradingDisabledError(msg)
 
 
 def _require_report_generated_at(

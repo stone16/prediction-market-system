@@ -11,6 +11,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
@@ -59,6 +60,7 @@ _READINESS_NOT_SUPPLIED = object()
 class PaperReportProvenance:
     artifact_mode: str
     output_path: str
+    input_snapshot_sha256: str | None = None
     generated_by: str = REPORT_GENERATOR_ID
     generated_at: str = field(
         default_factory=lambda: datetime.now(tz=UTC).isoformat()
@@ -162,6 +164,7 @@ class PaperReportMetrics:
     selection_funnel: SelectionFunnel | None = None
     position_mark_sources: tuple[tuple[str, int], ...] = ()
     execution_concentration: ExecutionConcentration | None = None
+    input_snapshot_sha256: str | None = None
 
     @classmethod
     def empty(cls, *, report_date: date) -> PaperReportMetrics:
@@ -276,6 +279,7 @@ def metrics_from_api_payloads(
     strategies: dict[str, Any] | None = None,
     strategy_metrics: dict[str, Any] | None = None,
     risk_events: tuple[tuple[str, str, str], ...] = (),
+    input_snapshot_sha256: str | None = None,
 ) -> PaperReportMetrics:
     events = list(risk_events)
     events.extend(_strategy_evidence_risk_events(strategies))
@@ -480,6 +484,7 @@ def metrics_from_api_payloads(
         selection_funnel=selection_funnel,
         position_mark_sources=position_mark_sources,
         execution_concentration=execution_concentration,
+        input_snapshot_sha256=input_snapshot_sha256,
         risk_events=tuple(events),
     )
 
@@ -607,6 +612,25 @@ def load_live_metrics(
         )
         strategy_metrics_payload = None
 
+    input_snapshot_sha256 = _paper_report_input_snapshot_sha256(
+        snapshot_cutoff=snapshot_cutoff,
+        status=status,
+        readiness=readiness,
+        readiness_error=readiness_error,
+        trades=trades,
+        trades_error=trades_error,
+        positions=positions,
+        positions_error=positions_error,
+        decisions=decisions,
+        decisions_error=decisions_error,
+        metrics=metric_payload,
+        metrics_error=metric_error,
+        strategies=strategies_payload,
+        strategies_error=strategies_error,
+        strategy_metrics=strategy_metrics_payload,
+        strategy_metrics_error=strategy_metrics_error,
+    )
+
     return metrics_from_api_payloads(
         report_date=report_date,
         status=status,
@@ -618,6 +642,7 @@ def load_live_metrics(
         strategies=strategies_payload,
         strategy_metrics=strategy_metrics_payload,
         risk_events=tuple(events),
+        input_snapshot_sha256=input_snapshot_sha256,
     )
 
 
@@ -801,6 +826,7 @@ def main(argv: list[str] | None = None) -> int:
             provenance=PaperReportProvenance(
                 artifact_mode="dry_run",
                 output_path="stdout",
+                input_snapshot_sha256=metrics.input_snapshot_sha256,
             ),
         )
         print(report)
@@ -826,6 +852,7 @@ def main(argv: list[str] | None = None) -> int:
             provenance=PaperReportProvenance(
                 artifact_mode="persisted",
                 output_path=str(output_path),
+                input_snapshot_sha256=metrics.input_snapshot_sha256,
             ),
         )
         _write_text_no_follow(output_path, report)
@@ -1156,7 +1183,7 @@ def _render_go_no_go_section(
 def _render_report_provenance_section(
     provenance: PaperReportProvenance,
 ) -> list[str]:
-    return [
+    lines = [
         "## Report Provenance",
         "",
         "| Field | Value |",
@@ -1165,8 +1192,14 @@ def _render_report_provenance_section(
         f"| generated_at | {_escape_table_value(provenance.generated_at)} |",
         f"| artifact_mode | {_escape_table_value(provenance.artifact_mode)} |",
         f"| output_path | {_escape_table_value(provenance.output_path)} |",
-        "",
     ]
+    if provenance.input_snapshot_sha256 is not None:
+        lines.append(
+            "| input_snapshot_sha256 | "
+            f"{_escape_table_value(provenance.input_snapshot_sha256)} |"
+        )
+    lines.append("")
+    return lines
 
 
 def _escape_table_value(value: str) -> str:
@@ -2963,6 +2996,52 @@ def _fetch_api_list_pages(
             return rows, None
         previous_page = list(page_payload)
         offset += _API_PAGE_SIZE
+
+
+def _paper_report_input_snapshot_sha256(
+    *,
+    snapshot_cutoff: str,
+    status: Mapping[str, object],
+    readiness: Mapping[str, object],
+    readiness_error: str | None,
+    trades: Mapping[str, object],
+    trades_error: str | None,
+    positions: Mapping[str, object],
+    positions_error: str | None,
+    decisions: Sequence[object],
+    decisions_error: str | None,
+    metrics: Mapping[str, object],
+    metrics_error: str | None,
+    strategies: Mapping[str, object] | None,
+    strategies_error: str | None,
+    strategy_metrics: Mapping[str, object] | None,
+    strategy_metrics_error: str | None,
+) -> str:
+    payload = {
+        "snapshot_cutoff": snapshot_cutoff,
+        "status": status,
+        "readiness": readiness,
+        "readiness_error": readiness_error,
+        "trades": trades,
+        "trades_error": trades_error,
+        "positions": positions,
+        "positions_error": positions_error,
+        "decisions": list(decisions),
+        "decisions_error": decisions_error,
+        "metrics": metrics,
+        "metrics_error": metrics_error,
+        "strategies": strategies,
+        "strategies_error": strategies_error,
+        "strategy_metrics": strategy_metrics,
+        "strategy_metrics_error": strategy_metrics_error,
+    }
+    canonical = json.dumps(
+        payload,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _loads_json_rejecting_duplicate_keys(text: str) -> object:

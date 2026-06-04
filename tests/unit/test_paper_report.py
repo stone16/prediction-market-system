@@ -4,6 +4,7 @@ import os
 import stat
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -28,6 +29,7 @@ from scripts.paper_report import (
     ExecutionConcentration,
     PaperSoakGateConfig,
     PaperReportMetrics,
+    PaperReportProvenance,
     TradeCostBreakdown,
     _fetch_api_list_pages,
     _fetch_api_payload,
@@ -505,6 +507,22 @@ def test_paper_report_persisted_file_can_target_exact_output_path(
     assert "| artifact_mode | persisted |" in report
     assert f"| output_path | {output_path} |" in report
     assert not (output_path.parent / "2026-05-03.md").exists()
+
+
+def test_paper_report_provenance_records_input_snapshot_hash() -> None:
+    input_snapshot_sha256 = sha256(b"paper report API snapshot").hexdigest()
+
+    report = render_report(
+        PaperReportMetrics.empty(report_date=date(2026, 5, 3)),
+        risk=RiskSettings(max_total_exposure=50.0),
+        provenance=PaperReportProvenance(
+            artifact_mode="persisted",
+            output_path="/secure/pms/paper-soak-go-report.md",
+            input_snapshot_sha256=input_snapshot_sha256,
+        ),
+    )
+
+    assert f"| input_snapshot_sha256 | {input_snapshot_sha256} |" in report
 
 
 def test_paper_report_returns_operator_error_for_unsafe_config_path(
@@ -3909,6 +3927,9 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
     }
     assert len(set(paginated_until_values)) == 1
     assert metrics.average_slippage_bps == pytest.approx(10.0)
+    assert isinstance(metrics.input_snapshot_sha256, str)
+    assert len(metrics.input_snapshot_sha256) == 64
+    int(metrics.input_snapshot_sha256, 16)
 
 
 def test_fetch_api_list_pages_follows_limit_offset_pages(

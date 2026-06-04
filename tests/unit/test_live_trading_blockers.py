@@ -1668,6 +1668,28 @@ def test_live_mode_rejects_paper_soak_report_missing_generated_at(
         validate_live_mode_ready(settings)
 
 
+def test_live_mode_rejects_paper_soak_report_missing_input_snapshot_hash(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "paper-soak-missing-input-snapshot-hash.md"
+    report_text = Path(PAPER_SOAK_GO_REPORT).read_text(encoding="utf-8")
+    report_path.write_text(
+        "\n".join(
+            line
+            for line in report_text.replace(
+                f"| output_path | {PAPER_SOAK_GO_REPORT} |",
+                f"| output_path | {report_path} |",
+            ).splitlines()
+            if not line.startswith("| input_snapshot_sha256 |")
+        ),
+        encoding="utf-8",
+    )
+    settings = _live_settings(live_paper_soak_report_path=str(report_path))
+
+    with pytest.raises(LiveTradingDisabledError, match="input_snapshot_sha256"):
+        validate_live_mode_ready(settings)
+
+
 def test_live_mode_rejects_paper_soak_report_output_path_mismatch(
     tmp_path: Path,
 ) -> None:

@@ -242,9 +242,10 @@ NO-GO risk event unless readiness status is `ready` and every check is `ready`
 or `disabled`.
 
 Persisted report files include a `Report Provenance` section with
-`artifact_mode` set to `persisted` and a parseable `generated_at` timestamp.
-Dry-run output is marked `dry_run` and is rejected by true LIVE validation even
-if redirected into a Markdown file.
+`artifact_mode` set to `persisted`, a parseable `generated_at` timestamp, the
+exact `output_path`, and `input_snapshot_sha256` for the canonical API snapshot
+used to compute the report. Dry-run output is marked `dry_run` and is rejected
+by true LIVE validation even if redirected into a Markdown file.
 The final `--require-go` report date must not be in the future; the report
 generator refuses future-dated final GO artifacts, and LIVE validation rejects
 any future-dated paper-soak report before startup. LIVE validation also rejects
@@ -683,6 +684,9 @@ detail must match the Summary `Strategy` row, so the report cannot mix a
 current strategy label with gate evidence from another run. Paper-only strategies
 such as `paper_canary_v1` cannot be final GO evidence. The committed GO gate
 requires at least 50 simulated fills before the report can pass.
+Runtime LIVE validation also requires the report provenance
+`input_snapshot_sha256` field so a hand-edited Markdown report cannot replace
+the API snapshot evidence used by `scripts/paper_report.py`.
 Runtime LIVE validation also requires the generated `Baseline Evidence Coverage`
 and `Secondary Baseline Brier` sections: `market_implied`, `mid_quote`, and
 `category_prior` coverage must be complete over the reported decision set, and
