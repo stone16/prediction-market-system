@@ -13,10 +13,16 @@ from pms.storage.fill_store import StoredTradeRow
 class _StoreDouble:
     def __init__(self, rows: list[StoredTradeRow]) -> None:
         self._rows = rows
-        self.calls: list[int] = []
+        self.calls: list[tuple[int, int, datetime | None]] = []
 
-    async def read_trades(self, *, limit: int) -> list[StoredTradeRow]:
-        self.calls.append(limit)
+    async def read_trades(
+        self,
+        *,
+        limit: int,
+        offset: int = 0,
+        until: datetime | None = None,
+    ) -> list[StoredTradeRow]:
+        self.calls.append((limit, offset, until))
         return list(self._rows)
 
 
@@ -46,13 +52,14 @@ async def test_list_trades_returns_market_question_and_fill_fields() -> None:
                 strategy_version_id="default-v1",
                 fee_bps=12,
                 fees=0.0246,
+                risk_group_id="event:cp06",
             )
         ]
     )
 
     payload = await list_trades(store, limit=25)
 
-    assert store.calls == [25]
+    assert store.calls == [(25, 0, None)]
     assert payload.model_dump(mode="json") == {
         "trades": [
             {
@@ -75,9 +82,11 @@ async def test_list_trades_returns_market_question_and_fill_fields() -> None:
                 "strategy_version_id": "default-v1",
                 "fee_bps": 12,
                 "fees": 0.0246,
+                "risk_group_id": "event:cp06",
             }
         ],
         "limit": 25,
+        "offset": 0,
     }
 
 

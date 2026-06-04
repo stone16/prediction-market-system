@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, Protocol
 
@@ -59,6 +60,8 @@ class DecisionRow(BaseModel):
     expires_at: str
     forecaster: str
     kelly_size: float
+    spread_bps_at_decision: int | None = None
+    risk_group_id: str | None = None
     decision_evidence: dict[str, Any]
     opportunity: OpportunityRow | None = None
 
@@ -95,8 +98,10 @@ class DecisionsReader(Protocol):
         self,
         *,
         limit: int,
+        offset: int = 0,
         status: str | None = None,
         include_opportunity: bool = False,
+        until: datetime | None = None,
     ) -> Sequence[StoredDecisionLike]: ...
 
     async def get_decision(
@@ -141,17 +146,27 @@ class DecisionRiskRejectedError(RuntimeError):
         self.reason = reason
 
 
+class DecisionEnqueueRejectedError(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 async def list_decisions(
     store: DecisionsReader,
     *,
     limit: int,
+    offset: int = 0,
     status: str | None = None,
     include_opportunity: bool = False,
+    until: datetime | None = None,
 ) -> list[DecisionRow]:
     rows = await store.read_decisions(
         limit=limit,
+        offset=offset,
         status=status,
         include_opportunity=include_opportunity,
+        until=until,
     )
     return [_decision_row(row) for row in rows]
 
@@ -179,7 +194,7 @@ async def accept_decision(
     dedup_store: DedupStoreLike,
     risk: RiskChecker,
     portfolio: Portfolio,
-    enqueue: Callable[[TradeDecision], Awaitable[None]],
+    enqueue: Callable[[TradeDecision], Awaitable[bool | None]],
 ) -> AcceptDecisionResponse:
     row = await store.get_decision(decision_id, include_opportunity=False)
     if row is None:
@@ -195,32 +210,56 @@ async def accept_decision(
     if not acquired:
         return _accepted_response(row.decision.decision_id)
 
-    risk_decision = risk.check(row.decision, portfolio)
-    if not risk_decision.approved:
-        await store.update_status(
+    lease_released = False
+    lease_transferred = False
+    try:
+        risk_decision = risk.check(row.decision, portfolio)
+        if not risk_decision.approved:
+            await store.update_status(
+                row.decision.decision_id,
+                current_status="pending",
+                next_status="rejected",
+                updated_at=datetime.now(tz=UTC),
+            )
+            await dedup_store.release(row.decision.decision_id, "invalid")
+            lease_released = True
+            raise DecisionRiskRejectedError(risk_decision.reason)
+
+        updated = await store.update_status(
             row.decision.decision_id,
             current_status="pending",
-            next_status="rejected",
+            next_status="accepted",
             updated_at=datetime.now(tz=UTC),
         )
-        await dedup_store.release(row.decision.decision_id, "invalid")
-        raise DecisionRiskRejectedError(risk_decision.reason)
-
-    updated = await store.update_status(
-        row.decision.decision_id,
-        current_status="pending",
-        next_status="accepted",
-        updated_at=datetime.now(tz=UTC),
-    )
-    if not updated:
-        refreshed = await store.get_decision(
-            row.decision.decision_id,
-            include_opportunity=False,
-        )
-        if refreshed is None or refreshed.status != "accepted":
-            raise DecisionNotFoundError("Decision not found")
-    await enqueue(row.decision)
-    return _accepted_response(row.decision.decision_id)
+        if not updated:
+            refreshed = await store.get_decision(
+                row.decision.decision_id,
+                include_opportunity=False,
+            )
+            if refreshed is None or refreshed.status != "accepted":
+                raise DecisionNotFoundError("Decision not found")
+        enqueued = await enqueue(row.decision)
+        if enqueued is False:
+            refreshed = await store.get_decision(
+                row.decision.decision_id,
+                include_opportunity=False,
+            )
+            if refreshed is None or refreshed.status != "rejected":
+                await store.update_status(
+                    row.decision.decision_id,
+                    current_status="accepted",
+                    next_status="rejected",
+                    updated_at=datetime.now(tz=UTC),
+                )
+                await dedup_store.release(row.decision.decision_id, "rejected")
+            lease_released = True
+            raise DecisionEnqueueRejectedError("max_open_positions_capacity")
+        lease_transferred = True
+        return _accepted_response(row.decision.decision_id)
+    finally:
+        if not lease_transferred and not lease_released:
+            with suppress(Exception):
+                await dedup_store.release(row.decision.decision_id, "invalid")
 
 
 def _accepted_response(decision_id: str) -> AcceptDecisionResponse:
@@ -259,6 +298,8 @@ def _decision_row(row: StoredDecisionLike) -> DecisionRow:
         expires_at=row.expires_at.isoformat(),
         forecaster=row.decision.model_id or "rules",
         kelly_size=row.decision.notional_usdc,
+        spread_bps_at_decision=row.decision.spread_bps_at_decision,
+        risk_group_id=row.decision.risk_group_id,
         decision_evidence=_decision_evidence(row),
         opportunity=(
             OpportunityRow(

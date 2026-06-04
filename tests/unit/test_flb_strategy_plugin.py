@@ -27,7 +27,9 @@ from pms.strategies.flb.source import (
     FlbMarketSnapshot,
     load_flb_calibration_csv,
 )
+from pms.strategies.flb.projection import build_h1_flb_strategy
 from pms.strategies.flb.strategy import FlbStrategyModule
+from pms.strategies.versioning import compute_strategy_version_id
 from pms.strategies.intents import StrategyContext, TradeIntent
 
 
@@ -182,6 +184,23 @@ def test_flb_components_satisfy_strategy_protocols() -> None:
     assert controller is module.controller
     assert agent is module.agent
     assert strategy_module.strategy_id == "h1_flb"
+
+
+def test_h1_flb_strategy_version_includes_calibration_artifact_identity() -> None:
+    first = build_h1_flb_strategy(
+        calibration_csv_sha256="a" * 64,
+        calibration_source_label="warehouse-flb-v1",
+    )
+    second = build_h1_flb_strategy(
+        calibration_csv_sha256="b" * 64,
+        calibration_source_label="warehouse-flb-v1",
+    )
+
+    assert dict(first.config.metadata)["flb_calibration_csv_sha256"] == "a" * 64
+    assert (
+        compute_strategy_version_id(*first.snapshot())
+        != compute_strategy_version_id(*second.snapshot())
+    )
 
 
 @pytest.mark.asyncio
@@ -365,6 +384,38 @@ def test_load_flb_calibration_csv_parses_model(tmp_path: Path) -> None:
     longshot = model.calibration_for("longshot_yes_overpriced_buy_no")
     assert longshot.probability_estimate == pytest.approx(0.99)
     assert longshot.sample_count == 150
+
+
+@pytest.mark.parametrize(
+    "source_label",
+    [
+        "Gamma API closed markets",
+        "warehouse CSV: /tmp/polymarket.csv",
+        "tests/fixtures/flb-calibration",
+        "synthetic-flb-v1",
+        "local-flb-v1",
+        "smoke-flb-v1",
+        "placeholder",
+    ],
+)
+def test_load_flb_calibration_csv_rejects_non_auditable_source_label(
+    tmp_path: Path,
+    source_label: str,
+) -> None:
+    model_path = tmp_path / "flb-calibration.csv"
+    model_path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                f"longshot_yes_overpriced_buy_no,0.99,150,{source_label}",
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="source_label"):
+        load_flb_calibration_csv(model_path)
 
 
 def test_load_flb_calibration_csv_rejects_symlink_path(tmp_path: Path) -> None:

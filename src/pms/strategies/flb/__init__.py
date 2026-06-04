@@ -2,6 +2,7 @@
 
 from pms.strategies.flb.agent import FlbAgent
 from pms.strategies.flb.controller import FlbController
+from pms.strategies.flb.projection import H1_FLB_STRATEGY_ID, build_h1_flb_strategy
 from pms.strategies.flb.source import (
     FLB_RESEARCH_REF,
     FlbCalibrationModel,
@@ -20,6 +21,8 @@ __all__ = [
     "FlbMarketSnapshot",
     "FlbSignalCalibration",
     "FlbStrategyModule",
+    "H1_FLB_STRATEGY_ID",
     "LiveFlbSource",
+    "build_h1_flb_strategy",
     "load_flb_calibration_csv",
 ]

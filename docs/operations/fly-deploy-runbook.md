@@ -72,8 +72,52 @@ resolved at boot. The image command intentionally does not pass `--config`;
 `fly.toml` selects the supervised paper-soak config with
 `PMS_CONFIG_PATH=/app/config.live-soak.yaml`.
 
+The supervised paper-soak config now requires the category-prior baseline at
+`/secure/pms/category-prior-observations.csv` plus the calibrated H1 FLB
+artifact at `/secure/pms/flb-calibration.csv` and
+`/secure/pms/flb-calibration.csv.provenance.json`. Bootstrap the app volume and
+stage all three artifacts before the first machine starts; otherwise `Runner`
+fails closed while loading the config.
+
+Generate the FLB artifacts from the checked-in Dune export first. `DUNE_API_KEY`
+is a credential; load it from the operator secret store into the staging shell
+and do not commit or paste it:
+
 ```bash
-fly deploy
+install -d -m 700 /secure/pms
+export DUNE_API_KEY="<load from operator secret store>"
+uv run python scripts/export_flb_warehouse_from_dune.py \
+  --output /secure/pms/polymarket_resolved_binary.csv \
+  --performance large
+uv run python scripts/flb_data_feasibility.py \
+  --source warehouse-csv \
+  --input /secure/pms/polymarket_resolved_binary.csv \
+  --output /secure/pms/flb-feasibility.md \
+  --csv /secure/pms/flb-deciles.csv \
+  --calibration-csv /secure/pms/flb-calibration.csv \
+  --calibration-source-label warehouse-flb-v1 \
+  --calibration-provenance-json \
+    /secure/pms/flb-calibration.csv.provenance.json
+```
+
+Generate the category-prior artifact from resolved Gamma markets:
+
+```bash
+uv run python scripts/export_category_prior_observations.py \
+  --output /secure/pms/category-prior-observations.csv \
+  --min-observations 100
+```
+
+Then create the Fly paper-soak volume and deploy while copying the non-secret
+artifacts into the mounted path:
+
+```bash
+fly volumes create pms_paper_soak_secure --region iad
+fly deploy \
+  --file-local /secure/pms/category-prior-observations.csv=/secure/pms/category-prior-observations.csv \
+  --file-local /secure/pms/flb-calibration.csv=/secure/pms/flb-calibration.csv \
+  --file-local \
+    /secure/pms/flb-calibration.csv.provenance.json=/secure/pms/flb-calibration.csv.provenance.json
 ```
 
 For LIVE capital, do not edit `fly.toml`. Prepare the separate ignored config
@@ -86,10 +130,22 @@ fly volumes create pms_live_secure --region iad -c fly.live.toml
 fly secrets import -c fly.live.toml
 ```
 
-Then copy the final paper-soak report, operator rehearsal report, and
-credentialed preflight artifact to `/secure/pms` on the mounted volume before
-starting the runner. The live template intentionally omits `PMS_CONFIG_PATH`;
-all launch-critical non-secret values come from `fly.live.toml`, and all
+Then copy the full non-secret launch artifact set to `/secure/pms` on the
+mounted volume before starting the runner:
+
+- `/secure/pms/paper-soak-go-report.md`
+- `/secure/pms/operator-rehearsal-report.md`
+- `/secure/pms/execution-model.json`
+- `/secure/pms/paper-backtest-execution-diff.json`
+- `/secure/pms/category-prior-observations.csv`
+- `/secure/pms/flb-calibration.csv`
+- `/secure/pms/flb-calibration.csv.provenance.json`
+- `/secure/pms/credentialed-preflight.json`
+
+The paper-soak report path must match
+`PMS_LIVE_PAPER_SOAK_REPORT_PATH=/secure/pms/paper-soak-go-report.md` in
+`fly.live.toml`. The live template intentionally omits `PMS_CONFIG_PATH`; all
+launch-critical non-secret values come from `fly.live.toml`, and all
 credential-bearing values come from Fly secrets. This prevents the LIVE app
 from accidentally booting with the PAPER soak config.
 

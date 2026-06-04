@@ -45,6 +45,7 @@ class _BookState:
     bids: dict[float, float] = field(default_factory=dict)
     asks: dict[float, float] = field(default_factory=dict)
     last_trade_price: float | None = None
+    fee_rate_bps: float | None = None
     last_hash: str | None = None
 
 
@@ -60,6 +61,7 @@ class MarketDataSensor:
     _PONG_TIMEOUT_S = 15.0
     _WATCHDOG_TIMEOUT_S = 120.0
     _CLOSE_TIMEOUT_S = 1.0
+    _DEFAULT_MAX_MESSAGE_SIZE_BYTES = 8 * 1024 * 1024
 
     def __init__(
         self,
@@ -77,6 +79,7 @@ class MarketDataSensor:
         self._websocket: Any = None
         self._send_lock = asyncio.Lock()
         self._max_reconnect_interval_s = self._DEFAULT_MAX_RECONNECT_INTERVAL_S
+        self._max_message_size_bytes = self._DEFAULT_MAX_MESSAGE_SIZE_BYTES
         self._heartbeat_interval_s = self._HEARTBEAT_INTERVAL_S
         self._pong_timeout_s = self._PONG_TIMEOUT_S
         self._connection_book_source: BookSource | None = None
@@ -103,6 +106,17 @@ class MarketDataSensor:
     @max_reconnect_interval_s.setter
     def max_reconnect_interval_s(self, value: float) -> None:
         self._max_reconnect_interval_s = value
+
+    @property
+    def max_message_size_bytes(self) -> int:
+        return self._max_message_size_bytes
+
+    @max_message_size_bytes.setter
+    def max_message_size_bytes(self, value: int) -> None:
+        if value < 1:
+            msg = "max_message_size_bytes must be positive"
+            raise ValueError(msg)
+        self._max_message_size_bytes = value
 
     @property
     def watchdog_timeout_count(self) -> int:
@@ -168,7 +182,7 @@ class MarketDataSensor:
                     TimeoutError,
                     InvalidHandshake,
                 ) as error:
-                    logger.error("market data sensor receive loop failed: %s", error)
+                    _log_reconnectable_error(error)
                     await self._sleep(backoff)
                     backoff = min(backoff * 2.0, self._max_reconnect_interval_s)
         finally:
@@ -192,10 +206,20 @@ class MarketDataSensor:
             await self._sleep(self._POOL_RETRY_BACKOFF_S)
             await self._probe_pool_latency()
 
-        await self._send_subscription_update(
-            previous_asset_ids=self._subscribed_asset_ids,
-            next_asset_ids=next_asset_ids,
-        )
+        try:
+            await self._send_subscription_update(
+                previous_asset_ids=self._subscribed_asset_ids,
+                next_asset_ids=next_asset_ids,
+            )
+        except (ConnectionClosed, ConnectionError, OSError, TimeoutError) as error:
+            _log_reconnectable_error(error)
+            with suppress(Exception):
+                await self._websocket.close()
+            self._websocket = None
+            self._connection_book_source = None
+            self._subscribed_asset_ids = frozenset()
+            self._pending_reconnect_assets = set()
+            return
         self._subscribed_asset_ids = frozenset(next_asset_ids)
 
     async def aclose(self) -> None:
@@ -282,7 +306,9 @@ class MarketDataSensor:
         state.bids = _levels_to_map(message.get("bids"))
         state.asks = _levels_to_map(message.get("asks"))
         state.last_hash = _optional_str(message.get("hash"))
-        state.last_trade_price = _optional_float(message.get("last_trade_price"))
+        fee_rate_bps = _optional_float(message.get("fee_rate_bps"))
+        if fee_rate_bps is not None:
+            state.fee_rate_bps = fee_rate_bps
 
         source: BookSource = "subscribe"
         if asset_id in self._pending_reconnect_assets:
@@ -302,7 +328,7 @@ class MarketDataSensor:
         return _signal_from_state(
             state=state,
             timestamp=timestamp,
-            price=state.last_trade_price,
+            price=_book_signal_price(state),
             event_type="book",
             extra=metadata,
         )
@@ -325,6 +351,9 @@ class MarketDataSensor:
             size = _required_float(change, "size")
             side = _required_side(change.get("side"))
             _apply_price_change(state, side=side, price=price, size=size)
+            fee_rate_bps = _optional_float(change.get("fee_rate_bps"))
+            if fee_rate_bps is not None:
+                state.fee_rate_bps = fee_rate_bps
             best_bid = _optional_float(change.get("best_bid"))
             best_ask = _optional_float(change.get("best_ask"))
             state.last_hash = _optional_str(change.get("hash"))
@@ -368,6 +397,9 @@ class MarketDataSensor:
         timestamp = _message_timestamp(message.get("timestamp"))
         state = self._book_state(market_id, asset_id)
         state.last_trade_price = price
+        fee_rate_bps = _optional_float(message.get("fee_rate_bps"))
+        if fee_rate_bps is not None:
+            state.fee_rate_bps = fee_rate_bps
         await self.store.write_trade(
             Trade(
                 id=0,
@@ -378,17 +410,19 @@ class MarketDataSensor:
             )
         )
         metadata = await self._market_metadata_for_signal(market_id)
+        extra: dict[str, Any] = {
+            **metadata,
+            "side": _optional_str(message.get("side")),
+            "size": _optional_float(message.get("size")),
+        }
+        if fee_rate_bps is not None:
+            extra["fee_rate_bps"] = fee_rate_bps
         return _signal_from_state(
             state=state,
             timestamp=timestamp,
             price=price,
             event_type="last_trade_price",
-            extra={
-                **metadata,
-                "side": _optional_str(message.get("side")),
-                "size": _optional_float(message.get("size")),
-                "fee_rate_bps": _optional_float(message.get("fee_rate_bps")),
-            },
+            extra=extra,
         )
 
     def _book_state(self, market_id: str, asset_id: str) -> _BookState:
@@ -408,11 +442,18 @@ class MarketDataSensor:
         normalized = {
             key: value
             for key, value in metadata.items()
-            if key in {"risk_group_id", "category", "event_id"}
+            if key
+            in {
+                "risk_group_id",
+                "category",
+                "event_id",
+                "yes_token_id",
+                "no_token_id",
+            }
             and isinstance(value, str)
             and value.strip() != ""
         }
-        if normalized:
+        if _has_complete_outcome_token_metadata(normalized):
             self._market_signal_metadata[market_id] = normalized
         return normalized
 
@@ -425,8 +466,15 @@ class MarketDataSensor:
 
     def _connect(self) -> Any:
         connect_kwargs: tuple[dict[str, Any], ...] = (
-            {"close_timeout": self._CLOSE_TIMEOUT_S, "proxy": None},
-            {"close_timeout": self._CLOSE_TIMEOUT_S},
+            {
+                "close_timeout": self._CLOSE_TIMEOUT_S,
+                "max_size": self._max_message_size_bytes,
+                "proxy": None,
+            },
+            {
+                "close_timeout": self._CLOSE_TIMEOUT_S,
+                "max_size": self._max_message_size_bytes,
+            },
             {},
         )
         for kwargs in connect_kwargs:
@@ -497,7 +545,10 @@ class MarketDataSensor:
                 await websocket.close()
                 return
             except Exception as error:
-                logger.error("market data sensor heartbeat failed: %s", error)
+                if isinstance(error, ConnectionClosed):
+                    _log_reconnectable_error(error)
+                else:
+                    logger.error("market data sensor heartbeat failed: %s", error)
                 await websocket.close()
                 return
 
@@ -557,6 +608,19 @@ def _is_unsupported_connect_kwarg_error(exc: TypeError) -> bool:
         "unexpected keyword argument" in message
         or "got an unexpected keyword" in message
         or "takes no keyword arguments" in message
+    )
+
+
+def _log_reconnectable_error(error: BaseException) -> None:
+    if isinstance(error, ConnectionClosed):
+        logger.warning(
+            "market data sensor websocket closed; reconnecting: %s",
+            error,
+        )
+        return
+    logger.warning(
+        "market data sensor transport interrupted; reconnecting: %s",
+        error,
     )
 
 
@@ -630,9 +694,23 @@ def _signal_from_state(
             for level_price, level_size in sorted(state.asks.items(), key=lambda item: item[0])
         ],
     }
-    external_signal = {"raw_event_type": event_type}
+    external_signal: dict[str, Any] = {
+        "raw_event_type": event_type,
+        "book_received_at": datetime.now(tz=UTC).isoformat(),
+    }
     if extra is not None:
         external_signal.update(extra)
+    if state.fee_rate_bps is not None and "fee_rate_bps" not in external_signal:
+        external_signal["fee_rate_bps"] = state.fee_rate_bps
+    if state.last_trade_price is not None and "last_trade_price" not in external_signal:
+        external_signal["last_trade_price"] = state.last_trade_price
+    token_outcome = _signal_token_outcome(
+        asset_id=state.asset_id,
+        yes_token_id=external_signal.get("yes_token_id"),
+        no_token_id=external_signal.get("no_token_id"),
+    )
+    if token_outcome is not None:
+        external_signal["signal_token_outcome"] = token_outcome
     return MarketSignal(
         market_id=state.market_id,
         token_id=state.asset_id,
@@ -648,6 +726,26 @@ def _signal_from_state(
     )
 
 
+def _signal_token_outcome(
+    *,
+    asset_id: str,
+    yes_token_id: object,
+    no_token_id: object,
+) -> str | None:
+    if isinstance(yes_token_id, str) and asset_id == yes_token_id:
+        return "YES"
+    if isinstance(no_token_id, str) and asset_id == no_token_id:
+        return "NO"
+    return None
+
+
+def _has_complete_outcome_token_metadata(metadata: dict[str, str]) -> bool:
+    return (
+        metadata.get("yes_token_id", "").strip() != ""
+        and metadata.get("no_token_id", "").strip() != ""
+    )
+
+
 def _signal_price(
     *,
     price: float,
@@ -657,6 +755,15 @@ def _signal_price(
     if best_bid is not None and best_ask is not None and best_bid > 0 and best_ask > 0:
         return (best_bid + best_ask) / 2.0
     return price
+
+
+def _book_signal_price(state: _BookState) -> float | None:
+    if state.bids and state.asks:
+        best_bid = max(state.bids)
+        best_ask = min(state.asks)
+        if best_bid > 0.0 and best_ask > 0.0:
+            return (best_bid + best_ask) / 2.0
+    return state.last_trade_price
 
 
 def _required_str(mapping: dict[str, Any], key: str) -> str:

@@ -70,6 +70,7 @@ def _decision() -> TradeDecision:
         limit_price=0.41,
         action=Side.BUY.value,
         model_id="model-cp08",
+        spread_bps_at_decision=75,
     )
 
 
@@ -245,6 +246,7 @@ async def test_accept_endpoint_returns_409_and_list_endpoint_can_include_opportu
         "liquidity": 0.04,
     }
     assert payload[0]["opportunity"]["expected_edge"] == 0.18
+    assert payload[0]["spread_bps_at_decision"] == 75
 
 
 @pytest.mark.asyncio(loop_scope="session")

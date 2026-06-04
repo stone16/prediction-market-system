@@ -204,6 +204,46 @@ def test_apply_composition_falls_back_to_yes_price_when_blend_has_no_present_bra
     assert result == pytest.approx(0.41)
 
 
+def test_apply_composition_scales_rule_delta_raw_orderbook_imbalance() -> None:
+    result = apply_composition(
+        (
+            _step(
+                "orderbook_imbalance",
+                role="rule_delta",
+                weight=0.25,
+                threshold=0.80,
+            ),
+            _step("rules", role="blend_weighted", weight=1.0),
+        ),
+        {
+            ("orderbook_imbalance", ""): 0.85,
+            ("yes_price", ""): 0.50,
+        },
+    )
+
+    assert result == pytest.approx(0.7125)
+
+
+def test_apply_composition_flips_no_token_orderbook_imbalance_before_rule_delta() -> None:
+    result = apply_composition(
+        (
+            _step(
+                "orderbook_imbalance",
+                role="rule_delta",
+                weight=0.25,
+                threshold=0.80,
+            ),
+            _step("rules", role="blend_weighted", weight=1.0),
+        ),
+        {
+            ("orderbook_imbalance", "NO"): 0.85,
+            ("yes_price", ""): 0.50,
+        },
+    )
+
+    assert result == pytest.approx(0.2875)
+
+
 def test_apply_composition_supports_generic_threshold_edge_steps() -> None:
     result = apply_composition(
         (
@@ -217,63 +257,60 @@ def test_apply_composition_supports_generic_threshold_edge_steps() -> None:
     assert result == pytest.approx(0.07)
 
 
-def test_apply_composition_treats_orderbook_imbalance_as_directional_edge() -> None:
-    result = apply_composition(
-        (
-            _step(
-                "orderbook_imbalance",
-                role="threshold_edge",
-                weight=1.0,
-                threshold=0.10,
+def test_apply_composition_rejects_raw_orderbook_imbalance_as_probability_edge() -> None:
+    with pytest.raises(ValueError, match="orderbook_imbalance is a raw depth factor"):
+        apply_composition(
+            (
+                _step(
+                    "orderbook_imbalance",
+                    role="threshold_edge",
+                    weight=1.0,
+                    threshold=0.10,
+                ),
             ),
-        ),
-        {
-            ("orderbook_imbalance", ""): 0.12,
-            ("yes_price", ""): 0.50,
-        },
-    )
-
-    assert result == pytest.approx(0.62)
+            {
+                ("orderbook_imbalance", ""): 0.12,
+                ("yes_price", ""): 0.50,
+            },
+        )
 
 
-def test_apply_composition_skips_orderbook_imbalance_below_threshold() -> None:
-    result = apply_composition(
-        (
-            _step(
-                "orderbook_imbalance",
-                role="threshold_edge",
-                weight=1.0,
-                threshold=0.10,
+def test_apply_composition_rejects_raw_orderbook_imbalance_even_below_threshold() -> None:
+    with pytest.raises(ValueError, match="orderbook_imbalance is a raw depth factor"):
+        apply_composition(
+            (
+                _step(
+                    "orderbook_imbalance",
+                    role="threshold_edge",
+                    weight=1.0,
+                    threshold=0.10,
+                ),
             ),
-        ),
-        {
-            ("orderbook_imbalance", ""): 0.05,
-            ("yes_price", ""): 0.50,
-        },
-    )
-
-    assert result == pytest.approx(0.50)
+            {
+                ("orderbook_imbalance", ""): 0.05,
+                ("yes_price", ""): 0.50,
+            },
+        )
 
 
-def test_apply_composition_does_not_use_gated_orderbook_weighted_fallback() -> None:
-    result = apply_composition(
-        (
-            _step(
-                "orderbook_imbalance",
-                role="threshold_edge",
-                weight=1.0,
-                threshold=0.10,
+def test_apply_composition_does_not_allow_gated_orderbook_weighted_fallback() -> None:
+    with pytest.raises(ValueError, match="orderbook_imbalance is a raw depth factor"):
+        apply_composition(
+            (
+                _step(
+                    "orderbook_imbalance",
+                    role="threshold_edge",
+                    weight=1.0,
+                    threshold=0.10,
+                ),
+                _step("orderbook_imbalance", role="weighted", weight=1.0),
+                _step("rules", role="blend_weighted", weight=0.5),
             ),
-            _step("orderbook_imbalance", role="weighted", weight=1.0),
-            _step("rules", role="blend_weighted", weight=0.5),
-        ),
-        {
-            ("orderbook_imbalance", ""): 0.05,
-            ("yes_price", ""): 0.50,
-        },
-    )
-
-    assert result == pytest.approx(0.50)
+            {
+                ("orderbook_imbalance", ""): 0.05,
+                ("yes_price", ""): 0.50,
+            },
+        )
 
 
 def test_apply_composition_raises_when_required_rule_inputs_are_missing() -> None:

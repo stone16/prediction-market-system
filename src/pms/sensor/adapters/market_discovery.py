@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, Literal, cast
 
 import asyncpg
 import httpx
@@ -37,6 +37,11 @@ class MarketDiscoverySensor:
     store: PostgresMarketDataStore
     http_client: httpx.AsyncClient
     poll_interval_s: float = 60.0
+    page_limit: int = 500
+    max_pages: int = 1
+    pagination_mode: Literal["keyset", "offset"] = "offset"
+    order: str | None = None
+    ascending: bool = False
     persist_price_snapshots: bool = False
     on_poll_complete: Callable[[], Awaitable[None]] | None = None
 
@@ -97,20 +102,131 @@ class MarketDiscoverySensor:
                 backoff = min(backoff * 2.0, self._MAX_BACKOFF_S)
 
     async def poll_once(self) -> None:
+        if self.pagination_mode == "keyset":
+            await self._poll_once_keyset()
+            return
+        await self._poll_once_offset()
+
+    async def _poll_once_keyset(self) -> None:
+        fetched_at = datetime.now(tz=UTC)
+        written_markets: list[Market] = []
+        cursor: str | None = None
+        exhausted_page_cap = False
+        for page_index in range(self.max_pages):
+            page_payload, raw_page_count, cursor = await self._fetch_keyset_page(cursor)
+            if raw_page_count == 0:
+                break
+            if page_payload:
+                await self._write_payload_page(
+                    payload=page_payload,
+                    fetched_at=fetched_at,
+                    written_markets=written_markets,
+                )
+            if cursor is None:
+                break
+            exhausted_page_cap = page_index == self.max_pages - 1
+        if exhausted_page_cap:
+            logger.warning(
+                "discovery reached configured keyset page cap max_pages=%d "
+                "page_limit=%d; Gamma universe may be truncated",
+                self.max_pages,
+                self.page_limit,
+            )
+
+        _record_price_fields_populated_ratio(written_markets)
+        await _record_snapshot_lag_seconds_max(self.store)
+
+    async def _poll_once_offset(self) -> None:
+        fetched_at = datetime.now(tz=UTC)
+        written_markets: list[Market] = []
+        exhausted_page_cap = False
+        for page_index in range(self.max_pages):
+            page_payload, raw_page_count = await self._fetch_page(page_index)
+            if raw_page_count == 0:
+                break
+            if page_payload:
+                await self._write_payload_page(
+                    payload=page_payload,
+                    fetched_at=fetched_at,
+                    written_markets=written_markets,
+                )
+            if raw_page_count < self.page_limit:
+                break
+            exhausted_page_cap = page_index == self.max_pages - 1
+        if exhausted_page_cap:
+            logger.warning(
+                "discovery reached configured page cap max_pages=%d page_limit=%d; "
+                "Gamma universe may be truncated",
+                self.max_pages,
+                self.page_limit,
+            )
+
+        _record_price_fields_populated_ratio(written_markets)
+        await _record_snapshot_lag_seconds_max(self.store)
+
+    async def _fetch_keyset_page(
+        self,
+        cursor: str | None,
+    ) -> tuple[list[dict[str, Any]], int, str | None]:
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": str(self.page_limit),
+        }
+        if self.order is not None and self.order.strip() != "":
+            params["order"] = self.order
+            params["ascending"] = _bool_param(self.ascending)
+        if cursor is not None:
+            params["after_cursor"] = cursor
+        response = await self.http_client.get(
+            "/markets/keyset",
+            params=params,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            msg = "Expected Gamma API /markets/keyset response to be an object"
+            raise ValueError(msg)
+        raw_markets = payload.get("markets")
+        if not isinstance(raw_markets, list):
+            msg = "Expected Gamma API /markets/keyset markets to be a list"
+            raise ValueError(msg)
+        next_cursor = _optional_text(payload.get("next_cursor"))
+        rows = [row for row in raw_markets if isinstance(row, dict)]
+        return rows, len(raw_markets), next_cursor
+
+    async def _fetch_page(self, page_index: int) -> tuple[list[dict[str, Any]], int]:
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": str(self.page_limit),
+            "offset": str(page_index * self.page_limit),
+        }
+        params.update(_pagination_sort_params(self.order, self.ascending))
         response = await self.http_client.get(
             "/markets",
-            params={"active": "true", "closed": "false", "limit": "500"},
+            params=params,
         )
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list):
             msg = "Expected Gamma API /markets response to be a list"
             raise ValueError(msg)
+        return [row for row in payload if isinstance(row, dict)], len(payload)
 
-        fetched_at = datetime.now(tz=UTC)
-        written_markets: list[Market] = []
+    async def _write_payload_page(
+        self,
+        *,
+        payload: list[dict[str, Any]],
+        fetched_at: datetime,
+        written_markets: list[Market],
+    ) -> None:
         for row in payload:
-            if not isinstance(row, dict):
+            if _is_non_binary_gamma_market(row):
+                logger.debug(
+                    "skipping non-binary Gamma market row: %s",
+                    row.get("conditionId") or row.get("condition_id"),
+                )
                 continue
             try:
                 market = _gamma_market_to_market(row, fetched_at)
@@ -167,9 +283,6 @@ class MarketDiscoverySensor:
                         error,
                     )
                     continue
-
-        _record_price_fields_populated_ratio(written_markets)
-        await _record_snapshot_lag_seconds_max(self.store)
 
     async def aclose(self) -> None:
         await self.http_client.aclose()
@@ -366,7 +479,14 @@ def _strict_float(value: object) -> float:
 def _spread_bps(*, best_bid: float | None, best_ask: float | None) -> int | None:
     if best_bid is None or best_ask is None:
         return None
-    spread = (Decimal(str(best_ask)) - Decimal(str(best_bid))) * Decimal("10000")
+    bid = Decimal(str(best_bid))
+    ask = Decimal(str(best_ask))
+    if ask < bid:
+        return None
+    midpoint = (ask + bid) / Decimal("2")
+    if midpoint <= 0:
+        return None
+    spread = ((ask - bid) / midpoint) * Decimal("10000")
     return int(round(spread))
 
 
@@ -396,6 +516,19 @@ def _record_price_fields_populated_ratio(markets: list[Market]) -> None:
     set_metric(SENSOR_DISCOVERY_PRICE_FIELDS_POPULATED_RATIO_METRIC, populated / total)
 
 
+def _pagination_sort_params(order: str | None, ascending: bool) -> dict[str, str]:
+    if order is None or order.strip() == "":
+        return {}
+    return {
+        "order": order,
+        "ascending": _bool_param(ascending),
+    }
+
+
+def _bool_param(value: bool) -> str:
+    return "true" if value else "false"
+
+
 async def _record_snapshot_lag_seconds_max(store: PostgresMarketDataStore) -> None:
     try:
         lag_seconds = await store.read_snapshot_lag_seconds_max()
@@ -423,7 +556,7 @@ def _gamma_market_to_tokens(
     condition_id: str,
 ) -> list[Token]:
     raw_token_ids = row.get("clobTokenIds")
-    if raw_token_ids in {None, ""}:
+    if _is_missing_sequence_payload(raw_token_ids):
         return []
 
     loaded = json.loads(raw_token_ids) if isinstance(raw_token_ids, str) else raw_token_ids
@@ -452,7 +585,7 @@ def _gamma_market_to_tokens(
 
 def _gamma_market_outcomes(row: dict[str, Any]) -> tuple[Outcome, Outcome]:
     raw_outcomes = row.get("outcomes")
-    if raw_outcomes in {None, ""}:
+    if _is_missing_sequence_payload(raw_outcomes):
         msg = "Gamma market row is missing outcomes"
         raise ValueError(msg)
     loaded = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
@@ -464,6 +597,24 @@ def _gamma_market_outcomes(row: dict[str, Any]) -> tuple[Outcome, Outcome]:
         msg = "Gamma market row must expose exactly YES/NO outcomes"
         raise ValueError(msg)
     return cast(tuple[Outcome, Outcome], normalized)
+
+
+def _is_non_binary_gamma_market(row: dict[str, Any]) -> bool:
+    raw_outcomes = row.get("outcomes")
+    if _is_missing_sequence_payload(raw_outcomes):
+        return False
+    try:
+        loaded = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(loaded, list):
+        return False
+    normalized = tuple(str(outcome).strip().upper() for outcome in loaded)
+    return len(normalized) != 2 or set(normalized) != {"YES", "NO"}
+
+
+def _is_missing_sequence_payload(value: object) -> bool:
+    return value is None or (isinstance(value, str) and value == "")
 
 
 def _optional_datetime(value: object) -> datetime | None:

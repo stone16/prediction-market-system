@@ -178,7 +178,7 @@ def _fake_registry_active_strategies() -> list[ActiveStrategy]:
 
 
 def _settings() -> PMSSettings:
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     approval_path, audit_path = make_private_live_paths(prefix="pms-runner-cp01-")
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-runner-cp01-reports-"
@@ -187,6 +187,7 @@ def _settings() -> PMSSettings:
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         auto_migrate_default_v2=False,
         live_exit_criteria_ratified_by="operator",
         live_exit_criteria_ratified_at=attested_at,
@@ -211,7 +212,7 @@ def _settings() -> PMSSettings:
             max_daily_loss_usdc=20.0,
             max_open_positions=5,
             max_exposure_per_risk_group=5_000.0,
-            max_quantity_shares=500.0,
+            max_quantity_shares=10_000.0,
         ),
         controller=ControllerSettings(time_in_force="IOC", quote_source="dual"),
         discord=DiscordSettings(
@@ -234,7 +235,7 @@ def _settings() -> PMSSettings:
 async def test_runner_builds_live_polymarket_adapter_with_sdk_client_and_file_gate(
     tmp_path: Path,
 ) -> None:
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-runner-cp01-build-reports-"
     )
@@ -242,6 +243,7 @@ async def test_runner_builds_live_polymarket_adapter_with_sdk_client_and_file_ga
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         auto_migrate_default_v2=False,
         live_exit_criteria_ratified_by="operator",
         live_exit_criteria_ratified_at=attested_at,
@@ -557,7 +559,7 @@ def _signal() -> MarketSignal:
         volume_24h=1_000.0,
         resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
         orderbook={"bids": [], "asks": []},
-        external_signal={"fair_value": 0.55},
+        external_signal={"event_id": "runner-cp01-event", "fair_value": 0.55},
         fetched_at=datetime(2026, 4, 19, tzinfo=UTC),
         market_status="open",
     )

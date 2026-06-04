@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from math import isfinite
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import Any, Literal, TypeVar, cast
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 from pms.config import PMSSettings
 from pms.controller._price_utils import best_ask, spread_bps_at_decision
@@ -27,14 +29,31 @@ from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
 from pms.controller.outcome_tokens import (
     NullOutcomeTokenResolver,
+    OutcomeTokens,
     OutcomeTokenResolver,
 )
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import RunMode, TimeInForce
 from pms.core.interfaces import ICalibrator, IForecaster, IPreCalibrator, ISizer
-from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
+from pms.core.models import (
+    BookLevel,
+    BookSnapshot,
+    MarketSignal,
+    Opportunity,
+    Portfolio,
+    TradeDecision,
+)
+from pms.execution.fees import market_fee_rate_from_metadata
+from pms.factors.base import EMPTY_OUTER_RING
 from pms.factors.composition import apply_composition, evaluate_branch_probabilities
+from pms.factors.definitions.orderbook_imbalance import OrderbookImbalance
+from pms.metrics import (
+    SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
+    increment_metric,
+)
 from pms.strategies.projections import ActiveStrategy, CalibrationContext, CalibrationSpec
 
 logger = logging.getLogger(__name__)
@@ -44,6 +63,66 @@ OpportunityEmission = tuple[Opportunity, TradeDecision]
 T = TypeVar("T")
 _ORIGINAL_RULES_PREDICT = RulesForecaster.predict
 _ORIGINAL_STATISTICAL_PREDICT = StatisticalForecaster.predict
+
+
+@dataclass(frozen=True, slots=True)
+class _SignalOutcomeContext:
+    yes_token_id: str | None
+    no_token_id: str | None
+    signal_outcome: Literal["YES", "NO"]
+
+
+class DirectBookSnapshotReader(Protocol):
+    async def read_latest_snapshot(
+        self,
+        market_id: str,
+        token_id: str,
+    ) -> BookSnapshot | None: ...
+
+    async def read_levels_for_snapshot(self, snapshot_id: int) -> list[BookLevel]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectBookRead:
+    signal: MarketSignal | None
+    failure: str | None = None
+    age_ms: float | None = None
+
+
+async def _read_direct_fee_rate_bps(
+    reader: DirectBookSnapshotReader | None,
+    *,
+    market_id: str,
+    token_id: str,
+) -> float | None:
+    if reader is None:
+        return None
+    fee_reader = getattr(reader, "read_fee_rate_bps", None)
+    if not callable(fee_reader):
+        return None
+    typed_reader = cast(
+        Callable[[str, str], Awaitable[float | None]],
+        fee_reader,
+    )
+    try:
+        fee_rate_bps = await typed_reader(market_id, token_id)
+    except Exception as error:  # noqa: BLE001
+        logger.warning(
+            "direct fee-rate read failed for %s/%s (%s): %s",
+            market_id,
+            token_id,
+            type(error).__name__,
+            str(error) or "(no message)",
+        )
+        return None
+    if (
+        fee_rate_bps is None
+        or not isfinite(fee_rate_bps)
+        or fee_rate_bps < 0.0
+        or fee_rate_bps > 10_000.0
+    ):
+        return None
+    return fee_rate_bps
 
 
 @dataclass
@@ -57,12 +136,14 @@ class ControllerPipeline:
     outcome_token_resolver: OutcomeTokenResolver = field(
         default_factory=NullOutcomeTokenResolver
     )
+    direct_book_reader: DirectBookSnapshotReader | None = None
     forecasters: Sequence[IForecaster] | None = None
     calibrator: ICalibrator | None = None
     sizer: ISizer | None = None
     router: Router | None = None
     settings: PMSSettings = field(default_factory=PMSSettings)
     last_diagnostic: ControllerDiagnostic | None = field(init=False, default=None)
+    last_execution_signal: MarketSignal | None = field(init=False, default=None)
     suppressed_zero_size: int = field(init=False, default=0)
     _last_decision_emitted_at: dict[tuple[str, str, str, str, str], datetime] = field(
         init=False,
@@ -125,30 +206,10 @@ class ControllerPipeline:
         portfolio: Portfolio | None = None,
     ) -> OpportunityEmission | None:
         self.last_diagnostic = None
+        self.last_execution_signal = None
         router = _required(self.router, "router")
-        # Call gate() (rather than gate_reason() twice) so the router funnel
-        # log is emitted exactly once per signal. gate() returns a bool; we
-        # re-derive the specific reason only on failure so we can attach it
-        # to the diagnostic.
-        if not router.gate(signal):
-            gate_reason = router.gate_reason(signal)
-            _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
-            self.last_diagnostic = ControllerDiagnostic(
-                code=f"router_gate:{gate_reason}",
-                message=(
-                    "Signal rejected by router gate: "
-                    f"{(gate_reason or 'unknown').replace('_', ' ')}."
-                ),
-                market_id=signal.market_id,
-                strategy_id=self.strategy_id,
-                strategy_version_id=self.strategy_version_id,
-                token_id=signal.token_id,
-                severity="info",
-                metadata={"gate_reason": gate_reason or "unknown"},
-            )
-            return None
         if signal.token_id is None:
-            _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
+            _log_pipeline_funnel(signal, forecasted_count=0, emitted_count=0)
             self.last_diagnostic = ControllerDiagnostic(
                 code="missing_token_id",
                 message=(
@@ -162,6 +223,75 @@ class ControllerPipeline:
                 severity="info",
                 metadata={},
             )
+            return None
+
+        signal_token_id = signal.token_id
+        raw_signal = signal
+        signal_outcome = _signal_outcome_context_from_signal(
+            signal,
+            signal_token_id=signal_token_id,
+        )
+        signal = _canonical_yes_signal(signal, signal_outcome)
+        signal = _with_decision_time_book_age(signal, self.settings)
+        if router.gate_reason(signal) == "book_too_stale":
+            signal = await self._refresh_signal_book_before_router_gate(
+                signal,
+                outcome=signal_outcome.signal_outcome,
+            )
+        # Call gate() (rather than gate_reason() twice) so the router funnel
+        # log is emitted exactly once per signal. gate() returns a bool; we
+        # re-derive the specific reason only on failure so we can attach it
+        # to the diagnostic.
+        if not router.gate(signal):
+            gate_reason = router.gate_reason(signal)
+            _log_pipeline_funnel(signal, forecasted_count=0, emitted_count=0)
+            gate_metadata: dict[str, object] = {
+                "gate_reason": gate_reason or "unknown"
+            }
+            if gate_reason == "book_too_stale":
+                gate_metadata["book_age_ms"] = signal.external_signal.get("book_age_ms")
+                gate_metadata["max_book_age_ms"] = router.controller.max_book_age_ms
+            self.last_diagnostic = ControllerDiagnostic(
+                code=f"router_gate:{gate_reason}",
+                message=(
+                    "Signal rejected by router gate: "
+                    f"{(gate_reason or 'unknown').replace('_', ' ')}."
+                ),
+                market_id=signal.market_id,
+                strategy_id=self.strategy_id,
+                strategy_version_id=self.strategy_version_id,
+                token_id=signal.token_id,
+                severity="info",
+                metadata=gate_metadata,
+            )
+            return None
+
+        active_portfolio = portfolio or _default_portfolio()
+        sizer = _required(self.sizer, "sizer")
+        min_order_usdc = _effective_min_order_usdc(
+            strategy=self.strategy,
+            sizer=sizer,
+            settings=self.settings,
+        )
+        risk_group_id = _risk_group_id(signal)
+        group_capacity_diagnostic = _risk_group_capacity_diagnostic(
+            portfolio=active_portfolio,
+            settings=self.settings,
+            min_order_usdc=min_order_usdc,
+            risk_group_id=risk_group_id,
+        )
+        if group_capacity_diagnostic is not None:
+            code, metadata = group_capacity_diagnostic
+            self._set_drop_diagnostic(
+                signal,
+                code=code,
+                message=(
+                    "Skipping decision before forecasting because the risk-group "
+                    "capacity cannot accept another minimum-size order."
+                ),
+                metadata=metadata,
+            )
+            _log_pipeline_funnel(signal, forecasted_count=0, emitted_count=0)
             return None
 
         forecasters = _required(self.forecasters, "forecasters")
@@ -207,7 +337,7 @@ class ControllerPipeline:
             self.strategy is not None and self.strategy.config.factor_composition
         )
         if not probabilities and not has_factor_composition:
-            _log_pipeline_funnel(signal, forecasted_count=0, traded_count=0)
+            _log_pipeline_funnel(signal, forecasted_count=0, emitted_count=0)
             self.last_diagnostic = ControllerDiagnostic(
                 code="no_forecaster_output",
                 message=(
@@ -345,7 +475,7 @@ class ControllerPipeline:
                 _log_pipeline_funnel(
                     signal,
                     forecasted_count=len(probabilities),
-                    traded_count=0,
+                    emitted_count=0,
                 )
                 return None
         else:
@@ -372,29 +502,80 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
             )
             return None
         prob_estimate = calibrated_estimate
         yes_probability = prob_estimate
         yes_reference_price = _yes_reference_price(signal, self.strategy)
+        if signal_outcome.signal_outcome == "NO":
+            yes_reference_price = signal.yes_price
         yes_edge = yes_probability - yes_reference_price
-        active_portfolio = portfolio or _default_portfolio()
-        sizer = _required(self.sizer, "sizer")
-        now = datetime.now(tz=UTC)
         opportunity_side: Literal["yes", "no"] = "yes"
-        decision_token_id = signal.token_id
-        decision_yes_token_id: str | None = signal.token_id
+        decision_token_id = signal_outcome.yes_token_id or signal_token_id
+        decision_yes_token_id: str | None = signal_outcome.yes_token_id or signal_token_id
         decision_outcome: Literal["YES", "NO"] = "YES"
         decision_probability = yes_probability
         decision_price = yes_reference_price
         decision_edge = yes_edge
+        execution_signal = signal
+        if yes_edge >= 0.0 and signal_outcome.signal_outcome == "NO":
+            if (
+                signal_outcome.yes_token_id is None
+                or signal_outcome.yes_token_id == signal_token_id
+            ):
+                resolved_tokens = await self.outcome_token_resolver.resolve(
+                    market_id=signal.market_id,
+                    signal_token_id=signal_token_id,
+                )
+                signal_outcome = _SignalOutcomeContext(
+                    yes_token_id=resolved_tokens.yes_token_id
+                    or signal_outcome.yes_token_id,
+                    no_token_id=resolved_tokens.no_token_id
+                    or signal_outcome.no_token_id,
+                    signal_outcome=signal_outcome.signal_outcome,
+                )
+            if (
+                signal_outcome.yes_token_id is None
+                or signal_outcome.yes_token_id == signal_token_id
+            ):
+                self.last_diagnostic = ControllerDiagnostic(
+                    code="missing_yes_token",
+                    message=(
+                        "Skipping bullish decision because no YES token could be "
+                        "resolved for a NO-token signal."
+                    ),
+                    market_id=signal.market_id,
+                    strategy_id=self.strategy_id,
+                    strategy_version_id=self.strategy_version_id,
+                    token_id=signal.token_id,
+                    severity="warning",
+                    metadata={
+                        "signal_token_id": signal.token_id,
+                        "no_token_id": signal_outcome.no_token_id,
+                        "outcome": "YES",
+                    },
+                )
+                logger.info(
+                    "controller diagnostic %s for %s",
+                    self.last_diagnostic.code,
+                    signal.market_id,
+                    extra={"controller_diagnostic": self.last_diagnostic},
+                )
+                return None
+            decision_token_id = signal_outcome.yes_token_id
+            decision_yes_token_id = signal_outcome.yes_token_id
         if yes_edge < 0.0:
-            outcome_tokens = await self.outcome_token_resolver.resolve(
-                market_id=signal.market_id,
-                signal_token_id=signal.token_id,
-            )
-            if outcome_tokens.no_token_id is None:
+            if signal_outcome.no_token_id is None:
+                resolved_tokens = await self.outcome_token_resolver.resolve(
+                    market_id=signal.market_id,
+                    signal_token_id=signal_token_id,
+                )
+                signal_outcome = _signal_outcome_context(
+                    signal_token_id=signal_token_id,
+                    outcome_tokens=resolved_tokens,
+                )
+            if signal_outcome.no_token_id is None:
                 self.last_diagnostic = ControllerDiagnostic(
                     code="missing_no_token",
                     message=(
@@ -407,7 +588,7 @@ class ControllerPipeline:
                     severity="warning",
                     metadata={
                         "signal_token_id": signal.token_id,
-                        "yes_token_id": outcome_tokens.yes_token_id,
+                        "yes_token_id": signal_outcome.yes_token_id,
                         "outcome": "NO",
                     },
                 )
@@ -418,13 +599,84 @@ class ControllerPipeline:
                     extra={"controller_diagnostic": self.last_diagnostic},
                 )
                 return None
-            decision_yes_token_id = outcome_tokens.yes_token_id
-            decision_token_id = outcome_tokens.no_token_id
+            decision_yes_token_id = signal_outcome.yes_token_id
+            decision_token_id = signal_outcome.no_token_id
             decision_outcome = "NO"
             opportunity_side = "no"
             decision_probability = 1.0 - yes_probability
             decision_price = max(1e-6, min(1.0 - 1e-6, 1.0 - yes_reference_price))
+            if signal_outcome.signal_outcome == "NO":
+                decision_price = _direct_signal_reference_price(
+                    raw_signal,
+                    strategy=self.strategy,
+                )
             decision_edge = decision_probability - decision_price
+        if (
+            _strategy_metadata(self.strategy).get("price_reference") == "best_ask"
+        ):
+            direct_required = not _decision_uses_signal_orderbook(
+                execution_signal,
+                token_id=decision_token_id,
+                outcome=decision_outcome,
+            )
+            direct_read = await self._read_direct_outcome_execution_signal(
+                signal,
+                token_id=decision_token_id,
+                outcome=decision_outcome,
+                price_coordinate="target_token",
+            )
+            if direct_read.signal is not None:
+                execution_signal = direct_read.signal
+                direct_price = best_ask(execution_signal)
+                if direct_price is None:
+                    self._set_drop_diagnostic(
+                        signal,
+                        code="direct_outcome_orderbook_required",
+                        message=(
+                            "Skipping decision because the selected outcome direct "
+                            "orderbook has no executable ask."
+                        ),
+                        metadata={
+                            "signal_token_id": signal.token_id,
+                            "decision_token_id": decision_token_id,
+                            "decision_outcome": decision_outcome,
+                        },
+                    )
+                    _log_pipeline_funnel(
+                        signal,
+                        forecasted_count=len(probabilities),
+                        emitted_count=0,
+                    )
+                    return None
+                decision_price = direct_price
+                decision_edge = decision_probability - decision_price
+            elif direct_required:
+                direct_metadata: dict[str, object] = {
+                    "signal_token_id": signal.token_id,
+                    "decision_token_id": decision_token_id,
+                    "decision_outcome": decision_outcome,
+                    "yes_reference_price": yes_reference_price,
+                    "synthetic_decision_price": decision_price,
+                }
+                if direct_read.failure is not None:
+                    direct_metadata["direct_book_failure"] = direct_read.failure
+                if direct_read.age_ms is not None:
+                    direct_metadata["direct_book_age_ms"] = direct_read.age_ms
+                self._set_drop_diagnostic(
+                    signal,
+                    code="direct_outcome_orderbook_required",
+                    message=(
+                        "Skipping decision because best-ask execution pricing "
+                        "requires a direct orderbook for the selected outcome token."
+                    ),
+                    metadata=direct_metadata,
+                )
+                _log_pipeline_funnel(
+                    signal,
+                    forecasted_count=len(probabilities),
+                    emitted_count=0,
+                )
+                return None
         if decision_edge <= 0.0:
             self._set_drop_diagnostic(
                 signal,
@@ -443,7 +695,76 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
+            )
+            return None
+        decision_spread_bps = spread_bps_at_decision(
+            execution_signal,
+            token_id=decision_token_id,
+            outcome=decision_outcome,
+            yes_token_id=decision_yes_token_id,
+        )
+        if (
+            decision_spread_bps is not None
+            and self.settings.mode != RunMode.BACKTEST
+            and decision_spread_bps > router.controller.max_spread_bps
+        ):
+            self._set_drop_diagnostic(
+                signal,
+                code="router_gate:spread_too_wide",
+                message=(
+                    "Skipping decision because the selected outcome book spread "
+                    "exceeds the configured maximum."
+                ),
+                metadata={
+                    "spread_bps_at_decision": decision_spread_bps,
+                    "max_spread_bps": router.controller.max_spread_bps,
+                    "decision_outcome": decision_outcome,
+                    "decision_token_id": decision_token_id,
+                },
+            )
+            _log_pipeline_funnel(
+                signal,
+                forecasted_count=len(probabilities),
+                emitted_count=0,
+            )
+            return None
+        decision_costs = _decision_cost_edges(
+            decision_price=decision_price,
+            spread_bps=decision_spread_bps,
+            settings=self.settings,
+            fee_rate=market_fee_rate_from_metadata(
+                execution_signal.external_signal,
+                fallback_rate=self.settings.strategies.flb_fee_rate,
+            ),
+        )
+        net_edge_after_costs = decision_edge - decision_costs.total_edge
+        if net_edge_after_costs <= 0.0:
+            self._set_drop_diagnostic(
+                signal,
+                code="decision_net_edge_not_positive",
+                message=(
+                    "Skipping decision because configured entry costs erase "
+                    "the gross edge after side selection."
+                ),
+                metadata={
+                    "gross_edge": decision_edge,
+                    "spread_bps_at_decision": decision_spread_bps,
+                    "spread_edge": decision_costs.spread_edge,
+                    "fee_rate": decision_costs.fee_rate,
+                    "fee_edge": decision_costs.fee_edge,
+                    "max_slippage_bps": self.settings.controller.max_slippage_bps,
+                    "slippage_edge": decision_costs.slippage_edge,
+                    "net_edge_after_costs": net_edge_after_costs,
+                    "decision_outcome": decision_outcome,
+                    "decision_probability": decision_probability,
+                    "decision_price": decision_price,
+                },
+            )
+            _log_pipeline_funnel(
+                signal,
+                forecasted_count=len(probabilities),
+                emitted_count=0,
             )
             return None
         size = sizer.size(
@@ -451,9 +772,91 @@ class ControllerPipeline:
             market_price=decision_price,
             portfolio=active_portfolio,
         )
-        min_order_usdc = self.settings.risk.min_order_usdc
-        if self.strategy is not None:
-            min_order_usdc = self.strategy.risk.min_order_size_usdc
+        market_exposure_usdc = _market_exposure_usdc(
+            active_portfolio,
+            market_id=signal.market_id,
+        )
+        max_market_position_usdc = _max_position_per_market_usdc(
+            strategy=self.strategy,
+            sizer=sizer,
+            settings=self.settings,
+        )
+        remaining_market_capacity_usdc = max(
+            0.0,
+            max_market_position_usdc - market_exposure_usdc,
+        )
+        if remaining_market_capacity_usdc < min_order_usdc and size >= min_order_usdc:
+            self._set_drop_diagnostic(
+                signal,
+                code="market_position_capacity_below_minimum",
+                message=(
+                    "Skipping decision because the remaining market position "
+                    "capacity is below the minimum order notional."
+                ),
+                metadata={
+                    "size_usdc": size,
+                    "min_order_usdc": min_order_usdc,
+                    "market_exposure_usdc": market_exposure_usdc,
+                    "max_market_position_usdc": max_market_position_usdc,
+                    "remaining_market_capacity_usdc": remaining_market_capacity_usdc,
+                    "decision_outcome": decision_outcome,
+                },
+            )
+            _log_pipeline_funnel(
+                signal,
+                forecasted_count=len(probabilities),
+                emitted_count=0,
+            )
+            return None
+        size = min(size, remaining_market_capacity_usdc)
+        remaining_risk_group_capacity_usdc = _remaining_risk_group_capacity_usdc(
+            portfolio=active_portfolio,
+            settings=self.settings,
+            risk_group_id=risk_group_id,
+        )
+        if remaining_risk_group_capacity_usdc is not None:
+            size = min(size, remaining_risk_group_capacity_usdc)
+        executable_depth_usdc = _executable_buy_depth_usdc(
+            execution_signal.orderbook,
+            limit_price=decision_price,
+            max_slippage_bps=self.settings.controller.max_slippage_bps,
+        )
+        if (
+            executable_depth_usdc is not None
+            and self.settings.mode != RunMode.BACKTEST
+            and _strategy_metadata(self.strategy).get("price_reference") == "best_ask"
+            and _decision_uses_signal_orderbook(
+                execution_signal,
+                token_id=decision_token_id,
+                outcome=decision_outcome,
+            )
+        ):
+            if executable_depth_usdc < min_order_usdc:
+                self._set_drop_diagnostic(
+                    signal,
+                    code="executable_depth_below_minimum",
+                    message=(
+                        "Skipping decision because executable book depth at "
+                        "the configured limit and slippage is below the "
+                        "minimum order notional."
+                    ),
+                    metadata={
+                        "executable_depth_usdc": executable_depth_usdc,
+                        "min_order_usdc": min_order_usdc,
+                        "decision_outcome": decision_outcome,
+                        "decision_price": decision_price,
+                        "max_slippage_bps": (
+                            self.settings.controller.max_slippage_bps
+                        ),
+                    },
+                )
+                _log_pipeline_funnel(
+                    signal,
+                    forecasted_count=len(probabilities),
+                    emitted_count=0,
+                )
+                return None
+            size = min(size, executable_depth_usdc)
         if size <= 0.0 or size < min_order_usdc:
             self.suppressed_zero_size += 1
             self._set_drop_diagnostic(
@@ -472,7 +875,7 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
             )
             return None
         cooldown_key = (
@@ -503,14 +906,51 @@ class ControllerPipeline:
             _log_pipeline_funnel(
                 signal,
                 forecasted_count=len(probabilities),
-                traded_count=0,
+                emitted_count=0,
             )
             return None
+        decision_created_at = datetime.now(tz=UTC)
+        final_book_age_ms = _execution_book_age_ms_at_decision_time(
+            execution_signal,
+            settings=self.settings,
+            decision_created_at=decision_created_at,
+        )
+        if final_book_age_ms is not None:
+            if final_book_age_ms > router.controller.max_book_age_ms:
+                self._set_drop_diagnostic(
+                    signal,
+                    code="router_gate:book_too_stale",
+                    message=(
+                        "Skipping decision because the selected outcome "
+                        "orderbook became too stale before emission."
+                    ),
+                    metadata={
+                        "gate_reason": "book_too_stale",
+                        "phase": "pre_emit",
+                        "book_age_ms": final_book_age_ms,
+                        "max_book_age_ms": router.controller.max_book_age_ms,
+                        "decision_outcome": decision_outcome,
+                        "decision_token_id": decision_token_id,
+                    },
+                )
+                _log_pipeline_funnel(
+                    signal,
+                    forecasted_count=len(probabilities),
+                    emitted_count=0,
+                )
+                return None
+            execution_signal = replace(
+                execution_signal,
+                external_signal={
+                    **execution_signal.external_signal,
+                    "book_age_ms": final_book_age_ms,
+                },
+            )
         self._last_decision_emitted_at[cooldown_key] = signal.timestamp
         _log_pipeline_funnel(
             signal,
             forecasted_count=len(probabilities),
-            traded_count=1,
+            emitted_count=1,
         )
         opportunity = Opportunity(
             opportunity_id=f"opportunity-{uuid.uuid4().hex}",
@@ -525,7 +965,7 @@ class ControllerPipeline:
             staleness_policy="market_signal_freshness",
             strategy_id=self.strategy_id,
             strategy_version_id=self.strategy_version_id,
-            created_at=now,
+            created_at=decision_created_at,
             factor_snapshot_hash=factor_snapshot_hash,
             composition_trace={
                 **composition_trace,
@@ -538,6 +978,14 @@ class ControllerPipeline:
                 "traded_probability": decision_probability,
                 "traded_price": decision_price,
                 "traded_edge": decision_edge,
+                "gross_edge": decision_edge,
+                "spread_bps_at_decision": decision_spread_bps,
+                "spread_edge": decision_costs.spread_edge,
+                "fee_rate": decision_costs.fee_rate,
+                "fee_edge": decision_costs.fee_edge,
+                "max_slippage_bps": self.settings.controller.max_slippage_bps,
+                "slippage_edge": decision_costs.slippage_edge,
+                "net_edge_after_costs": net_edge_after_costs,
             },
         )
 
@@ -553,6 +1001,7 @@ class ControllerPipeline:
             factor_snapshot_hash=factor_snapshot_hash,
             signal_timestamp=signal.timestamp,
         )
+        self.last_execution_signal = execution_signal
         return opportunity, TradeDecision(
             decision_id=f"decision-{uuid.uuid4().hex}",
             market_id=signal.market_id,
@@ -575,12 +1024,111 @@ class ControllerPipeline:
             model_id=_decision_model_id(model_ids),
             intent_key=intent_key,
             risk_group_id=_risk_group_id(signal),
-            spread_bps_at_decision=spread_bps_at_decision(
+            spread_bps_at_decision=decision_spread_bps,
+        )
+
+    async def _refresh_signal_book_before_router_gate(
+        self,
+        signal: MarketSignal,
+        *,
+        outcome: Literal["YES", "NO"],
+    ) -> MarketSignal:
+        if (
+            self.settings.mode == RunMode.BACKTEST
+            or self.direct_book_reader is None
+            or _strategy_metadata(self.strategy).get("price_reference") != "best_ask"
+        ):
+            return signal
+        direct_read = await self._read_direct_outcome_execution_signal(
+            signal,
+            token_id=signal.token_id,
+            outcome=outcome,
+        )
+        return signal if direct_read.signal is None else direct_read.signal
+
+    async def _read_direct_outcome_execution_signal(
+        self,
+        signal: MarketSignal,
+        *,
+        token_id: str | None,
+        outcome: Literal["YES", "NO"],
+        price_coordinate: Literal["canonical_yes", "target_token"] = "canonical_yes",
+    ) -> _DirectBookRead:
+        if token_id is None or self.direct_book_reader is None:
+            failure = "missing_token_id" if token_id is None else "reader_unavailable"
+            return _DirectBookRead(signal=None, failure=failure)
+        try:
+            snapshot = await self.direct_book_reader.read_latest_snapshot(
+                signal.market_id,
+                token_id,
+            )
+            if snapshot is None:
+                return _DirectBookRead(signal=None, failure="snapshot_missing")
+            snapshot_ts = _aware_utc(snapshot.ts)
+            age_ms = max(
+                0.0,
+                (datetime.now(tz=UTC) - snapshot_ts).total_seconds() * 1000.0,
+            )
+            if age_ms > self.settings.controller.max_book_age_ms:
+                return _DirectBookRead(signal=None, failure="stale", age_ms=age_ms)
+            levels = await self.direct_book_reader.read_levels_for_snapshot(snapshot.id)
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                "direct outcome book read failed for %s/%s: %s",
+                signal.market_id,
+                token_id,
+                error,
+            )
+            return _DirectBookRead(signal=None, failure="read_failed")
+
+        orderbook = _orderbook_from_levels(levels)
+        if orderbook is None:
+            return _DirectBookRead(signal=None, failure="levels_missing", age_ms=age_ms)
+        external_signal: dict[str, Any] = {
+            key: value
+            for key, value in signal.external_signal.items()
+            if key not in {"best_ask", "best_bid", "direct_token_price", "spread_bps"}
+        }
+        external_signal.update(
+            {
+                "signal_token_outcome": outcome,
+                "book_age_ms": age_ms,
+                "book_received_at": snapshot_ts.isoformat(),
+                "direct_outcome_book_source": snapshot.source,
+            }
+        )
+        fee_rate_bps = await _read_direct_fee_rate_bps(
+            self.direct_book_reader,
+            market_id=signal.market_id,
+            token_id=token_id,
+        )
+        if fee_rate_bps is not None:
+            external_signal["fee_rate_bps"] = fee_rate_bps
+        best_bid = _best_level(orderbook, "bids")
+        if best_bid is not None:
+            external_signal["best_bid"] = best_bid
+        direct_best_ask = _best_level(orderbook, "asks")
+        if direct_best_ask is not None:
+            external_signal["best_ask"] = direct_best_ask
+            external_signal["direct_token_price"] = direct_best_ask
+        direct_signal = replace(
+            signal,
+            token_id=token_id,
+            yes_price=_refreshed_direct_signal_price(
                 signal,
-                token_id=decision_token_id,
-                outcome=decision_outcome,
-                yes_token_id=decision_yes_token_id,
+                outcome=outcome,
+                direct_best_ask=direct_best_ask,
+                price_coordinate=price_coordinate,
             ),
+            orderbook=orderbook,
+            external_signal=external_signal,
+        )
+        spread_bps = spread_bps_at_decision(direct_signal)
+        if spread_bps is not None:
+            external_signal["spread_bps"] = spread_bps
+        return _DirectBookRead(
+            signal=replace(direct_signal, external_signal=external_signal),
+            age_ms=age_ms,
         )
 
     async def decide(
@@ -662,20 +1210,349 @@ def _log_pipeline_funnel(
     signal: MarketSignal,
     *,
     forecasted_count: int,
-    traded_count: int,
+    emitted_count: int,
 ) -> None:
+    increment_metric(SELECTION_FUNNEL_ROUTED_TOTAL_METRIC)
+    increment_metric(SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC, forecasted_count)
+    increment_metric(SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC, emitted_count)
     logger.info(
-        "controller pipeline funnel market_id=%s forecasted=%d traded=%d",
+        "controller pipeline funnel market_id=%s forecasted=%d emitted=%d",
         signal.market_id,
         forecasted_count,
-        traded_count,
+        emitted_count,
         extra={
             "event": "funnel_pipeline",
             "market_id": signal.market_id,
             "forecasted_count": forecasted_count,
-            "traded_count": traded_count,
+            "emitted_count": emitted_count,
         },
     )
+
+
+@dataclass(frozen=True)
+class _DecisionCostEdges:
+    spread_edge: float
+    fee_rate: float
+    fee_edge: float
+    slippage_edge: float
+
+    @property
+    def total_edge(self) -> float:
+        return self.spread_edge + self.fee_edge + self.slippage_edge
+
+
+def _decision_cost_edges(
+    *,
+    decision_price: float,
+    spread_bps: int | None,
+    settings: PMSSettings,
+    fee_rate: float | None = None,
+) -> _DecisionCostEdges:
+    price = Decimal(str(decision_price))
+    effective_fee_rate = (
+        settings.strategies.flb_fee_rate if fee_rate is None else fee_rate
+    )
+    fee_rate_decimal = Decimal(str(effective_fee_rate))
+    fee_edge = fee_rate_decimal * (Decimal("1.0") - price)
+    slippage_edge = (
+        Decimal(settings.controller.max_slippage_bps) / Decimal("10000")
+    ) * price
+    spread_edge = (
+        Decimal("0")
+        if spread_bps is None
+        else (Decimal(spread_bps) / Decimal("10000")) * price
+    )
+    return _DecisionCostEdges(
+        spread_edge=float(spread_edge),
+        fee_rate=effective_fee_rate,
+        fee_edge=float(fee_edge),
+        slippage_edge=float(slippage_edge),
+    )
+
+
+def _signal_outcome_context(
+    *,
+    signal_token_id: str,
+    outcome_tokens: OutcomeTokens,
+) -> _SignalOutcomeContext:
+    signal_outcome: Literal["YES", "NO"] = "YES"
+    if outcome_tokens.no_token_id is not None and signal_token_id == outcome_tokens.no_token_id:
+        signal_outcome = "NO"
+    return _SignalOutcomeContext(
+        yes_token_id=outcome_tokens.yes_token_id,
+        no_token_id=outcome_tokens.no_token_id,
+        signal_outcome=signal_outcome,
+    )
+
+
+def _signal_outcome_context_from_signal(
+    signal: MarketSignal,
+    *,
+    signal_token_id: str,
+) -> _SignalOutcomeContext:
+    yes_token_id = _external_token_id(signal, "yes_token_id")
+    no_token_id = _external_token_id(signal, "no_token_id")
+    signal_outcome: Literal["YES", "NO"] = _signal_token_outcome(signal)
+    if no_token_id is not None and signal_token_id == no_token_id:
+        signal_outcome = "NO"
+    elif yes_token_id is not None and signal_token_id == yes_token_id:
+        signal_outcome = "YES"
+    return _SignalOutcomeContext(
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
+        signal_outcome=signal_outcome,
+    )
+
+
+def _external_token_id(signal: MarketSignal, key: str) -> str | None:
+    value = _external_text(signal, key)
+    return value
+
+
+def _canonical_yes_signal(
+    signal: MarketSignal,
+    outcome_context: _SignalOutcomeContext,
+) -> MarketSignal:
+    external_signal = {
+        **signal.external_signal,
+        "signal_token_outcome": outcome_context.signal_outcome,
+    }
+    if outcome_context.yes_token_id is not None:
+        external_signal["yes_token_id"] = outcome_context.yes_token_id
+    if outcome_context.no_token_id is not None:
+        external_signal["no_token_id"] = outcome_context.no_token_id
+    if outcome_context.signal_outcome != "NO":
+        return replace(signal, external_signal=external_signal)
+
+    external_signal["direct_token_price"] = signal.yes_price
+    canonical_yes_price = _complement_probability_or_none(signal.yes_price)
+    if canonical_yes_price is None:
+        return replace(signal, external_signal=external_signal)
+    return replace(
+        signal,
+        yes_price=canonical_yes_price,
+        external_signal=external_signal,
+    )
+
+
+def _direct_signal_reference_price(
+    signal: MarketSignal,
+    *,
+    strategy: ActiveStrategy | None,
+) -> float:
+    if _strategy_metadata(strategy).get("price_reference") != "best_ask":
+        return signal.yes_price
+    executable_price = best_ask(signal)
+    return signal.yes_price if executable_price is None else executable_price
+
+
+def _refreshed_direct_signal_price(
+    signal: MarketSignal,
+    *,
+    outcome: Literal["YES", "NO"],
+    direct_best_ask: float | None,
+    price_coordinate: Literal["canonical_yes", "target_token"],
+) -> float:
+    if direct_best_ask is None:
+        return signal.yes_price
+    if price_coordinate == "target_token":
+        return direct_best_ask
+    if outcome == "NO":
+        canonical_yes_price = _complement_probability_or_none(direct_best_ask)
+        return signal.yes_price if canonical_yes_price is None else canonical_yes_price
+    return direct_best_ask
+
+
+def _complement_probability_or_none(value: float) -> float | None:
+    probability = _decimal_or_none(value)
+    if probability is None or probability <= 0 or probability >= 1:
+        return None
+    return float(Decimal("1.0") - probability)
+
+
+def _decision_uses_signal_orderbook(
+    signal: MarketSignal,
+    *,
+    token_id: str | None,
+    outcome: str,
+) -> bool:
+    if token_id is None:
+        return outcome == "YES"
+    return token_id == signal.token_id
+
+
+def _with_decision_time_book_age(
+    signal: MarketSignal,
+    settings: PMSSettings,
+) -> MarketSignal:
+    if settings.mode == RunMode.BACKTEST:
+        return signal
+    if "book_received_at" not in signal.external_signal:
+        return signal
+    age_ms = _decision_time_book_age_ms(
+        signal,
+        allowed_clock_skew_ms=settings.controller.allowed_book_clock_skew_ms,
+    )
+    return replace(
+        signal,
+        external_signal={
+            **signal.external_signal,
+            "book_age_ms": age_ms,
+        },
+    )
+
+
+def _execution_book_age_ms_at_decision_time(
+    signal: MarketSignal,
+    *,
+    settings: PMSSettings,
+    decision_created_at: datetime,
+) -> float | None:
+    if settings.mode == RunMode.BACKTEST:
+        return None
+    if "book_received_at" not in signal.external_signal:
+        return None
+    return _decision_time_book_age_ms(
+        signal,
+        allowed_clock_skew_ms=settings.controller.allowed_book_clock_skew_ms,
+        now=decision_created_at,
+    )
+
+
+def _decision_time_book_age_ms(
+    signal: MarketSignal,
+    *,
+    allowed_clock_skew_ms: float,
+    now: datetime | None = None,
+) -> float:
+    book_received_at = _external_signal_datetime(
+        signal.external_signal.get("book_received_at")
+    )
+    if book_received_at is None:
+        return float("inf")
+    age_ms = (
+        _aware_utc(now or datetime.now(tz=UTC)) - _aware_utc(book_received_at)
+    ).total_seconds() * 1000.0
+    if age_ms < -allowed_clock_skew_ms:
+        return float("inf")
+    return max(0.0, age_ms)
+
+
+def _external_signal_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    raw_value = value.strip()
+    if not raw_value:
+        return None
+    if raw_value.endswith("Z"):
+        raw_value = f"{raw_value[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
+
+
+def _orderbook_from_levels(levels: Sequence[BookLevel]) -> dict[str, list[dict[str, float]]] | None:
+    bids = [
+        {"price": level.price, "size": level.size}
+        for level in levels
+        if level.side == "BUY" and level.price > 0.0 and level.size > 0.0
+    ]
+    asks = [
+        {"price": level.price, "size": level.size}
+        for level in levels
+        if level.side == "SELL" and level.price > 0.0 and level.size > 0.0
+    ]
+    if not bids or not asks:
+        return None
+    bids.sort(key=lambda level: level["price"], reverse=True)
+    asks.sort(key=lambda level: level["price"])
+    return {"bids": bids, "asks": asks}
+
+
+def _best_level(orderbook: Mapping[str, Any], side: Literal["bids", "asks"]) -> float | None:
+    raw_levels = orderbook.get(side)
+    if not isinstance(raw_levels, list):
+        return None
+    prices = [
+        _decimal_or_none(level.get("price"))
+        for level in raw_levels
+        if isinstance(level, Mapping)
+    ]
+    valid_prices = [price for price in prices if price is not None and price > 0]
+    if not valid_prices:
+        return None
+    selected = max(valid_prices) if side == "bids" else min(valid_prices)
+    return float(selected)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _executable_buy_depth_usdc(
+    orderbook: Mapping[str, Any],
+    *,
+    limit_price: float,
+    max_slippage_bps: int,
+) -> float | None:
+    raw_levels = orderbook.get("asks")
+    if not isinstance(raw_levels, list) or not raw_levels:
+        return None
+    limit = _decimal_or_none(limit_price)
+    if limit is None:
+        return None
+    effective_limit = limit
+    if max_slippage_bps > 0:
+        effective_limit = limit * (
+            Decimal("1") + Decimal(max_slippage_bps) / Decimal("10000")
+        )
+    executable = Decimal("0")
+    saw_valid_level = False
+    for raw in raw_levels:
+        if not isinstance(raw, Mapping):
+            continue
+        price = _decimal_or_none(raw.get("price"))
+        size = _decimal_or_none(raw.get("size"))
+        if price is None or size is None or price <= 0 or size <= 0:
+            continue
+        saw_valid_level = True
+        if price <= effective_limit:
+            executable += price * size
+    if not saw_valid_level:
+        return None
+    return float(executable)
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not parsed.is_finite():
+        return None
+    return parsed
+
+
+def _effective_min_order_usdc(
+    *,
+    strategy: ActiveStrategy | None,
+    sizer: ISizer,
+    settings: PMSSettings,
+) -> float:
+    candidates = [settings.risk.min_order_usdc]
+    strategy_min_order = None if strategy is None else strategy.risk.min_order_size_usdc
+    if strategy_min_order is not None:
+        candidates.append(strategy_min_order)
+    sizer_risk = getattr(sizer, "risk", None)
+    sizer_min_order = getattr(sizer_risk, "min_order_usdc", None)
+    if isinstance(sizer_min_order, int | float):
+        candidates.append(float(sizer_min_order))
+    return max(candidates)
 
 
 def _model_id(result: ForecastResult, forecaster: IForecaster) -> str:
@@ -741,7 +1618,19 @@ def _predict_method_overridden(forecaster: IForecaster) -> bool:
 
 
 def _signal_factor_values(signal: MarketSignal) -> dict[tuple[str, str], float]:
-    return {("yes_price", ""): signal.yes_price}
+    values: dict[tuple[str, str], float] = {("yes_price", ""): signal.yes_price}
+    row = OrderbookImbalance().compute(signal, EMPTY_OUTER_RING)
+    if row is not None:
+        value = row.value
+        if _signal_token_outcome(signal) == "NO":
+            value = -value
+        values[(row.factor_id, row.param)] = value
+    return values
+
+
+def _signal_token_outcome(signal: MarketSignal) -> Literal["YES", "NO"]:
+    raw_outcome = str(signal.external_signal.get("signal_token_outcome", "YES")).upper()
+    return "NO" if raw_outcome == "NO" else "YES"
 
 
 def _risk_group_id(signal: MarketSignal) -> str | None:
@@ -827,6 +1716,100 @@ def _strategy_metadata(strategy: ActiveStrategy | None) -> dict[str, str]:
     if strategy is None:
         return {}
     return dict(strategy.config.metadata)
+
+
+def _market_exposure_usdc(portfolio: Portfolio, *, market_id: str) -> float:
+    return sum(
+        position.locked_usdc
+        for position in portfolio.open_positions
+        if position.market_id == market_id
+    )
+
+
+def _risk_group_capacity_diagnostic(
+    *,
+    portfolio: Portfolio,
+    settings: PMSSettings,
+    min_order_usdc: float,
+    risk_group_id: str | None,
+) -> tuple[str, dict[str, object]] | None:
+    max_group_exposure = settings.risk.max_exposure_per_risk_group
+    if max_group_exposure is None:
+        return None
+    if risk_group_id is None:
+        return (
+            "missing_risk_group_id",
+            {
+                "max_exposure_per_risk_group": max_group_exposure,
+                "min_order_usdc": min_order_usdc,
+            },
+        )
+    remaining_group_capacity_usdc = _remaining_risk_group_capacity_usdc(
+        portfolio,
+        settings=settings,
+        risk_group_id=risk_group_id,
+    )
+    if remaining_group_capacity_usdc is None:
+        return None
+    group_exposure_usdc = max_group_exposure - remaining_group_capacity_usdc
+    if remaining_group_capacity_usdc >= min_order_usdc:
+        return None
+    return (
+        "risk_group_capacity_below_minimum",
+        {
+            "risk_group_id": risk_group_id,
+            "group_exposure_usdc": group_exposure_usdc,
+            "max_exposure_per_risk_group": max_group_exposure,
+            "remaining_group_capacity_usdc": remaining_group_capacity_usdc,
+            "min_order_usdc": min_order_usdc,
+        },
+    )
+
+
+def _remaining_risk_group_capacity_usdc(
+    portfolio: Portfolio,
+    *,
+    settings: PMSSettings,
+    risk_group_id: str | None,
+) -> float | None:
+    max_group_exposure = settings.risk.max_exposure_per_risk_group
+    if max_group_exposure is None or risk_group_id is None:
+        return None
+    group_exposure_usdc = _risk_group_exposure_usdc(
+        portfolio,
+        risk_group_id=risk_group_id,
+    )
+    remaining_group_capacity_usdc = max(0.0, max_group_exposure - group_exposure_usdc)
+    return remaining_group_capacity_usdc
+
+
+def _risk_group_exposure_usdc(
+    portfolio: Portfolio,
+    *,
+    risk_group_id: str,
+) -> float:
+    return sum(
+        position.locked_usdc
+        for position in portfolio.open_positions
+        if position.risk_group_id == risk_group_id
+    )
+
+
+def _max_position_per_market_usdc(
+    *,
+    strategy: ActiveStrategy | None,
+    sizer: ISizer,
+    settings: PMSSettings,
+) -> float:
+    if strategy is not None:
+        return strategy.risk.max_position_notional_usdc
+    risk = getattr(sizer, "risk", None)
+    value = getattr(risk, "max_position_per_market", None)
+    if isinstance(value, bool):
+        return settings.risk.max_position_per_market
+    if isinstance(value, int | float):
+        return float(value)
+    return settings.risk.max_position_per_market
 
 
 def _intent_key(

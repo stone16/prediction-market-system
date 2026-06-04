@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from math import isfinite
 
 
 DEFAULT_MAX_BRIER_SCORE = 0.30
@@ -76,6 +77,33 @@ class MarketSelectionSpec:
     depth_min_usdc: float | None = None
     liquidity_min_usdc: float | None = None
     accepting_orders: bool = True
+    yes_price_min: float | None = None
+    yes_price_max: float | None = None
+
+    def __post_init__(self) -> None:
+        _validate_optional_probability_bound(
+            self.yes_price_min,
+            "MarketSelectionSpec.yes_price_min",
+        )
+        _validate_optional_probability_bound(
+            self.yes_price_max,
+            "MarketSelectionSpec.yes_price_max",
+        )
+        if (
+            self.yes_price_min is not None
+            and self.yes_price_max is not None
+            and self.yes_price_min > self.yes_price_max
+        ):
+            msg = "MarketSelectionSpec.yes_price_min must be <= yes_price_max"
+            raise ValueError(msg)
+
+
+def _validate_optional_probability_bound(value: float | None, field_name: str) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isfinite(value) or value < 0.0 or value > 1.0:
+        msg = f"{field_name} must be finite and within [0.0, 1.0]"
+        raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)

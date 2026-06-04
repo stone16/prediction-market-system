@@ -43,11 +43,13 @@ def _valid_category_prior_csv() -> str:
 
 def _signal(
     *,
-    category: str = "politics",
+    category: str | None = "politics",
     fetched_at: datetime = datetime(2026, 5, 10, tzinfo=UTC),
     external_signal: dict[str, object] | None = None,
 ) -> MarketSignal:
-    payload: dict[str, object] = {"category": category}
+    payload: dict[str, object] = {}
+    if category is not None:
+        payload["category"] = category
     if external_signal is not None:
         payload.update(external_signal)
     return MarketSignal(
@@ -134,6 +136,42 @@ def test_category_prior_estimator_falls_back_to_global_when_category_is_thin() -
     assert estimate is not None
     assert estimate.source == "global"
     assert estimate.category == "politics"
+    assert estimate.sample_count == 3
+    assert estimate.probability == pytest.approx(0.4)
+
+
+def test_category_prior_estimator_uses_risk_group_key_for_global_fallback() -> None:
+    estimator = CategoryPriorBaselineEstimator(
+        observations=(
+            _observation(
+                "politics",
+                1.0,
+                resolved_at=datetime(2026, 5, 1, tzinfo=UTC),
+            ),
+            _observation(
+                "sports",
+                0.0,
+                resolved_at=datetime(2026, 5, 1, tzinfo=UTC),
+            ),
+            _observation(
+                "crypto",
+                0.0,
+                resolved_at=datetime(2026, 5, 2, tzinfo=UTC),
+            ),
+        ),
+        min_category_samples=2,
+        min_global_samples=3,
+        smoothing_alpha=1.0,
+        smoothing_beta=1.0,
+    )
+
+    estimate = estimator.estimate(
+        _signal(category=None, external_signal={"risk_group_id": "event:106520"})
+    )
+
+    assert estimate is not None
+    assert estimate.source == "global"
+    assert estimate.category == "event:106520"
     assert estimate.sample_count == 3
     assert estimate.probability == pytest.approx(0.4)
 
@@ -350,6 +388,24 @@ def test_load_category_prior_observations_csv_rejects_price_like_payouts(
     )
 
     with pytest.raises(ValueError, match="settled payout vector"):
+        load_category_prior_observations_csv(export_path)
+
+
+def test_load_category_prior_observations_csv_rejects_naive_resolved_at(
+    tmp_path: Path,
+) -> None:
+    export_path = tmp_path / "category-prior.csv"
+    export_path.write_text(
+        "\n".join(
+            (
+                "market_id,category,yes_payout,no_payout,resolved_at",
+                "m-1,politics,1,0,2026-05-01T12:00:00",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="resolved_at must include timezone"):
         load_category_prior_observations_csv(export_path)
 
 

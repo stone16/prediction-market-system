@@ -19,6 +19,9 @@ htmlcov/
 build/
 dist/
 
+# Dashboard test artifacts
+dashboard/coverage/
+
 # Runtime logs (never commit — may contain credentials / debug output)
 *.log
 pms-api.log

@@ -4,6 +4,7 @@ import asyncio
 import json
 import inspect
 import logging
+from copy import deepcopy
 from math import isfinite
 from hashlib import sha256
 from collections.abc import Iterator, Mapping, Sequence
@@ -17,7 +18,7 @@ from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 import asyncpg
 import httpx
 from pms.actuator.adapters.backtest import BacktestActuator
-from pms.actuator.adapters.paper import PaperActuator
+from pms.actuator.adapters.paper import PaperActuator, paper_orderbook_fill_failure
 from pms.actuator.adapters.polymarket import (
     DenyFirstLiveOrderGate,
     FileFirstLiveOrderGate,
@@ -51,7 +52,7 @@ from pms.controller.factory import ControllerPipelineFactory
 from pms.controller.factor_snapshot import PostgresFactorSnapshotReader
 from pms.controller.outcome_tokens import MarketDataOutcomeTokenResolver
 from pms.controller.sizers.kelly import KellySizer
-from pms.core.enums import OrderStatus, RunMode, TimeInForce
+from pms.core.enums import OrderStatus, RunMode, Side, TimeInForce
 from pms.core.interfaces import (
     DiscoveryPollCompleteSensor,
     IController,
@@ -74,6 +75,10 @@ from pms.core.models import (
     VenueAccountSnapshot as VenueAccountSnapshot,
     VenueCredentials,
 )
+from pms.artifact_path_safety import (
+    require_path_outside_working_tree,
+    require_private_parent,
+)
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
 from pms.evaluation.metrics import (
@@ -84,6 +89,7 @@ from pms.evaluation.metrics import (
 from pms.evaluation.quote_reader import TokenBookQuoteReader
 from pms.evaluation.spool import EvalSpool
 from pms.event_stream import RuntimeEventBus
+from pms.execution.fees import market_fee_rate_from_metadata
 from pms.factors.catalog import ensure_factor_catalog
 from pms.factors.definitions import REGISTERED
 from pms.factors.service import FactorService
@@ -98,7 +104,12 @@ from pms.market_selection import (
     SensorSubscriptionController,
     UnionMergePolicy,
 )
+from pms.metrics import SELECTION_FUNNEL_TRADED_TOTAL_METRIC, increment_metric
 from pms.redaction import redact_live_error_values
+from pms.sensor.adapters.direct_book import (
+    PolymarketPublicBookClient,
+    RefreshingDirectBookSnapshotReader,
+)
 from pms.sensor.adapters.historical import HistoricalSensor
 from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
@@ -115,6 +126,7 @@ from pms.storage.market_subscription_store import PostgresMarketSubscriptionStor
 from pms.storage.opportunity_store import OpportunityStore
 from pms.storage.order_store import OrderStore
 from pms.storage.quote_eval_store import QuoteEvalStore
+from pms.storage.runtime_heartbeat_store import RuntimeHeartbeatStore
 from pms.storage.strategy_registry import PostgresStrategyRegistry
 from pms.strategies.aggregate import Strategy
 from pms.strategies.defaults import DEFAULT_STRATEGY_COMPOSITION
@@ -126,6 +138,10 @@ from pms.strategies.anchoring import (
 )
 from pms.strategies.anchoring.source import AnchoringMarketSnapshotReader
 from pms.strategies.flb import FlbAgent, FlbController, FlbStrategyModule
+from pms.strategies.flb.artifacts import (
+    flb_calibration_provenance_path,
+    require_flb_calibration_provenance_for_model,
+)
 from pms.strategies.flb.source import (
     FlbCalibrationModel,
     FlbMarketSnapshot,
@@ -133,7 +149,15 @@ from pms.strategies.flb.source import (
     LiveFlbSource,
     load_flb_calibration_csv,
 )
+from pms.strategies.flb.projection import (
+    H1_FLB_STRATEGY_ID,
+    build_h1_flb_strategy,
+)
 from pms.strategies.intents import StrategyContext
+from pms.strategies.paper_multifactor import (
+    PAPER_MULTI_FACTOR_STRATEGY_ID,
+    build_paper_multi_factor_strategy,
+)
 from pms.strategies.projections import (
     ActiveStrategy,
     CalibrationSpec,
@@ -163,9 +187,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BACKTEST_FIXTURE = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
 RUNNER_STATE_LIMIT = 1000
+CONTROLLER_SIGNAL_COOLESCE_LIMIT = 1_000
 RESELECTION_INTERVAL_S = 300.0
 DECISION_PENDING_TTL = timedelta(minutes=15)
 DECISION_SWEEP_INTERVAL_S = 5.0
+RUNTIME_HEARTBEAT_INTERVAL_S = 60.0
 DEFAULT_OPERATIONAL_MARKET_SELECTION_HORIZON_DAYS = 90
 RAW_FACTOR_COMPOSITION_ROLES = frozenset(
     {
@@ -175,11 +201,14 @@ RAW_FACTOR_COMPOSITION_ROLES = frozenset(
         "posterior_prior",
         "posterior_success",
         "posterior_failure",
+        "rule_delta",
     }
 )
 REGISTERED_FACTOR_IDS = frozenset(factor_cls.factor_id for factor_cls in REGISTERED)
 DEFAULT_V2_FACTOR_COMPOSITION = DEFAULT_STRATEGY_COMPOSITION
 T = TypeVar("T")
+PositionSlotKey = tuple[str, str | None, str, str, str, str]
+PositionExitReentryKey = tuple[str, str, str, str | None, str | None]
 
 
 class LivePersistenceFailureError(RuntimeError):
@@ -229,6 +258,7 @@ class ActuatorWorkItem:
     signal: MarketSignal | None
     dedup_acquired: bool = False
     decision_evidence: Mapping[str, object] = field(default_factory=dict)
+    paper_orderbook: Mapping[str, Any] | None = None
 
     def __iter__(self) -> Iterator[TradeDecision | MarketSignal | None]:
         yield self.decision
@@ -249,6 +279,7 @@ class VenueAccountReconciler(Protocol):
 class RunnerState:
     mode: RunMode
     runner_started_at: datetime | None = None
+    runtime_run_id: str | None = None
     signals: list[MarketSignal] = field(default_factory=list)
     opportunities: list[Opportunity] = field(default_factory=list)
     decisions: list[TradeDecision] = field(default_factory=list)
@@ -294,6 +325,10 @@ class Runner:
     _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
     _owns_pg_pool: bool = field(init=False, default=False)
     _decision_expiry_task: asyncio.Task[None] | None = field(init=False, default=None)
+    _runtime_heartbeat_task: asyncio.Task[None] | None = field(
+        init=False,
+        default=None,
+    )
     _market_selector: MarketSelectorLike | None = field(init=False, default=None)
     _subscription_controller: SubscriptionControllerLike | None = field(
         init=False,
@@ -333,6 +368,9 @@ class Runner:
     _paper_orderbooks: dict[str, dict[str, Any]] = field(
         init=False, default_factory=dict
     )
+    _latest_signal_by_token: dict[str, MarketSignal] = field(
+        init=False, default_factory=dict
+    )
     _position_exit_monitor: PositionExitMonitor = field(init=False)
     _emitted_position_exit_keys: set[tuple[str, str, str, str | None, str]] = field(
         init=False,
@@ -340,6 +378,13 @@ class Runner:
     )
     _position_exit_keys_by_decision: dict[
         str, tuple[str, str, str, str | None, str]
+    ] = field(init=False, default_factory=dict)
+    _pending_open_position_keys_by_decision: dict[str, PositionSlotKey] = field(
+        init=False,
+        default_factory=dict,
+    )
+    _position_exit_reentry_quarantine_until: dict[
+        PositionExitReentryKey, datetime
     ] = field(init=False, default_factory=dict)
     _category_prior_estimator: CategoryPriorBaselineEstimator | None = field(
         init=False,
@@ -407,8 +452,12 @@ class Runner:
     def pg_pool(self) -> asyncpg.Pool | None:
         return self._pg_pool
 
-    async def enqueue_accepted_decision(self, decision: TradeDecision) -> None:
-        await self._enqueue_decision(decision, signal=None, dedup_acquired=True)
+    async def enqueue_accepted_decision(self, decision: TradeDecision) -> bool:
+        return await self._enqueue_decision(
+            decision,
+            signal=None,
+            dedup_acquired=True,
+        )
 
     async def ensure_pg_pool(self) -> None:
         if self._pg_pool is not None:
@@ -450,6 +499,10 @@ class Runner:
         return self._subscription_controller
 
     @property
+    def controller_runtime_count(self) -> int:
+        return len(self._controller_runtimes)
+
+    @property
     def strategy_registry(self) -> PostgresStrategyRegistry | None:
         return self._strategy_registry
 
@@ -466,6 +519,8 @@ class Runner:
             tasks.append(self._actuator_task)
         if self._decision_expiry_task is not None:
             tasks.append(self._decision_expiry_task)
+        if self._runtime_heartbeat_task is not None:
+            tasks.append(self._runtime_heartbeat_task)
         if self._reselection_task is not None:
             tasks.append(self._reselection_task)
         if self.evaluator_task is not None:
@@ -492,11 +547,16 @@ class Runner:
         self._position_exit_monitor = PositionExitMonitor(self.config.position_exit)
         self._emitted_position_exit_keys.clear()
         self._position_exit_keys_by_decision.clear()
+        self._pending_open_position_keys_by_decision.clear()
+        self._position_exit_reentry_quarantine_until.clear()
+        started_at = datetime.now(tz=UTC)
         self.state = RunnerState(
             mode=self.config.mode,
-            runner_started_at=datetime.now(tz=UTC),
+            runner_started_at=started_at,
+            runtime_run_id=_runtime_run_id(mode=self.config.mode, started_at=started_at),
         )
         self._paper_orderbooks.clear()
+        self._latest_signal_by_token.clear()
 
         try:
             self._assert_no_legacy_jsonl_paths()
@@ -518,6 +578,7 @@ class Runner:
                     await self._assert_no_unresolved_submission_unknown_incidents()
                     await self._assert_live_market_data_freshness()
                 await self._ensure_default_v2_version()
+                await self._ensure_paper_soak_strategy()
                 if self._pg_pool is None:
                     msg = "Runner PostgreSQL pool is not initialized"
                     raise RuntimeError(msg)
@@ -548,13 +609,17 @@ class Runner:
             self._actuator_task = asyncio.create_task(self._actuator_loop())
             if self._pg_pool is not None:
                 self._decision_expiry_task = asyncio.create_task(self._decision_expiry_loop())
+            if self._pg_pool is not None and self.config.mode in {RunMode.PAPER, RunMode.LIVE}:
+                self._runtime_heartbeat_task = asyncio.create_task(
+                    self._runtime_heartbeat_loop()
+                )
         except Exception:
             self._live_preflight_artifact_validated = False
             self._live_preflight_active_strategies_fingerprint = None
             await self._cleanup_after_start_failure()
             raise
 
-    async def stop(self) -> None:
+    async def stop(self, *, close_pool: bool = True) -> None:
         self._stop_event.set()
         error: BaseException | None = None
 
@@ -564,6 +629,9 @@ class Runner:
         decision_expiry_task = self._decision_expiry_task
         if decision_expiry_task is not None and not decision_expiry_task.done():
             decision_expiry_task.cancel()
+        runtime_heartbeat_task = self._runtime_heartbeat_task
+        if runtime_heartbeat_task is not None and not runtime_heartbeat_task.done():
+            runtime_heartbeat_task.cancel()
         reselection_task = self._reselection_task
         self._reselection_requested.set()
         self._clear_discovery_poll_complete_hook()
@@ -590,6 +658,7 @@ class Runner:
                         *self._controller_pipeline_tasks.values(),
                         self._actuator_task,
                         decision_expiry_task,
+                        runtime_heartbeat_task,
                     )
                     if task
                 ),
@@ -622,6 +691,7 @@ class Runner:
         self._controller_task = None
         self._actuator_task = None
         self._decision_expiry_task = None
+        self._runtime_heartbeat_task = None
         self._market_selector = None
         self._subscription_controller = None
         self._strategy_registry = None
@@ -633,11 +703,12 @@ class Runner:
         self._live_preflight_artifact_validated = False
         self._live_preflight_active_strategies_fingerprint = None
 
-        try:
-            await self._close_pg_pool()
-        except BaseException as exc:  # pragma: no cover - defensive
-            if error is None:
-                error = exc
+        if close_pool:
+            try:
+                await self._close_pg_pool()
+            except BaseException as exc:  # pragma: no cover - defensive
+                if error is None:
+                    error = exc
 
         if error is not None:
             raise error
@@ -929,11 +1000,19 @@ class Runner:
         market_data_sensor.max_reconnect_interval_s = (
             self.config.sensor.max_reconnect_interval_s
         )
+        market_data_sensor.max_message_size_bytes = (
+            self.config.sensor.market_data_ws_max_size_bytes
+        )
         return (
             MarketDiscoverySensor(
                 store=PostgresMarketDataStore(self._pg_pool),
                 http_client=_build_discovery_http_client(self.config),
                 poll_interval_s=self.config.sensor.poll_interval_s,
+                page_limit=self.config.sensor.discovery_page_limit,
+                max_pages=self.config.sensor.discovery_max_pages,
+                pagination_mode=self.config.sensor.discovery_pagination_mode,
+                order=self.config.sensor.discovery_order,
+                ascending=self.config.sensor.discovery_ascending,
                 persist_price_snapshots=(
                     self.config.sensor.persist_discovery_price_snapshots
                 ),
@@ -1062,16 +1141,64 @@ class Runner:
             _raw_factor_steps(migrated_strategy.config.factor_composition),
         )
 
+    async def _ensure_paper_soak_strategy(self) -> None:
+        if self.config.mode != RunMode.PAPER:
+            return
+        if self.config.paper_soak_strategy_id is None:
+            return
+        registry = self._strategy_registry
+        if registry is None:
+            msg = "Runner strategy registry is not initialized"
+            raise RuntimeError(msg)
+        if self.config.paper_soak_strategy_id == PAPER_MULTI_FACTOR_STRATEGY_ID:
+            strategy = build_paper_multi_factor_strategy()
+        elif self.config.paper_soak_strategy_id == H1_FLB_STRATEGY_ID:
+            if self._flb_calibration_model is None:
+                msg = "h1_flb paper soak requires strategies.flb_calibration_path"
+                raise ValueError(msg)
+            strategy = _h1_flb_strategy_from_settings(
+                self.config,
+                calibration_model=self._flb_calibration_model,
+            )
+        else:
+            msg = (
+                "Unsupported paper_soak_strategy_id: "
+                f"{self.config.paper_soak_strategy_id!r}"
+            )
+            raise ValueError(msg)
+        version = await registry.create_version(strategy, activate=False)
+        await registry.populate_strategy_factors(
+            strategy.config.strategy_id,
+            version.strategy_version_id,
+            _raw_factor_steps(strategy.config.factor_composition),
+        )
+        if self.config.paper_soak_archive_default:
+            try:
+                await registry.archive_strategy("default")
+            except LookupError:
+                logger.info(
+                    "default strategy missing while activating paper soak strategy"
+                )
+        await registry.set_active(
+            strategy.config.strategy_id,
+            version.strategy_version_id,
+        )
+
     def _bind_runtime_stores(self) -> None:
         if self._pg_pool is None:
             msg = "Runner PostgreSQL pool is not initialized"
             raise RuntimeError(msg)
         if isinstance(self._controller_factory, ControllerPipelineFactory):
             market_data_store = PostgresMarketDataStore(self._pg_pool)
+            direct_book_reader = _controller_direct_book_reader(
+                self.config,
+                market_data_store,
+            )
             self._controller_factory = ControllerPipelineFactory(
                 settings=self.config,
                 factor_reader=PostgresFactorSnapshotReader(self._pg_pool),
                 outcome_token_resolver=MarketDataOutcomeTokenResolver(market_data_store),
+                direct_book_reader=direct_book_reader,
             )
         if isinstance(self.eval_store, EvalStore):
             self.eval_store.bind_pool(self._pg_pool)
@@ -1171,6 +1298,38 @@ class Runner:
             return
         self._paper_orderbooks[signal.market_id] = signal.orderbook
 
+    def _remember_signal_for_decision_evidence(self, signal: MarketSignal) -> None:
+        if signal.token_id is not None:
+            self._latest_signal_by_token[signal.token_id] = signal
+
+    def _coalesce_controller_signal_batch(
+        self,
+        signal: MarketSignal,
+        *,
+        queue: asyncio.Queue[MarketSignal],
+    ) -> MarketSignal:
+        selected_key = _controller_signal_coalesce_key(signal)
+        selected_signal = signal
+        deferred_signals: list[MarketSignal] = []
+        drained = 0
+        while drained < CONTROLLER_SIGNAL_COOLESCE_LIMIT:
+            try:
+                queued_signal = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            drained += 1
+            key = _controller_signal_coalesce_key(queued_signal)
+            if key == selected_key:
+                if _is_newer_controller_signal(queued_signal, selected_signal):
+                    selected_signal = queued_signal
+            else:
+                deferred_signals.append(queued_signal)
+            queue.task_done()
+
+        for deferred_signal in deferred_signals:
+            queue.put_nowait(deferred_signal)
+        return selected_signal
+
     def _enrich_signal_with_controller_baselines(
         self,
         signal: MarketSignal,
@@ -1193,6 +1352,7 @@ class Runner:
 
             try:
                 _append_bounded(self.state.signals, signal)
+                self._remember_signal_for_decision_evidence(signal)
                 if self.config.mode == RunMode.PAPER:
                     self._remember_paper_orderbook(signal)
                 await self.event_bus.publish(
@@ -1225,6 +1385,20 @@ class Runner:
                     continue
 
                 try:
+                    signal = self._coalesce_controller_signal_batch(
+                        signal,
+                        queue=queue,
+                    )
+                    stale_signal_diagnostic = self._stale_queued_signal_diagnostic(
+                        signal,
+                        runtime,
+                    )
+                    if stale_signal_diagnostic is not None:
+                        _append_bounded(
+                            self.state.controller_diagnostics,
+                            stale_signal_diagnostic,
+                        )
+                        continue
                     signal = self._enrich_signal_with_controller_baselines(signal)
                     opportunity: Opportunity | None = None
                     decision: TradeDecision | None = None
@@ -1239,17 +1413,36 @@ class Runner:
                                 _append_bounded(self.state.controller_diagnostics, diagnostic)
                             continue
                         opportunity, decision = emission
-                        await self.opportunity_store.insert(opportunity)
-                        _append_bounded(self.state.opportunities, opportunity)
                     else:
                         decision = await runtime.controller.decide(
                             signal,
                             portfolio=self.portfolio,
                         )
-                    if decision is not None and self._would_exceed_position_capacity(
-                        decision
-                    ):
-                        decision = None
+                    if decision is not None:
+                        decision_signal = _controller_execution_signal_for_decision(
+                            runtime.controller,
+                            fallback_signal=signal,
+                            decision=decision,
+                            latest_signals_by_token=self._latest_signal_by_token,
+                        )
+                        if self.config.mode == RunMode.PAPER:
+                            self._remember_signal_for_decision_evidence(
+                                decision_signal
+                            )
+                            self._remember_paper_orderbook(decision_signal)
+                        pre_actuator_diagnostic = self._pre_actuator_diagnostic(
+                            decision,
+                            decision_signal,
+                        )
+                        if pre_actuator_diagnostic is not None:
+                            _append_bounded(
+                                self.state.controller_diagnostics,
+                                pre_actuator_diagnostic,
+                            )
+                            continue
+                    if opportunity is not None:
+                        await self.opportunity_store.insert(opportunity)
+                        _append_bounded(self.state.opportunities, opportunity)
                     if decision is not None:
                         created_at = _decision_created_at(signal, opportunity)
                         expires_at = _decision_expires_at(
@@ -1263,7 +1456,7 @@ class Runner:
                             else None
                         )
                         decision_evidence = _decision_evidence_from_signal(
-                            signal,
+                            decision_signal,
                             decision=decision,
                             factor_snapshot_hash=factor_snapshot_hash,
                             quote_source=self.config.controller.quote_source,
@@ -1287,7 +1480,15 @@ class Runner:
                                 current_status="pending",
                                 next_status="accepted",
                                 updated_at=created_at,
-                            )
+                        )
+                        enqueued = await self._enqueue_decision(
+                            decision,
+                            signal=decision_signal,
+                            queued_at=created_at,
+                            decision_evidence=decision_evidence,
+                        )
+                        if not enqueued:
+                            continue
                         _append_bounded(self.state.decisions, decision)
                         await self.event_bus.publish(
                             "controller.decision",
@@ -1295,12 +1496,6 @@ class Runner:
                             created_at=created_at,
                             market_id=decision.market_id,
                             decision_id=decision.decision_id,
-                        )
-                        await self._enqueue_decision(
-                            decision,
-                            signal=signal,
-                            queued_at=created_at,
-                            decision_evidence=decision_evidence,
                         )
                 finally:
                     queue.task_done()
@@ -1349,6 +1544,7 @@ class Runner:
 
             decision = work_item.decision
             signal = work_item.signal
+            order_state: OrderState | None = None
             try:
                 if (
                     self.config.mode == RunMode.LIVE
@@ -1376,6 +1572,7 @@ class Runner:
                     decision,
                     self.portfolio,
                     dedup_acquired=work_item.dedup_acquired,
+                    paper_orderbook=work_item.paper_orderbook,
                 )
                 _append_bounded(self.state.orders, order_state)
                 try:
@@ -1389,6 +1586,7 @@ class Runner:
                             error=error,
                         )
                     logger.warning("order persistence failed: %s", error)
+                self._record_live_order_risk_reservation(order_state)
                 # LIVE fills get their real fee from venue reconciliation; for
                 # paper/backtest, model it from the configured rate so net-edge
                 # metrics are not inflated.
@@ -1402,6 +1600,8 @@ class Runner:
                 )
                 if fill is not None:
                     _append_bounded(self.state.fills, fill)
+                    if _is_selection_funnel_entry_fill(fill):
+                        increment_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC)
                     try:
                         await self.fill_store.insert(fill)
                     except Exception as error:  # noqa: BLE001
@@ -1414,10 +1614,16 @@ class Runner:
                             )
                         logger.warning("fill persistence failed: %s", error)
                     self.portfolio = _portfolio_with_fill(self.portfolio, fill)
+                    self._record_position_exit_reentry_quarantine(fill, decision)
                     decision_evidence = work_item.decision_evidence
                     if not decision_evidence and signal is not None:
-                        decision_evidence = _decision_evidence_from_signal(
+                        evidence_signal = _decision_evidence_signal_for_decision(
                             signal,
+                            decision,
+                            latest_signals_by_token=self._latest_signal_by_token,
+                        )
+                        decision_evidence = _decision_evidence_from_signal(
+                            evidence_signal,
                             decision=decision,
                             factor_snapshot_hash=None,
                             quote_source=self.config.controller.quote_source,
@@ -1489,7 +1695,9 @@ class Runner:
                 )
                 logger.warning("actuator execution failed: %s", detail)
             finally:
-                self._release_position_exit_key(decision.decision_id)
+                if not self._keeps_live_open_order_reservations(order_state):
+                    self._release_position_exit_key(decision.decision_id)
+                    self._release_position_capacity_reservation(decision.decision_id)
                 self._decision_queue.task_done()
 
     async def _decision_expiry_loop(self) -> None:
@@ -1510,6 +1718,43 @@ class Runner:
             except Exception as error:  # noqa: BLE001
                 logger.warning("decision expiry sweep failed: %s", error)
 
+    async def _runtime_heartbeat_loop(self) -> None:
+        while True:
+            if self._stop_event.is_set():
+                return
+            try:
+                await self._write_runtime_heartbeat()
+            except Exception as error:  # noqa: BLE001
+                logger.warning("runtime heartbeat write failed: %s", error)
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=RUNTIME_HEARTBEAT_INTERVAL_S,
+                )
+            except TimeoutError:
+                continue
+
+    async def _write_runtime_heartbeat(self) -> None:
+        if self._pg_pool is None:
+            return
+        run_id = self.state.runtime_run_id
+        started_at = self.state.runner_started_at
+        if run_id is None or started_at is None:
+            return
+        await RuntimeHeartbeatStore(self._pg_pool).append(
+            run_id=run_id,
+            mode=self.config.mode.value,
+            started_at=started_at,
+            observed_at=datetime.now(tz=UTC),
+            strategy_fingerprint=_runtime_strategy_fingerprint(
+                tuple(self._controller_runtimes.values())
+            ),
+            component_status={
+                **self._runtime_sensor_component_status(),
+                "controller_runtimes": len(self._controller_runtimes),
+            },
+        )
+
     async def _enqueue_decision(
         self,
         decision: TradeDecision,
@@ -1518,20 +1763,98 @@ class Runner:
         dedup_acquired: bool = False,
         queued_at: datetime | None = None,
         decision_evidence: Mapping[str, object] | None = None,
+    ) -> bool:
+        if self._would_exceed_position_capacity(decision):
+            if signal is not None:
+                _append_bounded(
+                    self.state.controller_diagnostics,
+                    self._position_capacity_diagnostic(decision, signal),
+                )
+            await self._reject_unqueued_decision(
+                decision,
+                dedup_acquired=dedup_acquired,
+                updated_at=(
+                    queued_at or (signal.fetched_at if signal is not None else None)
+                ),
+                reason="max_open_positions_capacity",
+            )
+            return False
+        risk_rejection_reason = self._risk_rejection_reason(decision)
+        if risk_rejection_reason is not None:
+            if signal is not None:
+                _append_bounded(
+                    self.state.controller_diagnostics,
+                    self._risk_rejection_diagnostic(
+                        decision,
+                        signal,
+                        reason=risk_rejection_reason,
+                    ),
+                )
+            await self._reject_unqueued_decision(
+                decision,
+                dedup_acquired=dedup_acquired,
+                updated_at=(
+                    queued_at or (signal.fetched_at if signal is not None else None)
+                ),
+                reason=risk_rejection_reason,
+            )
+            return False
+        reserved_key = self._reserve_position_capacity(decision)
+        try:
+            await self._update_decision_status_if_supported(
+                decision.decision_id,
+                current_status="accepted",
+                next_status="queued",
+                updated_at=(
+                    queued_at or (signal.fetched_at if signal is not None else None)
+                ),
+            )
+            await self._decision_queue.put(
+                ActuatorWorkItem(
+                    decision=decision,
+                    signal=signal,
+                    dedup_acquired=dedup_acquired,
+                    decision_evidence=decision_evidence or {},
+                    paper_orderbook=(
+                        _paper_orderbook_snapshot_for_decision(
+                            decision,
+                            signal,
+                            latest_signals_by_token=self._latest_signal_by_token,
+                        )
+                        if self.config.mode == RunMode.PAPER
+                        else None
+                    ),
+                )
+            )
+            return True
+        except BaseException:
+            if reserved_key is not None:
+                self._release_position_capacity_reservation(decision.decision_id)
+            raise
+
+    async def _reject_unqueued_decision(
+        self,
+        decision: TradeDecision,
+        *,
+        dedup_acquired: bool,
+        updated_at: datetime | None,
+        reason: str,
     ) -> None:
         await self._update_decision_status_if_supported(
             decision.decision_id,
             current_status="accepted",
-            next_status="queued",
-            updated_at=queued_at or (signal.fetched_at if signal is not None else None),
+            next_status="rejected",
+            updated_at=updated_at,
         )
-        await self._decision_queue.put(
-            ActuatorWorkItem(
-                decision=decision,
-                signal=signal,
-                dedup_acquired=dedup_acquired,
-                decision_evidence=decision_evidence or {},
+        if dedup_acquired:
+            await self.actuator_executor.dedup_store.release(
+                decision.decision_id,
+                "rejected",
             )
+        logger.warning(
+            "decision rejected before actuator queue: decision_id=%s reason=%s",
+            decision.decision_id,
+            reason,
         )
 
     async def _emit_position_exit_decisions(self, signal: MarketSignal) -> int:
@@ -1576,6 +1899,20 @@ class Runner:
                     next_status="accepted",
                     updated_at=created_at,
                 )
+            self._emitted_position_exit_keys.add(key)
+            self._position_exit_keys_by_decision[decision.decision_id] = key
+            try:
+                enqueued = await self._enqueue_decision(
+                    decision,
+                    signal=signal,
+                    queued_at=created_at,
+                )
+            except Exception:
+                self._release_position_exit_key(decision.decision_id)
+                raise
+            if not enqueued:
+                self._release_position_exit_key(decision.decision_id)
+                continue
             _append_bounded(self.state.decisions, decision)
             await self.event_bus.publish(
                 "controller.decision",
@@ -1584,17 +1921,6 @@ class Runner:
                 market_id=decision.market_id,
                 decision_id=decision.decision_id,
             )
-            self._emitted_position_exit_keys.add(key)
-            self._position_exit_keys_by_decision[decision.decision_id] = key
-            try:
-                await self._enqueue_decision(
-                    decision,
-                    signal=signal,
-                    queued_at=created_at,
-                )
-            except Exception:
-                self._release_position_exit_key(decision.decision_id)
-                raise
             emitted += 1
         return emitted
 
@@ -1628,21 +1954,369 @@ class Runner:
         max_positions = self.config.risk.max_open_positions
         if max_positions is None:
             return False
-        portfolio = self.portfolio
-        if len(portfolio.open_positions) < max_positions:
+        if not self._decision_opens_new_position_slot(decision):
             return False
-        opens_new_slot = not any(
-            position.market_id == decision.market_id
-            and position.token_id == decision.token_id
-            and position.venue == decision.venue
-            for position in portfolio.open_positions
+        open_keys = _open_position_keys(self.portfolio)
+        pending_new_keys = set(
+            self._pending_open_position_keys_by_decision.values()
+        ) - open_keys
+        return len(self.portfolio.open_positions) + len(pending_new_keys) >= max_positions
+
+    def _reserve_position_capacity(
+        self,
+        decision: TradeDecision,
+    ) -> PositionSlotKey | None:
+        if self._would_exceed_position_capacity(decision):
+            return None
+        if not self._decision_opens_new_position_slot(decision):
+            return None
+        key = _position_key_from_decision(decision)
+        self._pending_open_position_keys_by_decision[decision.decision_id] = key
+        return key
+
+    def _release_position_capacity_reservation(self, decision_id: str) -> None:
+        self._pending_open_position_keys_by_decision.pop(decision_id, None)
+
+    def _decision_opens_new_position_slot(self, decision: TradeDecision) -> bool:
+        key = _position_key_from_decision(decision)
+        if key in _open_position_keys(self.portfolio):
+            return False
+        if key in set(self._pending_open_position_keys_by_decision.values()):
+            return False
+        return not _decision_reduces_existing_position(self.portfolio, decision)
+
+    def _pre_actuator_diagnostic(
+        self,
+        decision: TradeDecision,
+        signal: MarketSignal,
+    ) -> ControllerDiagnostic | None:
+        reentry_diagnostic = self._position_exit_reentry_diagnostic(
+            decision,
+            signal,
         )
-        return opens_new_slot
+        if reentry_diagnostic is not None:
+            return reentry_diagnostic
+        if (
+            self.config.mode == RunMode.PAPER
+            and not self._paper_orderbook_ready_for_decision(decision)
+        ):
+            return ControllerDiagnostic(
+                code="paper_orderbook_missing_for_decision_token",
+                message=(
+                    "Skipping paper decision because the target token orderbook "
+                    "has not been observed yet."
+                ),
+                market_id=decision.market_id,
+                strategy_id=decision.strategy_id,
+                strategy_version_id=decision.strategy_version_id,
+                token_id=decision.token_id,
+                severity="warning",
+                metadata={
+                    "decision_outcome": decision.outcome,
+                    "decision_token_id": decision.token_id,
+                    "signal_token_id": signal.token_id,
+                    "known_orderbook_ids": sorted(self._paper_orderbooks.keys()),
+                },
+            )
+        if self.config.mode == RunMode.PAPER:
+            paper_liquidity_diagnostic = self._paper_liquidity_diagnostic(
+                decision,
+                signal,
+            )
+            if paper_liquidity_diagnostic is not None:
+                return paper_liquidity_diagnostic
+        if self._would_exceed_position_capacity(decision):
+            return self._position_capacity_diagnostic(decision, signal)
+        risk_rejection_reason = self._risk_rejection_reason(decision)
+        if risk_rejection_reason is not None:
+            return self._risk_rejection_diagnostic(
+                decision,
+                signal,
+                reason=risk_rejection_reason,
+            )
+        return None
+
+    def _stale_queued_signal_diagnostic(
+        self,
+        signal: MarketSignal,
+        runtime: StrategyControllerRuntime,
+    ) -> ControllerDiagnostic | None:
+        if self.config.mode == RunMode.BACKTEST:
+            return None
+        book_received_at = _external_signal_datetime(
+            signal.external_signal.get("book_received_at")
+        )
+        if book_received_at is None:
+            return None
+        if _controller_can_refresh_queued_book(runtime.controller):
+            return None
+        max_book_age_ms = self.config.controller.max_book_age_ms
+        raw_age_ms = (
+            _aware_utc(datetime.now(tz=UTC)) - _aware_utc(book_received_at)
+        ).total_seconds() * 1000.0
+        if raw_age_ms < -self.config.controller.allowed_book_clock_skew_ms:
+            book_age_ms = float("inf")
+        else:
+            book_age_ms = max(0.0, raw_age_ms)
+        if book_age_ms <= max_book_age_ms:
+            return None
+        return ControllerDiagnostic(
+            code="router_gate:book_too_stale",
+            message=(
+                "Skipping queued signal because the orderbook was already stale "
+                "before controller processing."
+            ),
+            market_id=signal.market_id,
+            strategy_id=runtime.strategy_id,
+            strategy_version_id=runtime.strategy_version_id,
+            token_id=signal.token_id,
+            severity="info",
+            metadata={
+                "gate_reason": "book_too_stale",
+                "phase": "queue_dequeue",
+                "book_age_ms": book_age_ms,
+                "max_book_age_ms": max_book_age_ms,
+            },
+        )
+
+    def _risk_rejection_reason(self, decision: TradeDecision) -> str | None:
+        risk = getattr(self.actuator_executor, "risk", None)
+        check = getattr(risk, "check", None)
+        if not callable(check):
+            return None
+        risk_decision = check(decision, self.portfolio)
+        if risk_decision.approved:
+            return None
+        return str(risk_decision.reason)
+
+    def _risk_rejection_diagnostic(
+        self,
+        decision: TradeDecision,
+        signal: MarketSignal,
+        *,
+        reason: str,
+    ) -> ControllerDiagnostic:
+        estimated_quantity = _estimated_decision_quantity(decision)
+        metadata: dict[str, object] = {
+            "risk_reason": reason,
+            "decision_notional_usdc": decision.notional_usdc,
+            "decision_limit_price": decision.limit_price,
+            "decision_token_id": decision.token_id,
+            "decision_outcome": decision.outcome,
+            "signal_token_id": signal.token_id,
+        }
+        if estimated_quantity is not None:
+            metadata["estimated_quantity_shares"] = estimated_quantity
+        if self.config.risk.max_quantity_shares is not None:
+            metadata["max_quantity_shares"] = self.config.risk.max_quantity_shares
+        return ControllerDiagnostic(
+            code=reason,
+            message=(
+                "Skipping decision because the risk envelope would reject it "
+                "before actuator execution."
+            ),
+            market_id=decision.market_id,
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            token_id=decision.token_id,
+            severity="warning",
+            metadata=metadata,
+        )
+
+    def _position_capacity_diagnostic(
+        self,
+        decision: TradeDecision,
+        signal: MarketSignal,
+    ) -> ControllerDiagnostic:
+        max_positions = self.config.risk.max_open_positions
+        return ControllerDiagnostic(
+            code="max_open_positions_capacity",
+            message=(
+                "Skipping decision because open plus queued new positions "
+                "would exceed the configured max_open_positions cap."
+            ),
+            market_id=decision.market_id,
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            token_id=decision.token_id,
+            severity="warning",
+            metadata={
+                "max_open_positions": max_positions,
+                "open_positions": len(self.portfolio.open_positions),
+                "pending_new_positions": len(
+                    set(self._pending_open_position_keys_by_decision.values())
+                    - _open_position_keys(self.portfolio)
+                ),
+                "decision_token_id": decision.token_id,
+                "decision_outcome": decision.outcome,
+                "signal_token_id": signal.token_id,
+            },
+        )
+
+    def _paper_orderbook_ready_for_decision(self, decision: TradeDecision) -> bool:
+        if decision.token_id is not None and decision.token_id in self._paper_orderbooks:
+            return True
+        return (
+            (decision.outcome == "YES" or decision.token_id is None)
+            and decision.market_id in self._paper_orderbooks
+        )
+
+    def _paper_liquidity_diagnostic(
+        self,
+        decision: TradeDecision,
+        signal: MarketSignal,
+    ) -> ControllerDiagnostic | None:
+        action = decision.action or decision.side
+        if action not in {Side.BUY.value, Side.SELL.value}:
+            return None
+        orderbook = _paper_orderbook_for_decision(self._paper_orderbooks, decision)
+        if orderbook is None:
+            return None
+        failure = paper_orderbook_fill_failure(orderbook, decision)
+        if failure is None:
+            return None
+        return ControllerDiagnostic(
+            code="paper_orderbook_insufficient_liquidity",
+            message=(
+                "Skipping paper decision because the observed paper orderbook "
+                "cannot fill the target notional within the configured limit "
+                "and slippage."
+            ),
+            market_id=decision.market_id,
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            token_id=decision.token_id,
+            severity="warning",
+            metadata={
+                "decision_outcome": decision.outcome,
+                "decision_token_id": decision.token_id,
+                "signal_token_id": signal.token_id,
+                "decision_notional_usdc": decision.notional_usdc,
+                "decision_limit_price": decision.limit_price,
+                "max_slippage_bps": decision.max_slippage_bps,
+                "failure": failure,
+            },
+        )
 
     def _release_position_exit_key(self, decision_id: str) -> None:
         key = self._position_exit_keys_by_decision.pop(decision_id, None)
         if key is not None:
             self._emitted_position_exit_keys.discard(key)
+
+    def _keeps_live_open_order_reservations(
+        self,
+        order_state: OrderState | None,
+    ) -> bool:
+        return (
+            self.config.mode == RunMode.LIVE
+            and order_state is not None
+            and _is_open_order_state(order_state)
+        )
+
+    def _record_live_order_risk_reservation(
+        self,
+        order_state: OrderState | None,
+    ) -> None:
+        if self.config.mode != RunMode.LIVE or order_state is None:
+            return
+        risk = getattr(self.actuator_executor, "risk", None)
+        if risk is None:
+            return
+        if _is_open_order_state(order_state):
+            record_open_order = getattr(risk, "record_open_order_state", None)
+            if callable(record_open_order):
+                record_open_order(order_state)
+            return
+        record_order_filled = getattr(risk, "record_order_filled", None)
+        if callable(record_order_filled):
+            record_order_filled(order_state.order_id)
+
+    def _runtime_sensor_component_status(self) -> dict[str, object]:
+        tasks = self.sensor_stream.tasks
+        running_tasks = 0
+        failed_tasks = 0
+        for task in tasks:
+            if not task.done():
+                running_tasks += 1
+                continue
+            if task.cancelled():
+                continue
+            if task.exception() is not None:
+                failed_tasks += 1
+        sensor_running = bool(tasks) and running_tasks == len(tasks)
+        return {
+            "running": (
+                sensor_running
+                and len(self._controller_runtimes) > 0
+                and not self._stop_event.is_set()
+            ),
+            "sensor_running": sensor_running,
+            "sensor_tasks": running_tasks,
+            "sensor_tasks_total": len(tasks),
+            "sensor_task_failures": failed_tasks,
+        }
+
+    def _record_position_exit_reentry_quarantine(
+        self,
+        fill: FillRecord,
+        decision: TradeDecision,
+    ) -> None:
+        cooldown_s = self.config.position_exit.reentry_cooldown_s
+        if cooldown_s <= 0.0 or not _is_position_exit_decision(decision):
+            return
+        key = _position_exit_reentry_key_from_decision(decision)
+        self._position_exit_reentry_quarantine_until[key] = (
+            fill.filled_at + timedelta(seconds=cooldown_s)
+        )
+
+    def _position_exit_reentry_diagnostic(
+        self,
+        decision: TradeDecision,
+        signal: MarketSignal,
+    ) -> ControllerDiagnostic | None:
+        cooldown_s = self.config.position_exit.reentry_cooldown_s
+        if cooldown_s <= 0.0 or _is_position_exit_decision(decision):
+            return None
+        if _decision_reduces_existing_position(self.portfolio, decision):
+            return None
+        now = signal.timestamp
+        self._drop_expired_position_exit_reentry_quarantines(now)
+        key = _position_exit_reentry_key_from_decision(decision)
+        quarantined_until = self._position_exit_reentry_quarantine_until.get(key)
+        if quarantined_until is None or quarantined_until <= now:
+            return None
+        seconds_remaining = (quarantined_until - now).total_seconds()
+        return ControllerDiagnostic(
+            code="position_exit_reentry_cooldown",
+            message=(
+                "Skipping decision because the same market/token is cooling down "
+                "after a position-exit fill."
+            ),
+            market_id=decision.market_id,
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            token_id=decision.token_id,
+            severity="warning",
+            metadata={
+                "cooldown_s": cooldown_s,
+                "seconds_remaining": seconds_remaining,
+                "risk_group_id": decision.risk_group_id,
+            },
+        )
+
+    def _drop_expired_position_exit_reentry_quarantines(
+        self,
+        now: datetime,
+    ) -> None:
+        expired = [
+            key
+            for key, quarantined_until in (
+                self._position_exit_reentry_quarantine_until.items()
+            )
+            if quarantined_until <= now
+        ]
+        for key in expired:
+            del self._position_exit_reentry_quarantine_until[key]
 
     async def _update_decision_status_if_supported(
         self,
@@ -1795,10 +2469,24 @@ class Runner:
             }
 
         active_strategies = await self._strategy_registry.list_active_strategies()
-        return {
+        eval_specs = {
             (strategy.strategy_id, strategy.strategy_version_id): strategy.eval_spec
             for strategy in active_strategies
         }
+        if self._controller_runtimes:
+            default_eval_spec = _default_active_strategy(self.config).eval_spec
+            for runtime in self._controller_runtimes.values():
+                eval_specs.setdefault(
+                    (runtime.strategy_id, runtime.strategy_version_id),
+                    default_eval_spec,
+                )
+        if not self._should_build_strategy_registry_controllers():
+            default_strategy = _default_active_strategy(self.config)
+            eval_specs.setdefault(
+                (default_strategy.strategy_id, default_strategy.strategy_version_id),
+                default_strategy.eval_spec,
+            )
+        return eval_specs
 
     def _should_stop_controller(self) -> bool:
         if self._stop_event.is_set() and self.sensor_stream.queue.empty():
@@ -1851,6 +2539,9 @@ class Runner:
         decision_expiry_task = self._decision_expiry_task
         if decision_expiry_task is not None and not decision_expiry_task.done():
             decision_expiry_task.cancel()
+        runtime_heartbeat_task = self._runtime_heartbeat_task
+        if runtime_heartbeat_task is not None and not runtime_heartbeat_task.done():
+            runtime_heartbeat_task.cancel()
         for task in self._controller_pipeline_tasks.values():
             if not task.done():
                 task.cancel()
@@ -1868,6 +2559,7 @@ class Runner:
                         self._factor_service_task,
                         *self._controller_pipeline_tasks.values(),
                         decision_expiry_task,
+                        runtime_heartbeat_task,
                     )
                     if task is not None
                 ),
@@ -1903,6 +2595,7 @@ class Runner:
         self._controller_task = None
         self._actuator_task = None
         self._decision_expiry_task = None
+        self._runtime_heartbeat_task = None
         self._market_selector = None
         self._subscription_controller = None
         self._strategy_registry = None
@@ -2765,6 +3458,77 @@ def _open_position_token_ids(portfolio: Portfolio) -> list[str]:
     )
 
 
+def _open_position_keys(portfolio: Portfolio) -> set[PositionSlotKey]:
+    return {
+        _position_key_from_position(position)
+        for position in portfolio.open_positions
+    }
+
+
+def _estimated_decision_quantity(decision: TradeDecision) -> float | None:
+    limit_price = Decimal(str(decision.limit_price))
+    if limit_price <= Decimal("0"):
+        return None
+    notional_usdc = Decimal(str(decision.notional_usdc))
+    return float(notional_usdc / limit_price)
+
+
+def _position_key_from_position(position: Position) -> PositionSlotKey:
+    return (
+        position.market_id,
+        position.token_id,
+        position.venue,
+        position.side,
+        position.strategy_id,
+        position.strategy_version_id,
+    )
+
+
+def _position_key_from_decision(decision: TradeDecision) -> PositionSlotKey:
+    return (
+        decision.market_id,
+        decision.token_id,
+        decision.venue,
+        decision.side,
+        decision.strategy_id,
+        decision.strategy_version_id,
+    )
+
+
+def _position_exit_reentry_key_from_decision(
+    decision: TradeDecision,
+) -> PositionExitReentryKey:
+    return (
+        decision.strategy_id,
+        decision.strategy_version_id,
+        decision.market_id,
+        decision.token_id,
+        decision.risk_group_id,
+    )
+
+
+def _is_position_exit_decision(decision: TradeDecision) -> bool:
+    return any(
+        condition.startswith("position_exit:")
+        for condition in decision.stop_conditions
+    )
+
+
+def _decision_reduces_existing_position(
+    portfolio: Portfolio,
+    decision: TradeDecision,
+) -> bool:
+    return any(
+        position.market_id == decision.market_id
+        and position.token_id == decision.token_id
+        and position.venue == decision.venue
+        and position.strategy_id == decision.strategy_id
+        and position.strategy_version_id == decision.strategy_version_id
+        and position.side != decision.side
+        for position in portfolio.open_positions
+    )
+
+
 def _build_discovery_http_client(settings: PMSSettings) -> httpx.AsyncClient:
     sensor = settings.sensor
     return httpx.AsyncClient(
@@ -2828,18 +3592,27 @@ def _fill_from_order(
 
     # Simulated (paper/backtest) fills carry the modelled Polymarket fee so the
     # evaluator's net-edge gate can compute instead of rendering N/A, and so
-    # paper P&L is not inflated relative to live. fee_rate is None for LIVE
-    # fills — there the venue reports the real fee via reconciliation, and we
-    # must not synthesize over it. Formula matches ExecutionModel.compute_fee.
+    # paper P&L is not inflated relative to live. When signal metadata carries
+    # market fee evidence, prefer it over the global fallback. fee_rate is None
+    # for LIVE fills — venue reconciliation owns real fees there, and we must not
+    # synthesize over it. Formula matches ExecutionModel.compute_fee.
     fees: float | None = None
     fee_bps: int | None = None
     if fee_rate is not None:
+        effective_fee_rate = (
+            market_fee_rate_from_metadata(
+                signal.external_signal,
+                fallback_rate=fee_rate,
+            )
+            if signal is not None
+            else fee_rate
+        )
         fees = (
             order_state.filled_notional_usdc
-            * fee_rate
+            * effective_fee_rate
             * (1.0 - order_state.fill_price)
         )
-        fee_bps = int(fee_rate * 10_000)
+        fee_bps = int(effective_fee_rate * 10_000)
 
     return FillRecord(
         trade_id=order_state.order_id,
@@ -2865,6 +3638,10 @@ def _fill_from_order(
     )
 
 
+def _is_selection_funnel_entry_fill(fill: FillRecord) -> bool:
+    return fill.side == Side.BUY.value
+
+
 def _decision_status_from_order(order_state: OrderState) -> str:
     normalized_status = order_state.status.lower()
     raw_status = order_state.raw_status.lower()
@@ -2888,6 +3665,24 @@ def _decision_status_from_order(order_state: OrderState) -> str:
     if normalized_status == OrderStatus.INVALID.value:
         return "rejected"
     return "submitted"
+
+
+def _is_open_order_state(order_state: OrderState) -> bool:
+    if order_state.remaining_notional_usdc <= 1e-9:
+        return False
+    normalized_status = order_state.status.lower()
+    raw_status = order_state.raw_status.lower()
+    return normalized_status in {
+        OrderStatus.LIVE.value,
+        OrderStatus.UNMATCHED.value,
+        OrderStatus.PARTIAL.value,
+        "open",
+    } or raw_status in {
+        OrderStatus.LIVE.value,
+        OrderStatus.UNMATCHED.value,
+        OrderStatus.PARTIAL.value,
+        "open",
+    }
 
 
 def _portfolio_with_fill(portfolio: Portfolio, fill: FillRecord) -> Portfolio:
@@ -3048,7 +3843,13 @@ async def _execute_actuator_work_item(
     portfolio: Portfolio,
     *,
     dedup_acquired: bool,
+    paper_orderbook: Mapping[str, Any] | None = None,
 ) -> OrderState:
+    executor = _executor_with_paper_orderbook_snapshot(
+        executor,
+        decision,
+        paper_orderbook,
+    )
     if dedup_acquired and _executor_accepts_dedup_acquired(executor):
         return cast(
             OrderState,
@@ -3059,6 +3860,48 @@ async def _execute_actuator_work_item(
             ),
         )
     return cast(OrderState, await executor.execute(decision, portfolio))
+
+
+def _executor_with_paper_orderbook_snapshot(
+    executor: Any,
+    decision: TradeDecision,
+    paper_orderbook: Mapping[str, Any] | None,
+) -> Any:
+    if (
+        paper_orderbook is None
+        or not isinstance(executor, ActuatorExecutor)
+        or not isinstance(executor.adapter, PaperActuator)
+    ):
+        return executor
+    return replace(
+        executor,
+        adapter=PaperActuator(
+            orderbooks={
+                _paper_orderbook_key(decision): cast(
+                    dict[str, Any],
+                    deepcopy(paper_orderbook),
+                )
+            }
+        ),
+    )
+
+
+def _paper_orderbook_key(decision: TradeDecision) -> str:
+    return decision.token_id or decision.market_id
+
+
+def _paper_orderbook_for_decision(
+    orderbooks: Mapping[str, dict[str, Any]],
+    decision: TradeDecision,
+) -> dict[str, Any] | None:
+    if decision.token_id is not None and decision.token_id in orderbooks:
+        return orderbooks[decision.token_id]
+    if (
+        (decision.outcome == "YES" or decision.token_id is None)
+        and decision.market_id in orderbooks
+    ):
+        return orderbooks[decision.market_id]
+    return None
 
 
 def _executor_accepts_dedup_acquired(executor: Any) -> bool:
@@ -3102,17 +3945,24 @@ def _decision_evidence_from_signal(
     decision_created_at: datetime,
 ) -> dict[str, object]:
     book_top_levels = _top_orderbook_levels(signal.orderbook)
+    book_token_outcome = _book_token_outcome(signal, decision)
+    canonical_yes_price = _canonical_yes_probability(
+        signal.yes_price,
+        book_token_outcome=book_token_outcome,
+    )
     return {
         "market_id": signal.market_id,
         "token_id": signal.token_id,
         "book_token_id": signal.token_id,
+        "book_token_outcome": book_token_outcome,
         "decision_token_id": decision.token_id,
         "decision_outcome": decision.outcome,
         "decision_side": decision.side,
         "venue": signal.venue,
         "market_status": signal.market_status,
         "signal_fetched_at": signal.fetched_at.isoformat(),
-        "yes_price": signal.yes_price,
+        "yes_price": canonical_yes_price,
+        "direct_token_price": signal.yes_price,
         "book_top_levels": book_top_levels,
         "book_hash": _decision_book_hash(
             market_id=signal.market_id,
@@ -3120,28 +3970,229 @@ def _decision_evidence_from_signal(
             book_top_levels=book_top_levels,
         ),
         "book_depth": 5,
+        "baseline_probability_coordinate": "YES",
         "market_implied_baseline_prob_estimate": (
             _market_implied_baseline_prob_estimate(decision)
         ),
+        "decision_outcome_market_implied_prob_estimate": decision.limit_price,
         "mid_quote_baseline_prob_estimate": (
-            _mid_quote_baseline_prob_estimate(book_top_levels)
+            _mid_quote_baseline_prob_estimate(
+                book_top_levels,
+                book_token_outcome=book_token_outcome,
+            )
         ),
         "last_trade_baseline_prob_estimate": (
-            _last_trade_baseline_prob_estimate(signal)
+            _last_trade_baseline_prob_estimate(
+                signal,
+                book_token_outcome=book_token_outcome,
+            )
         ),
         "category_prior_baseline_prob_estimate": (
             _category_prior_baseline_prob_estimate(signal)
         ),
-        "book_age_ms": _optional_float(signal.external_signal.get("book_age_ms")),
+        "book_age_ms": _decision_evidence_book_age_ms(
+            signal,
+            decision_created_at=decision_created_at,
+        ),
         "decision_latency_ms": _signal_to_decision_latency_ms(
             signal,
             decision_created_at=decision_created_at,
         ),
         "quote_source": quote_source,
+        "direct_outcome_book_source": _optional_text(
+            signal.external_signal.get("direct_outcome_book_source")
+        ),
         "factor_snapshot_hash": factor_snapshot_hash,
         "spread_bps_at_decision": decision.spread_bps_at_decision,
+        **_decision_cost_evidence(signal, decision),
         "external_signal_keys": sorted(str(key) for key in signal.external_signal),
     }
+
+
+def _decision_cost_evidence(
+    signal: MarketSignal,
+    decision: TradeDecision,
+) -> dict[str, float]:
+    price = Decimal(str(decision.limit_price))
+    if not price.is_finite() or price < 0:
+        return {}
+
+    evidence: dict[str, float] = {}
+    total_cost_edge = Decimal("0")
+    has_cost_evidence = False
+
+    fee_rate_bps = _optional_float(signal.external_signal.get("fee_rate_bps"))
+    if fee_rate_bps is not None and 0.0 <= fee_rate_bps <= 10_000.0:
+        fee_rate = Decimal(str(fee_rate_bps)) / Decimal("10000")
+        fee_edge = fee_rate * (Decimal("1.0") - price)
+        evidence["fee_rate_bps"] = fee_rate_bps
+        evidence["fee_rate"] = float(fee_rate)
+        evidence["fee_edge_at_decision"] = float(fee_edge)
+        total_cost_edge += fee_edge
+        has_cost_evidence = True
+
+    spread_bps = _optional_float(decision.spread_bps_at_decision)
+    if spread_bps is not None and spread_bps >= 0.0:
+        spread_edge = (Decimal(str(spread_bps)) / Decimal("10000")) * price
+        evidence["spread_edge_at_decision"] = float(spread_edge)
+        total_cost_edge += spread_edge
+        has_cost_evidence = True
+
+    slippage_bps = _optional_float(decision.max_slippage_bps)
+    if slippage_bps is not None and slippage_bps >= 0.0:
+        slippage_edge = (Decimal(str(slippage_bps)) / Decimal("10000")) * price
+        evidence["slippage_edge_at_decision"] = float(slippage_edge)
+        total_cost_edge += slippage_edge
+        has_cost_evidence = True
+
+    if not has_cost_evidence:
+        return evidence
+
+    evidence["total_cost_edge_at_decision"] = float(total_cost_edge)
+    expected_edge = Decimal(str(decision.expected_edge))
+    if expected_edge.is_finite():
+        evidence["net_edge_after_costs"] = float(expected_edge - total_cost_edge)
+    return evidence
+
+
+def _controller_execution_signal_for_decision(
+    controller: object,
+    *,
+    fallback_signal: MarketSignal,
+    decision: TradeDecision,
+    latest_signals_by_token: Mapping[str, MarketSignal],
+) -> MarketSignal:
+    execution_signal = getattr(controller, "last_execution_signal", None)
+    if (
+        isinstance(execution_signal, MarketSignal)
+        and execution_signal.market_id == decision.market_id
+        and (
+            decision.token_id is None
+            or execution_signal.token_id is None
+            or execution_signal.token_id == decision.token_id
+        )
+    ):
+        return execution_signal
+    return _decision_evidence_signal_for_decision(
+        fallback_signal,
+        decision,
+        latest_signals_by_token=latest_signals_by_token,
+    )
+
+
+def _decision_evidence_signal_for_decision(
+    signal: MarketSignal,
+    decision: TradeDecision,
+    *,
+    latest_signals_by_token: Mapping[str, MarketSignal],
+) -> MarketSignal:
+    target_token_id = decision.token_id
+    if target_token_id is None or target_token_id == signal.token_id:
+        return signal
+    candidate = latest_signals_by_token.get(target_token_id)
+    if candidate is None or candidate.market_id != signal.market_id:
+        return signal
+    return candidate
+
+
+def _paper_orderbook_snapshot_for_decision(
+    decision: TradeDecision,
+    signal: MarketSignal | None,
+    *,
+    latest_signals_by_token: Mapping[str, MarketSignal],
+) -> dict[str, Any] | None:
+    if signal is None:
+        return None
+    source_signal = signal
+    if decision.token_id is not None and decision.token_id != signal.token_id:
+        candidate = latest_signals_by_token.get(decision.token_id)
+        if candidate is None or candidate.market_id != decision.market_id:
+            return None
+        source_signal = candidate
+    return deepcopy(source_signal.orderbook)
+
+
+def _decision_evidence_book_age_ms(
+    signal: MarketSignal,
+    *,
+    decision_created_at: datetime,
+) -> float | None:
+    explicit_age = _optional_float(signal.external_signal.get("book_age_ms"))
+    if explicit_age is not None:
+        return explicit_age
+    book_received_at = _external_signal_datetime(
+        signal.external_signal.get("book_received_at")
+    )
+    if book_received_at is None:
+        return None
+    age_ms = (
+        _aware_utc(decision_created_at) - _aware_utc(book_received_at)
+    ).total_seconds() * 1000.0
+    return max(0.0, age_ms)
+
+
+def _controller_signal_coalesce_key(signal: MarketSignal) -> tuple[str, str]:
+    signal_id = signal.token_id if signal.token_id is not None else signal.market_id
+    return signal.venue, signal_id
+
+
+def _is_newer_controller_signal(
+    candidate: MarketSignal,
+    current: MarketSignal,
+) -> bool:
+    return _controller_signal_event_time(candidate) >= _controller_signal_event_time(
+        current
+    )
+
+
+def _controller_signal_event_time(signal: MarketSignal) -> datetime:
+    book_received_at = _external_signal_datetime(
+        signal.external_signal.get("book_received_at")
+    )
+    return _aware_utc(book_received_at or signal.fetched_at)
+
+
+def _controller_can_refresh_queued_book(controller: object) -> bool:
+    return getattr(controller, "direct_book_reader", None) is not None
+
+
+def _controller_direct_book_reader(
+    settings: PMSSettings,
+    market_data_store: PostgresMarketDataStore,
+) -> PostgresMarketDataStore | RefreshingDirectBookSnapshotReader:
+    if not settings.controller.venue_book_refresh_enabled:
+        return market_data_store
+    return RefreshingDirectBookSnapshotReader(
+        primary=market_data_store,
+        venue_client=PolymarketPublicBookClient(
+            host=settings.polymarket.host,
+            timeout_s=settings.controller.venue_book_refresh_timeout_s,
+        ),
+        max_snapshot_age_ms=settings.controller.max_book_age_ms,
+        allowed_clock_skew_ms=settings.controller.allowed_book_clock_skew_ms,
+    )
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _external_signal_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    raw_value = value.strip()
+    if not raw_value:
+        return None
+    if raw_value.endswith("Z"):
+        raw_value = f"{raw_value[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
 
 
 def _category_prior_estimator_from_settings(
@@ -3151,7 +4202,10 @@ def _category_prior_estimator_from_settings(
     if raw_path is None or raw_path.strip() == "":
         return None
 
-    loaded = load_category_prior_observations_csv(raw_path)
+    path = Path(raw_path).expanduser()
+    require_path_outside_working_tree(path, label="category-prior artifact")
+    require_private_parent(path, label="category-prior artifact")
+    loaded = load_category_prior_observations_csv(path)
     logger.info(
         "loaded category prior observations",
         extra={
@@ -3177,10 +4231,22 @@ def _flb_calibration_model_from_settings(
     if raw_path is None or raw_path.strip() == "":
         return None
 
+    path = Path(raw_path).expanduser()
+    require_path_outside_working_tree(path, label="FLB calibration artifact")
+    require_private_parent(path, label="FLB calibration artifact")
+    require_path_outside_working_tree(
+        flb_calibration_provenance_path(path),
+        label="FLB calibration provenance JSON",
+    )
+    require_private_parent(
+        flb_calibration_provenance_path(path),
+        label="FLB calibration provenance JSON",
+    )
     model = load_flb_calibration_csv(
-        raw_path,
+        path,
         min_sample_count=settings.strategies.flb_min_calibration_samples,
     )
+    require_flb_calibration_provenance_for_model(path, model=model)
     logger.info(
         "loaded FLB calibration model",
         extra={
@@ -3193,31 +4259,84 @@ def _flb_calibration_model_from_settings(
     return model
 
 
+def _h1_flb_strategy_from_settings(
+    settings: PMSSettings,
+    *,
+    calibration_model: FlbCalibrationModel,
+) -> Strategy:
+    raw_path = settings.strategies.flb_calibration_path
+    if raw_path is None or raw_path.strip() == "":
+        msg = "h1_flb strategy requires strategies.flb_calibration_path"
+        raise ValueError(msg)
+    provenance = require_flb_calibration_provenance_for_model(
+        Path(raw_path).expanduser(),
+        model=calibration_model,
+    )
+    return build_h1_flb_strategy(
+        calibration_csv_sha256=provenance.calibration_csv_sha256,
+        calibration_source_label=provenance.calibration_source_label,
+    )
+
+
 def _market_implied_baseline_prob_estimate(decision: TradeDecision) -> float:
     if decision.outcome == "NO":
         return 1.0 - decision.limit_price
     return decision.limit_price
 
 
+def _book_token_outcome(signal: MarketSignal, decision: TradeDecision) -> str:
+    raw_outcome = str(signal.external_signal.get("signal_token_outcome", "")).upper()
+    if raw_outcome in {"YES", "NO"}:
+        return raw_outcome
+    if decision.outcome == "NO" and decision.token_id == signal.token_id:
+        return "NO"
+    return "YES"
+
+
 def _mid_quote_baseline_prob_estimate(
     book_top_levels: dict[str, list[dict[str, float]]],
+    *,
+    book_token_outcome: str = "YES",
 ) -> float | None:
     bids = book_top_levels["bids"]
     asks = book_top_levels["asks"]
     if not bids or not asks:
         return None
-    return _probability_or_none((bids[0]["price"] + asks[0]["price"]) / 2.0)
+    return _canonical_yes_probability(
+        (bids[0]["price"] + asks[0]["price"]) / 2.0,
+        book_token_outcome=book_token_outcome,
+    )
 
 
-def _last_trade_baseline_prob_estimate(signal: MarketSignal) -> float | None:
+def _last_trade_baseline_prob_estimate(
+    signal: MarketSignal,
+    *,
+    book_token_outcome: str = "YES",
+) -> float | None:
     for value in (
         signal.external_signal.get("last_trade_price"),
         signal.orderbook.get("last_trade_price"),
     ):
-        probability = _probability_or_none(value)
+        probability = _canonical_yes_probability(
+            value,
+            book_token_outcome=book_token_outcome,
+        )
         if probability is not None:
             return probability
     return None
+
+
+def _canonical_yes_probability(
+    value: object,
+    *,
+    book_token_outcome: str,
+) -> float | None:
+    probability = _probability_or_none(value)
+    if probability is None:
+        return None
+    if book_token_outcome == "NO":
+        return 1.0 - probability
+    return probability
 
 
 def _category_prior_baseline_prob_estimate(signal: MarketSignal) -> float | None:
@@ -3268,6 +4387,28 @@ def _decision_book_hash(
     return sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _runtime_run_id(*, mode: RunMode, started_at: datetime) -> str:
+    payload = {
+        "mode": mode.value,
+        "started_at": started_at.isoformat(),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _runtime_strategy_fingerprint(
+    runtimes: Sequence[StrategyControllerRuntime],
+) -> str | None:
+    labels = sorted(
+        f"{runtime.strategy_id}@{runtime.strategy_version_id}"
+        for runtime in runtimes
+    )
+    if not labels:
+        return None
+    canonical = json.dumps(labels, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _signal_to_decision_latency_ms(
     signal: MarketSignal,
     *,
@@ -3286,6 +4427,13 @@ def _optional_float(value: object) -> float | None:
     if not isfinite(parsed):
         return None
     return parsed
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _probability_or_none(value: object) -> float | None:

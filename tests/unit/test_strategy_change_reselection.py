@@ -74,6 +74,8 @@ class FakeConnection:
     latest_book_snapshot_age_s: float | None = 30.0
     latest_usable_book_snapshot_age_s: float | None = 30.0
     missing_market_risk_metadata_count: int = 0
+    missing_launch_usable_token_count: int = 0
+    missing_subscribed_usable_token_count: int = 0
     execute_results: list[str] = field(default_factory=list)
     execute_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
     fetchval_calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
@@ -89,6 +91,10 @@ class FakeConnection:
 
     async def fetchval(self, query: str, *args: object) -> object:
         self.fetchval_calls.append((query, args))
+        if "missing_launch_usable_tokens" in query:
+            return self.missing_launch_usable_token_count
+        if "missing_subscribed_usable_tokens" in query:
+            return self.missing_subscribed_usable_token_count
         if "missing_market_risk_metadata" in query:
             return self.missing_market_risk_metadata_count
         if "usable_book_snapshots" in query:
@@ -325,22 +331,20 @@ def _settings(mode: RunMode) -> PMSSettings:
     else:
         paper_report_path = None
         rehearsal_report_path = None
+    attested_at = datetime.now(tz=UTC) if mode == RunMode.LIVE else None
     settings = PMSSettings(
         mode=mode,
         secret_source="fly" if mode == RunMode.LIVE else None,
         live_trading_enabled=mode == RunMode.LIVE,
+        api_token="live-api-token" if mode == RunMode.LIVE else None,
         live_exit_criteria_ratified_by=(
             "test-operator" if mode == RunMode.LIVE else None
         ),
-        live_exit_criteria_ratified_at=(
-            datetime(2026, 5, 25, tzinfo=UTC) if mode == RunMode.LIVE else None
-        ),
+        live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by=(
             "test-compliance" if mode == RunMode.LIVE else None
         ),
-        live_compliance_reviewed_at=(
-            datetime(2026, 5, 25, tzinfo=UTC) if mode == RunMode.LIVE else None
-        ),
+        live_compliance_reviewed_at=attested_at,
         live_compliance_jurisdiction="US" if mode == RunMode.LIVE else None,
         live_paper_soak_report_path=paper_report_path,
         live_operator_rehearsal_report_path=rehearsal_report_path,
@@ -477,7 +481,8 @@ async def test_set_active_fires_callback_after_acquire_exit() -> None:
         (
             """
         UPDATE strategies
-        SET active_version_id = $2
+        SET active_version_id = $2,
+            archived = FALSE
         WHERE strategy_id = $1
           AND EXISTS (
               SELECT 1
@@ -729,14 +734,16 @@ async def test_runner_constructs_single_strategy_registry_with_callback_for_boot
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-strategy-reselect-start-reports-"
     )
+    attested_at = datetime.now(tz=UTC)
     settings = PMSSettings(
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_exit_criteria_ratified_by="test-operator",
-        live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by="test-compliance",
-        live_compliance_reviewed_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_reviewed_at=attested_at,
         live_compliance_jurisdiction="US",
         live_paper_soak_report_path=paper_report_path,
         live_operator_rehearsal_report_path=rehearsal_report_path,

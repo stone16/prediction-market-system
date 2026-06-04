@@ -121,7 +121,7 @@ def test_gamma_row_to_market_extracts_all_price_fields() -> None:
     assert market.best_bid == 0.59
     assert market.best_ask == 0.62
     assert market.liquidity == 1250.5
-    assert market.spread_bps == 300
+    assert market.spread_bps == 496
     assert market.price_updated_at == fetched_at
 
 
@@ -220,7 +220,22 @@ def test_spread_bps_rounded_to_integer() -> None:
         fetched_at,
     )
 
-    assert market.spread_bps == 60
+    assert market.spread_bps == 115
+
+
+def test_spread_bps_uses_relative_midpoint_units() -> None:
+    fetched_at = datetime(2026, 4, 24, 9, 0, tzinfo=UTC)
+    market = _gamma_market_to_market(
+        _gamma_market(
+            "pm-low-price-spread",
+            outcomes=["Yes", "No"],
+            best_bid="0.02",
+            best_ask="0.03",
+        ),
+        fetched_at,
+    )
+
+    assert market.spread_bps == 4000
 
 
 def test_gamma_row_malformed_outcome_prices_logs_and_keeps_scalar_prices(
@@ -312,6 +327,218 @@ async def test_market_discovery_sensor_requests_active_open_markets_with_page_li
     assert captured_params.get("active") == "true"
     assert captured_params.get("closed") == "false"
     assert captured_params.get("limit") == "500"
+    assert captured_params.get("offset") == "0"
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_paginates_gamma_markets_until_short_page() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    captured_offsets: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        params = dict(request.url.params)
+        captured_offsets.append(params["offset"])
+        page_index = int(params["offset"]) // int(params["limit"])
+        if page_index == 0:
+            payload = [
+                _gamma_market(
+                    "page-0-a",
+                    token_ids=["page-0-a-yes", "page-0-a-no"],
+                    outcomes=["Yes", "No"],
+                ),
+                _gamma_market(
+                    "page-0-b",
+                    token_ids=["page-0-b-yes", "page-0-b-no"],
+                    outcomes=["Yes", "No"],
+                ),
+            ]
+        elif page_index == 1:
+            payload = [
+                _gamma_market(
+                    "page-1-a",
+                    token_ids=["page-1-a-yes", "page-1-a-no"],
+                    outcomes=["Yes", "No"],
+                ),
+                _gamma_market(
+                    "page-1-b",
+                    token_ids=["page-1-b-yes", "page-1-b-no"],
+                    outcomes=["Yes", "No"],
+                ),
+            ]
+        else:
+            payload = [
+                _gamma_market(
+                    "page-2-a",
+                    token_ids=["page-2-a-yes", "page-2-a-no"],
+                    outcomes=["Yes", "No"],
+                )
+            ]
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+        page_limit=2,
+        max_pages=5,
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    assert captured_offsets == ["0", "2", "4"]
+    assert store_mock.write_market_mock.await_count == 5
+    assert store_mock.write_token_mock.await_count == 10
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_keyset_paginates_until_empty_cursor() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    captured_cursors: list[str | None] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets/keyset"
+        params = dict(request.url.params)
+        assert "offset" not in params
+        assert "cursor" not in params
+        assert params.get("order") == "volume24hr"
+        assert params.get("ascending") == "false"
+        captured_cursors.append(params.get("after_cursor"))
+        if params.get("after_cursor") is None:
+            payload = {
+                "markets": [
+                    _gamma_market(
+                        "keyset-page-1-a",
+                        token_ids=["keyset-page-1-a-yes", "keyset-page-1-a-no"],
+                        outcomes=["Yes", "No"],
+                    )
+                ],
+                "next_cursor": "cursor-2",
+            }
+        else:
+            payload = {
+                "markets": [
+                    _gamma_market(
+                        "keyset-page-2-a",
+                        token_ids=["keyset-page-2-a-yes", "keyset-page-2-a-no"],
+                        outcomes=["Yes", "No"],
+                    )
+                ],
+                "next_cursor": "",
+            }
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+        page_limit=100,
+        max_pages=5,
+        pagination_mode="keyset",
+        order="volume24hr",
+        ascending=False,
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    assert captured_cursors == [None, "cursor-2"]
+    assert store_mock.write_market_mock.await_count == 2
+    assert store_mock.write_token_mock.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_continues_pagination_after_malformed_rows() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    captured_offsets: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        params = dict(request.url.params)
+        captured_offsets.append(params["offset"])
+        if params["offset"] == "0":
+            payload: list[object] = [
+                _gamma_market(
+                    "first-page-valid",
+                    token_ids=["first-yes", "first-no"],
+                    outcomes=["Yes", "No"],
+                ),
+                "malformed-row",
+            ]
+        else:
+            payload = [
+                _gamma_market(
+                    "second-page-valid",
+                    token_ids=["second-yes", "second-no"],
+                    outcomes=["Yes", "No"],
+                )
+            ]
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+        page_limit=2,
+        max_pages=5,
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    assert captured_offsets == ["0", "2"]
+    assert store_mock.write_market_mock.await_count == 2
+    assert store_mock.write_token_mock.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_warns_when_page_cap_is_reached(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(
+            200,
+            json=[
+                _gamma_market(
+                    "cap-page-market",
+                    token_ids=["cap-yes", "cap-no"],
+                    outcomes=["Yes", "No"],
+                )
+            ],
+        )
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+        page_limit=1,
+        max_pages=1,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await sensor.poll_once()
+    await sensor.aclose()
+
+    assert "discovery reached configured page cap max_pages=1 page_limit=1" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -565,6 +792,84 @@ async def test_market_discovery_sensor_skips_malformed_tokens_before_market_writ
     assert store_mock.write_price_snapshot_mock.await_count == 0
     assert store_mock.write_token_mock.await_count == 0
     assert "mismatched clobTokenIds/outcomes lengths" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_skips_non_binary_gamma_markets_without_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    payload = [
+        _gamma_market(
+            "multi-outcome-row",
+            token_ids=["a-token", "b-token", "c-token"],
+            outcomes=["A", "B", "C"],
+        ),
+        _gamma_market(
+            "binary-row",
+            token_ids=["yes-token", "no-token"],
+            outcomes=["Yes", "No"],
+        ),
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await sensor.poll_once()
+    await sensor.aclose()
+
+    assert store_mock.write_market_mock.await_count == 1
+    assert store_mock.write_token_mock.await_count == 2
+    assert "Gamma market row must expose exactly YES/NO outcomes" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_accepts_decoded_gamma_outcomes_list() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    market_row = _gamma_market(
+        "decoded-outcomes-row",
+        token_ids=["yes-token", "no-token"],
+        outcomes=["Yes", "No"],
+        outcome_prices=["0.62", "0.38"],
+    )
+    market_row["outcomes"] = ["Yes", "No"]
+    payload = [market_row]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/markets"
+        return httpx.Response(200, json=payload)
+
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    await sensor.poll_once()
+    await sensor.aclose()
+
+    assert store_mock.write_market_mock.await_count == 1
+    written_market = store_mock.write_market_mock.await_args_list[0].args[0]
+    assert written_market.condition_id == "decoded-outcomes-row"
+    assert written_market.yes_price == 0.62
+    assert written_market.no_price == 0.38
+    assert store_mock.write_token_mock.await_count == 2
 
 
 @pytest.mark.asyncio

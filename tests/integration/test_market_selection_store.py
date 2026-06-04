@@ -32,6 +32,11 @@ def _market(
     resolves_at: datetime | None,
     created_at: datetime,
     volume_24h: float,
+    yes_price: float | None = None,
+    no_price: float | None = None,
+    best_bid: float | None = None,
+    best_ask: float | None = None,
+    spread_bps: int | None = None,
 ) -> Market:
     return Market(
         condition_id=condition_id,
@@ -42,6 +47,11 @@ def _market(
         created_at=created_at,
         last_seen_at=created_at,
         volume_24h=volume_24h,
+        yes_price=yes_price,
+        no_price=no_price,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        spread_bps=spread_bps,
     )
 
 
@@ -71,6 +81,11 @@ async def test_read_eligible_markets_filters_by_venue_and_horizon_and_keeps_null
         resolves_at=now + timedelta(days=10),
         created_at=now,
         volume_24h=1_000.0,
+        yes_price=0.62,
+        no_price=0.38,
+        best_bid=0.61,
+        best_ask=0.63,
+        spread_bps=200,
     )
     future_out_of_horizon = _market(
         condition_id="market-out-of-horizon",
@@ -141,6 +156,11 @@ async def test_read_eligible_markets_filters_by_venue_and_horizon_and_keeps_null
     open_horizon = await store.read_eligible_markets("polymarket", None, 500.0)
 
     assert [market.condition_id for market, _ in bounded] == ["market-in-horizon"]
+    assert bounded[0][0].yes_price == pytest.approx(0.62)
+    assert bounded[0][0].no_price == pytest.approx(0.38)
+    assert bounded[0][0].best_bid == pytest.approx(0.61)
+    assert bounded[0][0].best_ask == pytest.approx(0.63)
+    assert bounded[0][0].spread_bps == 200
     assert [token.token_id for token in bounded[0][1]] == ["in-yes", "in-no"]
 
     assert [market.condition_id for market, _ in open_horizon] == [

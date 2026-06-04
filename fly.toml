@@ -9,6 +9,10 @@ primary_region = "iad"
   PMS_API_HOST = "0.0.0.0"
   PMS_CONFIG_PATH = "/app/config.live-soak.yaml"
 
+[mounts]
+  source = "pms_paper_soak_secure"
+  destination = "/secure/pms"
+
 [http_service]
   internal_port = 8000
   force_https = true

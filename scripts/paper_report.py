@@ -7,8 +7,11 @@ import os
 import re
 import stat
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
@@ -19,11 +22,24 @@ from urllib.request import Request, urlopen
 
 from pms.config import PMSSettings, RiskSettings
 from pms.core.models import EvalRecord, TradeDecision
+from pms.metrics import (
+    LLM_BUDGET_EXHAUSTED_TOTAL_METRIC,
+    LLM_DAILY_COST_LIMIT_USDC_METRIC,
+    LLM_DAILY_COST_USDC_METRIC,
+    LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC,
+    SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_SELECTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
+)
 
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
 REPORT_GENERATOR_ID = "scripts/paper_report.py"
 _API_TIMEOUT_S = 5.0
+_API_PAGE_SIZE = 200
 _SECONDARY_BASELINE_ORDER = (
     "market_implied",
     "mid_quote",
@@ -31,12 +47,20 @@ _SECONDARY_BASELINE_ORDER = (
     "category_prior",
 )
 _BASELINE_SOURCE_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+_PAPER_ONLY_STRATEGY_IDS = frozenset(
+    {
+        "paper_canary_v1",
+        "paper_multi_factor_v1",
+    }
+)
+_READINESS_NOT_SUPPLIED = object()
 
 
 @dataclass(frozen=True)
 class PaperReportProvenance:
     artifact_mode: str
     output_path: str
+    input_snapshot_sha256: str | None = None
     generated_by: str = REPORT_GENERATOR_ID
     generated_at: str = field(
         default_factory=lambda: datetime.now(tz=UTC).isoformat()
@@ -57,6 +81,8 @@ class TradeCostBreakdown:
     gross_edge: float
     spread_cost: float
     net_edge: float
+    fee_cost: float = 0.0
+    slippage_cost: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -74,7 +100,18 @@ class SelectionFunnel:
     selected: int = 0
     routed: int = 0
     forecasted: int = 0
+    controller_emitted: int = 0
     traded: int = 0
+
+
+@dataclass(frozen=True)
+class ExecutionConcentration:
+    entry_fills: int
+    distinct_markets: int
+    distinct_risk_groups: int
+    missing_risk_group_fills: int
+    max_market_fill_share: float | None
+    max_risk_group_fill_share: float | None
 
 
 @dataclass(frozen=True)
@@ -98,6 +135,10 @@ class PaperReportMetrics:
     average_slippage_bps: float | None = None
     todays_pnl: float = 0.0
     cumulative_pnl: float = 0.0
+    pnl_source: str = "final_eval"
+    current_unrealized_pnl: float = 0.0
+    llm_cost_usdc: float = 0.0
+    llm_budget_exhaustions: int = 0
     max_drawdown_pct: float | None = None
     open_positions: int = 0
     total_exposure: float = 0.0
@@ -111,6 +152,8 @@ class PaperReportMetrics:
     average_fee_bps: float | None = None
     average_net_edge_bps: float | None = None
     sharpe_ratio: float | None = None
+    readiness_status: str = "missing"
+    readiness_checks: tuple[tuple[str, str], ...] = ()
     unresolved_incidents: int = 0
     rejection_reasons: tuple[tuple[str, int], ...] = ()
     risk_events: tuple[tuple[str, str, str], ...] = ()
@@ -119,6 +162,9 @@ class PaperReportMetrics:
     baseline_evidence: BaselineEvidenceCoverage | None = None
     clamp_rejections: tuple[tuple[str, int], ...] = ()
     selection_funnel: SelectionFunnel | None = None
+    position_mark_sources: tuple[tuple[str, int], ...] = ()
+    execution_concentration: ExecutionConcentration | None = None
+    input_snapshot_sha256: str | None = None
 
     @classmethod
     def empty(cls, *, report_date: date) -> PaperReportMetrics:
@@ -128,13 +174,18 @@ class PaperReportMetrics:
 @dataclass(frozen=True)
 class PaperSoakGateConfig:
     min_soak_days: int = 30
-    min_fills: int = 10
+    min_accepted_decisions: int = 30
+    min_fills: int = 50
     max_slippage_bps: float = 50.0
     max_brier_score: float = 0.20
     min_brier_improvement: float = 0.0
     min_hit_rate: float = 0.45
     min_average_edge_bps: float = 5.0
     min_average_net_edge_bps: float = 0.0
+    min_distinct_markets: int = 3
+    min_distinct_risk_groups: int = 3
+    max_market_fill_share: float = 0.60
+    max_risk_group_fill_share: float = 0.60
 
 
 @dataclass(frozen=True)
@@ -168,7 +219,16 @@ def evaluate_paper_soak_gate(
 ) -> PaperSoakGateResult:
     checks = [
         _check_min_int("soak_days", metrics.day_of_soak, config.min_soak_days),
+        _check_min_int(
+            "decisions_accepted",
+            metrics.decisions_accepted,
+            config.min_accepted_decisions,
+        ),
         _check_min_int("fills", metrics.fills, config.min_fills),
+        _check_distinct_markets(metrics, config=config),
+        _check_distinct_risk_groups(metrics, config=config),
+        _check_max_market_fill_share(metrics, config=config),
+        _check_max_risk_group_fill_share(metrics, config=config),
         _check_optional_gt("fill_rate", metrics.fill_rate, 0.0),
         _check_optional_lte(
             "average_slippage_bps",
@@ -199,6 +259,7 @@ def evaluate_paper_soak_gate(
             config.min_average_net_edge_bps,
         ),
         _check_optional_gt("sharpe_ratio", metrics.sharpe_ratio, 0.0),
+        _check_readiness(metrics),
         _check_strategy_evidence(metrics.strategy),
         _check_zero("unresolved_incidents", metrics.unresolved_incidents, "unresolved"),
         _check_zero("risk_events", len(metrics.risk_events), "risk event(s)"),
@@ -210,16 +271,21 @@ def metrics_from_api_payloads(
     *,
     report_date: date,
     status: dict[str, Any],
+    readiness: object = _READINESS_NOT_SUPPLIED,
     trades: dict[str, Any],
     positions: dict[str, Any],
     metrics: dict[str, Any] | None = None,
     decisions: object | None = None,
     strategies: dict[str, Any] | None = None,
+    strategy_metrics: dict[str, Any] | None = None,
     risk_events: tuple[tuple[str, str, str], ...] = (),
+    input_snapshot_sha256: str | None = None,
 ) -> PaperReportMetrics:
     events = list(risk_events)
     events.extend(_strategy_evidence_risk_events(strategies))
+    events.extend(_strategy_metrics_risk_events(strategies, strategy_metrics))
     events.extend(_run_mode_risk_events(status))
+    events.extend(_readiness_risk_events(readiness))
     events.extend(_sensor_risk_events(status))
     events.extend(_actuator_risk_events(status))
     events.extend(_unresolved_incident_evidence_risk_events(status))
@@ -251,63 +317,134 @@ def metrics_from_api_payloads(
         events.append(("report generation", "runner_started_at missing", "check /status"))
         day_of_soak = 0
     else:
-        day_of_soak = max(0, (report_date - started_at.date()).days)
+        day_of_soak = _elapsed_soak_days(
+            started_at,
+            observed_until=_soak_observed_until(status, report_date=report_date),
+        )
+    events.extend(_runtime_continuity_risk_events(status, day_of_soak=day_of_soak))
 
     controller = _dict_value(status, "controller")
     actuator = _dict_value(status, "actuator")
     evaluator = _dict_value(status, "evaluator")
     supervision = _dict_value(status, "supervision")
+    events.extend(_current_controller_runtime_risk_events(controller))
     rejection_reasons = _diagnostic_counts(controller)
     events.extend(_diagnostic_evidence_risk_events(controller, rejection_reasons))
+    clamp_rejections = _clamp_rejections_from_diagnostic_counts(rejection_reasons)
     decision_rows = _rows_in_soak_window(
         _rows_from_payload(decisions, "decisions"),
         timestamp_key="created_at",
         started_at=started_at,
         report_date=report_date,
     )
-    decisions_made = _int_from_dict(controller, "decisions_total")
+    status_decisions_made = _int_from_dict(controller, "decisions_total")
+    decisions_made = len(decision_rows)
     events.extend(
         _decision_payload_completeness_risk_events(
             decision_rows,
-            decisions_made=decisions_made,
+            status_decisions_made=status_decisions_made,
         )
     )
     events.extend(_non_finite_decision_risk_events(decision_rows))
     baseline_evidence = _baseline_evidence_coverage(decision_rows)
     events.extend(_baseline_evidence_risk_events(decision_rows))
-    events.extend(
-        _baseline_evidence_score_risk_events(
-            baseline_evidence,
-            baseline_brier_by_source=baseline_brier_by_source,
-            brier_improvement_by_source=brier_improvement_by_source,
+    if _secondary_baseline_scores_are_due(metric_rows, evaluator):
+        events.extend(
+            _baseline_evidence_score_risk_events(
+                baseline_evidence,
+                baseline_brier_by_source=baseline_brier_by_source,
+                brier_improvement_by_source=brier_improvement_by_source,
+            )
         )
-    )
     trade_rows = _trade_rows_in_soak_window(
         _list_value(trades, "trades"),
         started_at=started_at,
         report_date=report_date,
     )
+    entry_trade_rows = _entry_trade_rows(trade_rows)
     events.extend(_non_finite_trade_risk_events(trade_rows))
+    execution_concentration = _execution_concentration(entry_trade_rows)
+    events.extend(
+        _execution_concentration_risk_events(
+            execution_concentration,
+            config=PaperSoakGateConfig(),
+        )
+    )
     position_rows = _list_value(positions, "positions")
     events.extend(_non_finite_position_risk_events(position_rows))
+    position_mark_sources = _position_mark_sources(position_rows)
+    events.extend(_position_mark_source_risk_events(position_mark_sources))
 
-    total_exposure = sum(_float_from_dict(row, "locked_usdc") for row in position_rows)
-    cumulative_pnl = sum(_float_from_dict(row, "unrealized_pnl") for row in position_rows)
+    total_exposure = sum(
+        (Decimal(str(_float_from_dict(row, "locked_usdc"))) for row in position_rows),
+        Decimal("0"),
+    )
+    current_unrealized_pnl = sum(
+        (
+            Decimal(str(_float_from_dict(row, "unrealized_pnl")))
+            for row in position_rows
+        ),
+        Decimal("0"),
+    )
+    cumulative_pnl = Decimal(
+        str(
+            _cumulative_pnl_from_metrics(
+                metric_rows,
+                report_date=report_date,
+            )
+        )
+    )
+    llm_total_cost_float, llm_window_cost_events = _llm_soak_cost_usdc(metric_rows)
+    events.extend(llm_window_cost_events)
+    llm_total_cost = Decimal(str(llm_total_cost_float))
+    llm_daily_cost = Decimal(str(_llm_daily_cost_usdc(metric_rows)))
+    llm_budget_exhaustions = _llm_budget_exhaustions(metric_rows)
+    events.extend(_llm_budget_risk_events(metric_rows))
+    cumulative_pnl -= llm_total_cost
+    todays_pnl_decimal = Decimal(str(todays_pnl)) - llm_daily_cost
+    max_drawdown_pct = _max_drawdown_pct_from_metrics(metric_rows)
+    max_drawdown_pct_decimal = (
+        None if max_drawdown_pct is None else Decimal(str(max_drawdown_pct))
+    )
+    raw_fill_rate = metric_rows.get("fill_rate")
+    fill_rate_float = _optional_float_from_dict(metric_rows, "fill_rate")
+    fill_rate = None if fill_rate_float is None else Decimal(str(fill_rate_float))
+    invalid_fill_rate_supplied = raw_fill_rate is not None and fill_rate_float is None
+    if (
+        not invalid_fill_rate_supplied
+        and (fill_rate is None or fill_rate <= Decimal("0.0"))
+        and decision_rows
+    ):
+        entry_decisions = _entry_decision_rows(decision_rows)
+        fill_rate = (
+            Decimal(len(entry_trade_rows)) / Decimal(len(entry_decisions))
+            if entry_decisions
+            else Decimal("0.0")
+        )
+    selection_funnel = _selection_funnel_from_metrics(metric_rows)
+    events.extend(_selection_funnel_risk_events(selection_funnel))
 
     return PaperReportMetrics(
         report_date=report_date,
         strategy=_strategy_label(status=status, strategies=strategies or {}),
         day_of_soak=day_of_soak,
         decisions_made=decisions_made,
+        decisions_accepted=_accepted_decision_count(decision_rows, entry_trade_rows),
         decisions_rejected=_int_from_dict(controller, "diagnostics_total"),
-        fills=len(trade_rows),
-        fill_rate=_optional_float_from_dict(metric_rows, "fill_rate"),
+        fills=len(entry_trade_rows),
+        fill_rate=None if fill_rate is None else float(fill_rate),
         average_slippage_bps=_optional_float_from_dict(metric_rows, "slippage_bps"),
-        todays_pnl=todays_pnl,
-        cumulative_pnl=cumulative_pnl,
-        max_drawdown_pct=_optional_float_from_dict(metric_rows, "max_drawdown_pct"),
+        todays_pnl=float(todays_pnl_decimal),
+        cumulative_pnl=float(cumulative_pnl),
+        pnl_source=_pnl_source_from_metrics(metric_rows),
+        current_unrealized_pnl=float(current_unrealized_pnl),
+        llm_cost_usdc=float(llm_total_cost),
+        llm_budget_exhaustions=llm_budget_exhaustions,
+        max_drawdown_pct=(
+            None if max_drawdown_pct_decimal is None else float(max_drawdown_pct_decimal)
+        ),
         open_positions=len(position_rows),
-        total_exposure=total_exposure,
+        total_exposure=float(total_exposure),
         brier_score_7d=_optional_float_from_dict_first(
             evaluator,
             ("brier_14d", "brier_overall"),
@@ -322,7 +459,7 @@ def metrics_from_api_payloads(
         ),
         baseline_brier_by_source=baseline_brier_by_source,
         brier_improvement_by_source=brier_improvement_by_source,
-        hit_rate=_optional_float_from_dict(metric_rows, "win_rate"),
+        hit_rate=_hit_rate_from_metrics(metric_rows, evaluator),
         average_edge_bps=_average_edge_bps(decision_rows),
         average_fee_bps=_average_fee_bps(trade_rows),
         average_net_edge_bps=_average_net_edge_bps(
@@ -334,12 +471,20 @@ def metrics_from_api_payloads(
             ),
         ),
         sharpe_ratio=_optional_float_from_dict(metric_rows, "sharpe_ratio"),
+        readiness_status=_readiness_status(readiness),
+        readiness_checks=_readiness_checks(readiness),
         unresolved_incidents=_int_from_dict(
             supervision,
             "unresolved_feedback_total",
         ),
         rejection_reasons=rejection_reasons,
+        trade_costs=_trade_costs_from_decision_rows(decision_rows),
         baseline_evidence=baseline_evidence,
+        clamp_rejections=clamp_rejections,
+        selection_funnel=selection_funnel,
+        position_mark_sources=position_mark_sources,
+        execution_concentration=execution_concentration,
+        input_snapshot_sha256=input_snapshot_sha256,
         risk_events=tuple(events),
     )
 
@@ -378,14 +523,30 @@ def load_live_metrics(
         )
 
     events: list[tuple[str, str, str]] = []
-    trades, trades_error = _fetch_api_json(
+    readiness, readiness_error = _fetch_api_json(
         api_base_url=api_base_url,
-        path="/trades?limit=200",
+        path="/readiness",
         api_token=api_token,
+    )
+    readiness_payload: object = readiness
+    if readiness_error is not None:
+        events.append(("report generation", "/readiness unavailable", readiness_error))
+        readiness_payload = _READINESS_NOT_SUPPLIED
+
+    snapshot_cutoff = datetime.now(tz=UTC).isoformat()
+    snapshot_query: Mapping[str, object] = {"until": snapshot_cutoff}
+    trade_rows, trades_error = _fetch_api_list_pages(
+        api_base_url=api_base_url,
+        path="/trades",
+        api_token=api_token,
+        payload_key="trades",
+        query=snapshot_query,
     )
     if trades_error is not None:
         events.append(("report generation", "/trades unavailable", trades_error))
-        trades = {}
+        trades: dict[str, object] = {}
+    else:
+        trades = {"trades": trade_rows}
 
     positions, positions_error = _fetch_api_json(
         api_base_url=api_base_url,
@@ -396,10 +557,11 @@ def load_live_metrics(
         events.append(("report generation", "/positions unavailable", positions_error))
         positions = {}
 
-    decisions, decisions_error = _fetch_api_payload(
+    decisions, decisions_error = _fetch_api_list_pages(
         api_base_url=api_base_url,
-        path="/decisions?limit=200",
+        path="/decisions",
         api_token=api_token,
+        query=snapshot_query,
     )
     if decisions_error is not None:
         events.append(("report generation", "/decisions unavailable", decisions_error))
@@ -435,16 +597,52 @@ def load_live_metrics(
     if strategies_error is not None:
         events.append(("report generation", "/strategies unavailable", strategies_error))
         strategies_payload = None
+    strategy_metrics_path = _strategy_metrics_path_for_metrics_window(
+        expected_metrics_window,
+    )
+    strategy_metrics, strategy_metrics_error = _fetch_api_json(
+        api_base_url=api_base_url,
+        path=strategy_metrics_path,
+        api_token=api_token,
+    )
+    strategy_metrics_payload: dict[str, Any] | None = strategy_metrics
+    if strategy_metrics_error is not None:
+        events.append(
+            ("report generation", "/strategies/metrics unavailable", strategy_metrics_error)
+        )
+        strategy_metrics_payload = None
+
+    input_snapshot_sha256 = _paper_report_input_snapshot_sha256(
+        snapshot_cutoff=snapshot_cutoff,
+        status=status,
+        readiness=readiness,
+        readiness_error=readiness_error,
+        trades=trades,
+        trades_error=trades_error,
+        positions=positions,
+        positions_error=positions_error,
+        decisions=decisions,
+        decisions_error=decisions_error,
+        metrics=metric_payload,
+        metrics_error=metric_error,
+        strategies=strategies_payload,
+        strategies_error=strategies_error,
+        strategy_metrics=strategy_metrics_payload,
+        strategy_metrics_error=strategy_metrics_error,
+    )
 
     return metrics_from_api_payloads(
         report_date=report_date,
         status=status,
+        readiness=readiness_payload,
         decisions=decisions,
         trades=trades,
         positions=positions,
         metrics=metric_payload,
         strategies=strategies_payload,
+        strategy_metrics=strategy_metrics_payload,
         risk_events=tuple(events),
+        input_snapshot_sha256=input_snapshot_sha256,
     )
 
 
@@ -469,13 +667,21 @@ def render_report(
             f"| Strategy | {_escape_table_value(metrics.strategy)} | - |",
             f"| Day of soak | {metrics.day_of_soak} | 30 required |",
             f"| Decisions made | {metrics.decisions_made} | - |",
-            f"| Decisions accepted | {metrics.decisions_accepted} | - |",
-            f"| Decisions rejected | {metrics.decisions_rejected} | - |",
-            f"| Fills | {metrics.fills} | - |",
+            f"| Decisions accepted | {metrics.decisions_accepted} | >= 30 by soak end |",
+            f"| Controller diagnostic sample | {metrics.decisions_rejected} | - |",
+            f"| Entry fills | {metrics.fills} | >= 50 by soak end |",
+            f"| Distinct traded markets | {_concentration_count(metrics.execution_concentration, 'distinct_markets')} | >= 3 by soak end |",
+            f"| Distinct traded risk groups | {_concentration_count(metrics.execution_concentration, 'distinct_risk_groups')} | >= 3 by soak end |",
+            f"| Max market fill share | {_concentration_share(metrics.execution_concentration, 'max_market_fill_share')} | <= 60% by soak end |",
+            f"| Max risk group fill share | {_concentration_share(metrics.execution_concentration, 'max_risk_group_fill_share')} | <= 60% by soak end |",
             f"| Fill rate | {_fmt_ratio_percent(metrics.fill_rate)} | > 0 |",
             f"| Average slippage (bps) | {_fmt_optional(metrics.average_slippage_bps, 1)} | <= 50 |",
             f"| Today's P&L | {_fmt_money_signed(metrics.todays_pnl)} | >= -daily limit |",
             f"| Cumulative P&L | {_fmt_money_signed(metrics.cumulative_pnl)} | > 0 by soak end |",
+            f"| P&L source | {_escape_table_value(metrics.pnl_source)} | - |",
+            f"| LLM cost (estimated) | {_fmt_money(metrics.llm_cost_usdc)} | deducted from P&L |",
+            f"| LLM budget exhaustions | {metrics.llm_budget_exhaustions} | 0 required |",
+            f"| Current open-position MTM | {_fmt_money_signed(metrics.current_unrealized_pnl)} | informational |",
             f"| Max drawdown | {_fmt_percent(metrics.max_drawdown_pct)} | <= {_fmt_percent(risk.max_drawdown_pct)} |",
             f"| Open positions | {metrics.open_positions} | <= {risk.max_open_positions or 'N/A'} |",
             f"| Total exposure | {_fmt_money(metrics.total_exposure)} | <= {_fmt_money(risk.max_total_exposure)} |",
@@ -515,7 +721,7 @@ def render_report(
         lines.append("No trades today.")
     else:
         lines.append(
-            f"{metrics.fills} fills executed with average slippage "
+            f"{metrics.fills} entry fills executed with average slippage "
             f"{_fmt_optional(metrics.average_slippage_bps, 1)} bps."
         )
     lines.extend(_render_reliability_section(metrics.reliability_bins))
@@ -530,6 +736,7 @@ def render_report(
     lines.extend(_render_rejection_reason_section(metrics.rejection_reasons))
     lines.extend(_render_clamp_rejection_section(metrics.clamp_rejections))
     lines.extend(_render_selection_funnel_section(metrics.selection_funnel))
+    lines.extend(_render_position_mark_source_section(metrics.position_mark_sources))
     lines.append("")
     return "\n".join(lines)
 
@@ -619,6 +826,7 @@ def main(argv: list[str] | None = None) -> int:
             provenance=PaperReportProvenance(
                 artifact_mode="dry_run",
                 output_path="stdout",
+                input_snapshot_sha256=metrics.input_snapshot_sha256,
             ),
         )
         print(report)
@@ -644,6 +852,7 @@ def main(argv: list[str] | None = None) -> int:
             provenance=PaperReportProvenance(
                 artifact_mode="persisted",
                 output_path=str(output_path),
+                input_snapshot_sha256=metrics.input_snapshot_sha256,
             ),
         )
         _write_text_no_follow(output_path, report)
@@ -926,6 +1135,26 @@ def _fmt_ratio_percent(value: float | None) -> str:
     return f"{value * 100.0:.1f}%"
 
 
+def _concentration_count(
+    concentration: ExecutionConcentration | None,
+    field_name: str,
+) -> str:
+    if concentration is None:
+        return "N/A"
+    value = getattr(concentration, field_name)
+    return str(value) if isinstance(value, int) else "N/A"
+
+
+def _concentration_share(
+    concentration: ExecutionConcentration | None,
+    field_name: str,
+) -> str:
+    if concentration is None:
+        return "N/A"
+    value = getattr(concentration, field_name)
+    return _fmt_ratio_percent(value if isinstance(value, float) else None)
+
+
 def _fmt_probability_percent(value: float) -> str:
     return f"{value * 100.0:.1f}%"
 
@@ -954,7 +1183,7 @@ def _render_go_no_go_section(
 def _render_report_provenance_section(
     provenance: PaperReportProvenance,
 ) -> list[str]:
-    return [
+    lines = [
         "## Report Provenance",
         "",
         "| Field | Value |",
@@ -963,8 +1192,14 @@ def _render_report_provenance_section(
         f"| generated_at | {_escape_table_value(provenance.generated_at)} |",
         f"| artifact_mode | {_escape_table_value(provenance.artifact_mode)} |",
         f"| output_path | {_escape_table_value(provenance.output_path)} |",
-        "",
     ]
+    if provenance.input_snapshot_sha256 is not None:
+        lines.append(
+            "| input_snapshot_sha256 | "
+            f"{_escape_table_value(provenance.input_snapshot_sha256)} |"
+        )
+    lines.append("")
+    return lines
 
 
 def _escape_table_value(value: str) -> str:
@@ -975,6 +1210,97 @@ def _check_min_int(name: str, actual: int, minimum: int) -> PaperSoakGateCheck:
     if actual >= minimum:
         return PaperSoakGateCheck(name, True, f"{actual} >= {minimum}")
     return PaperSoakGateCheck(name, False, f"{actual} < {minimum}")
+
+
+def _check_distinct_markets(
+    metrics: PaperReportMetrics,
+    *,
+    config: PaperSoakGateConfig,
+) -> PaperSoakGateCheck:
+    concentration = metrics.execution_concentration
+    if concentration is None:
+        return _deferred_or_missing_concentration_check(
+            "distinct_markets",
+            metrics,
+            config=config,
+        )
+    return _check_min_int(
+        "distinct_markets",
+        concentration.distinct_markets,
+        config.min_distinct_markets,
+    )
+
+
+def _check_distinct_risk_groups(
+    metrics: PaperReportMetrics,
+    *,
+    config: PaperSoakGateConfig,
+) -> PaperSoakGateCheck:
+    concentration = metrics.execution_concentration
+    if concentration is None:
+        return _deferred_or_missing_concentration_check(
+            "distinct_risk_groups",
+            metrics,
+            config=config,
+        )
+    return _check_min_int(
+        "distinct_risk_groups",
+        concentration.distinct_risk_groups,
+        config.min_distinct_risk_groups,
+    )
+
+
+def _check_max_market_fill_share(
+    metrics: PaperReportMetrics,
+    *,
+    config: PaperSoakGateConfig,
+) -> PaperSoakGateCheck:
+    concentration = metrics.execution_concentration
+    if concentration is None or concentration.max_market_fill_share is None:
+        return _deferred_or_missing_concentration_check(
+            "max_market_fill_share",
+            metrics,
+            config=config,
+        )
+    return _check_optional_lte(
+        "max_market_fill_share",
+        concentration.max_market_fill_share,
+        config.max_market_fill_share,
+    )
+
+
+def _check_max_risk_group_fill_share(
+    metrics: PaperReportMetrics,
+    *,
+    config: PaperSoakGateConfig,
+) -> PaperSoakGateCheck:
+    concentration = metrics.execution_concentration
+    if concentration is None or concentration.max_risk_group_fill_share is None:
+        return _deferred_or_missing_concentration_check(
+            "max_risk_group_fill_share",
+            metrics,
+            config=config,
+        )
+    return _check_optional_lte(
+        "max_risk_group_fill_share",
+        concentration.max_risk_group_fill_share,
+        config.max_risk_group_fill_share,
+    )
+
+
+def _deferred_or_missing_concentration_check(
+    name: str,
+    metrics: PaperReportMetrics,
+    *,
+    config: PaperSoakGateConfig,
+) -> PaperSoakGateCheck:
+    if metrics.fills < config.min_fills:
+        return PaperSoakGateCheck(
+            name,
+            True,
+            f"deferred until {config.min_fills} fills",
+        )
+    return PaperSoakGateCheck(name, False, "missing execution concentration evidence")
 
 
 def _check_zero(name: str, actual: int, noun: str) -> PaperSoakGateCheck:
@@ -996,11 +1322,68 @@ def _check_strategy_evidence(strategy: str) -> PaperSoakGateCheck:
             False,
             "missing concrete strategy_id@strategy_version_id",
         )
+    paper_only_labels = tuple(
+        label for label in labels if _is_paper_only_strategy_label(label)
+    )
+    if paper_only_labels:
+        return PaperSoakGateCheck(
+            "strategy_evidence",
+            False,
+            "paper-only strategy cannot be final GO evidence: "
+            f"{', '.join(paper_only_labels)}",
+        )
     return PaperSoakGateCheck(
         "strategy_evidence",
         True,
         ", ".join(labels),
     )
+
+
+def _is_paper_only_strategy_label(label: str) -> bool:
+    strategy_id, _, _strategy_version_id = label.partition("@")
+    normalized = strategy_id.strip().lower()
+    return normalized in _PAPER_ONLY_STRATEGY_IDS
+
+
+def _check_readiness(metrics: PaperReportMetrics) -> PaperSoakGateCheck:
+    not_ready_checks = {
+        name: value
+        for name, value in metrics.readiness_checks
+        if value not in {"ready", "disabled"}
+    }
+    if metrics.readiness_status == "ready" and not not_ready_checks:
+        return PaperSoakGateCheck(
+            "readiness",
+            True,
+            _readiness_gate_detail(
+                status=metrics.readiness_status,
+                checks=metrics.readiness_checks,
+                only_non_ready=False,
+            ),
+        )
+    return PaperSoakGateCheck(
+        "readiness",
+        False,
+        _readiness_gate_detail(
+            status=metrics.readiness_status,
+            checks=tuple(sorted(not_ready_checks.items())),
+            only_non_ready=True,
+        ),
+    )
+
+
+def _readiness_gate_detail(
+    *,
+    status: str,
+    checks: tuple[tuple[str, str], ...],
+    only_non_ready: bool,
+) -> str:
+    parts = [f"status={status or 'missing'}"]
+    if checks:
+        parts.extend(f"{name}={value}" for name, value in sorted(checks))
+    elif only_non_ready:
+        parts.append("checks=missing")
+    return "; ".join(parts)
 
 
 def _looks_like_placeholder(value: str) -> bool:
@@ -1165,18 +1548,80 @@ def _trade_costs(decisions: Sequence[TradeDecision]) -> tuple[TradeCostBreakdown
     for decision in decisions:
         if decision.spread_bps_at_decision is None:
             continue
-        gross_edge = abs(decision.prob_estimate - decision.limit_price)
-        spread_cost = decision.spread_bps_at_decision / 10_000.0
+        gross_edge = decision.prob_estimate - decision.limit_price
+        spread_cost = _price_space_cost(
+            bps=decision.spread_bps_at_decision,
+            price=decision.limit_price,
+        )
+        slippage_cost = _price_space_cost(
+            bps=decision.max_slippage_bps,
+            price=decision.limit_price,
+        )
         costs.append(
             TradeCostBreakdown(
                 decision_id=decision.decision_id,
                 market_id=decision.market_id,
                 gross_edge=gross_edge,
                 spread_cost=spread_cost,
-                net_edge=gross_edge - spread_cost,
+                slippage_cost=slippage_cost,
+                net_edge=gross_edge - spread_cost - slippage_cost,
             )
         )
     return tuple(costs)
+
+
+def _trade_costs_from_decision_rows(
+    decisions: Sequence[Mapping[str, object]],
+) -> tuple[TradeCostBreakdown, ...]:
+    costs: list[TradeCostBreakdown] = []
+    for row in _entry_decision_rows(decisions):
+        spread_bps = _optional_float_from_mapping(row, "spread_bps_at_decision")
+        gross_edge = _decision_edge(row)
+        if spread_bps is None or gross_edge is None:
+            continue
+        spread_cost = _price_space_cost(
+            bps=spread_bps,
+            price=_decision_price(row),
+        )
+        evidence_obj = row.get("decision_evidence")
+        evidence: Mapping[str, object] = (
+            evidence_obj if isinstance(evidence_obj, Mapping) else {}
+        )
+        fee_cost = _optional_float_from_mapping(evidence, "fee_edge_at_decision") or 0.0
+        slippage_cost = (
+            _optional_float_from_mapping(evidence, "slippage_edge_at_decision") or 0.0
+        )
+        net_edge = _optional_float_from_mapping(evidence, "net_edge_after_costs")
+        if net_edge is None:
+            net_edge = gross_edge - spread_cost - fee_cost - slippage_cost
+        costs.append(
+            TradeCostBreakdown(
+                decision_id=_string_from_mapping(row, "decision_id", "unknown"),
+                market_id=_string_from_mapping(row, "market_id", "unknown"),
+                gross_edge=gross_edge,
+                spread_cost=spread_cost,
+                fee_cost=fee_cost,
+                slippage_cost=slippage_cost,
+                net_edge=net_edge,
+            )
+        )
+    return tuple(costs)
+
+
+def _hit_rate_from_metrics(
+    metric_rows: dict[str, Any],
+    evaluator: dict[str, Any],
+) -> float | None:
+    hit_rate = _optional_float_from_dict(metric_rows, "win_rate")
+    if hit_rate is None:
+        return None
+    metric_record_count = _int_value(metric_rows.get("record_count"))
+    evaluator_record_count = _int_value(evaluator.get("eval_records_total"))
+    if metric_record_count == 0 or (
+        metric_record_count is None and evaluator_record_count == 0
+    ):
+        return None
+    return hit_rate
 
 
 def _clamp_rejections(
@@ -1192,11 +1637,21 @@ def _clamp_rejections(
     return tuple(sorted(counts.items()))
 
 
+def _clamp_rejections_from_diagnostic_counts(
+    diagnostic_counts: Sequence[tuple[str, int]],
+) -> tuple[tuple[str, int], ...]:
+    for reason, count in diagnostic_counts:
+        if reason == "calibration_clamp_rejected" and count > 0:
+            return (("aggregate", count),)
+    return ()
+
+
 def _selection_funnel(log_events: Sequence[Mapping[str, object]]) -> SelectionFunnel:
     discovered = 0
     selected = 0
     routed = 0
     forecasted = 0
+    controller_emitted = 0
     traded = 0
     for event in log_events:
         event_name = event.get("event")
@@ -1207,14 +1662,90 @@ def _selection_funnel(log_events: Sequence[Mapping[str, object]]) -> SelectionFu
             routed += _event_int(event, "routed_count")
         elif event_name == "funnel_pipeline":
             forecasted += _event_int(event, "forecasted_count")
+            controller_emitted += _event_int(event, "emitted_count")
             traded += _event_int(event, "traded_count")
+            if "emitted_count" not in event:
+                controller_emitted += _event_int(event, "traded_count")
     return SelectionFunnel(
         discovered=discovered,
         selected=selected,
         routed=routed,
         forecasted=forecasted,
+        controller_emitted=controller_emitted,
         traded=traded,
     )
+
+
+def _selection_funnel_from_metrics(
+    metrics: Mapping[str, object],
+) -> SelectionFunnel | None:
+    discovered = _int_metric_value(metrics, SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC)
+    selected = _int_metric_value(metrics, SELECTION_FUNNEL_SELECTED_TOTAL_METRIC)
+    routed = _int_metric_value(metrics, SELECTION_FUNNEL_ROUTED_TOTAL_METRIC)
+    forecasted = _int_metric_value(metrics, SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC)
+    controller_emitted = _int_metric_value(
+        metrics,
+        SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
+    )
+    traded = _int_metric_value(metrics, SELECTION_FUNNEL_TRADED_TOTAL_METRIC)
+    if controller_emitted == 0:
+        controller_emitted = _int_metric_value(
+            metrics,
+            SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
+        )
+    if (
+        discovered
+        == selected
+        == routed
+        == forecasted
+        == controller_emitted
+        == traded
+        == 0
+    ):
+        return None
+    return SelectionFunnel(
+        discovered=discovered,
+        selected=selected,
+        routed=routed,
+        forecasted=forecasted,
+        controller_emitted=controller_emitted,
+        traded=traded,
+    )
+
+
+def _selection_funnel_risk_events(
+    funnel: SelectionFunnel | None,
+) -> tuple[tuple[str, str, str], ...]:
+    if funnel is None:
+        return ()
+    adjacent_counts = (
+        ("discovered", funnel.discovered, "selected", funnel.selected),
+        ("selected", funnel.selected, "routed", funnel.routed),
+        ("routed", funnel.routed, "forecasted", funnel.forecasted),
+        (
+            "forecasted",
+            funnel.forecasted,
+            "controller_emitted",
+            funnel.controller_emitted,
+        ),
+        ("controller_emitted", funnel.controller_emitted, "traded", funnel.traded),
+    )
+    return tuple(
+        (
+            "selection_funnel",
+            "selection funnel stage count inverted",
+            f"{later_name}={later_count} > {earlier_name}={earlier_count}",
+        )
+        for earlier_name, earlier_count, later_name, later_count in adjacent_counts
+        if earlier_count > 0 and later_count > earlier_count
+    )
+
+
+def _int_metric_value(metrics: Mapping[str, object], key: str) -> int:
+    value = _optional_float_from_mapping(metrics, key)
+    if value is None or not math.isfinite(value) or value <= 0.0:
+        return 0
+    return int(value)
 
 
 def _event_int(event: Mapping[str, object], key: str) -> int:
@@ -1306,14 +1837,17 @@ def _render_secondary_baseline_score_section(
 
 
 def _render_trade_cost_section(costs: Sequence[TradeCostBreakdown]) -> list[str]:
-    lines = ["", "## Spread Cost Decomposition", ""]
+    lines = ["", "## Trade Cost Decomposition", ""]
     if not costs:
         lines.append("No trade cost data.")
         return lines
     lines.extend(
         [
-            "| Decision | Market | Gross edge | Spread cost | Net edge |",
-            "|---|---|---:|---:|---:|",
+            (
+                "| Decision | Market | Gross edge | Spread cost | Fee cost | "
+                "Slippage cost | Net after costs |"
+            ),
+            "|---|---|---:|---:|---:|---:|---:|",
         ]
     )
     for cost in costs:
@@ -1322,6 +1856,8 @@ def _render_trade_cost_section(costs: Sequence[TradeCostBreakdown]) -> list[str]
             f"{_escape_table_value(cost.market_id)} | "
             f"{_fmt_probability_percent(cost.gross_edge)} | "
             f"{_fmt_probability_percent(cost.spread_cost)} | "
+            f"{_fmt_probability_percent(cost.fee_cost)} | "
+            f"{_fmt_probability_percent(cost.slippage_cost)} | "
             f"{_fmt_probability_percent(cost.net_edge)} |"
         )
     return lines
@@ -1354,12 +1890,26 @@ def _render_selection_funnel_section(funnel: SelectionFunnel | None) -> list[str
     if funnel is None:
         lines.append("No funnel events recorded.")
         return lines
-    lines.extend(["| Stage | Count |", "|---|---:|"])
+    lines.extend(["| Stage | Asset Count |", "|---|---:|"])
     lines.append(f"| Discovered | {funnel.discovered} |")
     lines.append(f"| Selected | {funnel.selected} |")
     lines.append(f"| Routed | {funnel.routed} |")
     lines.append(f"| Forecasted | {funnel.forecasted} |")
+    lines.append(f"| Controller Emitted | {funnel.controller_emitted} |")
     lines.append(f"| Traded | {funnel.traded} |")
+    return lines
+
+
+def _render_position_mark_source_section(
+    mark_sources: Sequence[tuple[str, int]],
+) -> list[str]:
+    lines = ["", "## Position Mark Sources", ""]
+    if not mark_sources:
+        lines.append("No open positions recorded.")
+        return lines
+    lines.extend(["| Mark Source | Open Positions |", "|---|---:|"])
+    for source, count in mark_sources:
+        lines.append(f"| {_escape_table_value(source)} | {count} |")
     return lines
 
 
@@ -1390,21 +1940,121 @@ def _active_strategy_version_labels(strategies: dict[str, Any]) -> tuple[str, ..
     return tuple(labels)
 
 
+def _strategy_metrics_risk_events(
+    strategies: dict[str, Any] | None,
+    strategy_metrics: dict[str, Any] | None,
+) -> list[tuple[str, str, str]]:
+    if strategies is None or strategy_metrics is None:
+        return []
+    active_labels = set(_active_strategy_version_labels(strategies))
+    if not active_labels:
+        return []
+
+    rows_by_label: dict[str, dict[str, Any]] = {}
+    for row in _list_value(strategy_metrics, "strategies"):
+        strategy_id = row.get("strategy_id")
+        strategy_version_id = row.get("strategy_version_id")
+        if (
+            isinstance(strategy_id, str)
+            and strategy_id
+            and isinstance(strategy_version_id, str)
+            and strategy_version_id
+        ):
+            rows_by_label[f"{strategy_id}@{strategy_version_id}"] = row
+
+    events: list[tuple[str, str, str]] = []
+    for label in sorted(active_labels):
+        metric_row = rows_by_label.get(label)
+        if metric_row is None:
+            events.append(
+                (
+                    "strategy",
+                    "active strategy metrics missing",
+                    f"{label} missing from /strategies/metrics",
+                )
+            )
+            continue
+        record_count = _int_from_dict(metric_row, "record_count")
+        if metric_row.get("insufficient_samples") is True or record_count <= 0:
+            events.append(
+                (
+                    "strategy",
+                    "active strategy samples insufficient",
+                    f"{label} record_count={record_count}",
+                )
+            )
+            quote_record_count = _int_from_dict(metric_row, "quote_record_count")
+            pnl_source = metric_row.get("pnl_source")
+            quote_mtm_pnl = _optional_float_from_dict(metric_row, "quote_mtm_pnl")
+            if (
+                pnl_source == "quote_mtm"
+                and quote_record_count > 0
+                and (
+                    quote_mtm_pnl is None
+                    or Decimal(str(quote_mtm_pnl)) <= Decimal("0.0")
+                )
+            ):
+                events.append(
+                    (
+                        "strategy",
+                        "active strategy quote-mtm pnl not positive",
+                        (
+                            f"{label} quote_mtm_pnl="
+                            f"{0.0 if quote_mtm_pnl is None else quote_mtm_pnl:.4f}"
+                        ),
+                    )
+                )
+            continue
+        pnl = _optional_float_from_dict(metric_row, "pnl")
+        pnl_decimal = None if pnl is None else Decimal(str(pnl))
+        if pnl_decimal is None or pnl_decimal <= Decimal("0.0"):
+            events.append(
+                (
+                    "strategy",
+                    "active strategy pnl not positive",
+                    f"{label} pnl={0.0 if pnl is None else pnl:.4f}",
+                )
+            )
+        fill_rate = _optional_float_from_dict(metric_row, "fill_rate")
+        fill_rate_decimal = None if fill_rate is None else Decimal(str(fill_rate))
+        if fill_rate_decimal is None or fill_rate_decimal <= Decimal("0.0"):
+            events.append(
+                (
+                    "strategy",
+                    "active strategy fill rate not positive",
+                    f"{label} fill_rate={0.0 if fill_rate is None else fill_rate:.4f}",
+                )
+            )
+        brier_improvement = _optional_float_from_dict(
+            metric_row,
+            "brier_improvement_overall",
+        )
+        brier_improvement_decimal = (
+            None if brier_improvement is None else Decimal(str(brier_improvement))
+        )
+        if (
+            brier_improvement_decimal is None
+            or brier_improvement_decimal <= Decimal("0.0")
+        ):
+            events.append(
+                (
+                    "strategy",
+                    "active strategy brier improvement not positive",
+                    (
+                        f"{label} brier_improvement_overall="
+                        f"{0.0 if brier_improvement is None else brier_improvement:.4f}"
+                    ),
+                )
+            )
+    return events
+
+
 def _strategy_label(
     *,
     status: dict[str, Any],
     strategies: dict[str, Any] | None,
 ) -> str:
-    labels: list[str] = []
-    for row in _list_value(strategies or {}, "strategies"):
-        strategy_id = row.get("strategy_id")
-        if not isinstance(strategy_id, str) or not strategy_id:
-            continue
-        active_version_id = row.get("active_version_id")
-        if isinstance(active_version_id, str) and active_version_id:
-            labels.append(f"{strategy_id}@{active_version_id}")
-        else:
-            labels.append(strategy_id)
+    labels = list(_active_strategy_version_labels(strategies or {}))
     if labels:
         return ", ".join(labels)
 
@@ -1426,6 +2076,75 @@ def _run_mode_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
     ]
 
 
+def _readiness_risk_events(readiness: object) -> list[tuple[str, str, str]]:
+    if readiness is _READINESS_NOT_SUPPLIED:
+        return []
+    if not isinstance(readiness, Mapping):
+        return [
+            (
+                "report generation",
+                "readiness evidence missing",
+                "/readiness snapshot is required for paper-soak GO reports",
+            )
+        ]
+
+    status = readiness.get("status")
+    status_text = status if isinstance(status, str) and status else "missing"
+    raw_checks = readiness.get("checks")
+    if not isinstance(raw_checks, Mapping):
+        return [
+            (
+                "readiness",
+                "readiness not ready",
+                f"status={status_text}; checks=missing",
+            )
+        ]
+
+    not_ready_checks = {
+        str(name): value
+        for name, value in raw_checks.items()
+        if isinstance(name, str)
+        and isinstance(value, str)
+        and value not in {"ready", "disabled"}
+    }
+    if status_text == "ready" and not not_ready_checks:
+        return []
+
+    parts = [f"status={status_text}"]
+    parts.extend(
+        f"{name}={not_ready_checks[name]}" for name in sorted(not_ready_checks)
+    )
+    return [
+        (
+            "readiness",
+            "readiness not ready",
+            "; ".join(parts),
+        )
+    ]
+
+
+def _readiness_status(readiness: object) -> str:
+    if not isinstance(readiness, Mapping):
+        return "missing"
+    status = readiness.get("status")
+    return status if isinstance(status, str) and status else "missing"
+
+
+def _readiness_checks(readiness: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(readiness, Mapping):
+        return ()
+    checks = readiness.get("checks")
+    if not isinstance(checks, Mapping):
+        return ()
+    return tuple(
+        sorted(
+            (name, value)
+            for name, value in checks.items()
+            if isinstance(name, str) and isinstance(value, str)
+        )
+    )
+
+
 def _sensor_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
     events: list[tuple[str, str, str]] = []
     for row in _list_value(status, "sensors"):
@@ -1443,18 +2162,120 @@ def _sensor_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
     return events
 
 
+def _current_controller_runtime_risk_events(
+    controller: Mapping[str, Any],
+) -> list[tuple[str, str, str]]:
+    runtime_count = _int_value(controller.get("current_runtimes_total"))
+    if runtime_count is None:
+        return []
+    if runtime_count > 0:
+        return []
+    return [
+        (
+            "controller",
+            "controller runtime unavailable",
+            f"status.controller.current_runtimes_total={runtime_count}",
+        )
+    ]
+
+
+def _runtime_continuity_risk_events(
+    status: dict[str, Any],
+    *,
+    day_of_soak: int,
+) -> list[tuple[str, str, str]]:
+    if day_of_soak < 30:
+        return []
+    continuity = status.get("runtime_continuity")
+    if not isinstance(continuity, dict):
+        return [
+            (
+                "report generation",
+                "runtime continuity evidence missing",
+                (
+                    "status.runtime_continuity from postgres_runtime_heartbeats "
+                    "is required once soak_days >= 30"
+                ),
+            )
+        ]
+    source = continuity.get("source")
+    if source != "postgres_runtime_heartbeats":
+        return [
+            (
+                "report generation",
+                "runtime continuity evidence invalid",
+                "status.runtime_continuity.source must be postgres_runtime_heartbeats",
+            )
+        ]
+    healthy_days = _int_value(continuity.get("healthy_days"))
+    if healthy_days is None or healthy_days < 30:
+        return [
+            (
+                "report generation",
+                "runtime continuity evidence insufficient",
+                f"healthy_days={0 if healthy_days is None else healthy_days} < 30",
+            )
+        ]
+    max_gap_seconds = _optional_float_from_mapping(continuity, "max_gap_seconds")
+    if max_gap_seconds is None or max_gap_seconds > 300.0:
+        return [
+            (
+                "report generation",
+                "runtime continuity gap too large",
+                f"max_gap_seconds={0.0 if max_gap_seconds is None else max_gap_seconds:.1f} > 300.0",
+            )
+        ]
+    unhealthy_heartbeat_count = _int_value(continuity.get("unhealthy_heartbeat_count"))
+    if unhealthy_heartbeat_count is None or unhealthy_heartbeat_count > 0:
+        return [
+            (
+                "runtime",
+                "unhealthy runtime heartbeats",
+                (
+                    "unhealthy_heartbeat_count="
+                    f"{0 if unhealthy_heartbeat_count is None else unhealthy_heartbeat_count}"
+                ),
+            )
+        ]
+    min_controller_runtimes = _int_value(continuity.get("min_controller_runtimes"))
+    if min_controller_runtimes is None or min_controller_runtimes <= 0:
+        return [
+            (
+                "controller",
+                "controller runtime detached during soak",
+                (
+                    "min_controller_runtimes="
+                    f"{0 if min_controller_runtimes is None else min_controller_runtimes}"
+                ),
+            )
+        ]
+    return []
+
+
 def _actuator_risk_events(status: dict[str, Any]) -> list[tuple[str, str, str]]:
     actuator = _dict_value(status, "actuator")
+    events: list[tuple[str, str, str]] = []
+    if actuator.get("halted") is True:
+        reason = str(actuator.get("halt_reason") or "unknown")
+        triggered_at = str(actuator.get("halt_triggered_at") or "unknown")
+        events.append(
+            (
+                "actuator",
+                "active_halt",
+                f"{reason} since {triggered_at}",
+            )
+        )
     halt_recovery_cycles_7d = _int_from_dict(
         actuator,
         "halt_recovery_cycles_7d",
     )
     if halt_recovery_cycles_7d <= 0:
-        return []
+        return events
     detail = (
         f"{halt_recovery_cycles_7d} recovered halt cycle(s) in trailing 7d"
     )
-    return [("actuator", "halt_recovery_cycles_7d", detail)]
+    events.append(("actuator", "halt_recovery_cycles_7d", detail))
+    return events
 
 
 def _unresolved_incident_evidence_risk_events(
@@ -1578,67 +2399,281 @@ def _secondary_baseline_score_risk_events(
     return events
 
 
+def _secondary_baseline_scores_are_due(
+    metrics: dict[str, Any],
+    evaluator: Mapping[str, Any],
+) -> bool:
+    metric_record_count = _int_value(metrics.get("record_count"))
+    if metric_record_count is not None:
+        return metric_record_count > 0
+    evaluator_record_count = _int_value(evaluator.get("eval_records_total"))
+    if evaluator_record_count is not None:
+        return evaluator_record_count > 0
+    return (
+        _optional_float_from_dict_first(
+            evaluator,
+            (
+                "brier_14d",
+                "brier_overall",
+                "baseline_brier_14d",
+                "baseline_brier_overall",
+                "brier_improvement_14d",
+                "brier_improvement_overall",
+            ),
+        )
+        is not None
+    )
+
+
 def _daily_pnl_from_metrics(
     metrics: dict[str, Any],
     *,
     report_date: date,
 ) -> tuple[float, list[tuple[str, str, str]]]:
-    raw_series = metrics.get("pnl_series")
+    raw_series, series_path = _pnl_series_from_metrics(metrics)
     if not isinstance(raw_series, Sequence) or isinstance(raw_series, (str, bytes)):
         return 0.0, [
             (
                 "report generation",
                 "daily P&L evidence missing",
-                "metrics.pnl_series is required",
+                f"{series_path} is required",
             )
         ]
 
-    parsed_rows: list[tuple[datetime, float]] = []
+    parsed_rows: list[tuple[datetime, Decimal]] = []
     for raw_row in raw_series:
         if not isinstance(raw_row, Mapping):
-            return 0.0, [_invalid_daily_pnl_evidence_event()]
+            return 0.0, [_invalid_daily_pnl_evidence_event(series_path)]
         recorded_at = _parse_datetime(raw_row.get("recorded_at"))
         pnl = _optional_float_from_mapping(raw_row, "pnl")
         if recorded_at is None or pnl is None:
-            return 0.0, [_invalid_daily_pnl_evidence_event()]
-        parsed_rows.append((recorded_at, pnl))
+            return 0.0, [_invalid_daily_pnl_evidence_event(series_path)]
+        parsed_rows.append((recorded_at, Decimal(str(pnl))))
 
     if not parsed_rows:
         return 0.0, [
             (
                 "report generation",
                 "daily P&L evidence missing",
-                "metrics.pnl_series is empty",
+                f"{series_path} is empty",
             )
         ]
 
     parsed_rows.sort(key=lambda row: row[0])
     day_start = datetime(report_date.year, report_date.month, report_date.day, tzinfo=UTC)
     day_end = day_start + timedelta(days=1)
-    start_pnl = 0.0
-    end_pnl: float | None = None
-    for recorded_at, pnl in parsed_rows:
+    start_pnl = Decimal("0.0")
+    end_pnl: Decimal | None = None
+    for recorded_at, pnl_decimal in parsed_rows:
         if recorded_at < day_start:
-            start_pnl = pnl
+            start_pnl = pnl_decimal
         if recorded_at < day_end:
-            end_pnl = pnl
+            end_pnl = pnl_decimal
 
     if end_pnl is None:
         return 0.0, [
             (
                 "report generation",
                 "daily P&L evidence missing",
-                "metrics.pnl_series has no records before report day end",
+                f"{series_path} has no records before report day end",
             )
         ]
-    return end_pnl - start_pnl, []
+    return float(end_pnl - start_pnl), []
 
 
-def _invalid_daily_pnl_evidence_event() -> tuple[str, str, str]:
+def _cumulative_pnl_from_metrics(
+    metrics: dict[str, Any],
+    *,
+    report_date: date,
+) -> float:
+    raw_series, _series_path = _pnl_series_from_metrics(metrics)
+    if not isinstance(raw_series, Sequence) or isinstance(raw_series, (str, bytes)):
+        return 0.0
+
+    day_start = datetime(report_date.year, report_date.month, report_date.day, tzinfo=UTC)
+    day_end = day_start + timedelta(days=1)
+    latest_recorded_at: datetime | None = None
+    latest_pnl: Decimal | None = None
+    for raw_row in raw_series:
+        if not isinstance(raw_row, Mapping):
+            return 0.0
+        recorded_at = _parse_datetime(raw_row.get("recorded_at"))
+        pnl = _optional_float_from_mapping(raw_row, "pnl")
+        if recorded_at is None or pnl is None:
+            return 0.0
+        if recorded_at >= day_end:
+            continue
+        if latest_recorded_at is None or recorded_at > latest_recorded_at:
+            latest_recorded_at = recorded_at
+            latest_pnl = Decimal(str(pnl))
+    return 0.0 if latest_pnl is None else float(latest_pnl)
+
+
+def _pnl_series_from_metrics(metrics: Mapping[str, Any]) -> tuple[object, str]:
+    raw_series = metrics.get("pnl_series")
+    if _is_non_empty_sequence(raw_series):
+        return raw_series, "metrics.pnl_series"
+
+    if raw_series is None or _is_empty_sequence(raw_series):
+        quote_calibration = metrics.get("quote_calibration")
+        if isinstance(quote_calibration, Mapping):
+            raw_quote_series = quote_calibration.get("pnl_series")
+            if _is_non_empty_sequence(raw_quote_series):
+                return raw_quote_series, "metrics.quote_calibration.pnl_series"
+
+    return raw_series, "metrics.pnl_series"
+
+
+def _pnl_source_from_metrics(metrics: Mapping[str, Any]) -> str:
+    _raw_series, series_path = _pnl_series_from_metrics(metrics)
+    if series_path == "metrics.quote_calibration.pnl_series":
+        return "quote_mtm"
+    return "final_eval"
+
+
+def _llm_total_cost_usdc(metrics: Mapping[str, Any]) -> float:
+    return _optional_float_from_mapping(
+        metrics,
+        LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    ) or 0.0
+
+
+def _llm_soak_cost_usdc(
+    metrics: Mapping[str, Any],
+) -> tuple[float, list[tuple[str, str, str]]]:
+    total_cost = _llm_total_cost_usdc(metrics)
+    if total_cost <= 0.0 or not _metrics_payload_has_window(metrics):
+        return total_cost, []
+    return 0.0, [
+        (
+            "llm",
+            "windowed LLM cost evidence missing",
+            (
+                f"{LLM_ESTIMATED_COST_USDC_TOTAL_METRIC}={total_cost:.4f} is "
+                "process-global and cannot be deducted from a paper-soak window"
+            ),
+        )
+    ]
+
+
+def _metrics_payload_has_window(metrics: Mapping[str, Any]) -> bool:
+    return (
+        metrics.get("window_started_at") is not None
+        or metrics.get("window_ended_at") is not None
+    )
+
+
+def _llm_daily_cost_usdc(metrics: Mapping[str, Any]) -> float:
+    return _optional_float_from_mapping(metrics, LLM_DAILY_COST_USDC_METRIC) or 0.0
+
+
+def _llm_daily_cost_limit_usdc(metrics: Mapping[str, Any]) -> float:
+    return (
+        _optional_float_from_mapping(metrics, LLM_DAILY_COST_LIMIT_USDC_METRIC) or 0.0
+    )
+
+
+def _llm_budget_exhaustions(metrics: Mapping[str, Any]) -> int:
+    raw_exhaustions = _optional_float_from_mapping(
+        metrics,
+        LLM_BUDGET_EXHAUSTED_TOTAL_METRIC,
+    )
+    if raw_exhaustions is None or not math.isfinite(raw_exhaustions):
+        return 0
+    return max(0, int(raw_exhaustions))
+
+
+def _llm_budget_risk_events(
+    metrics: Mapping[str, Any],
+) -> tuple[tuple[str, str, str], ...]:
+    exhaustions = _llm_budget_exhaustions(metrics)
+    if exhaustions <= 0:
+        return ()
+    daily_cost = _llm_daily_cost_usdc(metrics)
+    limit = _llm_daily_cost_limit_usdc(metrics)
+    limit_detail = f", limit={limit:.4f}" if limit > 0 else ""
+    return (
+        (
+            "llm",
+            "daily LLM budget exhausted",
+            f"{exhaustions} exhaustion(s); daily_cost={daily_cost:.4f}"
+            f"{limit_detail}; forecasts are falling back to non-LLM branches",
+        ),
+    )
+
+
+def _max_drawdown_pct_from_metrics(metrics: Mapping[str, Any]) -> float | None:
+    if _pnl_source_from_metrics(metrics) == "quote_mtm":
+        quote_calibration = metrics.get("quote_calibration")
+        if isinstance(quote_calibration, Mapping):
+            return _optional_float_from_mapping(
+                quote_calibration,
+                "max_drawdown_pct",
+            )
+        return None
+    return _optional_float_from_mapping(metrics, "max_drawdown_pct")
+
+
+def _accepted_decision_count(
+    decision_rows: Sequence[Mapping[str, object]],
+    entry_trade_rows: Sequence[Mapping[str, object]],
+) -> int:
+    accepted_decision_ids = {
+        decision_id
+        for row in _entry_decision_rows(decision_rows)
+        if (decision_id := _string_from_mapping(row, "decision_id", ""))
+        and _decision_status_is_accepted(row.get("status"))
+    }
+    if accepted_decision_ids:
+        return len(accepted_decision_ids)
+
+    trade_decision_ids = {
+        decision_id
+        for row in entry_trade_rows
+        if (decision_id := _string_from_mapping(row, "decision_id", ""))
+        and not _is_exit_decision_id(decision_id)
+    }
+    if trade_decision_ids:
+        return len(trade_decision_ids)
+    return len(entry_trade_rows)
+
+
+def _decision_status_is_accepted(raw_status: object) -> bool:
+    if not isinstance(raw_status, str):
+        return False
+    return raw_status.lower() in {
+        "accepted",
+        "queued",
+        "submitted",
+        "partially_filled",
+        "filled",
+        "matched",
+    }
+
+
+def _is_empty_sequence(value: object) -> bool:
+    return (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes))
+        and len(value) == 0
+    )
+
+
+def _is_non_empty_sequence(value: object) -> bool:
+    return (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes))
+        and len(value) > 0
+    )
+
+
+def _invalid_daily_pnl_evidence_event(
+    series_path: str = "metrics.pnl_series",
+) -> tuple[str, str, str]:
     return (
         "report generation",
         "daily P&L evidence invalid",
-        "metrics.pnl_series entries require recorded_at and finite pnl",
+        f"{series_path} entries require recorded_at and finite pnl",
     )
 
 
@@ -1662,6 +2697,43 @@ def _non_finite_position_risk_events(
                 )
             )
     return events
+
+
+def _position_mark_sources(
+    positions: Sequence[Mapping[str, object]],
+) -> tuple[tuple[str, int], ...]:
+    counts: dict[str, int] = {}
+    for row in positions:
+        raw_source = row.get("mark_source")
+        source = (
+            raw_source.strip().lower()
+            if isinstance(raw_source, str) and raw_source.strip()
+            else "unknown"
+        )
+        counts[source] = counts.get(source, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
+def _position_mark_source_risk_events(
+    mark_sources: Sequence[tuple[str, int]],
+) -> list[tuple[str, str, str]]:
+    non_clob_sources = tuple(
+        (source, count)
+        for source, count in mark_sources
+        if source != "clob" and count > 0
+    )
+    if not non_clob_sources:
+        return []
+    detail = ", ".join(
+        f"{source}={count}" for source, count in non_clob_sources
+    )
+    return [
+        (
+            "positions",
+            "open-position MTM uses non-CLOB mark source",
+            f"{detail}; current open-position MTM is informational",
+        )
+    ]
 
 
 def _non_finite_trade_risk_events(
@@ -1716,16 +2788,16 @@ def _non_finite_decision_risk_events(
 def _decision_payload_completeness_risk_events(
     decision_rows: Sequence[Mapping[str, object]],
     *,
-    decisions_made: int,
+    status_decisions_made: int,
 ) -> list[tuple[str, str, str]]:
-    if decisions_made <= len(decision_rows):
+    if status_decisions_made <= len(decision_rows):
         return []
     return [
         (
             "report generation",
             "decision payload incomplete",
             f"/decisions returned {len(decision_rows)} row(s), "
-            f"but /status.controller.decisions_total reports {decisions_made}",
+            f"but /status.controller.decisions_total reports {status_decisions_made}",
         )
     ]
 
@@ -1733,11 +2805,12 @@ def _decision_payload_completeness_risk_events(
 def _baseline_evidence_coverage(
     decisions: Sequence[Mapping[str, object]],
 ) -> BaselineEvidenceCoverage | None:
-    if not decisions:
+    entry_decisions = _entry_decision_rows(decisions)
+    if not entry_decisions:
         return None
-    evidence_rows = _decision_evidence_rows(decisions)
+    evidence_rows = _decision_evidence_rows(entry_decisions)
     return BaselineEvidenceCoverage(
-        decisions=len(decisions),
+        decisions=len(entry_decisions),
         market_implied_count=_baseline_evidence_count(
             evidence_rows,
             "market_implied_baseline_prob_estimate",
@@ -1769,13 +2842,14 @@ def _baseline_evidence_count(
 def _baseline_evidence_risk_events(
     decisions: Sequence[Mapping[str, object]],
 ) -> list[tuple[str, str, str]]:
-    if not decisions:
+    entry_decisions = _entry_decision_rows(decisions)
+    if not entry_decisions:
         return []
 
-    evidence_rows = _decision_evidence_rows(decisions)
+    evidence_rows = _decision_evidence_rows(entry_decisions)
 
     events: list[tuple[str, str, str]] = []
-    missing_rows = len(decisions) - len(evidence_rows)
+    missing_rows = len(entry_decisions) - len(evidence_rows)
     if missing_rows > 0:
         events.append(
             (
@@ -1883,6 +2957,93 @@ def _fetch_api_payload(
         return {}, exc.__class__.__name__
 
 
+def _fetch_api_list_pages(
+    *,
+    api_base_url: str,
+    path: str,
+    api_token: str | None,
+    payload_key: str | None = None,
+    query: Mapping[str, object] | None = None,
+) -> tuple[list[object], str | None]:
+    rows: list[object] = []
+    offset = 0
+    previous_page: list[object] | None = None
+    while True:
+        page_query: dict[str, object] = {"limit": _API_PAGE_SIZE, "offset": offset}
+        if query is not None:
+            page_query.update(query)
+        page_path = f"{path}?{urlencode(page_query)}"
+        payload, error = _fetch_api_payload(
+            api_base_url=api_base_url,
+            path=page_path,
+            api_token=api_token,
+        )
+        if error is not None:
+            return [], error
+        page_payload: object
+        if payload_key is None:
+            page_payload = payload
+        elif isinstance(payload, dict):
+            page_payload = payload.get(payload_key)
+        else:
+            return [], "invalid JSON payload"
+        if not isinstance(page_payload, list):
+            return [], "invalid JSON payload"
+        if previous_page is not None and page_payload == previous_page:
+            return [], "pagination did not advance"
+        rows.extend(page_payload)
+        if len(page_payload) < _API_PAGE_SIZE:
+            return rows, None
+        previous_page = list(page_payload)
+        offset += _API_PAGE_SIZE
+
+
+def _paper_report_input_snapshot_sha256(
+    *,
+    snapshot_cutoff: str,
+    status: Mapping[str, object],
+    readiness: Mapping[str, object],
+    readiness_error: str | None,
+    trades: Mapping[str, object],
+    trades_error: str | None,
+    positions: Mapping[str, object],
+    positions_error: str | None,
+    decisions: Sequence[object],
+    decisions_error: str | None,
+    metrics: Mapping[str, object],
+    metrics_error: str | None,
+    strategies: Mapping[str, object] | None,
+    strategies_error: str | None,
+    strategy_metrics: Mapping[str, object] | None,
+    strategy_metrics_error: str | None,
+) -> str:
+    payload = {
+        "snapshot_cutoff": snapshot_cutoff,
+        "status": status,
+        "readiness": readiness,
+        "readiness_error": readiness_error,
+        "trades": trades,
+        "trades_error": trades_error,
+        "positions": positions,
+        "positions_error": positions_error,
+        "decisions": list(decisions),
+        "decisions_error": decisions_error,
+        "metrics": metrics,
+        "metrics_error": metrics_error,
+        "strategies": strategies,
+        "strategies_error": strategies_error,
+        "strategy_metrics": strategy_metrics,
+        "strategy_metrics_error": strategy_metrics_error,
+    }
+    canonical = json.dumps(
+        payload,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _loads_json_rejecting_duplicate_keys(text: str) -> object:
     def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
         seen: set[str] = set()
@@ -1946,6 +3107,38 @@ def _metrics_path_for_soak_window(
         }
     )
     return f"/metrics?{query}", (started_at.isoformat(), window_end.isoformat())
+
+
+def _strategy_metrics_path_for_metrics_window(
+    metrics_window: tuple[str, str] | None,
+) -> str:
+    if metrics_window is None:
+        return "/strategies/metrics"
+    query = urlencode({"since": metrics_window[0], "until": metrics_window[1]})
+    return f"/strategies/metrics?{query}"
+
+
+def _elapsed_soak_days(started_at: datetime, *, observed_until: datetime) -> int:
+    elapsed_seconds = (
+        _aware_datetime(observed_until) - _aware_datetime(started_at)
+    ).total_seconds()
+    return max(0, int(elapsed_seconds // 86_400))
+
+
+def _aware_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _soak_observed_until(status: dict[str, Any], *, report_date: date) -> datetime:
+    window_end = _paper_report_window_end(report_date)
+    continuity = status.get("runtime_continuity")
+    if isinstance(continuity, Mapping):
+        last_observed_at = _parse_datetime(continuity.get("last_observed_at"))
+        if last_observed_at is not None:
+            return min(last_observed_at, window_end)
+    return min(datetime.now(tz=UTC), window_end)
 
 
 def _metrics_window_risk_events(
@@ -2099,7 +3292,7 @@ def _diagnostic_evidence_risk_events(
 def _average_edge_bps(decisions: Sequence[Mapping[str, object]]) -> float | None:
     edges = [
         edge
-        for row in decisions
+        for row in _entry_decision_rows(decisions)
         if (edge := _decision_edge(row)) is not None
     ]
     if not edges:
@@ -2108,39 +3301,26 @@ def _average_edge_bps(decisions: Sequence[Mapping[str, object]]) -> float | None
 
 
 def _average_fee_bps(trades: Sequence[Mapping[str, object]]) -> float | None:
-    total_fees = sum(
-        _optional_float_from_mapping(row, "fees") or 0.0
-        for row in trades
-    )
-    total_notional = sum(
-        _optional_float_from_mapping(row, "fill_notional_usdc") or 0.0
-        for row in trades
-    )
-    if total_notional > 0.0 and total_fees > 0.0:
-        return total_fees / total_notional * 10_000.0
-
-    fee_bps_values = [
-        fee_bps
-        for row in trades
-        if (fee_bps := _optional_float_from_mapping(row, "fee_bps")) is not None
-    ]
-    if not fee_bps_values:
-        return None
-    return sum(fee_bps_values) / len(fee_bps_values)
+    fee_notional_bps = _average_fee_notional_bps_from_amounts(trades)
+    if fee_notional_bps is not None:
+        return fee_notional_bps
+    return _average_fee_rate_bps_from_trades(trades)
 
 
 def _average_spread_cost_bps(
     decisions: Sequence[Mapping[str, object]],
 ) -> float | None:
-    spreads = [
-        spread_bps
-        for row in decisions
-        if (spread_bps := _optional_float_from_mapping(row, "spread_bps_at_decision"))
+    spread_costs = [
+        spread_cost * 10_000.0
+        for row in _entry_decision_rows(decisions)
+        if (
+            spread_cost := _spread_cost_for_decision(row)
+        )
         is not None
     ]
-    if not spreads:
+    if not spread_costs:
         return None
-    return sum(spreads) / len(spreads)
+    return sum(spread_costs) / len(spread_costs)
 
 
 def _average_net_edge_bps(
@@ -2151,25 +3331,316 @@ def _average_net_edge_bps(
 ) -> float | None:
     average_edge = _average_edge_bps(decisions)
     average_spread_cost = _average_spread_cost_bps(decisions)
-    average_fee = _average_fee_bps(trade_rows)
+    average_slippage_cost = _average_slippage_cost_bps(
+        decisions,
+        average_slippage_bps=average_slippage_bps,
+    )
+    average_fee = _average_fee_edge_bps(decisions, _entry_trade_rows(trade_rows))
     if (
         average_edge is None
         or average_spread_cost is None
-        or average_slippage_bps is None
+        or average_slippage_cost is None
         or average_fee is None
     ):
         return None
-    return average_edge - average_spread_cost - average_slippage_bps - average_fee
+    return average_edge - average_spread_cost - average_slippage_cost - average_fee
+
+
+def _spread_cost_for_decision(row: Mapping[str, object]) -> float | None:
+    spread_bps = _optional_float_from_mapping(row, "spread_bps_at_decision")
+    if spread_bps is None:
+        return None
+    return _price_space_cost(bps=spread_bps, price=_decision_price(row))
+
+
+def _average_slippage_cost_bps(
+    decisions: Sequence[Mapping[str, object]],
+    *,
+    average_slippage_bps: float | None,
+) -> float | None:
+    if average_slippage_bps is None:
+        return None
+    if average_slippage_bps == 0.0:
+        return 0.0
+    prices = [
+        price
+        for row in _entry_decision_rows(decisions)
+        if (price := _decision_price(row)) is not None
+    ]
+    if not prices:
+        return average_slippage_bps
+    return sum(average_slippage_bps * price for price in prices) / len(prices)
+
+
+def _average_fee_edge_bps(
+    decisions: Sequence[Mapping[str, object]],
+    trade_rows: Sequence[Mapping[str, object]],
+) -> float | None:
+    price_by_decision = {
+        decision_id: price
+        for row in _entry_decision_rows(decisions)
+        if (decision_id := _string_from_mapping(row, "decision_id", ""))
+        and (price := _decision_price(row)) is not None
+    }
+    fee_costs = [
+        fee_cost
+        for row in trade_rows
+        if (
+            fee_cost := _fee_edge_bps_for_trade(
+                row,
+                decision_price=price_by_decision.get(
+                    _string_from_mapping(row, "decision_id", "")
+                ),
+            )
+        )
+        is not None
+    ]
+    if fee_costs:
+        return sum(fee_costs) / len(fee_costs)
+
+    fee_notional_bps = _average_fee_notional_bps_from_amounts(trade_rows)
+    average_price = _average_decision_price(decisions)
+    if fee_notional_bps is not None:
+        if average_price is None:
+            return fee_notional_bps
+        return fee_notional_bps * average_price
+
+    fee_rate_bps = _average_fee_rate_bps_from_trades(trade_rows)
+    if fee_rate_bps is not None:
+        if average_price is None:
+            return fee_rate_bps
+        return fee_rate_bps * (1.0 - average_price)
+    return None
+
+
+def _fee_edge_bps_for_trade(
+    row: Mapping[str, object],
+    *,
+    decision_price: float | None,
+) -> float | None:
+    fees = _optional_float_from_mapping(row, "fees")
+    if fees is not None:
+        fill_quantity = _optional_float_from_mapping(row, "fill_quantity")
+        if fill_quantity is not None and fill_quantity > 0.0:
+            return fees / fill_quantity * 10_000.0
+        fill_notional = _optional_float_from_mapping(row, "fill_notional_usdc")
+        fill_price = _optional_float_from_mapping(row, "fill_price") or decision_price
+        if fill_notional is not None and fill_notional > 0.0 and fill_price is not None:
+            return fees / fill_notional * fill_price * 10_000.0
+
+    fee_rate_bps = _optional_float_from_mapping(row, "fee_bps")
+    fill_price = _optional_float_from_mapping(row, "fill_price") or decision_price
+    if fee_rate_bps is not None and fill_price is not None:
+        return fee_rate_bps * (1.0 - fill_price)
+    return None
+
+
+def _average_fee_notional_bps_from_amounts(
+    trades: Sequence[Mapping[str, object]],
+) -> float | None:
+    fee_values = [_optional_float_from_mapping(row, "fees") for row in trades]
+    total_notional = sum(
+        _optional_float_from_mapping(row, "fill_notional_usdc") or 0.0
+        for row in trades
+    )
+    if total_notional > 0.0 and fee_values and all(
+        value is not None for value in fee_values
+    ):
+        total_fees = sum(value for value in fee_values if value is not None)
+        return total_fees / total_notional * 10_000.0
+    return None
+
+
+def _average_fee_rate_bps_from_trades(
+    trades: Sequence[Mapping[str, object]],
+) -> float | None:
+    fee_bps_values = [
+        fee_bps
+        for row in trades
+        if (fee_bps := _optional_float_from_mapping(row, "fee_bps")) is not None
+    ]
+    if not fee_bps_values:
+        return None
+    return sum(fee_bps_values) / len(fee_bps_values)
+
+
+def _average_decision_price(
+    decisions: Sequence[Mapping[str, object]],
+) -> float | None:
+    prices = [
+        price
+        for row in _entry_decision_rows(decisions)
+        if (price := _decision_price(row)) is not None
+    ]
+    if not prices:
+        return None
+    return sum(prices) / len(prices)
+
+
+def _decision_price(row: Mapping[str, object]) -> float | None:
+    for key in ("limit_price", "decision_price"):
+        value = _optional_float_from_mapping(row, key)
+        if value is not None and value > 0.0:
+            return value
+    return None
+
+
+def _price_space_cost(*, bps: float, price: float | None) -> float:
+    if price is None:
+        return bps / 10_000.0
+    return (bps / 10_000.0) * price
+
+
+def _entry_decision_rows(
+    decisions: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    return tuple(
+        row for row in decisions if not _is_exit_decision_id(row.get("decision_id"))
+    )
+
+
+def _entry_trade_rows(
+    trade_rows: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    return tuple(
+        row for row in trade_rows if not _is_exit_decision_id(row.get("decision_id"))
+    )
+
+
+def _execution_concentration(
+    entry_trade_rows: Sequence[Mapping[str, object]],
+) -> ExecutionConcentration | None:
+    if not entry_trade_rows:
+        return None
+
+    market_ids = [
+        market_id
+        for row in entry_trade_rows
+        if (market_id := _string_from_mapping(row, "market_id", "")) != ""
+    ]
+    risk_group_ids = [
+        risk_group_id
+        for row in entry_trade_rows
+        if (risk_group_id := _string_from_mapping(row, "risk_group_id", "")) != ""
+    ]
+    market_counts = Counter(market_ids)
+    risk_group_counts = Counter(risk_group_ids)
+    entry_fills = len(entry_trade_rows)
+    entry_fills_decimal = Decimal(entry_fills)
+    return ExecutionConcentration(
+        entry_fills=entry_fills,
+        distinct_markets=len(market_counts),
+        distinct_risk_groups=len(risk_group_counts),
+        missing_risk_group_fills=entry_fills - len(risk_group_ids),
+        max_market_fill_share=(
+            float(Decimal(max(market_counts.values())) / entry_fills_decimal)
+            if market_counts
+            else None
+        ),
+        max_risk_group_fill_share=(
+            float(Decimal(max(risk_group_counts.values())) / entry_fills_decimal)
+            if risk_group_counts
+            else None
+        ),
+    )
+
+
+def _execution_concentration_risk_events(
+    concentration: ExecutionConcentration | None,
+    *,
+    config: PaperSoakGateConfig,
+) -> list[tuple[str, str, str]]:
+    if concentration is None or concentration.entry_fills < config.min_fills:
+        return []
+
+    events: list[tuple[str, str, str]] = []
+    if (
+        concentration.distinct_markets > 0
+        and concentration.distinct_markets < config.min_distinct_markets
+    ):
+        events.append(
+            (
+                "report generation",
+                "execution market concentration too high",
+                (
+                    f"distinct_markets={concentration.distinct_markets} "
+                    f"< {config.min_distinct_markets}"
+                ),
+            )
+        )
+    if concentration.distinct_markets > 0 and concentration.missing_risk_group_fills:
+        events.append(
+            (
+                "report generation",
+                "execution risk group evidence missing",
+                (
+                    f"{concentration.missing_risk_group_fills} entry fill(s) "
+                    "lack risk_group_id"
+                ),
+            )
+        )
+    if (
+        concentration.distinct_risk_groups > 0
+        and concentration.distinct_risk_groups < config.min_distinct_risk_groups
+    ):
+        events.append(
+            (
+                "report generation",
+                "execution risk group concentration too high",
+                (
+                    f"distinct_risk_groups={concentration.distinct_risk_groups} "
+                    f"< {config.min_distinct_risk_groups}"
+                ),
+            )
+        )
+    if (
+        concentration.max_market_fill_share is not None
+        and Decimal(str(concentration.max_market_fill_share))
+        > Decimal(str(config.max_market_fill_share))
+    ):
+        events.append(
+            (
+                "report generation",
+                "execution market fill share too high",
+                (
+                    f"max_market_fill_share="
+                    f"{concentration.max_market_fill_share:.4f} "
+                    f"> {config.max_market_fill_share:.4f}"
+                ),
+            )
+        )
+    if (
+        concentration.max_risk_group_fill_share is not None
+        and Decimal(str(concentration.max_risk_group_fill_share))
+        > Decimal(str(config.max_risk_group_fill_share))
+    ):
+        events.append(
+            (
+                "report generation",
+                "execution risk group fill share too high",
+                (
+                    f"max_risk_group_fill_share="
+                    f"{concentration.max_risk_group_fill_share:.4f} "
+                    f"> {config.max_risk_group_fill_share:.4f}"
+                ),
+            )
+        )
+    return events
+
+
+def _is_exit_decision_id(value: object) -> bool:
+    return isinstance(value, str) and value.startswith("exit-")
+
 
 def _decision_edge(row: Mapping[str, object]) -> float | None:
     expected_edge = _optional_float_from_mapping(row, "expected_edge")
     if expected_edge is not None:
-        return abs(expected_edge)
+        return expected_edge
     prob_estimate = _optional_float_from_mapping(row, "prob_estimate")
     limit_price = _optional_float_from_mapping(row, "limit_price")
     if prob_estimate is None or limit_price is None:
         return None
-    return abs(prob_estimate - limit_price)
+    return prob_estimate - limit_price
 
 
 def _int_from_dict(payload: dict[str, Any], key: str, *, fallback: int = 0) -> int:
@@ -2203,11 +3674,11 @@ def _optional_float_from_dict(payload: dict[str, Any], key: str) -> float | None
 
 
 def _optional_float_from_dict_first(
-    payload: dict[str, Any],
+    payload: Mapping[str, Any],
     keys: Sequence[str],
 ) -> float | None:
     for key in keys:
-        value = _optional_float_from_dict(payload, key)
+        value = _optional_float_from_mapping(payload, key)
         if value is not None:
             return value
     return None
@@ -2245,6 +3716,15 @@ def _optional_float_from_mapping(
     key: str,
 ) -> float | None:
     return _optional_float_value(payload.get(key))
+
+
+def _string_from_mapping(
+    payload: Mapping[str, object],
+    key: str,
+    fallback: str,
+) -> str:
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else fallback
 
 
 def _optional_float_value(value: object) -> float | None:

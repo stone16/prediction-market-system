@@ -26,7 +26,7 @@ FAVORITE_YES_THRESHOLD = 0.90
 DEFAULT_FLB_CONFIDENCE = 0.65
 DEFAULT_FLB_CALIBRATION_MIN_SAMPLES = 100
 DEFAULT_FLB_ENTRY_EXECUTION_COST_BPS = 15.0
-DEFAULT_FLB_FEE_RATE = 0.04
+DEFAULT_FLB_FEE_RATE = 0.07
 FlbSignalName = Literal[
     "longshot_yes_overpriced_buy_no",
     "favorite_yes_underpriced_buy_yes",
@@ -35,6 +35,22 @@ _FLB_SIGNAL_NAMES = frozenset(
     {
         "longshot_yes_overpriced_buy_no",
         "favorite_yes_underpriced_buy_yes",
+    }
+)
+_FLB_CALIBRATION_SOURCE_LABEL_MAX_LENGTH = 80
+_FLB_CALIBRATION_SOURCE_LABEL_FORBIDDEN_PARTS = frozenset(
+    {
+        "dummy",
+        "example",
+        "fixture",
+        "gamma",
+        "local",
+        "placeholder",
+        "sample",
+        "smoke",
+        "synthetic",
+        "test",
+        "todo",
     }
 )
 _FLB_CALIBRATION_REQUIRED_COLUMNS = frozenset(
@@ -76,7 +92,7 @@ class FlbSignalCalibration:
         if self.sample_count <= 0:
             msg = "sample_count must be positive"
             raise ValueError(msg)
-        _require_non_empty(self.source_label, "source_label")
+        require_flb_calibration_source_label(self.source_label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,9 +547,8 @@ def load_flb_calibration_csv(
                         path=csv_path,
                         row_number=row_number,
                     ),
-                    source_label=_required_csv_text(
+                    source_label=_required_flb_source_label(
                         row,
-                        "source_label",
                         path=csv_path,
                         row_number=row_number,
                     ),
@@ -576,6 +591,54 @@ def _require_unique_csv_fieldnames(fieldnames: Sequence[str]) -> None:
         seen.add(fieldname)
 
 
+def require_flb_calibration_source_label(value: str) -> str:
+    """Validate the calibration source label used in live FLB evidence.
+
+    The label is intentionally an audit slug, not a path or prose source. The
+    artifact fingerprint binds the bytes separately; this field names the
+    upstream evidence family without letting Gamma feasibility runs, fixtures,
+    or placeholders masquerade as production calibration.
+    """
+    if len(value) > _FLB_CALIBRATION_SOURCE_LABEL_MAX_LENGTH:
+        msg = (
+            "source_label must be at most "
+            f"{_FLB_CALIBRATION_SOURCE_LABEL_MAX_LENGTH} characters"
+        )
+        raise ValueError(msg)
+    if not _is_flb_calibration_source_label_slug(value):
+        msg = (
+            "source_label must be a lowercase audit slug using letters, "
+            "digits, '-' or '_'"
+        )
+        raise ValueError(msg)
+    parts = {
+        part
+        for separator in ("-", "_")
+        for part in value.split(separator)
+        if part
+    }
+    forbidden = sorted(parts & _FLB_CALIBRATION_SOURCE_LABEL_FORBIDDEN_PARTS)
+    if forbidden:
+        msg = f"source_label contains forbidden source marker: {forbidden[0]}"
+        raise ValueError(msg)
+    return value
+
+
+def _is_flb_calibration_source_label_slug(value: str) -> bool:
+    if value == "":
+        return False
+    if value[0] < "a" or value[0] > "z":
+        return False
+    if not ("0" <= value[-1] <= "9" or "a" <= value[-1] <= "z"):
+        return False
+    return all(
+        character in {"-", "_"}
+        or "a" <= character <= "z"
+        or "0" <= character <= "9"
+        for character in value
+    )
+
+
 def _required_flb_signal_name(
     row: dict[str, str | None],
     *,
@@ -592,6 +655,25 @@ def _required_flb_signal_name(
         msg = f"{path}:{row_number}: unsupported FLB signal_name {value!r}"
         raise ValueError(msg)
     return cast(FlbSignalName, value)
+
+
+def _required_flb_source_label(
+    row: dict[str, str | None],
+    *,
+    path: Path,
+    row_number: int,
+) -> str:
+    value = _required_csv_text(
+        row,
+        "source_label",
+        path=path,
+        row_number=row_number,
+    )
+    try:
+        return require_flb_calibration_source_label(value)
+    except ValueError as exc:
+        msg = f"{path}:{row_number}: invalid source_label: {exc}"
+        raise ValueError(msg) from exc
 
 
 def _required_probability(

@@ -8,6 +8,7 @@ from collections.abc import Sequence
 import uvicorn
 
 from pms.config import load_settings, normalize_webhook_url
+from pms.core.enums import RunMode
 from pms.redaction import redact_database_error
 
 
@@ -39,6 +40,13 @@ def _startup_gate_message(host: str) -> str:
     )
 
 
+def _live_startup_gate_message() -> str:
+    return (
+        "Refusing to start pms-api in live mode without PMS_API_TOKEN. "
+        "Set PMS_API_TOKEN before starting the LIVE control plane."
+    )
+
+
 def _auto_start_fail_closed_message() -> str:
     return (
         "Refusing PMS_AUTO_START=1 without PMS_DISCORD__WEBHOOK_URL. "
@@ -60,7 +68,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     host = settings.api_host
 
-    if not settings.api_token and host not in LOOPBACK_API_HOSTS:
+    api_token = _normalized_api_token(settings.api_token)
+    if api_token is None and settings.mode == RunMode.LIVE:
+        print(_live_startup_gate_message(), file=sys.stderr)
+        return 1
+    if api_token is None and host not in LOOPBACK_API_HOSTS:
         print(_startup_gate_message(host), file=sys.stderr)
         return 1
     auto_start = os.environ.get("PMS_AUTO_START", "").lower() in {"1", "true", "yes"}
@@ -77,6 +89,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         reload=args.reload,
     )
     return 0
+
+
+def _normalized_api_token(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 if __name__ == "__main__":

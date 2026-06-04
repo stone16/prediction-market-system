@@ -136,7 +136,7 @@ def test_polymarket_live_estimate_uses_representative_costs() -> None:
 
     live_estimate = execution_model_cls.polymarket_live_estimate()
 
-    assert live_estimate.fee_rate == pytest.approx(0.04)
+    assert live_estimate.fee_rate == pytest.approx(0.07)
     assert live_estimate.slippage_bps > 0.0
     assert live_estimate.latency_ms > 0.0
     assert live_estimate.staleness_ms > 0.0

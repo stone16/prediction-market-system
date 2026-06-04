@@ -23,6 +23,25 @@ pytestmark = [
 ]
 
 
+async def _clear_preflight_risk_metadata_rows(pool: asyncpg.Pool) -> None:
+    async with pool.acquire() as connection:
+        await connection.execute(
+            "DELETE FROM market_subscriptions WHERE token_id LIKE 'pm-preflight-risk-%-yes'"
+        )
+        await connection.execute(
+            "DELETE FROM book_levels WHERE market_id LIKE 'pm-preflight-risk-%'"
+        )
+        await connection.execute(
+            "DELETE FROM book_snapshots WHERE market_id LIKE 'pm-preflight-risk-%'"
+        )
+        await connection.execute(
+            "DELETE FROM tokens WHERE condition_id LIKE 'pm-preflight-risk-%'"
+        )
+        await connection.execute(
+            "DELETE FROM markets WHERE condition_id LIKE 'pm-preflight-risk-%'"
+        )
+
+
 async def _seed_fresh_usable_book(
     pool: asyncpg.Pool,
     *,
@@ -65,6 +84,13 @@ async def _seed_fresh_usable_book(
             token_id,
             condition_id,
         )
+        await connection.execute(
+            """
+            INSERT INTO market_subscriptions (token_id, source)
+            VALUES ($1, 'user')
+            """,
+            token_id,
+        )
         snapshot_id = await connection.fetchval(
             """
             INSERT INTO book_snapshots (market_id, token_id, ts, source)
@@ -91,6 +117,7 @@ async def test_missing_risk_metadata_count_zero_when_risk_group_present(
     pg_pool: asyncpg.Pool,
 ) -> None:
     """PASS path: market has a non-empty ``risk_group_id``, count is 0."""
+    await _clear_preflight_risk_metadata_rows(pg_pool)
     await _seed_fresh_usable_book(
         pg_pool,
         condition_id="pm-preflight-risk-present",
@@ -110,6 +137,7 @@ async def test_missing_risk_metadata_count_one_when_risk_group_null(
     pg_pool: asyncpg.Pool,
 ) -> None:
     """FAIL path: market has NULL ``risk_group_id``, count is 1."""
+    await _clear_preflight_risk_metadata_rows(pg_pool)
     await _seed_fresh_usable_book(
         pg_pool,
         condition_id="pm-preflight-risk-missing",

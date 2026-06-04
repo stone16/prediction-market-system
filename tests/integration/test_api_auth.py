@@ -117,18 +117,63 @@ async def test_mutating_route_accepts_correct_bearer_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_routes_remain_open_when_api_token_is_configured() -> None:
+async def test_probe_routes_remain_open_when_api_token_is_configured() -> None:
     app = _app(api_token="expected-token")
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
     ) as client:
-        status = await client.get("/status")
-        feedback = await client.get("/feedback")
+        health = await client.get("/health")
+        readiness = await client.get("/readiness")
 
-    assert status.status_code == 200
-    assert feedback.status_code == 200
+    assert health.status_code == 200
+    assert readiness.status_code in {200, 503}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/signals",
+        "/status",
+        "/markets",
+        "/markets/condition-1",
+        "/markets/condition-1/price-history",
+        "/signals/condition-1/depth",
+        "/metrics",
+        "/feedback",
+        "/stream/events",
+        "/subscriptions",
+        "/strategies",
+        "/strategies/metrics",
+        "/strategies/strategy-1/decay-status",
+        "/factors/catalog",
+        "/factors?factor_id=orderbook_imbalance&market_id=condition-1",
+        "/research/backtest",
+        "/research/backtest/run-1",
+        "/research/backtest/run-1/strategies",
+    ],
+)
+async def test_sensitive_read_routes_require_bearer_token_when_configured(
+    path: str,
+) -> None:
+    app = _app(api_token="expected-token")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        missing = await client.get(path)
+        wrong = await client.get(
+            path,
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+
+    assert missing.status_code == 401
+    assert missing.json() == {"detail": "Missing or invalid API token."}
+    assert wrong.status_code == 401
+    assert wrong.json() == {"detail": "Missing or invalid API token."}
 
 
 @pytest.mark.asyncio

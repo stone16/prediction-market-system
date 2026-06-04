@@ -10,6 +10,11 @@ from pms.core.interfaces import MarketDataStore, StrategySelectionRegistry
 from pms.core.models import Market, Token
 from pms.core.venue_support import kalshi_stub_error, normalize_venue
 from pms.market_selection.merge import MergePolicy, MergeResult, StrategyMarketSet
+from pms.metrics import (
+    SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC,
+    SELECTION_FUNNEL_SELECTED_TOTAL_METRIC,
+    increment_metric,
+)
 from pms.strategies.projections import MarketSelectionSpec
 
 
@@ -50,8 +55,15 @@ class MarketSelector:
         if not user_asset_ids:
             _log_selector_funnel(self._last_discovered_count, len(merged.asset_ids))
             return merged
+        asset_ids = list(merged.asset_ids)
+        seen_asset_ids = set(asset_ids)
+        asset_ids.extend(
+            asset_id
+            for asset_id in sorted(user_asset_ids)
+            if asset_id not in seen_asset_ids
+        )
         result = MergeResult(
-            asset_ids=sorted(frozenset(merged.asset_ids) | user_asset_ids),
+            asset_ids=asset_ids,
             conflicts=merged.conflicts,
         )
         _log_selector_funnel(self._last_discovered_count, len(result.asset_ids))
@@ -73,13 +85,17 @@ class MarketSelector:
                 spec.resolution_time_max_horizon_days,
                 spec.volume_min_usdc,
             )
-            self._last_discovered_count += len(eligible_markets)
+            self._last_discovered_count += len(
+                _asset_ids_from_eligible_markets(eligible_markets)
+            )
             filtered_markets = await self._filter_markets(eligible_markets, spec)
+            ranked_asset_ids = _asset_ids_from_eligible_markets(filtered_markets)
             selections.append(
                 StrategyMarketSet(
                     strategy_id=strategy_id,
                     strategy_version_id=strategy_version_id,
-                    asset_ids=_asset_ids_from_eligible_markets(filtered_markets),
+                    asset_ids=frozenset(ranked_asset_ids),
+                    ranked_asset_ids=ranked_asset_ids,
                 )
             )
         return selections
@@ -109,12 +125,22 @@ class MarketSelector:
         ):
             return False
 
+        if spec.yes_price_min is not None and (
+            market.yes_price is None or market.yes_price < spec.yes_price_min
+        ):
+            return False
+
+        if spec.yes_price_max is not None and (
+            market.yes_price is None or market.yes_price > spec.yes_price_max
+        ):
+            return False
+
         if spec.spread_max_bps is None and spec.depth_min_usdc is None:
             return True
 
         summary = await self._store.get_latest_book_summary(market.condition_id)
         if summary is None:
-            return False
+            return _market_passes_discovery_bootstrap_filters(market, spec)
         if spec.spread_max_bps is not None and summary.spread_bps > spec.spread_max_bps:
             return False
         if spec.depth_min_usdc is not None and summary.depth_usdc < spec.depth_min_usdc:
@@ -128,6 +154,8 @@ class MarketSelector:
 
 
 def _log_selector_funnel(discovered_count: int, selected_count: int) -> None:
+    increment_metric(SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC, discovered_count)
+    increment_metric(SELECTION_FUNNEL_SELECTED_TOTAL_METRIC, selected_count)
     logger.info(
         "market selector funnel discovered=%d selected=%d",
         discovered_count,
@@ -140,12 +168,33 @@ def _log_selector_funnel(discovered_count: int, selected_count: int) -> None:
     )
 
 
+def _market_passes_discovery_bootstrap_filters(
+    market: Market,
+    spec: MarketSelectionSpec,
+) -> bool:
+    if spec.spread_max_bps is not None:
+        if market.spread_bps is None or market.spread_bps > spec.spread_max_bps:
+            return False
+
+    if spec.depth_min_usdc is not None:
+        if market.liquidity is None or market.liquidity < spec.depth_min_usdc:
+            return False
+
+    return True
+
+
 def _asset_ids_from_eligible_markets(
     eligible_markets: Sequence[tuple[Market, Sequence[Token]]],
-) -> frozenset[str]:
-    return frozenset(
-        token.token_id
-        for _, tokens in eligible_markets
-        for token in tokens
-        if token.outcome == "YES"
-    )
+) -> tuple[str, ...]:
+    ordered_asset_ids: list[str] = []
+    seen: set[str] = set()
+    for _, tokens in eligible_markets:
+        market_asset_ids = sorted(
+            token.token_id for token in tokens if token.outcome in {"YES", "NO"}
+        )
+        for asset_id in market_asset_ids:
+            if asset_id in seen:
+                continue
+            seen.add(asset_id)
+            ordered_asset_ids.append(asset_id)
+    return tuple(ordered_asset_ids)

@@ -47,7 +47,7 @@ Before you write a single line, confirm:
 
    ```bash
    docker compose up -d postgres
-   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_dev
+   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
    uv run alembic upgrade head
    ```
 
@@ -56,9 +56,14 @@ Before you write a single line, confirm:
 
    ```bash
    uv sync
-   uv run pytest -q              # baseline: 337 pass / 85 skipped
+   uv run pytest -q
    uv run mypy src/ tests/ --strict
+   uv run lint-imports
+   (cd dashboard && npm ci && npm run test:ci)
    ```
+
+   Use the current head's gate output as the source of truth instead
+   of copying historical pass/skipped count snapshots.
 
 3. You can boot the API and reach the dashboard:
 
@@ -618,9 +623,11 @@ in `factor_composition` controls the weighted blend.
 | `venue` | yes | `"polymarket"` (only adapter shipped). Kalshi is reserved but not implemented. |
 | `resolution_time_max_horizon_days` | yes (nullable) | Excludes markets resolving farther out. Tighter horizons reduce universe size dramatically. |
 | `volume_min_usdc` | yes | Excludes thin markets. `100.0` is a reasonable starting floor. |
-| `spread_max_bps` | no | Optional max bid-ask spread filter |
+| `spread_max_bps` | no | Optional max bid-ask spread filter in midpoint-relative bps |
 | `depth_min_usdc` | no | Optional min top-of-book depth filter |
 | `liquidity_min_usdc` | no | Optional composite liquidity threshold |
+| `yes_price_min` | no | Optional minimum YES price. Use this to avoid subscribing to markets the router will reject as out of price band. |
+| `yes_price_max` | no | Optional maximum YES price. Use this to avoid subscribing to markets the router will reject as out of price band. |
 | `accepting_orders` | no (default `true`) | Filter to markets currently accepting orders |
 
 Tighter filters = smaller subscription = lower bandwidth = faster

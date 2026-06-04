@@ -210,6 +210,34 @@ class _StrategySliceAccumulator:
 
 
 @dataclass(slots=True)
+class _BacktestExecutionRow:
+    decision_id: str
+    strategy_id: str
+    strategy_version_id: str
+    market_id: str
+    status: Literal["filled", "rejected"]
+    slippage_bps: float | None
+    pnl: float | None
+    rejection_reason: str | None
+    created_at: datetime
+
+    def as_insert_args(self, *, run_id: str) -> tuple[object, ...]:
+        return (
+            str(uuid4()),
+            run_id,
+            self.strategy_id,
+            self.strategy_version_id,
+            self.decision_id,
+            self.market_id,
+            self.status,
+            self.slippage_bps,
+            self.pnl,
+            self.rejection_reason,
+            self.created_at,
+        )
+
+
+@dataclass(slots=True)
 class _StrategyAccumulator:
     strategy_id: str
     strategy_version_id: str
@@ -235,6 +263,13 @@ class _StrategyAccumulator:
         tuple[str, str, datetime, datetime],
         _StrategySliceAccumulator,
     ] = field(default_factory=dict)
+    _execution_rows_by_decision: dict[str, _BacktestExecutionRow] = field(
+        default_factory=dict
+    )
+
+    @property
+    def execution_rows(self) -> tuple[_BacktestExecutionRow, ...]:
+        return tuple(self._execution_rows_by_decision.values())
 
     def record_decision(
         self,
@@ -291,6 +326,55 @@ class _StrategyAccumulator:
         drawdown = self.peak_equity - self.cumulative_pnl
         if drawdown > self.max_drawdown:
             self.max_drawdown = drawdown
+        self._execution_rows_by_decision[fill.decision_id] = _BacktestExecutionRow(
+            decision_id=fill.decision_id,
+            strategy_id=self.strategy_id,
+            strategy_version_id=self.strategy_version_id,
+            market_id=fill.market_id,
+            status="filled",
+            slippage_bps=_decision_slippage_bps(
+                decision=decision,
+                fill_price=fill.fill_price,
+            ),
+            pnl=float(pnl_delta) if _resolved_outcome(signal) is not None else None,
+            rejection_reason=None,
+            created_at=signal.fetched_at,
+        )
+
+    def record_execution_rejection(
+        self,
+        *,
+        signal: MarketSignal,
+        decision: TradeDecision,
+        rejection_reason: str,
+    ) -> None:
+        self.record_execution_terminal_rejection(
+            decision=decision,
+            rejection_reason=rejection_reason,
+            created_at=signal.fetched_at,
+        )
+
+    def record_execution_terminal_rejection(
+        self,
+        *,
+        decision: TradeDecision,
+        rejection_reason: str,
+        created_at: datetime,
+    ) -> None:
+        existing = self._execution_rows_by_decision.get(decision.decision_id)
+        if existing is not None and existing.status == "filled":
+            return
+        self._execution_rows_by_decision[decision.decision_id] = _BacktestExecutionRow(
+            decision_id=decision.decision_id,
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            market_id=decision.market_id,
+            status="rejected",
+            slippage_bps=None,
+            pnl=0.0,
+            rejection_reason=rejection_reason,
+            created_at=existing.created_at if existing is not None else created_at,
+        )
 
     def record_slice_decision(
         self,
@@ -584,6 +668,11 @@ class BacktestRunner:
                     execution_model=spec.execution_model,
                 )
             except InsufficientLiquidityError:
+                accumulator.record_execution_rejection(
+                    signal=signal,
+                    decision=cast(TradeDecision, decision),
+                    rejection_reason="insufficient_liquidity",
+                )
                 continue
             order_decisions[order_state.order_id] = cast(TradeDecision, decision)
             prior_notional, prior_quantity = observed_order_totals.get(
@@ -603,6 +692,11 @@ class BacktestRunner:
                 execution_model=spec.execution_model,
             )
             if fill is None:
+                accumulator.record_execution_rejection(
+                    signal=signal,
+                    decision=cast(TradeDecision, decision),
+                    rejection_reason=order_state.raw_status,
+                )
                 continue
             portfolio = _portfolio_with_fill(portfolio, fill)
             accumulator.record_fill(
@@ -628,6 +722,13 @@ class BacktestRunner:
             self.execution_simulator,
             session_end=spec.date_range_end,
         ):
+            decision_for_final = order_decisions.get(final_state.order_id)
+            if decision_for_final is not None:
+                accumulator.record_execution_terminal_rejection(
+                    decision=decision_for_final,
+                    rejection_reason=final_state.raw_status,
+                    created_at=final_state.submitted_at,
+                )
             observed_order_totals[final_state.order_id] = (
                 final_state.filled_notional_usdc,
                 final_state.filled_quantity,
@@ -754,6 +855,41 @@ class BacktestRunner:
                         """,
                         *accumulator.as_insert_args(run_id=run_id),
                     )
+                    for execution_row in accumulator.execution_rows:
+                        await connection.execute(
+                            """
+                            INSERT INTO backtest_execution_rows (
+                                backtest_execution_row_id,
+                                run_id,
+                                strategy_id,
+                                strategy_version_id,
+                                decision_id,
+                                market_id,
+                                status,
+                                slippage_bps,
+                                pnl,
+                                rejection_reason,
+                                created_at
+                            ) VALUES (
+                                $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8,
+                                $9, $10, $11
+                            )
+                            ON CONFLICT (
+                                run_id,
+                                strategy_id,
+                                strategy_version_id,
+                                decision_id
+                            ) DO UPDATE
+                            SET
+                                market_id = EXCLUDED.market_id,
+                                status = EXCLUDED.status,
+                                slippage_bps = EXCLUDED.slippage_bps,
+                                pnl = EXCLUDED.pnl,
+                                rejection_reason = EXCLUDED.rejection_reason,
+                                created_at = EXCLUDED.created_at
+                            """,
+                            *execution_row.as_insert_args(run_id=run_id),
+                        )
                     for slice_args in accumulator.slice_insert_args(run_id=run_id):
                         await connection.execute(
                             """

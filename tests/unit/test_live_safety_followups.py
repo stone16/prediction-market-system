@@ -84,6 +84,9 @@ from tests.support.live_paths import (
 )
 
 
+AUTH_HEADERS = {"Authorization": "Bearer live-api-token"}
+
+
 class ConstantForecaster:
     def __init__(self, probability: float) -> None:
         self.probability = probability
@@ -188,7 +191,7 @@ def _portfolio() -> Portfolio:
 
 
 def _live_settings(**overrides: object) -> PMSSettings:
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     approval_path, audit_path = make_private_live_paths(prefix="pms-live-safety-")
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-live-safety-reports-"
@@ -197,6 +200,7 @@ def _live_settings(**overrides: object) -> PMSSettings:
         "mode": RunMode.LIVE,
         "secret_source": "fly",
         "live_trading_enabled": True,
+        "api_token": "live-api-token",
         "auto_migrate_default_v2": False,
         "live_emergency_audit_path": str(
             Path(approval_path).parent / "live-emergency-audit.jsonl"
@@ -1314,6 +1318,8 @@ class _Connection:
         self.latest_book_snapshot_age_s: float | None = 30.0
         self.latest_usable_book_snapshot_age_s: float | None = 30.0
         self.missing_market_risk_metadata_count = 0
+        self.missing_launch_usable_token_count = 0
+        self.missing_subscribed_usable_token_count = 0
         self.fetchrow_result: dict[str, object] | None = None
         self.decision_submission_unknown_exists = True
         self.order_intent_submission_unknown_exists = True
@@ -1325,6 +1331,10 @@ class _Connection:
 
     async def fetchval(self, query: str, *args: object) -> object:
         self.fetchval_calls.append((query, args))
+        if "missing_launch_usable_tokens" in query:
+            return self.missing_launch_usable_token_count
+        if "missing_subscribed_usable_tokens" in query:
+            return self.missing_subscribed_usable_token_count
         if "missing_market_risk_metadata" in query:
             return self.missing_market_risk_metadata_count
         if "usable_book_snapshots" in query:
@@ -1708,6 +1718,7 @@ async def test_api_reconciles_submission_unknown_incident(
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/live/reconcile-submission-unknown",
+            headers=AUTH_HEADERS,
             json={
                 "decision_id": "d-unknown",
                 "venue_order_id": "pm-123",
@@ -1748,6 +1759,7 @@ async def test_api_reconcile_submission_unknown_checks_schema_before_mutation(
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/live/reconcile-submission-unknown",
+            headers=AUTH_HEADERS,
             json={
                 "decision_id": "d-unknown",
                 "venue_order_id": "pm-123",
@@ -1819,6 +1831,7 @@ async def test_api_reconcile_submission_unknown_redacts_live_credentials_from_sc
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/live/reconcile-submission-unknown",
+            headers=AUTH_HEADERS,
             json={
                 "decision_id": "d-unknown",
                 "venue_order_id": "pm-123",
@@ -1854,6 +1867,7 @@ async def test_api_rejects_open_submission_unknown_without_venue_order_id() -> N
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/live/reconcile-submission-unknown",
+            headers=AUTH_HEADERS,
             json={
                 "decision_id": "d-unknown",
                 "status": "open",
@@ -1880,6 +1894,7 @@ async def test_api_rejects_submission_unknown_blank_reconciled_by() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/live/reconcile-submission-unknown",
+            headers=AUTH_HEADERS,
             json={
                 "decision_id": "d-unknown",
                 "venue_order_id": "pm-123",
@@ -1924,6 +1939,7 @@ def test_decision_lifecycle_statuses_cover_execution_and_reconciliation() -> Non
     assert "submitted" in DECISION_STATUSES
     assert "submission_unknown" in DECISION_STATUSES
     assert "reconciled" in DECISION_STATUSES
+    validate_decision_status_transition("accepted", "rejected")
     validate_decision_status_transition("accepted", "queued")
     validate_decision_status_transition("queued", "submitted")
     validate_decision_status_transition("submitted", "rejected")

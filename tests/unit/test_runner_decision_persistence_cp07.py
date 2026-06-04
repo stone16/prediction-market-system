@@ -10,13 +10,21 @@ from typing import Any, cast
 
 import pytest
 
-from pms.config import PMSSettings, RiskSettings
+from pms.config import ControllerSettings, PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode, Side, TimeInForce
-from pms.core.models import MarketSignal, Opportunity, Portfolio, TradeDecision
+from pms.core.models import (
+    MarketSignal,
+    Opportunity,
+    Portfolio,
+    Position,
+    TradeDecision,
+)
 from pms.runner import (
     Runner,
     StrategyControllerRuntime,
+    _controller_execution_signal_for_decision,
     _decision_evidence_from_signal,
+    _decision_evidence_signal_for_decision,
     _decision_expires_at,
 )
 
@@ -38,6 +46,21 @@ def _settings() -> PMSSettings:
 def _runner() -> Runner:
     return Runner(
         config=_settings(),
+        historical_data_path=FIXTURE_PATH,
+    )
+
+
+def _paper_runner_with_strict_book_age() -> Runner:
+    return Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            auto_migrate_default_v2=False,
+            controller=ControllerSettings(max_book_age_ms=1_000.0),
+            risk=RiskSettings(
+                max_position_per_market=1000.0,
+                max_total_exposure=10_000.0,
+            ),
+        ),
         historical_data_path=FIXTURE_PATH,
     )
 
@@ -133,6 +156,18 @@ class _RecordingOpportunityStore:
         self.calls.append(opportunity.opportunity_id)
 
 
+class _CapacityFillingOpportunityStore(_RecordingOpportunityStore):
+    async def insert(self, opportunity: Opportunity) -> None:
+        await super().insert(opportunity)
+        competing = replace(
+            _decision(),
+            decision_id="decision-competing-capacity",
+            market_id="market-competing-capacity",
+            token_id="token-competing-capacity",
+        )
+        assert self.runner._reserve_position_capacity(competing) is not None  # noqa: SLF001
+
+
 class _RecordingDecisionStore:
     def __init__(self, runner: Runner) -> None:
         self.runner = runner
@@ -190,7 +225,7 @@ class _RecordingSweepStore:
 
 
 @pytest.mark.asyncio
-async def test_controller_pipeline_persists_decision_before_enqueuing_it() -> None:
+async def test_controller_pipeline_persists_and_enqueues_decision() -> None:
     runner = _runner()
     controller = _OpportunityAwareControllerDouble()
     queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
@@ -249,6 +284,227 @@ async def test_controller_pipeline_persists_decision_before_enqueuing_it() -> No
         2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC
     )
     assert decision_store.expires_at == datetime(2026, 4, 23, 10, 15, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_coalesces_superseded_token_signals_before_forecast() -> None:
+    runner = _paper_runner_with_strict_book_age()
+    controller = _OpportunityAwareControllerDouble()
+    queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
+    runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        controller=cast(Any, controller),
+        asset_ids=None,
+    )
+    runner._controller_signal_queues["default"] = queue  # noqa: SLF001
+    runner.opportunity_store = cast(Any, _RecordingOpportunityStore(runner))
+    runner.decision_store = cast(Any, _RecordingDecisionStore(runner))
+    runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+    await runner._controller_task
+    now = datetime.now(tz=UTC)
+    older = replace(
+        _signal(),
+        market_id="market-superseded-cp07",
+        token_id="token-cp07-yes",
+        fetched_at=now,
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.41, "size": 100.0}],
+        },
+        external_signal={
+            **_signal().external_signal,
+            "book_received_at": now.isoformat(),
+        },
+    )
+    newer = replace(
+        _signal(),
+        market_id="market-latest-cp07",
+        token_id="token-cp07-yes",
+        fetched_at=now + timedelta(milliseconds=10),
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.41, "size": 100.0}],
+        },
+        external_signal={
+            **_signal().external_signal,
+            "book_received_at": (now + timedelta(milliseconds=10)).isoformat(),
+        },
+    )
+    runner._remember_paper_orderbook(newer)  # noqa: SLF001
+    await queue.put(older)
+    await queue.put(newer)
+
+    await asyncio.wait_for(
+        runner._controller_pipeline_loop("default"),  # noqa: SLF001
+        timeout=1.0,
+    )
+
+    assert controller.calls == ["market-latest-cp07"]
+    assert runner.state.controller_diagnostics == []
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_drops_stale_queued_book_signal_before_controller() -> None:
+    runner = _paper_runner_with_strict_book_age()
+    controller = _OpportunityAwareControllerDouble()
+    queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
+    runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        controller=cast(Any, controller),
+        asset_ids=None,
+    )
+    runner._controller_signal_queues["default"] = queue  # noqa: SLF001
+    runner.opportunity_store = cast(Any, _RecordingOpportunityStore(runner))
+    runner.decision_store = cast(Any, _RecordingDecisionStore(runner))
+    runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+    await runner._controller_task
+    now = datetime.now(tz=UTC)
+    stale = replace(
+        _signal(),
+        market_id="market-stale-cp07",
+        token_id="token-stale-cp07",
+        fetched_at=now,
+        external_signal={
+            **_signal().external_signal,
+            "book_received_at": (now - timedelta(seconds=5)).isoformat(),
+        },
+    )
+    fresh = replace(
+        _signal(),
+        market_id="market-fresh-cp07",
+        token_id="token-fresh-cp07",
+        fetched_at=now,
+        external_signal={
+            **_signal().external_signal,
+            "book_received_at": (now + timedelta(milliseconds=100)).isoformat(),
+        },
+    )
+    await queue.put(stale)
+    await queue.put(fresh)
+
+    await asyncio.wait_for(
+        runner._controller_pipeline_loop("default"),  # noqa: SLF001
+        timeout=1.0,
+    )
+
+    assert controller.calls == ["market-fresh-cp07"]
+    stale_diagnostic = runner.state.controller_diagnostics[0]
+    assert stale_diagnostic.code == "router_gate:book_too_stale"
+    assert stale_diagnostic.market_id == "market-stale-cp07"
+    assert stale_diagnostic.metadata["phase"] == "queue_dequeue"
+    assert stale_diagnostic.metadata["max_book_age_ms"] == 1_000.0
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_allows_stale_queued_signal_when_controller_can_refresh_book() -> None:
+    runner = _paper_runner_with_strict_book_age()
+    controller = _OpportunityAwareControllerDouble()
+    setattr(controller, "direct_book_reader", object())
+    queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
+    runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        controller=cast(Any, controller),
+        asset_ids=None,
+    )
+    runner._controller_signal_queues["default"] = queue  # noqa: SLF001
+    runner.opportunity_store = cast(Any, _RecordingOpportunityStore(runner))
+    runner.decision_store = cast(Any, _RecordingDecisionStore(runner))
+    runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+    await runner._controller_task
+    now = datetime.now(tz=UTC)
+    stale_refreshable = replace(
+        _signal(),
+        market_id="market-refreshable-cp07",
+        token_id="token-cp07-yes",
+        fetched_at=now,
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.41, "size": 100.0}],
+        },
+        external_signal={
+            **_signal().external_signal,
+            "book_received_at": (now - timedelta(seconds=5)).isoformat(),
+        },
+    )
+    runner._remember_paper_orderbook(stale_refreshable)  # noqa: SLF001
+    await queue.put(stale_refreshable)
+
+    await asyncio.wait_for(
+        runner._controller_pipeline_loop("default"),  # noqa: SLF001
+        timeout=1.0,
+    )
+
+    assert controller.calls == ["market-refreshable-cp07"]
+    assert runner.state.controller_diagnostics == []
+
+
+@pytest.mark.asyncio
+async def test_controller_pipeline_skips_runtime_state_when_enqueue_rejects() -> None:
+    settings = PMSSettings(
+        mode=RunMode.BACKTEST,
+        auto_migrate_default_v2=False,
+        risk=RiskSettings(
+            max_open_positions=2,
+            max_position_per_market=1000.0,
+            max_total_exposure=10_000.0,
+        ),
+    )
+    runner = Runner(config=settings, historical_data_path=FIXTURE_PATH)
+    runner.portfolio = replace(
+        runner.portfolio,
+        open_positions=[
+            Position(
+                market_id="market-existing-capacity",
+                token_id="token-existing-capacity",
+                venue="polymarket",
+                side=Side.BUY.value,
+                shares_held=10.0,
+                avg_entry_price=0.5,
+                unrealized_pnl=0.0,
+                locked_usdc=5.0,
+            )
+        ],
+    )
+    controller = _OpportunityAwareControllerDouble()
+    queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
+    runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        controller=cast(Any, controller),
+        asset_ids=None,
+    )
+    runner._controller_signal_queues["default"] = queue  # noqa: SLF001
+    runner.opportunity_store = cast(Any, _CapacityFillingOpportunityStore(runner))
+    runner.decision_store = cast(Any, _RecordingDecisionStore(runner))
+    runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
+    await runner._controller_task
+    await queue.put(_signal())
+
+    await asyncio.wait_for(
+        runner._controller_pipeline_loop("default"),  # noqa: SLF001
+        timeout=1.0,
+    )
+
+    decision_store = cast(_RecordingDecisionStore, runner.decision_store)
+    assert runner._decision_queue.empty()  # noqa: SLF001
+    assert runner.state.decisions == []
+    assert decision_store.transitions == [
+        (
+            "decision-cp07",
+            "pending",
+            "accepted",
+            datetime(2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC),
+        ),
+        (
+            "decision-cp07",
+            "accepted",
+            "rejected",
+            datetime(2026, 4, 23, 10, 0, 1, 250000, tzinfo=UTC),
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -311,6 +567,29 @@ def test_decision_evidence_drops_non_finite_orderbook_values() -> None:
     json.dumps(evidence, allow_nan=False)
 
 
+def test_decision_evidence_computes_book_age_for_live_market_data_signal() -> None:
+    book_received_at = _signal().fetched_at + timedelta(milliseconds=400)
+    signal = replace(
+        _signal(),
+        external_signal={
+            "raw_event_type": "book",
+            "book_received_at": book_received_at.isoformat(),
+        },
+    )
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=_decision(),
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at + timedelta(milliseconds=1250),
+    )
+
+    assert evidence["book_age_ms"] == pytest.approx(850.0)
+    external_signal_keys = evidence["external_signal_keys"]
+    assert isinstance(external_signal_keys, list)
+    assert "book_received_at" in external_signal_keys
+
+
 def test_decision_evidence_records_submitted_token_when_buy_no_uses_yes_book() -> None:
     signal = replace(_signal(), token_id="token-cp07-yes")
     decision = replace(
@@ -334,6 +613,134 @@ def test_decision_evidence_records_submitted_token_when_buy_no_uses_yes_book() -
     assert evidence["decision_side"] == "BUY"
     assert evidence["spread_bps_at_decision"] == 500
     assert evidence["book_hash"]
+
+
+def test_decision_evidence_prefers_recent_target_token_signal_for_flipped_side() -> None:
+    yes_signal = replace(
+        _signal(),
+        token_id="token-cp07-yes",
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.42, "size": 25.0}],
+        },
+        external_signal={
+            "book_age_ms": 70.0,
+            "yes_token_id": "token-cp07-yes",
+            "no_token_id": "token-cp07-no",
+            "signal_token_outcome": "YES",
+        },
+    )
+    no_signal = replace(
+        _signal(),
+        token_id="token-cp07-no",
+        yes_price=0.59,
+        orderbook={
+            "bids": [{"price": 0.58, "size": 30.0}],
+            "asks": [{"price": 0.60, "size": 35.0}],
+        },
+        external_signal={
+            "book_age_ms": 80.0,
+            "yes_token_id": "token-cp07-yes",
+            "no_token_id": "token-cp07-no",
+            "signal_token_outcome": "NO",
+        },
+    )
+    decision = replace(
+        _decision(),
+        token_id="token-cp07-no",
+        outcome="NO",
+        limit_price=0.60,
+    )
+
+    evidence_signal = _decision_evidence_signal_for_decision(
+        yes_signal,
+        decision,
+        latest_signals_by_token={"token-cp07-no": no_signal},
+    )
+    evidence = _decision_evidence_from_signal(
+        evidence_signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=yes_signal.fetched_at,
+    )
+
+    assert evidence["book_token_id"] == "token-cp07-no"
+    assert evidence["book_token_outcome"] == "NO"
+    assert evidence["book_top_levels"] == {
+        "bids": [{"price": 0.58, "size": 30.0}],
+        "asks": [{"price": 0.60, "size": 35.0}],
+    }
+    assert evidence["book_age_ms"] == 80.0
+    assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
+
+
+def test_decision_evidence_prefers_controller_execution_signal() -> None:
+    class ControllerWithExecutionSignal:
+        last_execution_signal: MarketSignal | None
+
+        def __init__(self, execution_signal: MarketSignal) -> None:
+            self.last_execution_signal = execution_signal
+
+    raw_signal = replace(
+        _signal(),
+        token_id="token-cp07-yes",
+        orderbook={
+            "bids": [{"price": 0.40, "size": 20.0}],
+            "asks": [{"price": 0.42, "size": 25.0}],
+        },
+        external_signal={
+            "book_age_ms": 30_000.0,
+            "yes_token_id": "token-cp07-yes",
+            "no_token_id": "token-cp07-no",
+            "signal_token_outcome": "YES",
+        },
+    )
+    execution_signal = replace(
+        raw_signal,
+        token_id="token-cp07-no",
+        yes_price=0.59,
+        orderbook={
+            "bids": [{"price": 0.58, "size": 30.0}],
+            "asks": [{"price": 0.60, "size": 35.0}],
+        },
+        external_signal={
+            "book_age_ms": 12.0,
+            "yes_token_id": "token-cp07-yes",
+            "no_token_id": "token-cp07-no",
+            "signal_token_outcome": "NO",
+            "direct_outcome_book_source": "venue_direct",
+        },
+    )
+    decision = replace(
+        _decision(),
+        token_id="token-cp07-no",
+        outcome="NO",
+        limit_price=0.60,
+    )
+
+    evidence_signal = _controller_execution_signal_for_decision(
+        ControllerWithExecutionSignal(execution_signal),
+        fallback_signal=raw_signal,
+        decision=decision,
+        latest_signals_by_token={},
+    )
+    evidence = _decision_evidence_from_signal(
+        evidence_signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=raw_signal.fetched_at,
+    )
+
+    assert evidence_signal is execution_signal
+    assert evidence["book_token_id"] == "token-cp07-no"
+    assert evidence["book_age_ms"] == 12.0
+    assert evidence["direct_outcome_book_source"] == "venue_direct"
+    assert evidence["book_top_levels"] == {
+        "bids": [{"price": 0.58, "size": 30.0}],
+        "asks": [{"price": 0.60, "size": 35.0}],
+    }
 
 
 def test_decision_evidence_records_secondary_baseline_probabilities() -> None:
@@ -362,6 +769,87 @@ def test_decision_evidence_records_secondary_baseline_probabilities() -> None:
     )
 
     assert evidence["market_implied_baseline_prob_estimate"] == pytest.approx(0.61)
+    assert evidence["baseline_probability_coordinate"] == "YES"
+    assert evidence["decision_outcome_market_implied_prob_estimate"] == (
+        pytest.approx(0.39)
+    )
     assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
     assert evidence["last_trade_baseline_prob_estimate"] == pytest.approx(0.43)
     assert evidence["category_prior_baseline_prob_estimate"] == pytest.approx(0.52)
+
+
+def test_decision_evidence_records_cost_basis_at_decision_time() -> None:
+    signal = replace(
+        _signal(),
+        external_signal={
+            "resolved_outcome": 1.0,
+            "book_age_ms": 75.0,
+            "fee_rate_bps": 300.0,
+        },
+    )
+    decision = replace(
+        _decision(),
+        expected_edge=0.21,
+        limit_price=0.41,
+        max_slippage_bps=50,
+        spread_bps_at_decision=80,
+    )
+
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at,
+    )
+
+    assert evidence["fee_rate_bps"] == pytest.approx(300.0)
+    assert evidence["fee_rate"] == pytest.approx(0.03)
+    assert evidence["fee_edge_at_decision"] == pytest.approx(0.0177)
+    assert evidence["spread_edge_at_decision"] == pytest.approx(0.00328)
+    assert evidence["slippage_edge_at_decision"] == pytest.approx(0.00205)
+    assert evidence["total_cost_edge_at_decision"] == pytest.approx(0.02303)
+    assert evidence["net_edge_after_costs"] == pytest.approx(0.18697)
+
+
+def test_decision_evidence_projects_direct_no_book_baselines_to_yes_probability() -> None:
+    signal = replace(
+        _signal(),
+        token_id="token-cp07-no",
+        yes_price=0.585,
+        orderbook={
+            "bids": [{"price": 0.58, "size": 20.0}],
+            "asks": [{"price": 0.60, "size": 25.0}],
+        },
+        external_signal={
+            "resolved_outcome": 1.0,
+            "book_age_ms": 75.0,
+            "last_trade_price": 0.57,
+        },
+    )
+    decision = replace(
+        _decision(),
+        token_id="token-cp07-no",
+        outcome="NO",
+        limit_price=0.60,
+    )
+
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at,
+    )
+
+    assert evidence["book_token_id"] == "token-cp07-no"
+    assert evidence["book_token_outcome"] == "NO"
+    assert evidence["yes_price"] == pytest.approx(0.415)
+    assert evidence["direct_token_price"] == pytest.approx(0.585)
+    assert evidence["market_implied_baseline_prob_estimate"] == pytest.approx(0.40)
+    assert evidence["baseline_probability_coordinate"] == "YES"
+    assert evidence["decision_outcome_market_implied_prob_estimate"] == (
+        pytest.approx(0.60)
+    )
+    assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
+    assert evidence["last_trade_baseline_prob_estimate"] == pytest.approx(0.43)

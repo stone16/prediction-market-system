@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Literal
 
 import pytest
@@ -9,7 +10,7 @@ from pms.actuator.risk import RiskDecision, RiskManager
 from pms.config import RiskSettings
 from pms.controller.pipeline import _default_portfolio
 from pms.core.enums import TimeInForce
-from pms.core.models import Portfolio, Position, TradeDecision
+from pms.core.models import OrderState, Portfolio, Position, TradeDecision
 
 
 def _decision(
@@ -126,6 +127,37 @@ def _position(
         avg_entry_price=0.5,
         unrealized_pnl=0.0,
         locked_usdc=locked_usdc,
+        strategy_id="strategy-risk",
+        strategy_version_id="strategy-risk-v1",
+        risk_group_id=risk_group_id,
+    )
+
+
+def _live_open_order(
+    *,
+    order_id: str = "live-open-risk-order",
+    market_id: str = "market-open-risk",
+    token_id: str = "token-open-risk",
+    remaining_notional_usdc: float = 10.0,
+    risk_group_id: str | None = "event:open-risk",
+) -> OrderState:
+    return OrderState(
+        order_id=order_id,
+        decision_id=f"decision-{order_id}",
+        status="live",
+        market_id=market_id,
+        token_id=token_id,
+        venue="polymarket",
+        requested_notional_usdc=remaining_notional_usdc,
+        filled_notional_usdc=0.0,
+        remaining_notional_usdc=remaining_notional_usdc,
+        fill_price=None,
+        submitted_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+        last_updated_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+        raw_status="live",
+        strategy_id="strategy-risk",
+        strategy_version_id="strategy-risk-v1",
+        filled_quantity=0.0,
         risk_group_id=risk_group_id,
     )
 
@@ -271,6 +303,58 @@ def test_risk_manager_rejects_min_order_size() -> None:
     result = RiskManager(_risk(min_order_usdc=1.0)).check(decision, _portfolio())
 
     assert result == RiskDecision(approved=False, reason="min_order_usdc")
+
+
+def test_risk_manager_allows_below_min_order_full_position_reduction() -> None:
+    portfolio = _portfolio(
+        locked_usdc=0.5,
+        open_positions=[
+            _position(
+                market_id="market-risk",
+                token_id="token-risk",
+                locked_usdc=0.5,
+                risk_group_id="event:risk",
+            )
+        ],
+    )
+    decision = _decision(
+        side="SELL",
+        notional_usdc=0.5,
+        risk_group_id="event:risk",
+    )
+
+    result = RiskManager(
+        _risk(min_order_usdc=1.0, max_exposure_per_risk_group=0.25)
+    ).check(decision, portfolio)
+
+    assert result == RiskDecision(approved=True, reason="approved")
+
+
+def test_risk_manager_counts_live_open_order_risk_group_exposure() -> None:
+    manager = RiskManager(_risk(max_exposure_per_risk_group=15.0))
+    manager.record_open_order_state(_live_open_order(remaining_notional_usdc=10.0))
+    decision = _decision(
+        notional_usdc=6.0,
+        risk_group_id="event:open-risk",
+    )
+
+    result = manager.check(decision, _portfolio())
+
+    assert result == RiskDecision(
+        approved=False,
+        reason="max_exposure_per_risk_group",
+    )
+
+
+def test_risk_manager_exposes_active_halt_state() -> None:
+    checked_at = datetime(2026, 5, 31, tzinfo=UTC)
+    manager = RiskManager(_risk(max_drawdown_pct=10.0))
+    portfolio = _portfolio(max_drawdown_pct=11.0)
+
+    halt = manager.check_auto_halt(portfolio, now=checked_at)
+
+    assert halt.halted is True
+    assert manager.active_halt() == halt
 
 
 def test_risk_manager_rejects_when_open_positions_at_cap() -> None:

@@ -221,7 +221,9 @@ async def test_controller_pipeline_emits_controller_decision_event() -> None:
     runner.decision_store = cast(Any, _DecisionStoreDouble())
     runner._controller_task = asyncio.create_task(asyncio.sleep(0))  # noqa: SLF001
     await runner._controller_task
-    await queue.put(_signal())
+    signal = _signal()
+    runner._remember_paper_orderbook(signal)  # noqa: SLF001
+    await queue.put(signal)
 
     await asyncio.wait_for(runner._controller_pipeline_loop("default"), timeout=1.0)  # noqa: SLF001
 

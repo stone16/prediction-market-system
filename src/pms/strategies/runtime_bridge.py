@@ -25,7 +25,7 @@ from pms.strategies.intents import (
 from pms.strategies.registry import StrategyModuleRegistry
 
 
-DecisionEnqueuer = Callable[[TradeDecision], Awaitable[None]]
+DecisionEnqueuer = Callable[[TradeDecision], Awaitable[bool | None]]
 
 
 class StrategyArtifactWriter(Protocol):
@@ -177,7 +177,10 @@ class AgentStrategyRuntimeBridge:
                     tuple(execution_artifacts),
                 )
             for decision in decisions:
-                await self.enqueue_decision(decision)
+                enqueued = await self.enqueue_decision(decision)
+                if enqueued is False:
+                    rejection_reasons.append("decision_enqueue_rejected")
+                    continue
                 enqueued_decision_ids.append(decision.decision_id)
 
         return AgentStrategyBridgeReport(

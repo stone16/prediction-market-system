@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
 
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, Side, TimeInForce
-from pms.core.models import BookSummary, EvalRecord, Feedback, FillRecord, TradeDecision
+from pms.core.models import (
+    BookSide,
+    BookSummary,
+    EvalRecord,
+    Feedback,
+    FillRecord,
+    QuoteEvalRecord,
+    TradeDecision,
+)
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
 from pms.evaluation.metrics import (
@@ -19,6 +26,7 @@ from pms.evaluation.quote_scoring import QuoteScorer
 from pms.evaluation.spool import EvalSpool
 from pms.storage.eval_store import EvalStore
 from pms.storage.feedback_store import FeedbackStore
+from pms.storage.quote_eval_store import QuoteEvalStore
 from pms.strategies.projections import EvalSpec
 from tests.support.fake_stores import InMemoryEvalStore, InMemoryFeedbackStore
 
@@ -28,6 +36,7 @@ def _decision(
     decision_id: str = "d-cp07",
     prob: float = 0.7,
     price: float = 0.4,
+    side: BookSide = Side.BUY.value,
     strategy_id: str = "default",
     strategy_version_id: str = "default-v1",
 ) -> TradeDecision:
@@ -36,7 +45,7 @@ def _decision(
         market_id="m-cp07",
         token_id="t-yes",
         venue="polymarket",
-        side=Side.BUY.value,
+        side=side,
         limit_price=price,
         notional_usdc=price * 10.0,
         order_type="limit",
@@ -58,6 +67,8 @@ def _fill(
     resolved_outcome: float | None = 1.0,
     fill_price: float = 0.42,
     status: str = OrderStatus.MATCHED.value,
+    side: str = Side.BUY.value,
+    fees: float | None = None,
     strategy_id: str = "default",
     strategy_version_id: str = "default-v1",
 ) -> FillRecord:
@@ -69,7 +80,7 @@ def _fill(
         market_id="m-cp07",
         token_id="t-yes",
         venue="polymarket",
-        side=Side.BUY.value,
+        side=side,
         fill_price=fill_price,
         fill_notional_usdc=fill_price * 10.0,
         fill_quantity=10.0,
@@ -80,6 +91,7 @@ def _fill(
         strategy_id=strategy_id,
         strategy_version_id=strategy_version_id,
         resolved_outcome=resolved_outcome,
+        fees=fees,
     )
 
 
@@ -117,6 +129,28 @@ def _eval_record(
         slippage_bps=slippage_bps,
         filled=filled,
     )
+
+
+class _InMemoryQuoteEvalStore:
+    def __init__(self) -> None:
+        self.records: list[QuoteEvalRecord] = []
+
+    async def append(self, record: QuoteEvalRecord) -> None:
+        self.records.append(record)
+
+
+class _StaticQuoteReader:
+    def __init__(self, quote: BookSummary | None) -> None:
+        self.quote = quote
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def latest_book_summary(
+        self,
+        market_id: str,
+        token_id: str | None,
+    ) -> BookSummary | None:
+        self.calls.append((market_id, token_id))
+        return self.quote
 
 
 def _strategy_snapshot(
@@ -194,6 +228,86 @@ def test_quote_scorer_uses_midpoint_for_calibration_and_bid_for_buy_mtm() -> Non
     assert record.quote_score == pytest.approx((0.70 - 0.64) ** 2)
     assert record.mtm_pnl == pytest.approx((0.62 - 0.50) * 10.0)
     assert record.category == "model-a"
+
+
+def test_quote_scorer_subtracts_fill_fees_from_buy_mtm() -> None:
+    quote = BookSummary(
+        best_bid=0.62,
+        best_ask=0.66,
+        spread_bps=625.0,
+        depth_usdc=250.0,
+        timestamp=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    record = QuoteScorer().score(
+        _fill(
+            decision_id="d-quote-fee",
+            resolved_outcome=None,
+            fill_price=0.50,
+            fees=0.15,
+        ),
+        _decision(decision_id="d-quote-fee", prob=0.70, price=0.50),
+        quote,
+        quote_lag_seconds=3600,
+        recorded_at=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    assert record.mtm_pnl == pytest.approx((0.62 - 0.50) * 10.0 - 0.15)
+
+
+def test_quote_scorer_subtracts_fill_fees_from_sell_mtm() -> None:
+    quote = BookSummary(
+        best_bid=0.62,
+        best_ask=0.66,
+        spread_bps=625.0,
+        depth_usdc=250.0,
+        timestamp=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    record = QuoteScorer().score(
+        _fill(
+            decision_id="d-quote-sell-fee",
+            resolved_outcome=None,
+            fill_price=0.70,
+            side=Side.SELL.value,
+            fees=0.12,
+        ),
+        _decision(
+            decision_id="d-quote-sell-fee",
+            prob=0.30,
+            price=0.70,
+            side=Side.SELL.value,
+        ),
+        quote,
+        quote_lag_seconds=3600,
+        recorded_at=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    assert record.mtm_pnl == pytest.approx((0.70 - 0.66) * 10.0 - 0.12)
+
+
+def test_quote_scorer_uses_decimal_internals_for_boundary_mtm() -> None:
+    quote = BookSummary(
+        best_bid=0.30,
+        best_ask=0.31,
+        spread_bps=327.0,
+        depth_usdc=250.0,
+        timestamp=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    record = QuoteScorer().score(
+        _fill(
+            decision_id="d-quote-decimal",
+            resolved_outcome=None,
+            fill_price=0.20,
+        ),
+        _decision(decision_id="d-quote-decimal", prob=0.70, price=0.20),
+        quote,
+        quote_lag_seconds=3600,
+        recorded_at=datetime(2026, 4, 14, 11, 0, tzinfo=UTC),
+    )
+
+    assert record.mtm_pnl == 1.0
 
 
 def test_scorer_scores_secondary_baselines_from_decision_evidence() -> None:
@@ -369,19 +483,17 @@ async def test_eval_spool_enqueue_is_non_blocking_and_scores_in_background(
     spool = EvalSpool(store=store, scorer=Scorer())
     await spool.start()
     try:
-        started_at = time.perf_counter()
         for index in range(100):
             spool.enqueue(
                 _fill(decision_id=f"d-{index}", resolved_outcome=1.0),
                 _decision(prob=0.7),
             )
-        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        assert await cast(InMemoryEvalStore, store).all() == []
 
         await spool.join()
     finally:
         await spool.stop()
 
-    assert elapsed_ms < 100
     assert len(await cast(InMemoryEvalStore, store).all()) == 100
 
 
@@ -406,6 +518,97 @@ async def test_eval_spool_skips_unresolved_fills_and_keeps_running(
         await spool.stop()
 
     assert [record.decision_id for record in await cast(InMemoryEvalStore, store).all()] == ["d-resolved"]
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_prefers_fresh_quote_reader_for_unresolved_fill_mtm(
+) -> None:
+    quote_store = _InMemoryQuoteEvalStore()
+    fresh_reader = _StaticQuoteReader(
+        BookSummary(
+            best_bid=0.10,
+            best_ask=0.20,
+            spread_bps=6_666.0,
+            depth_usdc=1.0,
+            timestamp=datetime(2026, 4, 14, 10, 59, tzinfo=UTC),
+        )
+    )
+    fill = _fill(
+        decision_id="d-evidence-quote",
+        resolved_outcome=None,
+        fill_price=0.50,
+    )
+    spool = EvalSpool(
+        store=cast(EvalStore, InMemoryEvalStore()),
+        scorer=Scorer(),
+        quote_store=cast(QuoteEvalStore, quote_store),
+        quote_reader=fresh_reader,
+    )
+    await spool.start()
+    try:
+        spool.enqueue(
+            fill,
+            _decision(decision_id="d-evidence-quote", prob=0.70, price=0.50),
+            decision_evidence={
+                "direct_outcome_book_source": "venue_direct",
+                "book_age_ms": 25.0,
+                "book_top_levels": {
+                    "bids": [{"price": 0.62, "size": 100.0}],
+                    "asks": [{"price": 0.64, "size": 100.0}],
+                },
+            },
+        )
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    assert fresh_reader.calls == [("m-cp07", "t-yes")]
+    assert len(quote_store.records) == 1
+    record = quote_store.records[0]
+    assert record.quote_source == "postgres_snapshot"
+    assert record.quote_price == pytest.approx(0.15)
+    assert record.mtm_pnl == pytest.approx((0.10 - 0.50) * 10.0)
+    assert record.book_ts == datetime(2026, 4, 14, 10, 59, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_falls_back_to_decision_time_book_evidence(
+) -> None:
+    quote_store = _InMemoryQuoteEvalStore()
+    fill = _fill(
+        decision_id="d-evidence-quote",
+        resolved_outcome=None,
+        fill_price=0.50,
+    )
+    spool = EvalSpool(
+        store=cast(EvalStore, InMemoryEvalStore()),
+        scorer=Scorer(),
+        quote_store=cast(QuoteEvalStore, quote_store),
+    )
+    await spool.start()
+    try:
+        spool.enqueue(
+            fill,
+            _decision(decision_id="d-evidence-quote", prob=0.70, price=0.50),
+            decision_evidence={
+                "direct_outcome_book_source": "venue_direct",
+                "book_age_ms": 25.0,
+                "book_top_levels": {
+                    "bids": [{"price": 0.62, "size": 100.0}],
+                    "asks": [{"price": 0.64, "size": 100.0}],
+                },
+            },
+        )
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    assert len(quote_store.records) == 1
+    record = quote_store.records[0]
+    assert record.quote_source == "venue_direct"
+    assert record.quote_price == pytest.approx(0.63)
+    assert record.mtm_pnl == pytest.approx((0.62 - 0.50) * 10.0)
+    assert record.book_ts == fill.filled_at - timedelta(milliseconds=25.0)
 
 
 def test_metrics_snapshot_empty_and_aggregated_records() -> None:

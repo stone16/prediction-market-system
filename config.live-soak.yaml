@@ -7,14 +7,19 @@ live_trading_enabled: false
 live_account_reconciliation_required: true
 live_emergency_audit_path: .data/live-emergency-audit.jsonl
 live_first_order_audit_path: .data/first-order-audit.jsonl
+paper_soak_strategy_id: h1_flb
+paper_soak_archive_default: true
 
 risk:
-  max_position_per_market: 5.0
+  max_position_per_market: 1.0
   max_total_exposure: 50.0
   max_drawdown_pct: 20.0
   max_daily_loss_usdc: 20.0
-  max_open_positions: 5
-  max_exposure_per_risk_group: 15.0
+  max_open_positions: 50
+  # PAPER soak evidence should not be dominated by one event. Keep the group
+  # cap equal to the minimum order so repeated markets in the same risk group
+  # are rejected until production evidence justifies wider concentration.
+  max_exposure_per_risk_group: 1.0
   min_order_usdc: 1.0
   slippage_threshold_bps: 50.0
   max_quantity_shares: 500.0
@@ -24,11 +29,21 @@ position_exit:
   stop_loss_pct: 30.0
   profit_take_pct: 50.0
   max_holding_days: 7
+  reentry_cooldown_s: 3600.0
 
 sensor:
-  poll_interval_s: 5.0
+  poll_interval_s: 60.0
   max_reconnect_interval_s: 60.0
+  market_data_ws_max_size_bytes: 8388608
+  # Keep the paper-soak subscription set conservative. In local live-data
+  # soaks, 400-asset subscriptions repeatedly reset/silenced the Polymarket
+  # websocket before controller evidence could produce fills.
   max_subscription_asset_ids: 100
+  discovery_page_limit: 100
+  discovery_max_pages: 30
+  discovery_pagination_mode: keyset
+  discovery_order: volume24hr
+  discovery_ascending: false
   discovery_http_timeout_s: 10.0
   discovery_http_pool_timeout_s: 10.0
   discovery_http_max_connections: 10
@@ -42,30 +57,37 @@ controller:
   max_slippage_bps: 50
   time_in_force: IOC
   decision_cooldown_s: 60.0
-  max_book_age_ms: 1000.0
+  # Keep execution evidence tight enough for readiness. Venue refresh is
+  # enabled below; stale websocket snapshots must refresh from the public book
+  # endpoint or be rejected before a paper order is emitted.
+  max_book_age_ms: 2000.0
   allowed_book_clock_skew_ms: 250.0
   max_spread_bps: 100.0
   strict_factor_gates: false
   quote_source: postgres_snapshot
+  venue_book_refresh_enabled: true
+  venue_book_refresh_timeout_s: 5.0
   direct_quote_min_notional_usdc: 100.0
   dual_quote_max_price_delta_bps: 25.0
-  # Optional historical resolution export used to attach a no-lookahead
-  # category-prior baseline to each controller decision. Keep null until the
-  # file exists; if set, startup fails closed when the file/schema is invalid.
-  category_prior_observations_path: null
+  # Historical resolution export used to attach a no-lookahead category-prior
+  # baseline to each controller decision. The launch soak requires this
+  # artifact so the final LIVE GO report can satisfy baseline coverage gates.
+  category_prior_observations_path: /secure/pms/category-prior-observations.csv
   category_prior_min_category_samples: 20
   category_prior_min_global_samples: 100
   category_prior_smoothing_alpha: 1.0
   category_prior_smoothing_beta: 1.0
 
 strategies:
-  # Optional warehouse-calibrated H1 FLB model. Keep null until the artifact
-  # exists; if set, startup fails closed when schema/sample gates fail.
+  # Warehouse-calibrated H1 FLB model. This is intentionally required for the
+  # launch soak: startup fails closed when the artifact is missing or when
+  # schema/sample gates fail.
   # CSV columns: signal_name, probability_estimate, sample_count, source_label.
-  flb_calibration_path: null
+  # Required sidecar: /secure/pms/flb-calibration.csv.provenance.json.
+  flb_calibration_path: /secure/pms/flb-calibration.csv
   flb_min_calibration_samples: 100
   flb_entry_execution_cost_bps: 15.0
-  flb_fee_rate: 0.04
+  flb_fee_rate: 0.07
 
 polymarket:
   host: https://clob.polymarket.com
@@ -80,15 +102,19 @@ polymarket:
   operator_approval_mode: every_order
 
 llm:
-  enabled: true
+  enabled: false
   provider: anthropic
-  max_daily_llm_cost_usdc: 25.0
+  # H1 FLB does not use an LLM forecaster. Keep a small cap in config so an
+  # operator who deliberately enables LLM experiments still has a hard budget.
+  max_daily_llm_cost_usdc: 0.05
   # api_key, model, and base_url are intentionally omitted from the committed
   # YAML so the operator's .env or shell can choose between native Anthropic
   # and any Anthropic-compatible provider (DeepSeek's /anthropic endpoint,
-  # OpenRouter, Bedrock proxies). Required env vars when running this config:
+  # OpenRouter, Bedrock proxies) only after explicitly enabling LLM.
   #
-  #   PMS_LLM__API_KEY    = "sk-..."                         (always required)
+  # PMS_LLM__API_KEY is required only if you explicitly enable LLM.
+  # Optional LLM opt-in env vars:
+  #   PMS_LLM__API_KEY    = "sk-..."
   #   PMS_LLM__MODEL      = "claude-sonnet-4-6"              (or e.g. DeepSeek-V4-Pro)
   #   PMS_LLM__BASE_URL   = ""                               (empty for native Anthropic;
   #                          "https://api.deepseek.com/anthropic" for DeepSeek)

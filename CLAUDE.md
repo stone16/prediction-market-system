@@ -31,33 +31,37 @@ Never commit to `main` directly; changes land via PR.
 
 ## Canonical gates
 
-Run from a clean shell at the repo root. Both gates are load-bearing.
+Run from a clean shell at the repo root. These gates are load-bearing.
 
 ```bash
 uv sync                                  # install deps from uv.lock
-uv run pytest -q                         # full suite — see baseline below
+uv run pytest -q                         # full default suite
 uv run mypy src/ tests/ --strict         # strict on every committed module
+uv run lint-imports                      # import-linter contracts
 ```
 
-For dashboard work, also run:
+The dashboard Vitest suite is also enforced by CI:
 
 ```bash
-(cd dashboard && npm run test)           # Vitest suite
+(cd dashboard && npm ci && npm run test:ci)
 ```
 
-**Baseline (as of 2026-04-21, main @ 96f2a14):** `pytest`
-337 passing, 85 skipped. The 85 skips are PostgreSQL-backed integration
-checks gated on `PMS_RUN_INTEGRATION=1` and, where needed,
-`PMS_TEST_DATABASE_URL`. mypy strict must be clean (196 source files).
-If the baseline fails on a fresh clone, fix the config — not the test —
-and commit with a `fix(tests):` or `fix(build):` prefix before starting
-feature work (see promoted rule: *Fresh-clone baseline verification*).
+**Baseline policy:** do not rely on historical pass/skipped or source-file
+count snapshots. The current head's gate output is the source of truth:
+default `pytest` must pass with only explicitly gated skips, mypy strict must
+be clean on every committed module, import-linter contracts must hold, and the
+dashboard Vitest suite must pass. If the baseline fails on a fresh clone, fix
+the config — not the test — and commit with a `fix(tests):` or `fix(build):`
+prefix before starting feature work (see promoted rule: *Fresh-clone baseline
+verification*).
 
 Integration tests:
 ```bash
-export DATABASE_URL="${PMS_TEST_DATABASE_URL:-postgres://postgres:postgres@localhost:5432/pms_test}"
+docker compose up -d postgres
+export PMS_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
+export DATABASE_URL="$PMS_TEST_DATABASE_URL"
 uv run alembic upgrade head
-PMS_RUN_INTEGRATION=1 uv run pytest -m integration
+PMS_RUN_INTEGRATION=1 uv run pytest -q -m integration
 ```
 
 Compose-backed PostgreSQL integration DB:

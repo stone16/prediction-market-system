@@ -11,9 +11,18 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from pms.config import PMSSettings, normalize_webhook_url
+from pms.config import (
+    PMSSettings,
+    normalize_webhook_url,
+    validate_live_readiness_reports_for_submission,
+)
+from pms.core.category_prior import load_category_prior_observations_csv
 from pms.core.models import LiveTradingDisabledError
 from pms.research.spec_codec import deserialize_execution_model
+from pms.strategies.flb.artifacts import (
+    flb_calibration_provenance_path,
+    validate_flb_calibration_provenance_json,
+)
 
 
 _LIVE_PAPER_BACKTEST_DIFF_GENERATED_BY = "scripts/paper_backtest_execution_diff.py"
@@ -52,9 +61,6 @@ _LIVE_PAPER_BACKTEST_DIFF_EMPTY_LIST_FIELDS: tuple[tuple[str, str], ...] = (
     ("backtest_only_decision_ids", "backtest-only decisions"),
     ("status_mismatches", "status mismatches"),
 )
-_REQUIRED_CATEGORY_PRIOR_COLUMNS = frozenset(
-    {"market_id", "category", "yes_payout", "no_payout", "resolved_at"}
-)
 _REQUIRED_FLB_CALIBRATION_COLUMNS = frozenset(
     {"signal_name", "probability_estimate", "sample_count", "source_label"}
 )
@@ -62,6 +68,22 @@ _REQUIRED_FLB_SIGNALS = frozenset(
     {
         "longshot_yes_overpriced_buy_no",
         "favorite_yes_underpriced_buy_yes",
+    }
+)
+_FLB_CALIBRATION_SOURCE_LABEL_MAX_LENGTH = 80
+_FLB_CALIBRATION_SOURCE_LABEL_FORBIDDEN_PARTS = frozenset(
+    {
+        "dummy",
+        "example",
+        "fixture",
+        "gamma",
+        "local",
+        "placeholder",
+        "sample",
+        "smoke",
+        "synthetic",
+        "test",
+        "todo",
     }
 )
 
@@ -130,11 +152,18 @@ def live_preflight_readiness_reports_fingerprint(settings: PMSSettings) -> str:
             settings.strategies.flb_calibration_path,
             label="LIVE FLB calibration artifact",
         ),
+        "flb_calibration_provenance": _readiness_report_fingerprint_payload(
+            _flb_calibration_provenance_raw_path(
+                settings.strategies.flb_calibration_path
+            ),
+            label="LIVE FLB calibration provenance JSON",
+        ),
     }
     return canonical_sha256(payload)
 
 
 def validate_live_strategy_artifacts_for_submission(settings: PMSSettings) -> None:
+    validate_live_readiness_reports_for_submission(settings)
     _validate_live_execution_model_artifact(settings)
     _validate_live_paper_backtest_diff_artifact(settings)
     _validate_live_category_prior_artifact(settings)
@@ -216,6 +245,12 @@ def _validate_live_execution_model_artifact(settings: PMSSettings) -> None:
         label="LIVE execution-model artifact",
         max_age_s=settings.live_readiness_report_max_age_s,
     )
+    _require_strategy_artifact_strategy_evidence(
+        payload,
+        artifact_label="LIVE execution-model artifact",
+        expected_labels=_paper_soak_report_strategy_labels(settings),
+    )
+    _require_live_execution_model_input_hash(payload)
     try:
         execution_model = deserialize_execution_model(payload)
     except (KeyError, TypeError, ValueError) as exc:
@@ -358,6 +393,12 @@ def _validate_live_paper_backtest_diff_artifact(settings: PMSSettings) -> None:
         label="LIVE paper-vs-backtest execution diff artifact",
         max_age_s=settings.live_readiness_report_max_age_s,
     )
+    _require_strategy_artifact_strategy_evidence(
+        payload,
+        artifact_label="LIVE paper-vs-backtest execution diff artifact",
+        expected_labels=_paper_soak_report_strategy_labels(settings),
+    )
+    _require_paper_backtest_diff_input_hashes(payload)
     if payload.get("final_go_no_go_valid") is not True:
         msg = "LIVE paper-vs-backtest execution diff artifact must be final GO"
         raise LiveTradingDisabledError(msg)
@@ -419,6 +460,57 @@ def _validate_live_paper_backtest_diff_artifact(settings: PMSSettings) -> None:
     _require_paper_backtest_diff_thresholds(metric_values, thresholds=thresholds)
 
 
+def _require_strategy_artifact_strategy_evidence(
+    payload: Mapping[str, object],
+    *,
+    artifact_label: str,
+    expected_labels: Sequence[str],
+) -> None:
+    raw_value = payload.get("strategy_evidence")
+    if not isinstance(raw_value, str) or raw_value.strip() == "":
+        msg = f"{artifact_label} strategy_evidence is required"
+        raise LiveTradingDisabledError(msg)
+    observed_labels = _strategy_evidence_labels(raw_value, artifact_label=artifact_label)
+    expected = set(expected_labels)
+    observed = set(observed_labels)
+    if observed != expected:
+        msg = (
+            f"{artifact_label} strategy_evidence must match active strategies from "
+            "paper-soak GO report: "
+            f"expected={', '.join(sorted(expected))}; "
+            f"observed={', '.join(sorted(observed))}"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _strategy_evidence_labels(
+    raw_value: str,
+    *,
+    artifact_label: str,
+) -> tuple[str, ...]:
+    labels = tuple(
+        label.strip()
+        for label in raw_value.split(",")
+        if label.strip() != ""
+    )
+    if (
+        not labels
+        or len(set(labels)) != len(labels)
+        or any(
+            label.lower() == "unknown"
+            or "@" not in label
+            or _looks_like_artifact_placeholder(label)
+            for label in labels
+        )
+    ):
+        msg = (
+            f"{artifact_label} strategy_evidence must contain concrete "
+            "strategy_id@strategy_version_id"
+        )
+        raise LiveTradingDisabledError(msg)
+    return labels
+
+
 def _validate_live_category_prior_artifact(settings: PMSSettings) -> None:
     raw_path = settings.controller.category_prior_observations_path
     if raw_path is None or raw_path.strip() == "":
@@ -437,8 +529,12 @@ def _validate_live_category_prior_artifact(settings: PMSSettings) -> None:
         raw_path,
         label="LIVE category-prior artifact",
     )
-    text = _read_strategy_artifact_text(path, label="LIVE category-prior artifact")
-    observation_count = _count_category_prior_observations(text)
+    try:
+        loaded = load_category_prior_observations_csv(path)
+    except ValueError as exc:
+        msg = f"LIVE category-prior artifact invalid: {exc}"
+        raise LiveTradingDisabledError(msg) from exc
+    observation_count = len(loaded.observations)
     minimum = settings.controller.category_prior_min_global_samples
     if observation_count < minimum:
         msg = (
@@ -469,10 +565,29 @@ def _validate_live_flb_calibration_artifact(settings: PMSSettings) -> None:
         label="LIVE FLB calibration artifact",
     )
     text = _read_strategy_artifact_text(path, label="LIVE FLB calibration artifact")
-    _validate_flb_calibration_rows(
+    source_labels, signal_sample_counts = _validate_flb_calibration_rows(
         text,
         min_sample_count=settings.strategies.flb_min_calibration_samples,
     )
+    provenance_path = _require_live_strategy_artifact_path(
+        str(flb_calibration_provenance_path(path)),
+        label="LIVE FLB calibration provenance JSON",
+    )
+    provenance_text = _read_strategy_artifact_text(
+        provenance_path,
+        label="LIVE FLB calibration provenance JSON",
+    )
+    try:
+        validate_flb_calibration_provenance_json(
+            provenance_text,
+            calibration_csv_sha256=sha256(text.encode("utf-8")).hexdigest(),
+            source_labels=source_labels,
+            signal_sample_counts=signal_sample_counts,
+            min_sample_count=settings.strategies.flb_min_calibration_samples,
+        )
+    except ValueError as exc:
+        msg = f"LIVE FLB calibration provenance JSON invalid: {exc}"
+        raise LiveTradingDisabledError(msg) from exc
 
 
 def _require_live_strategy_artifact_path(raw_path: str, *, label: str) -> Path:
@@ -511,7 +626,7 @@ def _require_json_artifact_generated_at(
     except ValueError as exc:
         msg = f"{label} generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    generated_at = _coerce_datetime(generated_at)
+    generated_at = _require_timezone_aware_datetime(generated_at, label=label)
     now = datetime.now(tz=UTC)
     if generated_at > now:
         msg = f"{label} generated_at is in the future"
@@ -538,6 +653,34 @@ def _require_paper_backtest_diff_empty_lists(payload: Mapping[str, object]) -> N
                 f"{label}"
             )
             raise LiveTradingDisabledError(msg)
+
+
+def _require_paper_backtest_diff_input_hashes(payload: Mapping[str, object]) -> None:
+    raw_value = payload.get("input_csv_sha256")
+    if not isinstance(raw_value, dict):
+        msg = (
+            "LIVE paper-vs-backtest execution diff artifact "
+            "input_csv_sha256 is required"
+        )
+        raise LiveTradingDisabledError(msg)
+    for field_name in ("paper", "backtest"):
+        digest = raw_value.get(field_name)
+        if not isinstance(digest, str) or not is_sha256_hexdigest(digest):
+            msg = (
+                "LIVE paper-vs-backtest execution diff artifact "
+                f"input_csv_sha256.{field_name} must be a sha256 hex digest"
+            )
+            raise LiveTradingDisabledError(msg)
+
+
+def _require_live_execution_model_input_hash(payload: Mapping[str, object]) -> None:
+    digest = payload.get("input_csv_sha256")
+    if not isinstance(digest, str) or not is_sha256_hexdigest(digest):
+        msg = (
+            "LIVE execution-model artifact input_csv_sha256 "
+            "must be a sha256 hex digest"
+        )
+        raise LiveTradingDisabledError(msg)
 
 
 def _require_paper_backtest_diff_metric_number(
@@ -699,66 +842,11 @@ def _require_paper_backtest_diff_threshold_number(
     return value
 
 
-def _count_category_prior_observations(text: str) -> int:
-    reader = csv.DictReader(text.splitlines())
-    _require_unique_csv_fieldnames(
-        reader.fieldnames,
-        label="LIVE category-prior artifact invalid",
-    )
-    fieldnames = set(reader.fieldnames or ())
-    missing_columns = sorted(_REQUIRED_CATEGORY_PRIOR_COLUMNS - fieldnames)
-    if missing_columns:
-        msg = (
-            "LIVE category-prior artifact invalid: missing columns: "
-            f"{', '.join(missing_columns)}"
-        )
-        raise LiveTradingDisabledError(msg)
-    seen_market_ids: set[str] = set()
-    observation_count = 0
-    for row_number, row in enumerate(reader, start=2):
-        market_id = (row.get("market_id") or "").strip()
-        if market_id == "":
-            msg = f"LIVE category-prior artifact invalid: row {row_number} missing market_id"
-            raise LiveTradingDisabledError(msg)
-        if market_id in seen_market_ids:
-            msg = f"LIVE category-prior artifact invalid: duplicate market_id {market_id}"
-            raise LiveTradingDisabledError(msg)
-        seen_market_ids.add(market_id)
-        if (row.get("category") or "").strip() == "":
-            msg = f"LIVE category-prior artifact invalid: row {row_number} missing category"
-            raise LiveTradingDisabledError(msg)
-        _parse_category_prior_resolved_at(row, row_number=row_number)
-        yes_payout = (row.get("yes_payout") or "").strip()
-        no_payout = (row.get("no_payout") or "").strip()
-        if (yes_payout, no_payout) == ("0.5", "0.5"):
-            continue
-        if (yes_payout, no_payout) not in {("1", "0"), ("0", "1")}:
-            msg = (
-                "LIVE category-prior artifact invalid: "
-                f"row {row_number} has non-settled payout vector"
-            )
-            raise LiveTradingDisabledError(msg)
-        observation_count += 1
-    return observation_count
-
-
-def _parse_category_prior_resolved_at(
-    row: Mapping[str, str | None],
+def _validate_flb_calibration_rows(
+    text: str,
     *,
-    row_number: int,
-) -> None:
-    raw_value = (row.get("resolved_at") or "").strip()
-    if raw_value == "":
-        msg = f"LIVE category-prior artifact invalid: row {row_number} missing resolved_at"
-        raise LiveTradingDisabledError(msg)
-    try:
-        datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        msg = f"LIVE category-prior artifact invalid: row {row_number} invalid resolved_at"
-        raise LiveTradingDisabledError(msg) from exc
-
-
-def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
+    min_sample_count: int,
+) -> tuple[tuple[str, ...], dict[str, int]]:
     reader = csv.DictReader(text.splitlines())
     _require_unique_csv_fieldnames(
         reader.fieldnames,
@@ -773,6 +861,8 @@ def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
         )
         raise LiveTradingDisabledError(msg)
     observed_signals: set[str] = set()
+    source_labels: list[str] = []
+    signal_sample_counts: dict[str, int] = {}
     for row_number, row in enumerate(reader, start=2):
         signal_name = (row.get("signal_name") or "").strip()
         if signal_name == "":
@@ -796,15 +886,18 @@ def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
             row_number=row_number,
         )
         sample_count = _require_sample_count(row.get("sample_count"), row_number=row_number)
+        signal_sample_counts[signal_name] = sample_count
         if sample_count < min_sample_count:
             msg = (
                 "LIVE FLB calibration artifact invalid: "
                 f"{signal_name} sample_count {sample_count} < {min_sample_count}"
             )
             raise LiveTradingDisabledError(msg)
-        if (row.get("source_label") or "").strip() == "":
-            msg = f"LIVE FLB calibration artifact invalid: row {row_number} missing source_label"
-            raise LiveTradingDisabledError(msg)
+        _require_flb_calibration_source_label(
+            row.get("source_label"),
+            row_number=row_number,
+        )
+        source_labels.append((row.get("source_label") or "").strip())
     missing_signals = sorted(_REQUIRED_FLB_SIGNALS - observed_signals)
     if missing_signals:
         msg = (
@@ -812,6 +905,65 @@ def _validate_flb_calibration_rows(text: str, *, min_sample_count: int) -> None:
             f"signals: {', '.join(missing_signals)}"
         )
         raise LiveTradingDisabledError(msg)
+    return tuple(source_labels), signal_sample_counts
+
+
+def _flb_calibration_provenance_raw_path(raw_path: str | None) -> str | None:
+    if raw_path is None or raw_path.strip() == "":
+        return None
+    return str(flb_calibration_provenance_path(raw_path))
+
+
+def _require_flb_calibration_source_label(
+    raw_value: str | None,
+    *,
+    row_number: int,
+) -> None:
+    value = (raw_value or "").strip()
+    if value == "":
+        msg = f"LIVE FLB calibration artifact invalid: row {row_number} missing source_label"
+        raise LiveTradingDisabledError(msg)
+    if len(value) > _FLB_CALIBRATION_SOURCE_LABEL_MAX_LENGTH:
+        msg = (
+            "LIVE FLB calibration artifact invalid: "
+            f"row {row_number} source_label too long"
+        )
+        raise LiveTradingDisabledError(msg)
+    if not _is_flb_calibration_source_label_slug(value):
+        msg = (
+            "LIVE FLB calibration artifact invalid: "
+            f"row {row_number} source_label must be a lowercase audit slug"
+        )
+        raise LiveTradingDisabledError(msg)
+    parts = {
+        part
+        for separator in ("-", "_")
+        for part in value.split(separator)
+        if part
+    }
+    forbidden = sorted(parts & _FLB_CALIBRATION_SOURCE_LABEL_FORBIDDEN_PARTS)
+    if forbidden:
+        msg = (
+            "LIVE FLB calibration artifact invalid: "
+            f"row {row_number} source_label contains forbidden source marker "
+            f"{forbidden[0]}"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _is_flb_calibration_source_label_slug(value: str) -> bool:
+    if value == "":
+        return False
+    if value[0] < "a" or value[0] > "z":
+        return False
+    if not ("0" <= value[-1] <= "9" or "a" <= value[-1] <= "z"):
+        return False
+    return all(
+        character in {"-", "_"}
+        or "a" <= character <= "z"
+        or "0" <= character <= "9"
+        for character in value
+    )
 
 
 def _require_unique_csv_fieldnames(
@@ -891,7 +1043,7 @@ def _json_artifact_generated_at(raw_path: str | None, *, label: str) -> datetime
     except ValueError as exc:
         msg = f"{label} generated_at is invalid for credentialed preflight chronology"
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_datetime(parsed)
+    return _require_timezone_aware_datetime(parsed, label=label)
 
 
 def canonical_sha256(payload: Mapping[str, object]) -> str:
@@ -1005,12 +1157,25 @@ def _emergency_audit_record_timestamp(
             f"chronology: {path}:{line_number} invalid timestamp"
         )
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_datetime(parsed)
+    return _require_timezone_aware_datetime(
+        parsed,
+        label=(
+            "LIVE emergency audit record invalid for credentialed preflight "
+            f"chronology: {path}:{line_number}"
+        ),
+        field_name="timestamp",
+    )
 
 
-def _coerce_datetime(value: datetime) -> datetime:
+def _require_timezone_aware_datetime(
+    value: datetime,
+    *,
+    label: str,
+    field_name: str = "generated_at",
+) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=UTC)
+        msg = f"{label} {field_name} must include timezone"
+        raise LiveTradingDisabledError(msg)
     return value.astimezone(UTC)
 
 
@@ -1034,7 +1199,64 @@ def _readiness_report_generated_at(raw_path: str | None, *, label: str) -> datet
     except ValueError as exc:
         msg = f"{label} persisted provenance generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_datetime(generated_at)
+    return _require_timezone_aware_datetime(
+        generated_at,
+        label=label,
+        field_name="persisted provenance generated_at",
+    )
+
+
+def _paper_soak_report_strategy_labels(settings: PMSSettings) -> tuple[str, ...]:
+    raw_path = settings.live_paper_soak_report_path
+    if raw_path is None or raw_path.strip() == "":
+        msg = "LIVE paper-soak GO report missing for strategy artifact binding"
+        raise LiveTradingDisabledError(msg)
+    path = Path(raw_path).expanduser()
+    try:
+        report_text = _read_bytes_no_follow(path).decode("utf-8")
+    except OSError as exc:
+        msg = (
+            "LIVE paper-soak GO report is unreadable for strategy artifact "
+            f"binding: {path}"
+        )
+        raise LiveTradingDisabledError(msg) from exc
+    strategy_label = _markdown_summary_strategy_value(report_text)
+    if (
+        strategy_label.strip() == ""
+        or strategy_label.strip().lower() == "unknown"
+        or _looks_like_artifact_placeholder(strategy_label)
+    ):
+        msg = "LIVE paper-soak GO report missing concrete strategy evidence"
+        raise LiveTradingDisabledError(msg)
+    labels = tuple(
+        label.strip()
+        for label in strategy_label.split(",")
+        if label.strip() != ""
+    )
+    if not labels:
+        msg = "LIVE paper-soak GO report missing concrete strategy evidence"
+        raise LiveTradingDisabledError(msg)
+    return labels
+
+
+def _markdown_summary_strategy_value(report_text: str) -> str:
+    in_summary = False
+    for raw_line in report_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            in_summary = line == "## Summary"
+            continue
+        if not in_summary or not line.startswith("|"):
+            continue
+        cells = _markdown_table_cells(line)
+        if len(cells) < 2 or cells[0] != "Strategy":
+            continue
+        if len(cells) != 3:
+            msg = "LIVE paper-soak GO report malformed Summary Strategy row"
+            raise LiveTradingDisabledError(msg)
+        return cells[1].strip()
+    msg = "LIVE paper-soak GO report missing Summary Strategy row"
+    raise LiveTradingDisabledError(msg)
 
 
 def _markdown_report_provenance_value(

@@ -13,10 +13,11 @@ do not run `alembic revision --autogenerate` — it is forbidden by §B of the p
 
 ## Applying
 
-Point `DATABASE_URL` at the target database, then apply the current head:
+Point `DATABASE_URL` at the target database, then apply the current head. For
+the committed compose service, use the compose-created `pms_test` database:
 
 ```bash
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_dev
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
 uv run alembic upgrade head
 ```
 

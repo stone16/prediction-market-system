@@ -3,17 +3,29 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from pms.actuator.adapters.polymarket import PolymarketSubmissionUnknownError
-from pms.config import ControllerSettings, PMSSettings, PolymarketSettings, RiskSettings
+from pms.config import (
+    ControllerSettings,
+    PMSSettings,
+    PolymarketSettings,
+    PositionExitSettings,
+    RiskSettings,
+)
 from pms.core.enums import MarketStatus, OrderStatus, RunMode, Side, TimeInForce
 from pms.core.models import FillRecord, MarketSignal, OrderState, Portfolio, Position
 from pms.core.models import TradeDecision
+from pms.metrics import (
+    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
+    get_metric,
+    set_metric,
+)
 from pms.runner import ActuatorWorkItem, Runner, _portfolio_with_fill
 
 
@@ -29,6 +41,18 @@ def _settings() -> PMSSettings:
             max_total_exposure=10_000.0,
         ),
     )
+
+
+def _settings_with_exit_reentry_cooldown(*, cooldown_s: float) -> PMSSettings:
+    settings = _settings()
+    settings.position_exit = PositionExitSettings(
+        enabled=True,
+        stop_loss_pct=30.0,
+        profit_take_pct=50.0,
+        max_holding_days=7,
+        reentry_cooldown_s=cooldown_s,
+    )
+    return settings
 
 
 def _live_settings(tmp_path: Path) -> PMSSettings:
@@ -343,6 +367,41 @@ class _RejectingExecutorDouble:
         )
 
 
+class _OpenOrderExecutorDouble:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def execute(
+        self,
+        decision: TradeDecision,
+        portfolio: Portfolio,
+        *,
+        dedup_acquired: bool = False,
+    ) -> OrderState:
+        del portfolio, dedup_acquired
+        self.calls.append(decision.market_id)
+        now = datetime(2026, 4, 23, 10, 0, tzinfo=UTC)
+        return OrderState(
+            order_id=f"open-order-{decision.market_id}",
+            decision_id=decision.decision_id,
+            status=OrderStatus.LIVE.value,
+            market_id=decision.market_id,
+            token_id=decision.token_id,
+            venue=decision.venue,
+            requested_notional_usdc=decision.notional_usdc,
+            filled_notional_usdc=0.0,
+            remaining_notional_usdc=decision.notional_usdc,
+            fill_price=None,
+            submitted_at=now,
+            last_updated_at=now,
+            raw_status="live",
+            strategy_id=decision.strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            filled_quantity=0.0,
+            risk_group_id=decision.risk_group_id,
+        )
+
+
 class _FailingExecutorDouble:
     def __init__(self, message: str) -> None:
         self.message = message
@@ -387,6 +446,7 @@ async def _run_actuator_loop(runner: Runner) -> None:
 
 @pytest.mark.asyncio
 async def test_actuator_loop_persists_fill_after_appending_runner_state() -> None:
+    set_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC, 0.0)
     runner = _runner()
     runner.actuator_executor = cast(Any, _ExecutorDouble())
     runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
@@ -405,6 +465,7 @@ async def test_actuator_loop_persists_fill_after_appending_runner_state() -> Non
     assert cast(_RecordingOrderStore, runner.order_store).calls == ["market-cp06-a"]
     assert [fill.market_id for fill in runner.state.fills] == ["market-cp06-a"]
     assert cast(_RecordingFillStore, runner.fill_store).calls == ["market-cp06-a"]
+    assert get_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC) == pytest.approx(1.0)
     assert runner.portfolio.locked_usdc == pytest.approx(20.5)
     assert cast(_EvaluatorSpoolDouble, runner._evaluator_spool).calls == [
         ("market-cp06-a", "decision-market-cp06-a")
@@ -412,6 +473,121 @@ async def test_actuator_loop_persists_fill_after_appending_runner_state() -> Non
     evidence = cast(_EvaluatorSpoolDouble, runner._evaluator_spool).decision_evidence
     assert evidence is not None
     assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.405)
+
+
+@pytest.mark.asyncio
+async def test_actuator_loop_does_not_count_exit_sell_as_selection_funnel_trade() -> None:
+    set_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC, 0.0)
+    runner = _runner()
+    runner.actuator_executor = cast(Any, _ExecutorDouble())
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _RecordingOrderStore(runner))
+    runner.fill_store = cast(Any, _RecordingFillStore(runner))
+    _mark_controller_done(runner)
+
+    decision = replace(
+        _decision(market_id="market-cp06-exit", notional_usdc=12.5),
+        decision_id="exit-profit_take-market-cp06-exit",
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+        limit_price=0.61,
+    )
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(decision, _signal(market_id="market-cp06-exit"))
+    )
+
+    await _run_actuator_loop(runner)
+
+    assert [fill.side for fill in runner.state.fills] == [Side.SELL.value]
+    assert get_metric(SELECTION_FUNNEL_TRADED_TOTAL_METRIC) == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_paper_actuator_uses_queued_target_token_orderbook_snapshot() -> None:
+    runner = _runner()
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _RecordingOrderStore(runner))
+    runner.fill_store = cast(Any, _RecordingFillStore(runner))
+    _mark_controller_done(runner)
+    market_id = "market-paper-snapshot"
+    no_token_id = f"{market_id}-no"
+    yes_signal = _signal(market_id=market_id)
+    no_signal = replace(
+        _signal(market_id=market_id),
+        token_id=no_token_id,
+        orderbook={
+            "bids": [{"price": 0.40, "size": 100.0}],
+            "asks": [{"price": 0.41, "size": 100.0}],
+        },
+    )
+    decision = replace(
+        _decision(market_id=market_id),
+        token_id=no_token_id,
+        outcome="NO",
+        limit_price=0.41,
+    )
+    runner._remember_signal_for_decision_evidence(no_signal)  # noqa: SLF001
+    runner._remember_paper_orderbook(no_signal)  # noqa: SLF001
+
+    enqueued = await runner._enqueue_decision(  # noqa: SLF001
+        decision,
+        signal=yes_signal,
+        queued_at=yes_signal.fetched_at,
+    )
+    runner._paper_orderbooks[no_token_id] = {  # noqa: SLF001
+        "bids": [{"price": 0.40, "size": 100.0}],
+        "asks": [{"price": 0.45, "size": 100.0}],
+    }
+
+    await _run_actuator_loop(runner)
+
+    assert enqueued is True
+    assert [fill.fill_price for fill in runner.state.fills] == [pytest.approx(0.41)]
+    assert runner.state.orders[0].status == OrderStatus.MATCHED.value
+
+
+@pytest.mark.asyncio
+async def test_paper_actuator_uses_controller_direct_target_token_orderbook() -> None:
+    runner = _runner()
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _RecordingOrderStore(runner))
+    runner.fill_store = cast(Any, _RecordingFillStore(runner))
+    _mark_controller_done(runner)
+    market_id = "market-paper-direct-book"
+    no_token_id = f"{market_id}-no"
+    direct_no_signal = replace(
+        _signal(market_id=market_id),
+        token_id=no_token_id,
+        yes_price=0.58,
+        orderbook={
+            "bids": [{"price": 0.57, "size": 100.0}],
+            "asks": [{"price": 0.58, "size": 100.0}],
+        },
+        external_signal={
+            "yes_token_id": f"{market_id}-yes",
+            "no_token_id": no_token_id,
+            "signal_token_outcome": "NO",
+            "direct_outcome_book_source": "venue_direct",
+        },
+    )
+    decision = replace(
+        _decision(market_id=market_id),
+        token_id=no_token_id,
+        outcome="NO",
+        limit_price=0.58,
+    )
+
+    enqueued = await runner._enqueue_decision(  # noqa: SLF001
+        decision,
+        signal=direct_no_signal,
+        queued_at=direct_no_signal.fetched_at,
+    )
+
+    await _run_actuator_loop(runner)
+
+    assert enqueued is True
+    assert [fill.fill_price for fill in runner.state.fills] == [pytest.approx(0.58)]
+    assert runner.state.orders[0].status == OrderStatus.MATCHED.value
 
 
 @pytest.mark.asyncio
@@ -557,6 +733,224 @@ async def test_actuator_loop_releases_position_exit_key_after_rejected_order() -
 
     assert key not in runner._emitted_position_exit_keys  # noqa: SLF001
     assert decision.decision_id not in runner._position_exit_keys_by_decision  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_actuator_loop_keeps_capacity_reserved_for_live_open_order(
+    tmp_path: Path,
+) -> None:
+    settings = _live_settings(tmp_path)
+    settings.risk.max_open_positions = 1
+    runner = Runner(config=settings)
+    runner.actuator_executor = cast(Any, _OpenOrderExecutorDouble())
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _RecordingOrderStore(runner))
+    _mark_controller_done(runner)
+    decision = _decision(market_id="market-live-open-capacity")
+    next_decision = replace(
+        _decision(market_id="market-live-open-capacity-next"),
+        decision_id="decision-live-open-capacity-next",
+    )
+    assert runner._reserve_position_capacity(decision) is not None  # noqa: SLF001
+
+    await runner._decision_queue.put(ActuatorWorkItem(decision, None))  # noqa: SLF001
+
+    await _run_actuator_loop(runner)
+
+    assert (  # noqa: SLF001
+        decision.decision_id in runner._pending_open_position_keys_by_decision
+    )
+    assert runner._would_exceed_position_capacity(next_decision)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_actuator_loop_keeps_exit_key_reserved_for_live_open_exit_order(
+    tmp_path: Path,
+) -> None:
+    runner = Runner(config=_live_settings(tmp_path))
+    runner.actuator_executor = cast(Any, _OpenOrderExecutorDouble())
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _RecordingOrderStore(runner))
+    _mark_controller_done(runner)
+    decision = replace(
+        _decision(market_id="market-live-open-exit"),
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+        stop_conditions=["position_exit:stop_loss"],
+    )
+    key = (
+        decision.strategy_id,
+        decision.strategy_version_id,
+        decision.market_id,
+        decision.token_id,
+        "stop_loss",
+    )
+    runner._emitted_position_exit_keys.add(key)  # noqa: SLF001
+    runner._position_exit_keys_by_decision[decision.decision_id] = key  # noqa: SLF001
+
+    await runner._decision_queue.put(ActuatorWorkItem(decision, None))  # noqa: SLF001
+
+    await _run_actuator_loop(runner)
+
+    assert key in runner._emitted_position_exit_keys  # noqa: SLF001
+    assert runner._position_exit_keys_by_decision[decision.decision_id] == key  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_actuator_loop_quarantines_reentry_after_position_exit_fill() -> None:
+    runner = Runner(
+        config=_settings_with_exit_reentry_cooldown(cooldown_s=1_800.0),
+        historical_data_path=FIXTURE_PATH,
+    )
+    runner.actuator_executor = cast(Any, _ExecutorDouble())
+    runner._evaluator_spool = cast(Any, _EvaluatorSpoolDouble())  # noqa: SLF001
+    runner.order_store = cast(Any, _RecordingOrderStore(runner))
+    runner.fill_store = cast(Any, _RecordingFillStore(runner))
+    _mark_controller_done(runner)
+
+    market_id = "market-exit-reentry"
+    exit_decision = replace(
+        _decision(market_id=market_id),
+        decision_id=f"exit-stop_loss-{market_id}",
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+        stop_conditions=["position_exit:stop_loss"],
+        risk_group_id="event:exit-reentry",
+    )
+    signal = _signal(market_id=market_id)
+    runner.portfolio = Portfolio(
+        total_usdc=1_000.0,
+        free_usdc=979.5,
+        locked_usdc=20.5,
+        open_positions=[
+            Position(
+                market_id=market_id,
+                token_id=exit_decision.token_id,
+                venue="polymarket",
+                side=Side.BUY.value,
+                shares_held=50.0,
+                avg_entry_price=0.41,
+                unrealized_pnl=0.0,
+                locked_usdc=20.5,
+                strategy_id=exit_decision.strategy_id,
+                strategy_version_id=exit_decision.strategy_version_id,
+                risk_group_id=exit_decision.risk_group_id,
+            )
+        ],
+    )
+
+    await runner._decision_queue.put(  # noqa: SLF001
+        ActuatorWorkItem(exit_decision, signal)
+    )
+
+    await _run_actuator_loop(runner)
+
+    next_entry = replace(
+        _decision(market_id=market_id),
+        risk_group_id="event:exit-reentry",
+    )
+    diagnostic = runner._pre_actuator_diagnostic(next_entry, signal)  # noqa: SLF001
+
+    assert diagnostic is not None
+    assert diagnostic.code == "position_exit_reentry_cooldown"
+    assert diagnostic.metadata["cooldown_s"] == pytest.approx(1_800.0)
+    assert diagnostic.metadata["seconds_remaining"] == pytest.approx(1_800.0)
+
+    runner.portfolio = Portfolio(
+        total_usdc=1_000.0,
+        free_usdc=999.0,
+        locked_usdc=1.0,
+        open_positions=[
+            Position(
+                market_id=market_id,
+                token_id=next_entry.token_id,
+                venue="polymarket",
+                side=Side.BUY.value,
+                shares_held=2.0,
+                avg_entry_price=0.50,
+                unrealized_pnl=0.0,
+                locked_usdc=1.0,
+                strategy_id=next_entry.strategy_id,
+                strategy_version_id=next_entry.strategy_version_id,
+                risk_group_id=next_entry.risk_group_id,
+            )
+        ],
+    )
+    reducing_decision = replace(
+        next_entry,
+        decision_id="manual-risk-reducing-exit",
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+    )
+    reducing_book_key = reducing_decision.token_id or reducing_decision.market_id
+    runner._paper_orderbooks[reducing_book_key] = {  # noqa: SLF001
+        "bids": [{"price": 0.41, "size": 100.0}],
+        "asks": [{"price": 0.41, "size": 100.0}],
+    }
+    assert runner._pre_actuator_diagnostic(  # noqa: SLF001
+        reducing_decision,
+        signal,
+    ) is None
+    runner.portfolio = Portfolio(
+        total_usdc=1_000.0,
+        free_usdc=1_000.0,
+        locked_usdc=0.0,
+        open_positions=[],
+    )
+
+    key = (
+        next_entry.strategy_id,
+        next_entry.strategy_version_id,
+        next_entry.market_id,
+        next_entry.token_id,
+        next_entry.risk_group_id,
+    )
+    runner._position_exit_reentry_quarantine_until[key] = (  # noqa: SLF001
+        signal.fetched_at - timedelta(seconds=1)
+    )
+
+    assert runner._pre_actuator_diagnostic(next_entry, signal) is None  # noqa: SLF001
+
+
+def test_pre_actuator_diagnostic_rejects_unfillable_paper_orderbook() -> None:
+    runner = _runner()
+    market_id = "thin-paper-book"
+    signal = _signal(market_id=market_id)
+    decision = _decision(market_id=market_id, notional_usdc=20.5)
+    runner._paper_orderbooks[decision.token_id or decision.market_id] = {  # noqa: SLF001
+        "bids": [{"price": 0.40, "size": 100.0}],
+        "asks": [{"price": 0.41, "size": 1.0}],
+    }
+
+    diagnostic = runner._pre_actuator_diagnostic(decision, signal)  # noqa: SLF001
+
+    assert diagnostic is not None
+    assert diagnostic.code == "paper_orderbook_insufficient_liquidity"
+    assert diagnostic.metadata["decision_notional_usdc"] == pytest.approx(20.5)
+    assert "executable depth is insufficient" in str(diagnostic.metadata["failure"])
+
+
+def test_pre_actuator_diagnostic_rejects_unfillable_paper_exit_orderbook() -> None:
+    runner = _runner()
+    market_id = "thin-paper-exit-book"
+    signal = _signal(market_id=market_id)
+    decision = replace(
+        _decision(market_id=market_id, notional_usdc=20.5),
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+    )
+    book_key = decision.token_id or decision.market_id
+    runner._paper_orderbooks[book_key] = {  # noqa: SLF001
+        "bids": [],
+        "asks": [{"price": 0.41, "size": 100.0}],
+    }
+
+    diagnostic = runner._pre_actuator_diagnostic(decision, signal)  # noqa: SLF001
+
+    assert diagnostic is not None
+    assert diagnostic.code == "paper_orderbook_insufficient_liquidity"
+    assert diagnostic.metadata["decision_notional_usdc"] == pytest.approx(20.5)
+    assert diagnostic.metadata["failure"] == "bids depth is empty"
 
 
 @pytest.mark.asyncio

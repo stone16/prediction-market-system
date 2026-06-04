@@ -13,6 +13,12 @@ from pms.strategies.projections import (
 
 PAPER_MULTI_FACTOR_STRATEGY_ID = "paper_multi_factor_v1"
 _FACTOR_FRESHNESS_S = 300.0
+_ORDERBOOK_IMBALANCE_MIN_ABS = 0.80
+_ORDERBOOK_IMBALANCE_EDGE_SCALE = 0.25
+_RESOLUTION_HORIZON_DAYS = 31
+_ROUTER_MIN_YES_PRICE = 0.02
+_ROUTER_MAX_YES_PRICE = 0.98
+_CALIBRATION_SHRINKAGE_FACTOR = 1.0
 
 
 def build_paper_multi_factor_strategy() -> Strategy:
@@ -22,21 +28,11 @@ def build_paper_multi_factor_strategy() -> Strategy:
             factor_composition=(
                 FactorCompositionStep(
                     factor_id="orderbook_imbalance",
-                    role="threshold_edge",
+                    role="rule_delta",
                     param="",
-                    weight=1.0,
-                    threshold=0.10,
+                    weight=_ORDERBOOK_IMBALANCE_EDGE_SCALE,
+                    threshold=_ORDERBOOK_IMBALANCE_MIN_ABS,
                     required=True,
-                    freshness_sla_s=_FACTOR_FRESHNESS_S,
-                    allow_neutral_fallback=False,
-                ),
-                FactorCompositionStep(
-                    factor_id="orderbook_imbalance",
-                    role="weighted",
-                    param="",
-                    weight=1.0,
-                    threshold=None,
-                    required=False,
                     freshness_sla_s=_FACTOR_FRESHNESS_S,
                     allow_neutral_fallback=False,
                 ),
@@ -66,7 +62,25 @@ def build_paper_multi_factor_strategy() -> Strategy:
                     factor_id="rules",
                     role="blend_weighted",
                     param="",
-                    weight=0.5,
+                    weight=1.0,
+                    threshold=None,
+                    required=False,
+                    allow_neutral_fallback=True,
+                ),
+                FactorCompositionStep(
+                    factor_id="llm",
+                    role="runtime_probability",
+                    param="",
+                    weight=1.0,
+                    threshold=None,
+                    required=False,
+                    allow_neutral_fallback=True,
+                ),
+                FactorCompositionStep(
+                    factor_id="llm",
+                    role="blend_weighted",
+                    param="",
+                    weight=1.0,
                     threshold=None,
                     required=False,
                     allow_neutral_fallback=True,
@@ -83,9 +97,9 @@ def build_paper_multi_factor_strategy() -> Strategy:
             ),
         ),
         risk=RiskParams(
-            max_position_notional_usdc=2.0,
+            max_position_notional_usdc=1.0,
             max_daily_drawdown_pct=50.0,
-            min_order_size_usdc=0.50,
+            min_order_size_usdc=1.0,
         ),
         eval_spec=EvalSpec(
             metrics=("brier", "pnl", "fill_rate"),
@@ -102,12 +116,14 @@ def build_paper_multi_factor_strategy() -> Strategy:
         ),
         market_selection=MarketSelectionSpec(
             venue="polymarket",
-            resolution_time_max_horizon_days=90,
+            resolution_time_max_horizon_days=_RESOLUTION_HORIZON_DAYS,
             volume_min_usdc=100.0,
+            yes_price_min=_ROUTER_MIN_YES_PRICE,
+            yes_price_max=_ROUTER_MAX_YES_PRICE,
         ),
         calibration=CalibrationSpec(
             enabled=True,
-            shrinkage_factor=0.35,
+            shrinkage_factor=_CALIBRATION_SHRINKAGE_FACTOR,
             shrinkage_bias=0.0,
             extreme_clamp_low=0.08,
             extreme_clamp_high=0.92,

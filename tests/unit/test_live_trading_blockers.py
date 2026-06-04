@@ -48,7 +48,10 @@ from pms.core.models import (
     TradeDecision,
 )
 from pms.factors.composition import evaluate_branch_probabilities
-from pms.live_preflight_artifact import live_preflight_settings_fingerprint
+from pms.live_preflight_artifact import (
+    live_preflight_readiness_reports_fingerprint,
+    live_preflight_settings_fingerprint,
+)
 from pms.runner import ActuatorWorkItem, Runner
 from pms.storage.dedup_store import InMemoryDedupStore
 from pms.storage.feedback_store import FeedbackStore
@@ -304,7 +307,7 @@ async def test_on_signal_emits_diagnostic_when_composition_resolution_fails() ->
     strategy = _active_strategy(
         composition=(
             FactorCompositionStep(
-                factor_id="orderbook_imbalance",
+                factor_id="missing_weighted_factor",
                 role="weighted",
                 param="",
                 weight=1.0,
@@ -317,7 +320,7 @@ async def test_on_signal_emits_diagnostic_when_composition_resolution_fails() ->
         factor_reader=SnapshotReader(
             FactorSnapshot(
                 values={},
-                missing_factors=(("orderbook_imbalance", ""),),
+                missing_factors=(("missing_weighted_factor", ""),),
                 snapshot_hash="composition-unresolvable",
             )
         ),
@@ -452,9 +455,9 @@ def _live_settings(
     live_readiness_report_max_age_s: float = 7 * 24 * 60 * 60,
     local_secret_file: str | None = None,
     api_host: str = "127.0.0.1",
-    api_token: str | None = None,
+    api_token: str | None = "live-api-token",
 ) -> PMSSettings:
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     first_order_audit_path = (
         str(_LIVE_PATH_ROOT / "first-order-audit.jsonl")
         if live_first_order_audit_path is None
@@ -578,7 +581,12 @@ def test_live_mode_ready_rejects_live_trading_enabled_outside_live_mode() -> Non
 
 def test_live_mode_rejects_exposed_api_without_api_token() -> None:
     with pytest.raises(LiveTradingDisabledError, match="PMS_API_TOKEN"):
-        validate_live_mode_ready(_live_settings(api_host="0.0.0.0"))
+        validate_live_mode_ready(_live_settings(api_host="0.0.0.0", api_token=None))
+
+
+def test_live_mode_rejects_loopback_api_without_api_token() -> None:
+    with pytest.raises(LiveTradingDisabledError, match="PMS_API_TOKEN"):
+        validate_live_mode_ready(_live_settings(api_host="127.0.0.1", api_token=None))
 
 
 def test_live_mode_rejects_discord_alert_dir_inside_working_tree() -> None:
@@ -827,6 +835,55 @@ def test_live_mode_rejects_risk_group_cap_below_min_order() -> None:
     settings.risk.max_exposure_per_risk_group = settings.risk.min_order_usdc / 2.0
 
     with pytest.raises(LiveTradingDisabledError, match="max_exposure_per_risk_group"):
+        validate_live_mode_ready(settings)
+
+
+def test_live_mode_rejects_enabled_llm_without_daily_cost_cap() -> None:
+    settings = _live_settings()
+    settings.llm = LLMSettings(
+        enabled=True,
+        provider="anthropic",
+        api_key="sk-test",
+        max_daily_llm_cost_usdc=None,
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="llm.max_daily_llm_cost_usdc",
+    ):
+        validate_live_mode_ready(settings)
+
+
+def test_live_mode_rejects_llm_daily_cost_cap_above_daily_loss_cap() -> None:
+    settings = _live_settings()
+    assert settings.risk.max_daily_loss_usdc is not None
+    settings.llm = LLMSettings(
+        enabled=True,
+        provider="anthropic",
+        api_key="sk-test",
+        max_daily_llm_cost_usdc=settings.risk.max_daily_loss_usdc + 1.0,
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="llm.max_daily_llm_cost_usdc",
+    ):
+        validate_live_mode_ready(settings)
+
+
+def test_live_mode_rejects_llm_daily_cost_cap_above_first_order_cost_budget() -> None:
+    settings = _live_settings()
+    settings.llm = LLMSettings(
+        enabled=True,
+        provider="anthropic",
+        api_key="sk-test",
+        max_daily_llm_cost_usdc=settings.risk.min_order_usdc * 0.05 + 0.001,
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="llm.max_daily_llm_cost_usdc",
+    ):
         validate_live_mode_ready(settings)
 
 
@@ -1320,9 +1377,12 @@ def test_live_mode_rejects_enabled_llm_when_provider_sdk_is_missing(
 
     monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
     settings = _live_settings()
-    settings.llm.enabled = True
-    settings.llm.provider = "anthropic"
-    settings.llm.api_key = "sk-test"
+    settings.llm = LLMSettings(
+        enabled=True,
+        provider="anthropic",
+        api_key="sk-test",
+        max_daily_llm_cost_usdc=0.05,
+    )
 
     with pytest.raises(LiveTradingDisabledError) as exc_info:
         validate_live_mode_ready(settings)
@@ -1402,6 +1462,21 @@ def test_live_mode_requires_passing_paper_soak_go_report() -> None:
 
     with pytest.raises(LiveTradingDisabledError, match="paper soak"):
         validate_live_mode_ready(settings)
+
+
+@pytest.mark.parametrize("random_like_suffix", ("todo1234", "replace1"))
+def test_live_mode_allows_random_report_path_substrings(
+    random_like_suffix: str,
+) -> None:
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix=f"pms-live-random-{random_like_suffix}-reports-"
+    )
+    settings = _live_settings(
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+    )
+
+    validate_live_mode_ready(settings)
 
 
 def test_live_mode_rejects_test_fixture_paper_soak_go_report() -> None:
@@ -1593,6 +1668,28 @@ def test_live_mode_rejects_paper_soak_report_missing_generated_at(
         validate_live_mode_ready(settings)
 
 
+def test_live_mode_rejects_paper_soak_report_missing_input_snapshot_hash(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "paper-soak-missing-input-snapshot-hash.md"
+    report_text = Path(PAPER_SOAK_GO_REPORT).read_text(encoding="utf-8")
+    report_path.write_text(
+        "\n".join(
+            line
+            for line in report_text.replace(
+                f"| output_path | {PAPER_SOAK_GO_REPORT} |",
+                f"| output_path | {report_path} |",
+            ).splitlines()
+            if not line.startswith("| input_snapshot_sha256 |")
+        ),
+        encoding="utf-8",
+    )
+    settings = _live_settings(live_paper_soak_report_path=str(report_path))
+
+    with pytest.raises(LiveTradingDisabledError, match="input_snapshot_sha256"):
+        validate_live_mode_ready(settings)
+
+
 def test_live_mode_rejects_paper_soak_report_output_path_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -1641,7 +1738,11 @@ def test_live_mode_rejects_paper_soak_provenance_row_with_extra_cells() -> None:
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| generated_at | 2026-05-25T00:00:00+00:00 |",
+            next(
+                line
+                for line in report_path.read_text(encoding="utf-8").splitlines()
+                if line.startswith("| generated_at |")
+            ),
             "| generated_at | 2026-05-25T00:00:00+00:00 | TODO: hidden extra cell |",
         ),
         encoding="utf-8",
@@ -1688,6 +1789,50 @@ def test_live_mode_rejects_stale_paper_soak_report_generated_at() -> None:
         validate_live_mode_ready(settings)
 
 
+@pytest.mark.parametrize(
+    ("report_name", "expected_detail"),
+    [
+        (
+            "paper_soak",
+            "paper soak GO report persisted provenance generated_at must include timezone",
+        ),
+        (
+            "operator_rehearsal",
+            "operator rehearsal report persisted provenance generated_at must include timezone",
+        ),
+    ],
+)
+def test_live_mode_rejects_naive_readiness_report_generated_at(
+    report_name: str,
+    expected_detail: str,
+) -> None:
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix="pms-live-naive-readiness-report-"
+    )
+    naive_generated_at = (
+        (datetime.now(tz=UTC) - timedelta(seconds=30))
+        .replace(tzinfo=None)
+        .isoformat()
+    )
+    target_path = (
+        paper_report_path
+        if report_name == "paper_soak"
+        else rehearsal_report_path
+    )
+    _replace_report_provenance_field(
+        target_path,
+        field_name="generated_at",
+        value=naive_generated_at,
+    )
+    settings = _live_settings(
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match=expected_detail):
+        validate_live_mode_ready(settings)
+
+
 def test_live_mode_rejects_no_go_paper_soak_report(tmp_path: Path) -> None:
     report_path = tmp_path / "paper-soak-no-go.md"
     report_path.write_text(
@@ -1729,7 +1874,8 @@ def test_live_mode_rejects_paper_soak_go_report_missing_gate_rows(
                 "| Check | Status | Detail |",
                 "|---|---|---|",
                 "| soak_days | PASS | 30 >= 30 |",
-                "| fills | PASS | 10 >= 10 |",
+                "| decisions_accepted | PASS | 30 >= 30 |",
+                "| fills | PASS | 50 >= 50 |",
             ]
         ),
         encoding="utf-8",
@@ -1786,8 +1932,8 @@ def test_live_mode_rejects_paper_soak_go_report_with_incomplete_mid_quote_baseli
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| mid_quote | 10 / 10 | 100.0% |",
-            "| mid_quote | 9 / 10 | 90.0% |",
+            "| mid_quote | 50 / 50 | 100.0% |",
+            "| mid_quote | 49 / 50 | 98.0% |",
         ),
         encoding="utf-8",
     )
@@ -1807,11 +1953,11 @@ def test_live_mode_rejects_paper_soak_go_report_with_duplicate_baseline_coverage
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| mid_quote | 10 / 10 | 100.0% |",
+            "| mid_quote | 50 / 50 | 100.0% |",
             "\n".join(
                 [
-                    "| mid_quote | 9 / 10 | 90.0% |",
-                    "| mid_quote | 10 / 10 | 100.0% |",
+                    "| mid_quote | 49 / 50 | 98.0% |",
+                    "| mid_quote | 50 / 50 | 100.0% |",
                 ]
             ),
         ),
@@ -1833,8 +1979,8 @@ def test_live_mode_rejects_paper_soak_go_report_with_contradictory_baseline_cove
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| mid_quote | 10 / 10 | 100.0% |",
-            "| mid_quote | 10 / 10 | 0.0% |",
+            "| mid_quote | 50 / 50 | 100.0% |",
+            "| mid_quote | 50 / 50 | 0.0% |",
         ),
         encoding="utf-8",
     )
@@ -1854,8 +2000,8 @@ def test_live_mode_rejects_paper_soak_go_report_with_malformed_baseline_coverage
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| category_prior | 10 / 10 | 100.0% |",
-            "| category_prior | 10 / 10 | complete |",
+            "| category_prior | 50 / 50 | 100.0% |",
+            "| category_prior | 50 / 50 | complete |",
         ),
         encoding="utf-8",
     )
@@ -1875,8 +2021,8 @@ def test_live_mode_rejects_baseline_coverage_denominator_mismatch() -> None:
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| last_trade | 8 / 10 | 80.0% |",
-            "| last_trade | 8 / 8 | 100.0% |",
+            "| last_trade | 40 / 50 | 80.0% |",
+            "| last_trade | 40 / 40 | 100.0% |",
         ),
         encoding="utf-8",
     )
@@ -1898,13 +2044,13 @@ def test_live_mode_rejects_baseline_coverage_denominator_mismatch_before_require
     )
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8")
-    report_text = report_text.replace("| last_trade | 8 / 10 | 80.0% |\n", "")
+    report_text = report_text.replace("| last_trade | 40 / 50 | 80.0% |\n", "")
     report_text = report_text.replace(
-        "| market_implied | 10 / 10 | 100.0% |",
+        "| market_implied | 50 / 50 | 100.0% |",
         "\n".join(
             [
-                "| last_trade | 8 / 8 | 100.0% |",
-                "| market_implied | 10 / 10 | 100.0% |",
+                "| last_trade | 40 / 40 | 100.0% |",
+                "| market_implied | 50 / 50 | 100.0% |",
             ]
         ),
     )
@@ -1928,8 +2074,8 @@ def test_live_mode_rejects_blank_baseline_source_label() -> None:
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8")
     report_text = report_text.replace(
-        "| last_trade | 8 / 10 | 80.0% |",
-        "|  | 8 / 10 | 80.0% |",
+        "| last_trade | 40 / 50 | 80.0% |",
+        "|  | 40 / 50 | 80.0% |",
     )
     report_text = report_text.replace(
         "| last_trade | 0.2400 | 0.0300 |",
@@ -1952,8 +2098,8 @@ def test_live_mode_rejects_placeholder_baseline_source_label() -> None:
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8")
     report_text = report_text.replace(
-        "| last_trade | 8 / 10 | 80.0% |",
-        "| TODO_BASELINE | 8 / 10 | 80.0% |",
+        "| last_trade | 40 / 50 | 80.0% |",
+        "| TODO_BASELINE | 40 / 50 | 80.0% |",
     )
     report_text = report_text.replace(
         "| last_trade | 0.2400 | 0.0300 |",
@@ -1976,8 +2122,8 @@ def test_live_mode_rejects_prose_baseline_source_label() -> None:
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8")
     report_text = report_text.replace(
-        "| last_trade | 8 / 10 | 80.0% |",
-        "| last trade baseline | 8 / 10 | 80.0% |",
+        "| last_trade | 40 / 50 | 80.0% |",
+        "| last trade baseline | 40 / 50 | 80.0% |",
     )
     report_text = report_text.replace(
         "| last_trade | 0.2400 | 0.0300 |",
@@ -2000,8 +2146,8 @@ def test_live_mode_rejects_digit_prefixed_baseline_source_label() -> None:
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8")
     report_text = report_text.replace(
-        "| last_trade | 8 / 10 | 80.0% |",
-        "| 7day_baseline | 8 / 10 | 80.0% |",
+        "| last_trade | 40 / 50 | 80.0% |",
+        "| 7day_baseline | 40 / 50 | 80.0% |",
     )
     report_text = report_text.replace(
         "| last_trade | 0.2400 | 0.0300 |",
@@ -2024,7 +2170,7 @@ def test_live_mode_rejects_secondary_baseline_without_coverage_evidence() -> Non
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| last_trade | 8 / 10 | 80.0% |\n",
+            "| last_trade | 40 / 50 | 80.0% |\n",
             "",
         ),
         encoding="utf-8",
@@ -2048,8 +2194,8 @@ def test_live_mode_rejects_secondary_baseline_with_zero_covered_decisions() -> N
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| last_trade | 8 / 10 | 80.0% |",
-            "| last_trade | 0 / 10 | 0.0% |",
+            "| last_trade | 40 / 50 | 80.0% |",
+            "| last_trade | 0 / 50 | 0.0% |",
         ),
         encoding="utf-8",
     )
@@ -2071,7 +2217,7 @@ def test_live_mode_rejects_optional_baseline_coverage_with_zero_total_decisions(
     )
     report_path = Path(paper_report_path)
     report_text = report_path.read_text(encoding="utf-8").replace(
-        "| last_trade | 8 / 10 | 80.0% |",
+        "| last_trade | 40 / 50 | 80.0% |",
         "| last_trade | 0 / 0 | 0.0% |",
     )
     report_path.write_text(
@@ -2121,8 +2267,8 @@ def test_live_mode_rejects_paper_soak_go_report_with_incomplete_category_prior_b
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| category_prior | 10 / 10 | 100.0% |",
-            "| category_prior | 0 / 10 | 0.0% |",
+            "| category_prior | 50 / 50 | 100.0% |",
+            "| category_prior | 0 / 50 | 0.0% |",
         ),
         encoding="utf-8",
     )
@@ -2299,10 +2445,10 @@ def test_live_mode_rejects_paper_soak_go_report_with_duplicate_gate_row() -> Non
     report_path = Path(paper_report_path)
     report_path.write_text(
         report_path.read_text(encoding="utf-8").replace(
-            "| fills | PASS | 10 >= 10 |",
+            "| fills | PASS | 50 >= 50 |",
             "\n".join(
                 [
-                    "| fills | PASS | 10 >= 10 |",
+                    "| fills | PASS | 50 >= 50 |",
                     "| fills | PASS | duplicated fill evidence |",
                 ]
             ),
@@ -2545,6 +2691,28 @@ def test_live_mode_rejects_paper_soak_go_decision_outside_gate_section(
         validate_live_mode_ready(settings)
 
 
+def test_live_mode_rejects_paper_soak_go_report_with_conflicting_gate_decisions() -> None:
+    paper_report_path, rehearsal_report_path = make_live_report_paths(
+        prefix="pms-live-conflicting-paper-decision-"
+    )
+    report_path = Path(paper_report_path)
+    report_path.write_text(
+        report_path.read_text(encoding="utf-8").replace(
+            "\n| Check | Status | Detail |",
+            "\n**Decision:** NO-GO\n\n| Check | Status | Detail |",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    settings = _live_settings(
+        live_paper_soak_report_path=paper_report_path,
+        live_operator_rehearsal_report_path=rehearsal_report_path,
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match="decision"):
+        validate_live_mode_ready(settings)
+
+
 def test_live_mode_rejects_future_dated_paper_soak_go_report() -> None:
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-live-future-paper-report-"
@@ -2606,10 +2774,12 @@ def test_live_mode_rejects_paper_soak_report_date_after_generated_at() -> None:
 def test_live_mode_requires_passing_operator_rehearsal_report() -> None:
     approval_dir = _LIVE_PATH_ROOT / "missing-rehearsal"
     approval_dir.mkdir(mode=0o700, exist_ok=True)
+    attested_at = datetime.now(tz=UTC)
     settings = PMSSettings(
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         auto_migrate_default_v2=False,
         live_emergency_audit_path=str(
             approval_dir / "live-emergency-audit.jsonl"
@@ -2619,9 +2789,9 @@ def test_live_mode_requires_passing_operator_rehearsal_report() -> None:
             approval_dir / "credentialed-preflight.json"
         ),
         live_exit_criteria_ratified_by="operator",
-        live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by="counsel",
-        live_compliance_reviewed_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_reviewed_at=attested_at,
         live_compliance_jurisdiction="US-operator-approved",
         live_paper_soak_report_path=PAPER_SOAK_GO_REPORT,
         risk=RiskSettings(
@@ -3627,14 +3797,35 @@ async def test_live_runner_rejects_stale_preflight_artifact(
         )
     )
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-    artifact["generated_at"] = (
-        datetime.now(tz=UTC) - timedelta(hours=2, seconds=1)
-    ).isoformat()
+    stale_generated_at = datetime.now(tz=UTC) - timedelta(hours=2, seconds=1)
+    artifact["generated_at"] = stale_generated_at.isoformat()
     artifact_path.write_text(
         json.dumps(artifact, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     settings.live_preflight_artifact_path = str(artifact_path)
+    readiness_report_generated_at = stale_generated_at - timedelta(seconds=60)
+    operator_attested_at = stale_generated_at - timedelta(seconds=30)
+    _replace_report_provenance_field(
+        cast(str, settings.live_paper_soak_report_path),
+        field_name="generated_at",
+        value=readiness_report_generated_at.isoformat(),
+    )
+    _replace_report_provenance_field(
+        cast(str, settings.live_operator_rehearsal_report_path),
+        field_name="generated_at",
+        value=readiness_report_generated_at.isoformat(),
+    )
+    settings.live_exit_criteria_ratified_at = operator_attested_at
+    settings.live_compliance_reviewed_at = operator_attested_at
+    artifact["settings_fingerprint"] = live_preflight_settings_fingerprint(settings)
+    artifact["readiness_reports_fingerprint"] = (
+        live_preflight_readiness_reports_fingerprint(settings)
+    )
+    artifact_path.write_text(
+        json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     runner = Runner(config=settings)
 
     async def fail_if_database_boots() -> None:

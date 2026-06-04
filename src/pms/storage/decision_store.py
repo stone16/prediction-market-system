@@ -44,7 +44,7 @@ DECISION_STATUSES: Final[tuple[DecisionStatus, ...]] = (
 )
 _VALID_STATUS_TRANSITIONS: Final[dict[DecisionStatus, frozenset[DecisionStatus]]] = {
     "pending": frozenset({"pending", "accepted", "rejected", "expired"}),
-    "accepted": frozenset({"accepted", "queued", "submitted"}),
+    "accepted": frozenset({"accepted", "queued", "submitted", "rejected"}),
     "queued": frozenset({"queued", "submitted", "rejected", "cancelled"}),
     "submitted": frozenset(
         {
@@ -214,8 +214,10 @@ class DecisionStore:
         self,
         *,
         limit: int,
+        offset: int = 0,
         status: str | None = None,
         include_opportunity: bool = False,
+        until: datetime | None = None,
     ) -> Sequence[StoredDecisionRow]:
         if self.pool is None or not hasattr(self.pool, "acquire"):
             return []
@@ -227,11 +229,15 @@ class DecisionStore:
                 _DECISION_SELECT
                 + """
                 WHERE ($1::text IS NULL OR decisions.status = $1)
+                  AND ($2::timestamptz IS NULL OR decisions.created_at <= $2)
                 ORDER BY decisions.created_at DESC, decisions.decision_id DESC
-                LIMIT $2
+                LIMIT $3
+                OFFSET $4
                 """,
                 normalized_status,
+                until,
                 limit,
+                offset,
             )
         return [
             _stored_decision_from_row(row, include_opportunity=include_opportunity)

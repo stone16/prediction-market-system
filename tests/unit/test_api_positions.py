@@ -38,6 +38,7 @@ async def test_list_positions_returns_serialized_positions() -> None:
                 mark_age_seconds=14.25,
                 strategy_id="strategy-api",
                 strategy_version_id="strategy-api-v1",
+                risk_group_id="event:cp06",
             )
         ]
     )
@@ -60,6 +61,7 @@ async def test_list_positions_returns_serialized_positions() -> None:
                 "mark_age_seconds": 14.25,
                 "strategy_id": "strategy-api",
                 "strategy_version_id": "strategy-api-v1",
+                "risk_group_id": "event:cp06",
             }
         ]
     }

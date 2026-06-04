@@ -75,14 +75,18 @@ class PostgresStrategyRegistry:
         async with self._pool.acquire() as connection:
             await connection.execute(query, strategy_id, metadata_json)
 
-    async def create_version(self, strategy: Strategy) -> StrategyVersion:
-        """Register a strategy snapshot and make that version active.
+    async def create_version(
+        self,
+        strategy: Strategy,
+        *,
+        activate: bool = True,
+    ) -> StrategyVersion:
+        """Register a strategy snapshot and optionally make that version active.
 
         Re-registering an existing version is idempotent for the
-        `strategy_versions` row but still re-points
-        `strategies.active_version_id` to the requested version. S2
-        treats `create_version(...)` as the explicit register-and-activate
-        entrypoint until a separate activation API exists.
+        `strategy_versions` row. By default this still re-points
+        `strategies.active_version_id` to the requested version; installers can
+        pass `activate=False` to populate dependent rows before activation.
         """
         strategy_id = strategy.config.strategy_id
         strategy_version_id = compute_strategy_version_id(*strategy.snapshot())
@@ -115,7 +119,8 @@ class PostgresStrategyRegistry:
         """
         update_strategy_query = """
         UPDATE strategies
-        SET active_version_id = $2
+        SET active_version_id = $2,
+            archived = FALSE
         WHERE strategy_id = $1
         """
         async with self._pool.acquire() as connection:
@@ -140,12 +145,14 @@ class PostgresStrategyRegistry:
                 if not isinstance(created_at, datetime):
                     msg = "strategy_versions.created_at did not return a timestamp"
                     raise TypeError(msg)
-                await connection.execute(
-                    update_strategy_query,
-                    strategy_id,
-                    strategy_version_id,
-                )
-        await self._notify_strategy_change()
+                if activate:
+                    await connection.execute(
+                        update_strategy_query,
+                        strategy_id,
+                        strategy_version_id,
+                    )
+        if activate:
+            await self._notify_strategy_change()
         return StrategyVersion(
             strategy_id=strategy_id,
             strategy_version_id=strategy_version_id,
@@ -215,6 +222,25 @@ class PostgresStrategyRegistry:
             for row in rows
         ]
 
+    async def list_active_strategy_rows(self) -> list[StrategyRow]:
+        query = """
+        SELECT strategy_id, active_version_id, created_at
+        FROM strategies
+        WHERE active_version_id IS NOT NULL
+          AND archived IS NOT TRUE
+        ORDER BY strategy_id ASC
+        """
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(query)
+        return [
+            StrategyRow(
+                strategy_id=row["strategy_id"],
+                active_version_id=row["active_version_id"],
+                created_at=_ensure_utc(row["created_at"]),
+            )
+            for row in rows
+        ]
+
     async def list_versions(self, strategy_id: str) -> list[StrategyVersion]:
         query = """
         SELECT strategy_id, strategy_version_id, created_at
@@ -246,6 +272,7 @@ class PostgresStrategyRegistry:
             ON versions.strategy_id = strategies.strategy_id
            AND versions.strategy_version_id = strategies.active_version_id
         WHERE strategies.active_version_id IS NOT NULL
+          AND strategies.archived IS NOT TRUE
         ORDER BY strategies.strategy_id ASC
         """
         async with self._pool.acquire() as connection:
@@ -282,6 +309,7 @@ class PostgresStrategyRegistry:
             ON versions.strategy_id = strategies.strategy_id
            AND versions.strategy_version_id = strategies.active_version_id
         WHERE strategies.active_version_id IS NOT NULL
+          AND strategies.archived IS NOT TRUE
         ORDER BY strategies.strategy_id ASC
         """
         async with self._pool.acquire() as connection:
@@ -325,7 +353,8 @@ class PostgresStrategyRegistry:
         """
         update_strategy_query = """
         UPDATE strategies
-        SET active_version_id = $2
+        SET active_version_id = $2,
+            archived = FALSE
         WHERE strategy_id = $1
           AND EXISTS (
               SELECT 1
@@ -371,6 +400,21 @@ class PostgresStrategyRegistry:
                 "No strategy_versions row matched activation target "
                 f"strategy_id={strategy_id!r}, strategy_version_id={strategy_version_id!r}"
             )
+            raise LookupError(msg)
+        await self._notify_strategy_change()
+
+    async def archive_strategy(self, strategy_id: str) -> None:
+        query = """
+        UPDATE strategies
+        SET archived = TRUE,
+            active_version_id = NULL
+        WHERE strategy_id = $1
+        """
+        async with self._pool.acquire() as connection:
+            status = await connection.execute(query, strategy_id)
+        updated = _command_tag_row_count(status)
+        if updated == 0:
+            msg = f"No strategies row matched archive target strategy_id={strategy_id!r}"
             raise LookupError(msg)
         await self._notify_strategy_change()
 
@@ -561,6 +605,14 @@ def _market_selection_from_payload(
         liquidity_min_usdc=_json_optional_float(
             market_selection_payload.get("liquidity_min_usdc"),
             "market_selection.liquidity_min_usdc",
+        ),
+        yes_price_min=_json_optional_float(
+            market_selection_payload.get("yes_price_min"),
+            "market_selection.yes_price_min",
+        ),
+        yes_price_max=_json_optional_float(
+            market_selection_payload.get("yes_price_max"),
+            "market_selection.yes_price_max",
         ),
         accepting_orders=_json_optional_bool(
             market_selection_payload.get("accepting_orders"),

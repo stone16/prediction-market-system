@@ -45,6 +45,7 @@ from pms.live_preflight import (
 from pms.storage.schema_check import EXPECTED_SCHEMA_HEAD
 from pms.storage.live_reconciliation import LiveOrderReconciliationRecord
 from pms.strategies.aggregate import Strategy
+from pms.strategies.flb import build_h1_flb_strategy
 from pms.strategies.paper_canary import build_paper_canary_strategy
 from pms.strategies.projections import (
     ActiveStrategy,
@@ -184,6 +185,26 @@ def _replace_report_provenance_field(
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _replace_report_gate_detail(
+    report_path: str,
+    *,
+    check_name: str,
+    detail: str,
+) -> None:
+    path = Path(report_path)
+    replaced = False
+    lines: list[str] = []
+    prefix = f"| {check_name} |"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(prefix):
+            lines.append(f"| {check_name} | PASS | {detail} |")
+            replaced = True
+        else:
+            lines.append(line)
+    assert replaced
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _insert_report_summary_strategy(report_path: str, strategy_label: str) -> None:
     path = Path(report_path)
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -247,12 +268,14 @@ class _Connection:
         latest_book_snapshot_age_s: float | None = 30.0,
         latest_usable_book_snapshot_age_s: float | None = 30.0,
         missing_market_risk_metadata_count: int = 0,
+        missing_subscribed_usable_token_count: int = 0,
         active_strategy_rows: tuple[dict[str, object], ...] | None = None,
     ) -> None:
         self.unresolved_submission_unknown = unresolved_submission_unknown
         self.latest_book_snapshot_age_s = latest_book_snapshot_age_s
         self.latest_usable_book_snapshot_age_s = latest_usable_book_snapshot_age_s
         self.missing_market_risk_metadata_count = missing_market_risk_metadata_count
+        self.missing_subscribed_usable_token_count = missing_subscribed_usable_token_count
         self.active_strategy_rows = (
             active_strategy_rows
             if active_strategy_rows is not None
@@ -267,6 +290,8 @@ class _Connection:
             return EXPECTED_SCHEMA_HEAD
         if "outcome = 'submission_unknown'" in query:
             return self.unresolved_submission_unknown
+        if "missing_launch_usable_tokens" in query:
+            return self.missing_subscribed_usable_token_count
         if "missing_market_risk_metadata" in query:
             return self.missing_market_risk_metadata_count
         if "usable_book_snapshots" in query:
@@ -321,6 +346,13 @@ class _LiveOpenOrderConnection(_Connection):
     async def fetchval(self, query: str, *args: object) -> object:
         if "FROM orders" in query and "remaining_notional_usdc" in query:
             return self.live_open_order_count
+        return await super().fetchval(query, *args)
+
+
+class _OpenStatusLiveOrderConnection(_Connection):
+    async def fetchval(self, query: str, *args: object) -> object:
+        if "FROM orders" in query and "remaining_notional_usdc" in query:
+            return 1 if "'open'" in query else 0
         return await super().fetchval(query, *args)
 
 
@@ -409,7 +441,7 @@ def _settings(
     mode: RunMode = RunMode.LIVE,
     live_emergency_audit_path: Path | None = None,
 ) -> PMSSettings:
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-live-preflight-reports-"
     )
@@ -431,6 +463,7 @@ def _settings(
         Path(paper_report_path).parent / "paper-backtest-execution-diff.json"
     )
     _write_valid_flb_calibration_csv(flb_calibration_path)
+    _write_valid_flb_calibration_provenance_json(flb_calibration_path)
     _write_valid_category_prior_csv(category_prior_path)
     _write_valid_execution_model_json(execution_model_path)
     _write_valid_paper_backtest_diff_json(paper_backtest_diff_path)
@@ -438,6 +471,7 @@ def _settings(
         mode=mode,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_exit_criteria_ratified_by="operator",
         live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by="counsel",
@@ -486,13 +520,27 @@ def _settings(
     )
 
 
-def _write_valid_paper_backtest_diff_json(path: Path) -> None:
+def _write_valid_paper_backtest_diff_json(
+    path: Path,
+    *,
+    strategy_evidence: str | None = None,
+) -> None:
+    if strategy_evidence is None:
+        strategy = _live_strategy()
+        strategy_evidence = f"{strategy.config.strategy_id}@{_strategy_version_id(strategy)}"
     path.write_text(
         json.dumps(
             {
                 "generated_by": "scripts/paper_backtest_execution_diff.py",
                 "artifact_mode": "paper_backtest_execution_diff",
-                "generated_at": datetime(2026, 5, 25, tzinfo=UTC).isoformat(),
+                "generated_at": (
+                    datetime.now(tz=UTC) - timedelta(seconds=60)
+                ).isoformat(),
+                "strategy_evidence": strategy_evidence,
+                "input_csv_sha256": {
+                    "paper": "a" * 64,
+                    "backtest": "b" * 64,
+                },
                 "final_go_no_go_valid": True,
                 "thresholds": {
                     "min_matched_decisions": 10,
@@ -530,12 +578,16 @@ def _write_valid_paper_backtest_diff_json(path: Path) -> None:
 
 
 def _write_valid_execution_model_json(path: Path) -> None:
+    strategy = _live_strategy()
     path.write_text(
         json.dumps(
             {
                 "generated_by": "scripts/execution_model_from_telemetry.py",
                 "artifact_mode": "telemetry_execution_model",
                 "generated_at": datetime.now(tz=UTC).isoformat(),
+                "strategy_evidence": (
+                    f"{strategy.config.strategy_id}@{_strategy_version_id(strategy)}"
+                ),
                 "fee_rate": 0.04,
                 "slippage_bps": 6.0,
                 "latency_ms": 500.0,
@@ -547,6 +599,7 @@ def _write_valid_execution_model_json(path: Path) -> None:
                 "price_invalidation_streak": 10,
                 "replay_window_ms": 86_400_000,
                 "calibration_source": "telemetry_calibrated",
+                "input_csv_sha256": "c" * 64,
                 "min_samples": 10,
                 "telemetry_sample_count": 10,
                 "adverse_selection_sample_count": 10,
@@ -567,6 +620,33 @@ def _write_valid_flb_calibration_csv(path: Path) -> None:
                 "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
             )
         ),
+        encoding="utf-8",
+    )
+
+
+def _write_valid_flb_calibration_provenance_json(calibration_path: Path) -> None:
+    provenance_path = Path(f"{calibration_path}.provenance.json")
+    provenance_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "flb_calibration_provenance",
+                "generated_by": "scripts/flb_data_feasibility.py",
+                "source": "warehouse-csv",
+                "generated_at": "2026-06-01T00:00:00+00:00",
+                "warehouse_csv_sha256": sha256(
+                    b"unit warehouse provenance fixture"
+                ).hexdigest(),
+                "warehouse_market_count": 301,
+                "warehouse_longshot_count": 150,
+                "warehouse_favorite_count": 151,
+                "calibration_csv_sha256": sha256(
+                    calibration_path.read_bytes()
+                ).hexdigest(),
+                "calibration_source_label": "warehouse-flb-v1",
+            },
+            sort_keys=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -679,6 +759,7 @@ def test_pms_live_cli_parses_preflight_command() -> None:
             "--database-url",
             "postgresql://localhost/pms_live",
             "--skip-venue",
+            "--skip-credentials",
             "--json",
             "--output",
             "docs/live/preflight.json",
@@ -689,8 +770,75 @@ def test_pms_live_cli_parses_preflight_command() -> None:
     assert args.config == "config.live.yaml"
     assert args.database_url == "postgresql://localhost/pms_live"
     assert args.skip_venue is True
+    assert args.skip_credentials is True
     assert args.json is True
     assert args.output == "docs/live/preflight.json"
+
+
+@pytest.mark.asyncio
+async def test_pms_live_preflight_skip_credentials_skips_local_secret_file_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.live.yaml"
+    missing_secret_path = tmp_path / "missing" / "polymarket.local-secrets.yaml"
+    config_path.write_text(
+        "\n".join(
+            (
+                "mode: live",
+                "secret_source: local_file",
+                f"local_secret_file: {missing_secret_path}",
+                "live_trading_enabled: true",
+                "llm:",
+                "  enabled: true",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("PMS_LLM__API_KEY", raising=False)
+    monkeypatch.delenv("PMS_LLM__PROVIDER", raising=False)
+
+    async def fake_run_live_preflight(
+        settings: PMSSettings,
+        *,
+        skip_venue: bool,
+        skip_credentials: bool,
+    ) -> LivePreflightResult:
+        assert settings.local_secret_file == str(missing_secret_path)
+        assert settings.llm.api_key == "diagnostic-llm-api-key"
+        assert settings.llm.provider == "anthropic"
+        assert skip_venue is False
+        assert skip_credentials is True
+        return LivePreflightResult(
+            (
+                LivePreflightCheck(
+                    "live_config",
+                    True,
+                    "LIVE config validates with diagnostic credentials",
+                ),
+            )
+        )
+
+    monkeypatch.setattr(live_cli, "run_live_preflight", fake_run_live_preflight)
+    args = build_parser().parse_args(
+        [
+            "preflight",
+            "--config",
+            str(config_path),
+            "--skip-credentials",
+            "--json",
+        ]
+    )
+
+    exit_code = await live_cli._main_async(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["checks"][0]["name"] == "live_config"
+    assert payload["checks"][0]["ok"] is True
+    assert os.environ.get("PMS_LLM__API_KEY") is None
+    assert os.environ.get("PMS_LLM__PROVIDER") is None
 
 
 def test_pms_live_cli_parses_live_order_reconcile_command() -> None:
@@ -1123,9 +1271,11 @@ async def test_pms_live_preflight_cli_rejects_env_config_file_output_path(
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         assert settings.live_preflight_artifact_path == str(configured_preflight_path)
         assert skip_venue is False
+        assert skip_credentials is False
         return LivePreflightResult(
             (
                 LivePreflightCheck(
@@ -1342,6 +1492,30 @@ def test_live_preflight_readiness_fingerprint_binds_flb_calibration_artifact(
     assert after != before
 
 
+def test_live_preflight_readiness_fingerprint_binds_flb_calibration_provenance(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    before = live_preflight_module.live_preflight_readiness_reports_fingerprint(
+        settings
+    )
+
+    calibration_path = Path(cast(str, settings.strategies.flb_calibration_path))
+    provenance_path = Path(f"{calibration_path}.provenance.json")
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["warehouse_csv_sha256"] = "b" * 64
+    provenance_path.write_text(
+        json.dumps(provenance, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    after = live_preflight_module.live_preflight_readiness_reports_fingerprint(settings)
+
+    assert after != before
+
+
 @pytest.mark.parametrize(
     ("artifact_name", "expected_detail"),
     [
@@ -1495,6 +1669,7 @@ def test_live_preflight_readiness_fingerprint_opens_reports_with_no_follow_when_
         Path(cast(str, settings.live_paper_backtest_diff_path)),
         Path(cast(str, settings.controller.category_prior_observations_path)),
         Path(cast(str, settings.strategies.flb_calibration_path)),
+        Path(f"{cast(str, settings.strategies.flb_calibration_path)}.provenance.json"),
     }
     observed: list[tuple[Path, int]] = []
     real_open = os.open
@@ -2104,9 +2279,11 @@ async def test_pms_live_preflight_cli_reports_artifact_write_failure_without_tra
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         del settings
         assert skip_venue is False
+        assert skip_credentials is False
         return _final_preflight_result()
 
     monkeypatch.setattr(live_cli, "run_live_preflight", fake_run_live_preflight)
@@ -2151,9 +2328,11 @@ async def test_pms_live_preflight_output_marks_database_url_override_as_not_fina
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         assert settings.database.dsn == "postgresql://user:secret@db.example/pms_live"
         observed_skip_venue.append(skip_venue)
+        assert skip_credentials is False
         return LivePreflightResult(
             (
                 LivePreflightCheck(
@@ -2214,9 +2393,11 @@ async def test_pms_live_preflight_output_marks_skip_venue_as_not_final(
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         del settings
         assert skip_venue is True
+        assert skip_credentials is False
         return LivePreflightResult(
             (
                 LivePreflightCheck(
@@ -2246,7 +2427,51 @@ async def test_pms_live_preflight_output_marks_skip_venue_as_not_final(
     assert artifact["artifact_mode"] == "incomplete_preflight"
     assert artifact["final_go_no_go_valid"] is False
     assert artifact["skip_venue"] is True
+    assert artifact["skip_credentials"] is False
     assert artifact["result"]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_pms_live_preflight_output_marks_skip_credentials_as_not_final(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_path = tmp_path / "preflight-debug.json"
+    config_path = tmp_path / "config.live.yaml"
+    config_path.write_text("mode: live\n", encoding="utf-8")
+
+    async def fake_run_live_preflight(
+        settings: PMSSettings,
+        *,
+        skip_venue: bool,
+        skip_credentials: bool,
+    ) -> LivePreflightResult:
+        del settings
+        assert skip_venue is False
+        assert skip_credentials is True
+        return _final_preflight_result()
+
+    monkeypatch.setattr(live_cli, "run_live_preflight", fake_run_live_preflight)
+    args = build_parser().parse_args(
+        [
+            "preflight",
+            "--config",
+            str(config_path),
+            "--skip-credentials",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    exit_code = await live_cli._main_async(args)
+
+    artifact = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert artifact["artifact_mode"] == "incomplete_preflight"
+    assert artifact["final_go_no_go_valid"] is False
+    assert artifact["skip_venue"] is False
+    assert artifact["skip_credentials"] is True
+    assert artifact["result"]["ok"] is True
 
 
 @pytest.mark.asyncio
@@ -2262,9 +2487,11 @@ async def test_pms_live_preflight_output_marks_missing_required_checks_as_not_fi
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         del settings
         assert skip_venue is False
+        assert skip_credentials is False
         return LivePreflightResult(
             (
                 LivePreflightCheck(
@@ -2308,9 +2535,11 @@ async def test_pms_live_preflight_output_records_active_strategy_fingerprint(
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         del settings
         assert skip_venue is False
+        assert skip_credentials is False
         return LivePreflightResult(
             (
                 LivePreflightCheck(
@@ -2377,9 +2606,11 @@ async def test_pms_live_preflight_output_requires_active_strategy_fingerprint_fo
         settings: PMSSettings,
         *,
         skip_venue: bool,
+        skip_credentials: bool,
     ) -> LivePreflightResult:
         del settings
         assert skip_venue is False
+        assert skip_credentials is False
         return LivePreflightResult(
             tuple(
                 LivePreflightCheck(
@@ -5306,6 +5537,66 @@ async def test_live_preflight_passes_with_live_config_schema_incidents_and_venue
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_skip_credentials_runs_non_credential_checks(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    settings.polymarket.private_key = None
+    settings.polymarket.api_key = None
+    settings.polymarket.api_secret = None
+    settings.polymarket.api_passphrase = None
+    settings.polymarket.signature_type = None
+    settings.polymarket.funder_address = None
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+        skip_credentials=True,
+    )
+
+    live_config = result.require_check("live_config")
+    venue_check = result.require_check("venue_reconciliation")
+    assert result.ok is False
+    assert live_config.ok is True
+    assert "diagnostic credentials" in live_config.detail
+    assert "Missing Polymarket credential" not in live_config.detail
+    assert venue_check.ok is False
+    assert "skipped by operator flag" in venue_check.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_skip_credentials_surfaces_strategy_artifact_errors(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    settings.polymarket.private_key = None
+    settings.polymarket.api_key = None
+    settings.polymarket.api_secret = None
+    settings.polymarket.api_passphrase = None
+    settings.polymarket.signature_type = None
+    settings.polymarket.funder_address = None
+    settings.strategies.flb_calibration_path = None
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+        skip_credentials=True,
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert "FLB calibration artifact path is required" in live_config.detail
+    assert "Missing Polymarket credential" not in live_config.detail
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_without_flb_calibration_artifact_path(
     tmp_path: Path,
 ) -> None:
@@ -5324,6 +5615,28 @@ async def test_live_preflight_fails_without_flb_calibration_artifact_path(
     assert result.ok is False
     assert live_config.ok is False
     assert "FLB calibration artifact path is required" in live_config.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_without_flb_calibration_provenance_sidecar(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    calibration_path = Path(cast(str, settings.strategies.flb_calibration_path))
+    Path(f"{calibration_path}.provenance.json").unlink()
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert "FLB calibration provenance JSON" in live_config.detail
 
 
 @pytest.mark.parametrize(
@@ -5515,6 +5828,33 @@ async def test_live_preflight_fails_when_execution_model_staleness_is_infinite(
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_fails_when_execution_model_lacks_input_hash(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    payload.pop("input_csv_sha256", None)
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert (
+        "execution-model artifact input_csv_sha256 must be a sha256 hex digest"
+        in live_config.detail
+    )
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_when_execution_model_lacks_sample_contract(
     tmp_path: Path,
 ) -> None:
@@ -5648,6 +5988,33 @@ async def test_live_preflight_fails_with_failed_paper_backtest_diff_artifact(
         "paper-vs-backtest execution diff artifact must be final GO"
         in live_config.detail
     )
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_paper_backtest_diff_strategy_mismatches_active_strategy(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    payload["strategy_evidence"] = "paper_canary_v1@paper-only-version"
+    diff_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert (
+        "paper-vs-backtest execution diff artifact strategy_evidence "
+        "must match active strategies"
+    ) in live_config.detail
 
 
 @pytest.mark.asyncio
@@ -5995,6 +6362,12 @@ async def test_live_preflight_fails_when_paper_backtest_diff_hides_mismatch_list
         (
             (datetime.now(tz=UTC) - timedelta(days=8)).isoformat(),
             "paper-vs-backtest execution diff artifact is stale",
+        ),
+        (
+            (datetime.now(tz=UTC) - timedelta(seconds=60))
+            .replace(tzinfo=None)
+            .isoformat(),
+            "paper-vs-backtest execution diff artifact generated_at must include timezone",
         ),
     ],
 )
@@ -6520,6 +6893,53 @@ async def test_live_preflight_fails_when_active_strategy_lacks_explicit_live_opt
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_accepts_h1_flb_live_candidate_strategy(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    active_strategy = build_h1_flb_strategy()
+    active_strategy_label = (
+        f"{active_strategy.config.strategy_id}@"
+        f"{_strategy_version_id(active_strategy)}"
+    )
+    _insert_report_summary_strategy(
+        cast(str, settings.live_paper_soak_report_path),
+        active_strategy_label,
+    )
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    diff_payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    diff_payload["strategy_evidence"] = active_strategy_label
+    diff_path.write_text(json.dumps(diff_payload), encoding="utf-8")
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    model_payload = json.loads(model_path.read_text(encoding="utf-8"))
+    model_payload["strategy_evidence"] = active_strategy_label
+    model_path.write_text(json.dumps(model_payload), encoding="utf-8")
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(
+                _Connection(
+                    active_strategy_rows=(_active_strategy_row(active_strategy),)
+                )
+            ),
+        ),
+        venue_reconciler=cast(
+            PolymarketVenueAccountReconciler,
+            _MatchingVenueReconciler(),
+        ),
+    )
+
+    strategy_check = result.require_check("active_strategies")
+    assert result.ok is True
+    assert strategy_check.ok is True
+    assert f"{active_strategy.config.strategy_id}@" in strategy_check.detail
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_when_paper_report_names_different_strategy(
     tmp_path: Path,
 ) -> None:
@@ -6592,6 +7012,165 @@ async def test_live_preflight_fails_when_paper_report_strategy_row_has_extra_cel
     assert result.ok is False
     assert strategy_check.ok is False
     assert "malformed Summary Strategy row" in strategy_check.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_paper_report_decision_is_no_go(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    paper_report_path = Path(cast(str, settings.live_paper_soak_report_path))
+    paper_report_path.write_text(
+        paper_report_path.read_text(encoding="utf-8").replace(
+            "**Decision:** GO",
+            "**Decision:** NO-GO",
+        ),
+        encoding="utf-8",
+    )
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(
+                _Connection(
+                    active_strategy_rows=(_active_strategy_row(_live_strategy()),)
+                )
+            ),
+        ),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert "paper soak GO report must contain a Go/No-Go GO decision" in (
+        live_config.detail
+    )
+
+
+@pytest.mark.parametrize(
+    ("check_name", "detail"),
+    (
+        ("hit_rate", "0.45 >= 0.45"),
+        ("average_edge_bps", "5.0 >= 5.0"),
+        ("average_net_edge_bps", "0.0 >= 0.0"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_paper_report_strict_gt_gate_uses_equality(
+    tmp_path: Path,
+    check_name: str,
+    detail: str,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    _replace_report_gate_detail(
+        cast(str, settings.live_paper_soak_report_path),
+        check_name=check_name,
+        detail=detail,
+    )
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(
+                _Connection(
+                    active_strategy_rows=(_active_strategy_row(_live_strategy()),)
+                )
+            ),
+        ),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert f"{check_name} detail below LIVE threshold" in live_config.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_paper_report_lacks_readiness_gate(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    paper_report_path = Path(cast(str, settings.live_paper_soak_report_path))
+    paper_report_path.write_text(
+        "\n".join(
+            line
+            for line in paper_report_path.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("| readiness |")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(
+                _Connection(
+                    active_strategy_rows=(_active_strategy_row(_live_strategy()),)
+                )
+            ),
+        ),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert "missing required gate checks: readiness" in live_config.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_paper_report_includes_paper_only_strategy(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    active_strategy = _live_strategy()
+    active_strategy_label = (
+        f"{active_strategy.config.strategy_id}@"
+        f"{_strategy_version_id(active_strategy)}"
+    )
+    strategy_evidence = (
+        f"{active_strategy_label}, paper_canary_v1@paper-only-version"
+    )
+    _insert_report_summary_strategy(
+        cast(str, settings.live_paper_soak_report_path),
+        strategy_evidence,
+    )
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    diff_payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    diff_payload["strategy_evidence"] = strategy_evidence
+    diff_path.write_text(json.dumps(diff_payload), encoding="utf-8")
+
+    result = await run_live_preflight(
+        settings,
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(
+                _Connection(
+                    active_strategy_rows=(_active_strategy_row(active_strategy),)
+                )
+            ),
+        ),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_config = result.require_check("live_config")
+    assert result.ok is False
+    assert live_config.ok is False
+    assert "paper-only strategy cannot be final GO evidence" in live_config.detail
 
 
 @pytest.mark.asyncio
@@ -6766,8 +7345,8 @@ def test_live_preflight_artifact_rejects_swapped_readiness_report(
     paper_report_path = Path(cast(str, settings.live_paper_soak_report_path))
     paper_report_path.write_text(
         paper_report_path.read_text(encoding="utf-8").replace(
-            "| fills | PASS | 10 >= 10 |",
-            "| fills | PASS | 11 >= 10 |",
+            "| fills | PASS | 50 >= 50 |",
+            "| fills | PASS | 51 >= 50 |",
         ),
         encoding="utf-8",
     )
@@ -6777,6 +7356,112 @@ def test_live_preflight_artifact_rejects_swapped_readiness_report(
         LiveTradingDisabledError,
         match="readiness reports fingerprint mismatch",
     ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_rejects_naive_generated_at(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    artifact_path = Path(
+        make_live_preflight_artifact_path(
+            prefix="pms-live-preflight-naive-generated-at-",
+            settings=settings,
+        )
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["generated_at"] = (
+        (datetime.now(tz=UTC) - timedelta(seconds=20))
+        .replace(tzinfo=None)
+        .isoformat()
+    )
+    artifact_path.write_text(
+        json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    settings.live_preflight_artifact_path = str(artifact_path)
+    validator = getattr(live_preflight_module, "require_live_preflight_artifact")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="generated_at must include timezone",
+    ):
+        validator(settings)
+
+
+def test_live_strategy_artifact_submission_accepts_runtime_valid_category_prior_decimals(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    prior_path = Path(cast(str, settings.controller.category_prior_observations_path))
+    rows = ["market_id,category,yes_payout,no_payout,resolved_at"]
+    for index in range(1, 121):
+        category = "politics" if index % 2 == 0 else "sports"
+        yes_payout, no_payout = (
+            ("1.0", "0.0") if index % 3 == 0 else ("0.0", "1.0")
+        )
+        rows.append(
+            f"m-{index},{category},{yes_payout},{no_payout},"
+            f"2026-05-{(index % 20) + 1:02d}T12:00:00Z"
+        )
+    prior_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    validator(settings)
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "expected_detail"),
+    [
+        (
+            "execution_model",
+            "execution-model artifact generated_at must include timezone",
+        ),
+        (
+            "paper_backtest_diff",
+            "paper-vs-backtest execution diff artifact generated_at must include timezone",
+        ),
+    ],
+)
+def test_live_strategy_artifact_submission_rejects_naive_generated_at(
+    tmp_path: Path,
+    artifact_name: str,
+    expected_detail: str,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+
+    if artifact_name == "execution_model":
+        payload_path = Path(cast(str, settings.live_execution_model_path))
+    elif artifact_name == "paper_backtest_diff":
+        payload_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    else:
+        raise AssertionError(f"unknown artifact_name: {artifact_name}")
+
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    payload["generated_at"] = (
+        (datetime.now(tz=UTC) - timedelta(seconds=60))
+        .replace(tzinfo=None)
+        .isoformat()
+    )
+    payload_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(LiveTradingDisabledError, match=expected_detail):
         validator(settings)
 
 
@@ -6857,6 +7542,182 @@ def test_live_preflight_artifact_revalidates_strategy_artifact_content(
     validator = getattr(live_preflight_module, "require_live_preflight_artifact")
 
     with pytest.raises(LiveTradingDisabledError, match=expected_detail):
+        validator(settings)
+
+
+def test_live_preflight_artifact_revalidates_paper_report_decision(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    paper_report_path = Path(cast(str, settings.live_paper_soak_report_path))
+    paper_report_path.write_text(
+        paper_report_path.read_text(encoding="utf-8").replace(
+            "**Decision:** GO",
+            "**Decision:** NO-GO",
+        ),
+        encoding="utf-8",
+    )
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="paper soak GO report must contain a Go/No-Go GO decision",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_revalidates_operator_rehearsal_decision(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    rehearsal_report_path = Path(
+        cast(str, settings.live_operator_rehearsal_report_path)
+    )
+    rehearsal_report_path.write_text(
+        rehearsal_report_path.read_text(encoding="utf-8").replace(
+            "**Decision:** PASS",
+            "**Decision:** FAIL",
+        ),
+        encoding="utf-8",
+    )
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="operator rehearsal report must contain a PASS decision",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_revalidates_paper_report_strategy_evidence(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    active_strategy = _live_strategy()
+    active_strategy_label = (
+        f"{active_strategy.config.strategy_id}@"
+        f"{_strategy_version_id(active_strategy)}"
+    )
+    strategy_evidence = (
+        f"{active_strategy_label}, paper_canary_v1@paper-only-version"
+    )
+    _insert_report_summary_strategy(
+        cast(str, settings.live_paper_soak_report_path),
+        strategy_evidence,
+    )
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    diff_payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    diff_payload["strategy_evidence"] = strategy_evidence
+    diff_path.write_text(json.dumps(diff_payload), encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="paper-only strategy cannot be final GO evidence",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_rejects_missing_paper_backtest_input_hashes(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    diff_path = Path(cast(str, settings.live_paper_backtest_diff_path))
+    payload = json.loads(diff_path.read_text(encoding="utf-8"))
+    payload.pop("input_csv_sha256", None)
+    diff_path.write_text(json.dumps(payload), encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="paper-vs-backtest execution diff artifact input_csv_sha256 is required",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_rejects_missing_execution_model_strategy_evidence(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    payload.pop("strategy_evidence", None)
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="execution-model artifact strategy_evidence is required",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_rejects_missing_execution_model_input_hash(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    payload.pop("input_csv_sha256", None)
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="execution-model artifact input_csv_sha256 must be a sha256 hex digest",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_rejects_execution_model_strategy_mismatch(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    model_path = Path(cast(str, settings.live_execution_model_path))
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    payload["strategy_evidence"] = "paper_canary_v1@paper-only-version"
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+    validator = getattr(
+        live_preflight_artifact_module,
+        "validate_live_strategy_artifacts_for_submission",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="execution-model artifact strategy_evidence must match active strategies",
+    ):
         validator(settings)
 
 
@@ -7002,6 +7863,8 @@ def test_live_preflight_artifact_rejects_preflight_before_emergency_audit_record
     readiness_generated_at = now - timedelta(seconds=30)
     preflight_generated_at = now - timedelta(seconds=20)
     emergency_audit_at = now - timedelta(seconds=10)
+    settings.live_exit_criteria_ratified_at = preflight_generated_at - timedelta(seconds=1)
+    settings.live_compliance_reviewed_at = preflight_generated_at - timedelta(seconds=1)
     for raw_path in (
         settings.live_execution_model_path,
         settings.live_paper_backtest_diff_path,
@@ -7070,6 +7933,77 @@ def test_live_preflight_artifact_rejects_malformed_emergency_audit_record(
         match="emergency audit record invalid",
     ):
         validator(settings)
+
+
+def test_live_preflight_artifact_rejects_naive_emergency_audit_timestamp(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    artifact_path = Path(
+        make_live_preflight_artifact_path(
+            prefix="pms-live-preflight-naive-emergency-audit-",
+            settings=settings,
+        )
+    )
+    audit_path = Path(settings.live_emergency_audit_path)
+    audit_path.write_text(
+        json.dumps(
+            {
+                "timestamp": (
+                    (datetime.now(tz=UTC) - timedelta(seconds=10))
+                    .replace(tzinfo=None)
+                    .isoformat()
+                ),
+                "phase": "manual_emergency_stop",
+                "event": "manual_emergency_stop",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings.live_preflight_artifact_path = str(artifact_path)
+    validator = getattr(live_preflight_module, "require_live_preflight_artifact")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="timestamp must include timezone",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_module_rejects_naive_emergency_audit_timestamp(
+    tmp_path: Path,
+) -> None:
+    audit_path = tmp_path / "live-emergency-audit.jsonl"
+    audit_path.write_text(
+        json.dumps(
+            {
+                "timestamp": (
+                    (datetime.now(tz=UTC) - timedelta(seconds=10))
+                    .replace(tzinfo=None)
+                    .isoformat()
+                ),
+                "phase": "manual_emergency_stop",
+                "event": "manual_emergency_stop",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    validator = getattr(
+        live_preflight_artifact_module,
+        "latest_live_emergency_audit_timestamp",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="timestamp must include timezone",
+    ):
+        validator(str(audit_path))
 
 
 def test_live_preflight_artifact_rejects_placeholder_artifact_path(
@@ -7433,24 +8367,89 @@ def test_live_preflight_artifact_rejects_duplicate_json_keys(
         validator(settings)
 
 
-def test_live_preflight_category_prior_artifact_rejects_duplicate_csv_header() -> None:
+def test_live_preflight_artifact_rejects_skip_credentials(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    artifact_path = Path(
+        make_live_preflight_artifact_path(
+            prefix="pms-live-preflight-skip-credentials-",
+            settings=settings,
+        )
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["skip_credentials"] = True
+    artifact_path.write_text(
+        json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    settings.live_preflight_artifact_path = str(artifact_path)
+    validator = getattr(live_preflight_module, "require_live_preflight_artifact")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="must not skip credential validation",
+    ):
+        validator(settings)
+
+
+def test_live_preflight_artifact_requires_skip_credentials_false(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    artifact_path = Path(
+        make_live_preflight_artifact_path(
+            prefix="pms-live-preflight-missing-skip-credentials-",
+            settings=settings,
+        )
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact.pop("skip_credentials", None)
+    artifact_path.write_text(
+        json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    settings.live_preflight_artifact_path = str(artifact_path)
+    validator = getattr(live_preflight_module, "require_live_preflight_artifact")
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="skip_credentials must be false",
+    ):
+        validator(settings)
+
+
+def test_live_strategy_artifact_submission_rejects_duplicate_category_prior_csv_header(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    settings = _settings(approval_path=approval_dir / "first-order.json")
+    prior_path = Path(cast(str, settings.controller.category_prior_observations_path))
+    prior_path.write_text(
+        "\n".join(
+            (
+                "market_id,category,category,yes_payout,no_payout,resolved_at",
+                "m-1,politics,shadowed,1,0,2026-05-01T12:00:00Z",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     validator = getattr(
         live_preflight_artifact_module,
-        "_count_category_prior_observations",
+        "validate_live_strategy_artifacts_for_submission",
     )
 
     with pytest.raises(
         LiveTradingDisabledError,
         match="duplicate CSV column: category",
     ):
-        validator(
-            "\n".join(
-                (
-                    "market_id,category,category,yes_payout,no_payout,resolved_at",
-                    "m-1,politics,shadowed,1,0,2026-05-01T12:00:00Z",
-                )
-            )
-        )
+        validator(settings)
 
 
 def test_live_preflight_flb_calibration_artifact_rejects_duplicate_csv_header() -> None:
@@ -7469,6 +8468,42 @@ def test_live_preflight_flb_calibration_artifact_rejects_duplicate_csv_header() 
                     "signal_name,probability_estimate,sample_count,source_label,source_label",
                     "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1,shadowed",
                     "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1,shadowed",
+                )
+            ),
+            min_sample_count=100,
+        )
+
+
+@pytest.mark.parametrize(
+    "source_label",
+    [
+        "Gamma API closed markets",
+        "warehouse CSV: /tmp/polymarket.csv",
+        "tests/fixtures/flb-calibration",
+        "synthetic-flb-v1",
+        "local-flb-v1",
+        "smoke-flb-v1",
+        "placeholder",
+    ],
+)
+def test_live_preflight_flb_calibration_artifact_rejects_non_auditable_source_label(
+    source_label: str,
+) -> None:
+    validator = getattr(
+        live_preflight_artifact_module,
+        "_validate_flb_calibration_rows",
+    )
+
+    with pytest.raises(
+        LiveTradingDisabledError,
+        match="source_label",
+    ):
+        validator(
+            "\n".join(
+                (
+                    "signal_name,probability_estimate,sample_count,source_label",
+                    f"longshot_yes_overpriced_buy_no,0.99,150,{source_label}",
+                    "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
                 )
             ),
             min_sample_count=100,
@@ -7922,6 +8957,50 @@ async def test_live_preflight_fails_when_persisted_live_open_order_exists(
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_treats_persisted_open_status_as_live_order(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    pool = _Pool(_OpenStatusLiveOrderConnection())
+
+    result = await run_live_preflight(
+        _settings(approval_path=approval_dir / "first-order.json"),
+        pool=cast(asyncpg.Pool, pool),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    live_open_orders_check = result.require_check("live_open_orders")
+    assert result.ok is False
+    assert live_open_orders_check.ok is False
+    assert "durable live open-order ledger" in live_open_orders_check.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_emergency_audit_jsonl_is_malformed(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+    emergency_audit_path = approval_dir / "live-emergency-audit.jsonl"
+    emergency_audit_path.write_text("{not valid json}\n", encoding="utf-8")
+
+    result = await run_live_preflight(
+        _settings(
+            approval_path=approval_dir / "first-order.json",
+            live_emergency_audit_path=emergency_audit_path,
+        ),
+        pool=cast(asyncpg.Pool, _Pool(_Connection())),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+    )
+
+    emergency_check = result.require_check("emergency_audit")
+    assert result.ok is False
+    assert emergency_check.ok is False
+    assert "emergency audit record invalid" in emergency_check.detail
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_when_no_book_snapshots_exist(
     tmp_path: Path,
 ) -> None:
@@ -8024,6 +9103,117 @@ async def test_live_preflight_fails_when_usable_book_snapshot_is_stale(
 
 
 @pytest.mark.asyncio
+async def test_live_preflight_checks_launch_tokens_from_manual_and_active_strategy_sources() -> None:
+    connection = _Connection(missing_subscribed_usable_token_count=0)
+
+    missing_count = await live_preflight_module._fresh_usable_launch_token_missing_count(
+        cast(asyncpg.Pool, _Pool(connection)),
+        max_age_s=300.0,
+    )
+
+    assert missing_count == 0
+    query = next(
+        query for query in connection.fetchval_calls if "missing_launch_usable_tokens" in query
+    )
+    assert "manual_tokens AS" in query
+    assert "active_strategy_specs AS" in query
+    assert "active_strategy_tokens AS" in query
+    assert "JOIN launch_tokens" in query
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_ignores_archived_strategies_for_launch_tokens() -> None:
+    connection = _Connection(missing_subscribed_usable_token_count=0)
+
+    await live_preflight_module._fresh_usable_launch_token_missing_count(
+        cast(asyncpg.Pool, _Pool(connection)),
+        max_age_s=300.0,
+    )
+
+    query = next(
+        query for query in connection.fetchval_calls if "active_strategy_specs" in query
+    )
+    assert "strategies.archived IS NOT TRUE" in query
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_launch_tokens_apply_selector_spread_depth_filters() -> None:
+    connection = _Connection(missing_subscribed_usable_token_count=0)
+
+    await live_preflight_module._fresh_usable_launch_token_missing_count(
+        cast(asyncpg.Pool, _Pool(connection)),
+        max_age_s=300.0,
+    )
+
+    query = next(
+        query for query in connection.fetchval_calls if "active_strategy_specs" in query
+    )
+    assert "active_strategy_specs.spread_max_bps IS NULL" in query
+    assert "markets.spread_bps IS NOT NULL" in query
+    assert "markets.spread_bps <= active_strategy_specs.spread_max_bps" in query
+    assert "active_strategy_specs.depth_min_usdc IS NULL" in query
+    assert "markets.liquidity IS NOT NULL" in query
+    assert "markets.liquidity >= active_strategy_specs.depth_min_usdc" in query
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_launch_tokens_use_legacy_selector_defaults() -> None:
+    connection = _Connection(missing_subscribed_usable_token_count=0)
+
+    await live_preflight_module._fresh_usable_launch_token_missing_count(
+        cast(asyncpg.Pool, _Pool(connection)),
+        max_age_s=300.0,
+    )
+
+    query = next(
+        query for query in connection.fetchval_calls if "active_strategy_specs" in query
+    )
+    compact_query = " ".join(query.split())
+    assert "ELSE 100.0" in query
+    assert "ELSE 250.0" in query
+    assert ")::boolean, true ) AS accepting_orders" in compact_query
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_launch_tokens_match_selector_tradable_outcomes() -> None:
+    connection = _Connection(missing_subscribed_usable_token_count=0)
+
+    await live_preflight_module._fresh_usable_launch_token_missing_count(
+        cast(asyncpg.Pool, _Pool(connection)),
+        max_age_s=300.0,
+    )
+
+    query = next(
+        query for query in connection.fetchval_calls if "active_strategy_specs" in query
+    )
+    assert "tokens.outcome IN ('YES', 'NO')" in query
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_scopes_risk_metadata_to_fresh_usable_launch_markets() -> None:
+    connection = _Connection(missing_market_risk_metadata_count=0)
+
+    missing_count = await (
+        live_preflight_module._fresh_usable_book_market_missing_risk_metadata_count(
+            cast(asyncpg.Pool, _Pool(connection)),
+            max_age_s=300.0,
+        )
+    )
+
+    assert missing_count == 0
+    query = next(
+        query
+        for query in connection.fetchval_calls
+        if "missing_market_risk_metadata" in query
+    )
+    assert "active_strategy_specs AS" in query
+    assert "JOIN launch_tokens" in query
+    assert "fresh_usable_launch_markets AS" in query
+    assert "FROM fresh_usable_launch_markets" in query
+    assert "WHERE markets.condition_id IS NULL" in query
+
+
+@pytest.mark.asyncio
 async def test_live_preflight_fails_when_fresh_usable_market_lacks_risk_group_metadata(
     tmp_path: Path,
 ) -> None:
@@ -8045,6 +9235,30 @@ async def test_live_preflight_fails_when_fresh_usable_market_lacks_risk_group_me
     assert market_data_check.ok is False
     assert "risk_group_id" in market_data_check.detail
     assert "1 fresh usable market" in market_data_check.detail
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_fails_when_subscribed_token_lacks_fresh_usable_depth(
+    tmp_path: Path,
+) -> None:
+    approval_dir = tmp_path / "secure"
+    approval_dir.mkdir(mode=0o700)
+
+    result = await run_live_preflight(
+        _settings(approval_path=approval_dir / "first-order.json"),
+        pool=cast(
+            asyncpg.Pool,
+            _Pool(_Connection(missing_subscribed_usable_token_count=1)),
+        ),
+        venue_reconciler=cast(PolymarketVenueAccountReconciler, _MatchingVenueReconciler()),
+        skip_venue=True,
+    )
+
+    market_data_check = result.require_check("market_data_freshness")
+    assert result.ok is False
+    assert market_data_check.ok is False
+    assert "1 launch token" in market_data_check.detail
+    assert "fresh usable book depth" in market_data_check.detail
 
 
 @pytest.mark.asyncio

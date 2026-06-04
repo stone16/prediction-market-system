@@ -95,7 +95,7 @@ strategies:
   flb_min_calibration_samples: 100
   # Static first-live entry cost buffer; replace with paper/live telemetry.
   flb_entry_execution_cost_bps: 15.0
-  flb_fee_rate: 0.04
+  flb_fee_rate: 0.07
 
 polymarket:
   host: https://clob.polymarket.com

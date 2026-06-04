@@ -15,6 +15,15 @@ from weakref import ReferenceType, ref
 
 from pms.config import LLMSettings
 from pms.core.models import MarketSignal
+from pms.metrics import (
+    LLM_BUDGET_EXHAUSTED_TOTAL_METRIC,
+    LLM_DAILY_COST_LIMIT_USDC_METRIC,
+    LLM_DAILY_COST_USDC_METRIC,
+    LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    LLM_FORECAST_CALLS_TOTAL_METRIC,
+    increment_metric,
+    set_metric,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +59,10 @@ class LLMTransientError(RuntimeError):
     """Wraps SDK transient errors such as rate limit, 5xx, and network errors."""
 
 
+class LLMProviderUnavailableError(RuntimeError):
+    """Raised when an enabled LLM forecaster cannot load its provider SDK."""
+
+
 class LLMParseError(RuntimeError):
     """Raised when a provider response cannot satisfy the forecast contract."""
 
@@ -69,6 +82,33 @@ class LLMForecastResult(tuple[float, float, str]):
         return instance
 
 
+def validate_llm_runtime_dependencies(config: LLMSettings) -> None:
+    if not config.enabled:
+        return
+    provider = config.provider
+    if provider is None:
+        return
+    package_name, client_factory_name = _provider_runtime(provider)
+    try:
+        provider_module = import_module(package_name)
+    except ImportError as exc:
+        msg = (
+            f"LLM provider package {package_name!r} is required when "
+            f"llm.enabled=true and llm.provider={provider!r}; install with "
+            "`uv sync --extra llm` or disable llm.enabled."
+        )
+        raise LLMProviderUnavailableError(msg) from exc
+    client_factory = getattr(provider_module, client_factory_name, None)
+    if callable(client_factory):
+        return
+    msg = (
+        f"LLM provider package {package_name!r} does not expose callable "
+        f"{client_factory_name}; reinstall the provider SDK or disable "
+        "llm.enabled."
+    )
+    raise LLMProviderUnavailableError(msg)
+
+
 @dataclass
 class LLMForecaster:
     config: LLMSettings | None = None
@@ -79,6 +119,7 @@ class LLMForecaster:
     def __post_init__(self) -> None:
         if self.config is None:
             self.config = LLMSettings()
+        self._publish_budget_metrics()
 
     def predict(self, signal: MarketSignal) -> LLMForecastResult | None:
         if self.config is None or not self.config.enabled:
@@ -88,6 +129,8 @@ class LLMForecaster:
             return cached
         estimated_cost = self._estimated_call_cost_usdc()
         if not self._reserve_budget(estimated_cost):
+            increment_metric(LLM_BUDGET_EXHAUSTED_TOTAL_METRIC)
+            self._publish_budget_metrics()
             logger.info(
                 "llm_forecaster_budget_exhausted",
                 extra={
@@ -321,6 +364,12 @@ class LLMForecaster:
     def _record_cost(self, estimated_cost_usdc: Decimal, signal: MarketSignal) -> None:
         assert self.config is not None
         daily_cost = self._daily_cost_usdc_float()
+        increment_metric(LLM_FORECAST_CALLS_TOTAL_METRIC)
+        increment_metric(
+            LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+            float(estimated_cost_usdc),
+        )
+        self._publish_budget_metrics(daily_cost=daily_cost)
         logger.info(
             "llm_forecaster_cost_recorded",
             extra={
@@ -338,6 +387,16 @@ class LLMForecaster:
         with tracker.lock:
             return float(tracker.daily_cost_usdc)
 
+    def _publish_budget_metrics(self, *, daily_cost: float | None = None) -> None:
+        assert self.config is not None
+        observed_daily_cost = (
+            self._daily_cost_usdc_float() if daily_cost is None else daily_cost
+        )
+        max_daily = self.config.max_daily_llm_cost_usdc
+        limit = 0.0 if max_daily is None else float(max_daily)
+        set_metric(LLM_DAILY_COST_USDC_METRIC, observed_daily_cost)
+        set_metric(LLM_DAILY_COST_LIMIT_USDC_METRIC, limit)
+
     def _budget_tracker(self) -> _BudgetTracker:
         assert self.config is not None
         key = id(self.config)
@@ -349,6 +408,14 @@ class LLMForecaster:
                 tracker = _BudgetTracker()
                 _BUDGET_TRACKERS[key] = (ref(self.config), tracker)
             return tracker
+
+
+def _provider_runtime(provider: str) -> tuple[str, str]:
+    if provider == "anthropic":
+        return "anthropic", "Anthropic"
+    if provider == "openai":
+        return "openai", "OpenAI"
+    raise LLMProviderUnavailableError(f"unsupported LLM provider: {provider!r}")
 
 
 def _safe_import(name: str) -> object | None:

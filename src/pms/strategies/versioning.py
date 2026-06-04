@@ -45,6 +45,13 @@ def _payload_value(value: Any) -> Any:
         if payload.get("enabled") is True:
             del payload["enabled"]
         return _payload_value(payload)
+    if isinstance(value, MarketSelectionSpec):
+        payload = asdict(value, dict_factory=_sorted_dict_factory)
+        if payload.get("yes_price_min") is None:
+            del payload["yes_price_min"]
+        if payload.get("yes_price_max") is None:
+            del payload["yes_price_max"]
+        return _payload_value(payload)
     if is_dataclass(value) and not isinstance(value, type):
         return _payload_value(asdict(value, dict_factory=_sorted_dict_factory))
     if isinstance(value, dict):

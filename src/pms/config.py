@@ -4,6 +4,7 @@ import getpass
 import importlib.util
 import math
 import os
+import re
 import stat
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ class MissingPolymarketCredentialsError(LiveTradingDisabledError):
 
 SecretSource = Literal["fly", "local_file"]
 OperatorApprovalMode = Literal["first_order", "every_order"]
+DiscoveryOrder = Literal["volume24hr", "volumeNum", "liquidityNum", "createdAt"]
 
 
 _LIVE_PAPER_REPORT_GENERATOR = "scripts/paper_report.py"
@@ -30,10 +32,20 @@ _LIVE_OPERATOR_REHEARSAL_REPORT_GENERATOR = "scripts/rehearse_first_order.py"
 _MAX_LIVE_OPERATOR_APPROVAL_AGE_S = 5 * 60
 _MAX_LIVE_PREFLIGHT_ARTIFACT_AGE_S = 60 * 60
 _MAX_LIVE_READINESS_REPORT_AGE_S = 7 * 24 * 60 * 60
+_MAX_LIVE_LLM_DAILY_COST_TO_MIN_ORDER_RATIO = 0.05
 _LOOPBACK_API_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"})
+_SHA256_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_PLACEHOLDER_SHA256_DIGESTS = frozenset(
+    character * 64 for character in "0123456789abcdef"
+)
 _REQUIRED_LIVE_PAPER_SOAK_GATE_CHECKS: tuple[str, ...] = (
     "soak_days",
+    "decisions_accepted",
     "fills",
+    "distinct_markets",
+    "distinct_risk_groups",
+    "max_market_fill_share",
+    "max_risk_group_fill_share",
     "fill_rate",
     "average_slippage_bps",
     "todays_pnl",
@@ -47,9 +59,16 @@ _REQUIRED_LIVE_PAPER_SOAK_GATE_CHECKS: tuple[str, ...] = (
     "average_edge_bps",
     "average_net_edge_bps",
     "sharpe_ratio",
+    "readiness",
     "strategy_evidence",
     "unresolved_incidents",
     "risk_events",
+)
+_PAPER_ONLY_STRATEGY_IDS = frozenset(
+    {
+        "paper_canary_v1",
+        "paper_multi_factor_v1",
+    }
 )
 _REQUIRED_LIVE_PAPER_SOAK_BASELINE_SOURCES: tuple[str, ...] = (
     "market_implied",
@@ -81,10 +100,18 @@ _POLYMARKET_CREDENTIAL_CONFIG_FIELDS: frozenset[str] = frozenset(
         "funder_address",
     }
 )
+_PATH_PLACEHOLDER_WORD_RE = re.compile(
+    r"(?<![a-z0-9_])(?:todo|replace|placeholder)(?![a-z0-9_])"
+)
+_TEXT_PLACEHOLDER_WORD_RE = re.compile(
+    r"(?<![a-z0-9])(?:todo|replace|placeholder)(?![a-z0-9])"
+)
+_STRONG_PLACEHOLDER_MARKERS: tuple[str, ...] = ("fill_in", "__fill")
 _POLYMARKET_TEXT_CREDENTIAL_CONFIG_FIELDS: frozenset[str] = (
     _POLYMARKET_CREDENTIAL_CONFIG_FIELDS - {"signature_type"}
 )
 _POLYMARKET_SIGNATURE_TYPES: frozenset[int] = frozenset({0, 1, 2, 3})
+_GAMMA_KEYSET_MAX_PAGE_LIMIT = 100
 
 
 def _read_text_no_follow(path: Path) -> str:
@@ -221,7 +248,7 @@ class DiscordSettings(BaseModel):
         normalized = str(value).strip()
         if normalized == "":
             raise ValueError("alert_dir must not be blank")
-        if _looks_like_placeholder(normalized):
+        if _path_looks_like_placeholder(normalized):
             raise ValueError("alert_dir must not contain a placeholder")
         return normalized
 
@@ -266,6 +293,8 @@ class ControllerSettings(BaseModel):
     quote_source: Literal["postgres_snapshot", "venue_direct", "dual"] = (
         "postgres_snapshot"
     )
+    venue_book_refresh_enabled: bool = False
+    venue_book_refresh_timeout_s: float = Field(default=5.0, gt=0.0)
     direct_quote_min_notional_usdc: float | None = 100.0
     dual_quote_max_price_delta_bps: float = 25.0
     category_prior_observations_path: str | None = None
@@ -295,12 +324,23 @@ class PositionExitSettings(BaseModel):
     stop_loss_pct: float | None = Field(default=None, gt=0.0)
     profit_take_pct: float | None = Field(default=None, gt=0.0)
     max_holding_days: int | None = Field(default=None, gt=0)
+    reentry_cooldown_s: float = Field(default=0.0, ge=0.0)
 
 
 class SensorSettings(BaseModel):
     poll_interval_s: float = 5.0
     max_reconnect_interval_s: float = 60.0
+    market_data_ws_max_size_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
     max_subscription_asset_ids: int | None = Field(default=100, ge=1)
+    discovery_page_limit: int = Field(
+        default=_GAMMA_KEYSET_MAX_PAGE_LIMIT,
+        ge=1,
+        le=500,
+    )
+    discovery_max_pages: int = Field(default=1, ge=1)
+    discovery_pagination_mode: Literal["keyset", "offset"] = "keyset"
+    discovery_order: DiscoveryOrder | None = None
+    discovery_ascending: bool = False
     discovery_http_timeout_s: float = Field(default=10.0, gt=0.0)
     discovery_http_pool_timeout_s: float = Field(default=10.0, gt=0.0)
     discovery_http_max_connections: int = Field(default=10, ge=1)
@@ -308,6 +348,18 @@ class SensorSettings(BaseModel):
     discovery_http_keepalive_expiry_s: float = Field(default=120.0, ge=0.0)
     persist_discovery_price_snapshots: bool = False
     persist_price_changes: bool = False
+
+    @model_validator(mode="after")
+    def _validate_keyset_page_limit(self) -> Self:
+        if (
+            self.discovery_pagination_mode == "keyset"
+            and self.discovery_page_limit > _GAMMA_KEYSET_MAX_PAGE_LIMIT
+        ):
+            raise ValueError(
+                "sensor.discovery_page_limit for keyset discovery_pagination_mode "
+                f"must be <= {_GAMMA_KEYSET_MAX_PAGE_LIMIT}"
+            )
+        return self
 
 
 class DashboardSettings(BaseModel):
@@ -323,7 +375,7 @@ class StrategyRuntimeSettings(BaseModel):
         allow_inf_nan=False,
     )
     flb_fee_rate: float = Field(
-        default=0.04,
+        default=0.07,
         ge=0.0,
         le=1.0,
         allow_inf_nan=False,
@@ -359,6 +411,8 @@ class PMSSettings(BaseSettings):
     live_trading_enabled: bool = False
     agent_strategy_runtime_enabled: bool = False
     auto_migrate_default_v2: bool = True
+    paper_soak_strategy_id: Literal["paper_multi_factor_v1", "h1_flb"] | None = None
+    paper_soak_archive_default: bool = False
     enforce_schema_check: bool | None = None
     factor_cadence_s: float = 1.0
     api_host: str = "127.0.0.1"
@@ -394,7 +448,12 @@ class PMSSettings(BaseSettings):
     strategies: StrategyRuntimeSettings = Field(default_factory=StrategyRuntimeSettings)
 
     @classmethod
-    def load(cls, config_path: str | Path | None = "config.yaml") -> Self:
+    def load(
+        cls,
+        config_path: str | Path | None = "config.yaml",
+        *,
+        load_local_secret_file: bool = True,
+    ) -> Self:
         config_data: dict[str, Any] = {}
         path: Path | None = None
 
@@ -423,7 +482,8 @@ class PMSSettings(BaseSettings):
 
         _reject_inline_polymarket_credentials(config_data)
         _reject_inline_llm_api_key(config_data)
-        config_data = _merge_local_secret_file(config_data)
+        if load_local_secret_file:
+            config_data = _merge_local_secret_file(config_data)
         settings = cls(**config_data)
         if path is not None:
             _require_live_config_file_distinct_from_protected_paths(
@@ -433,11 +493,18 @@ class PMSSettings(BaseSettings):
         return settings
 
 
-def load_settings(config_path: str | Path | None = None) -> PMSSettings:
+def load_settings(
+    config_path: str | Path | None = None,
+    *,
+    load_local_secret_file: bool = True,
+) -> PMSSettings:
     configured_path = config_path
     if configured_path is None:
         configured_path = os.environ.get("PMS_CONFIG_PATH") or "config.yaml"
-    return PMSSettings.load(configured_path)
+    return PMSSettings.load(
+        configured_path,
+        load_local_secret_file=load_local_secret_file,
+    )
 
 
 def validate_live_mode_ready(
@@ -505,7 +572,7 @@ def validate_live_mode_ready(
         if settings.local_secret_file is None or settings.local_secret_file.strip() == "":
             msg = "LIVE local_file secret source requires PMS_LOCAL_SECRET_FILE."
             raise LiveTradingDisabledError(msg)
-        if _looks_like_placeholder(settings.local_secret_file):
+        if _path_looks_like_placeholder(settings.local_secret_file):
             msg = "LIVE local secret file path contains placeholder"
             raise LiveTradingDisabledError(msg)
         try:
@@ -614,19 +681,22 @@ def validate_live_mode_ready(
     return credentials
 
 
+def validate_live_readiness_reports_for_submission(settings: PMSSettings) -> None:
+    _require_live_paper_soak_go_report(settings)
+    _require_live_operator_rehearsal_report(settings)
+
+
 def _require_live_api_control_plane_auth(settings: PMSSettings) -> None:
     api_token = settings.api_token
     if api_token is not None and _looks_like_placeholder(api_token):
         msg = "LIVE api_token contains placeholder"
         raise LiveTradingDisabledError(msg)
 
-    if settings.api_host.strip().lower() in _LOOPBACK_API_HOSTS:
-        return
     if api_token is not None and api_token.strip() != "":
         return
     msg = (
-        "LIVE non-loopback API host requires PMS_API_TOKEN before real-money "
-        "startup"
+        "LIVE mode requires PMS_API_TOKEN before real-money startup, including "
+        "loopback control-plane binds"
     )
     raise LiveTradingDisabledError(msg)
 
@@ -639,7 +709,7 @@ def _require_live_preflight_artifact_path(settings: PMSSettings) -> None:
             "live_preflight_artifact_path"
         )
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(raw_path):
+    if _path_looks_like_placeholder(raw_path):
         msg = "LIVE credentialed preflight artifact path contains placeholder"
         raise LiveTradingDisabledError(msg)
 
@@ -689,7 +759,7 @@ def _require_live_alert_fallback_dir(settings: PMSSettings) -> None:
         )
         raise LiveTradingDisabledError(msg)
     raw_path = settings.discord.alert_dir
-    if _looks_like_placeholder(raw_path):
+    if _path_looks_like_placeholder(raw_path):
         msg = "LIVE discord.alert_dir contains placeholder"
         raise LiveTradingDisabledError(msg)
     path = Path(raw_path).expanduser()
@@ -808,6 +878,35 @@ def _require_live_risk_envelope(settings: PMSSettings) -> None:
     elif settings.risk.slippage_threshold_bps < 0.0:
         invalid.append("risk.slippage_threshold_bps must be >= 0")
 
+    if settings.llm.enabled:
+        llm_daily_cost = settings.llm.max_daily_llm_cost_usdc
+        max_daily_loss = settings.risk.max_daily_loss_usdc
+        if llm_daily_cost is None:
+            invalid.append(
+                "llm.max_daily_llm_cost_usdc is required when LLM is enabled"
+            )
+        elif not _is_finite_positive(llm_daily_cost):
+            invalid.append("llm.max_daily_llm_cost_usdc must be finite and > 0")
+        elif (
+            max_daily_loss is not None
+            and _is_finite_positive(max_daily_loss)
+            and llm_daily_cost > max_daily_loss
+        ):
+            invalid.append(
+                "llm.max_daily_llm_cost_usdc must be <= risk.max_daily_loss_usdc"
+            )
+        if (
+            llm_daily_cost is not None
+            and _is_finite_positive(llm_daily_cost)
+            and _is_finite_positive(settings.risk.min_order_usdc)
+            and llm_daily_cost
+            > settings.risk.min_order_usdc
+            * _MAX_LIVE_LLM_DAILY_COST_TO_MIN_ORDER_RATIO
+        ):
+            invalid.append(
+                "llm.max_daily_llm_cost_usdc must be <= 5% of risk.min_order_usdc"
+            )
+
     if invalid:
         fields = ", ".join(invalid)
         msg = f"LIVE risk envelope invalid: {fields}"
@@ -917,30 +1016,38 @@ def _looks_like_placeholder(value: str) -> bool:
     normalized = value.strip().lower()
     if normalized == "":
         return False
-    placeholder_markers = (
-        "fill_in",
-        "__fill",
-        "<",
-        ">",
-        "todo",
-        "replace",
-        "placeholder",
+    return (
+        _contains_strong_placeholder_marker(normalized)
+        or "<" in normalized
+        or ">" in normalized
+        or _TEXT_PLACEHOLDER_WORD_RE.search(normalized) is not None
     )
-    return any(marker in normalized for marker in placeholder_markers)
+
+
+def _path_looks_like_placeholder(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "":
+        return False
+    return (
+        _contains_strong_placeholder_marker(normalized)
+        or "<" in normalized
+        or ">" in normalized
+        or _PATH_PLACEHOLDER_WORD_RE.search(normalized) is not None
+    )
+
+
+def _contains_strong_placeholder_marker(normalized: str) -> bool:
+    return any(marker in normalized for marker in _STRONG_PLACEHOLDER_MARKERS)
 
 
 def _looks_like_report_placeholder_detail(value: str) -> bool:
     normalized = value.strip().lower()
     if normalized == "":
         return False
-    placeholder_markers = (
-        "fill_in",
-        "__fill",
-        "todo",
-        "replace",
-        "placeholder",
+    return (
+        _contains_strong_placeholder_marker(normalized)
+        or _TEXT_PLACEHOLDER_WORD_RE.search(normalized) is not None
     )
-    return any(marker in normalized for marker in placeholder_markers)
 
 
 def _coerce_aware_datetime(value: datetime) -> datetime:
@@ -961,7 +1068,7 @@ def _require_live_operator_approval_path(
             "polymarket.first_live_order_approval_path"
         )
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(raw_path):
+    if _path_looks_like_placeholder(raw_path):
         msg = "LIVE operator approval path contains placeholder"
         raise LiveTradingDisabledError(msg)
     path = Path(raw_path).expanduser()
@@ -1118,10 +1225,10 @@ def _require_distinct_live_audit_paths(settings: PMSSettings) -> None:
     if settings.live_emergency_audit_path.strip() == "":
         msg = "LIVE emergency audit path missing: live_emergency_audit_path"
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(first_order_path):
+    if _path_looks_like_placeholder(first_order_path):
         msg = "LIVE first-order audit path contains placeholder"
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(settings.live_emergency_audit_path):
+    if _path_looks_like_placeholder(settings.live_emergency_audit_path):
         msg = "LIVE emergency audit path contains placeholder"
         raise LiveTradingDisabledError(msg)
 
@@ -1273,7 +1380,7 @@ def _require_live_paper_soak_go_report(settings: PMSSettings) -> datetime:
     if raw_path is None or raw_path.strip() == "":
         msg = "LIVE paper soak GO report missing: live_paper_soak_report_path"
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(raw_path):
+    if _path_looks_like_placeholder(raw_path):
         msg = "LIVE paper soak GO report path contains placeholder"
         raise LiveTradingDisabledError(msg)
 
@@ -1461,13 +1568,16 @@ def _live_paper_soak_gate_detail_semantic_errors(
     invalid: list[str] = []
     for check_name, minimum, strict in (
         ("soak_days", 30.0, False),
-        ("fills", 10.0, False),
+        ("decisions_accepted", 30.0, False),
+        ("fills", 50.0, False),
+        ("distinct_markets", 3.0, False),
+        ("distinct_risk_groups", 3.0, False),
         ("fill_rate", 0.0, True),
         ("cumulative_pnl", 0.0, True),
         ("brier_improvement", 0.0, True),
-        ("hit_rate", 0.45, False),
-        ("average_edge_bps", 5.0, False),
-        ("average_net_edge_bps", 0.0, False),
+        ("hit_rate", 0.45, True),
+        ("average_edge_bps", 5.0, True),
+        ("average_net_edge_bps", 0.0, True),
         ("sharpe_ratio", 0.0, True),
     ):
         value, error = _paper_soak_numeric_gate_detail_value(rows, check_name)
@@ -1480,6 +1590,8 @@ def _live_paper_soak_gate_detail_semantic_errors(
 
     for check_name, maximum in (
         ("average_slippage_bps", 50.0),
+        ("max_market_fill_share", 0.60),
+        ("max_risk_group_fill_share", 0.60),
         ("brier_score", 0.20),
     ):
         value, error = _paper_soak_numeric_gate_detail_value(rows, check_name)
@@ -1588,14 +1700,47 @@ def _require_live_paper_soak_strategy_evidence_matches_summary(
         label="LIVE paper soak GO report",
     )
     strategy_evidence = rows["strategy_evidence"][1].strip()
-    if _strategy_label_set(strategy_evidence) == _strategy_label_set(summary_strategy):
-        return
+    evidence_labels = _strategy_label_set(strategy_evidence)
+    summary_labels = _strategy_label_set(summary_strategy)
+    if evidence_labels != summary_labels:
+        msg = (
+            "LIVE paper soak GO report strategy_evidence must match "
+            "Summary Strategy"
+        )
+        raise LiveTradingDisabledError(msg)
 
-    msg = (
-        "LIVE paper soak GO report strategy_evidence must match "
-        "Summary Strategy"
+    invalid_labels = sorted(
+        label
+        for label in summary_labels
+        if (
+            label.lower() == "unknown"
+            or "@" not in label
+            or _looks_like_report_placeholder_detail(label)
+        )
     )
-    raise LiveTradingDisabledError(msg)
+    if invalid_labels:
+        fields = ", ".join(invalid_labels)
+        msg = (
+            "LIVE paper soak GO report strategy_evidence must contain "
+            f"concrete strategy_id@strategy_version_id: {fields}"
+        )
+        raise LiveTradingDisabledError(msg)
+
+    paper_only_labels = sorted(
+        label for label in summary_labels if _is_paper_only_strategy_label(label)
+    )
+    if paper_only_labels:
+        fields = ", ".join(paper_only_labels)
+        msg = (
+            "LIVE paper soak GO report paper-only strategy cannot be "
+            f"final GO evidence: {fields}"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _is_paper_only_strategy_label(label: str) -> bool:
+    strategy_id, _, _strategy_version_id = label.partition("@")
+    return strategy_id.strip().lower() in _PAPER_ONLY_STRATEGY_IDS
 
 
 def _require_live_paper_soak_baseline_evidence(report_text: str) -> None:
@@ -2054,7 +2199,30 @@ def _require_live_paper_soak_persisted_provenance(
         output_path=output_path,
         label="LIVE paper soak GO report",
     )
+    _require_paper_report_input_snapshot_sha256(provenance)
     return generated_at
+
+
+def _require_paper_report_input_snapshot_sha256(provenance: dict[str, str]) -> None:
+    digest = provenance.get("input_snapshot_sha256", "").strip()
+    if digest == "":
+        msg = (
+            "LIVE paper soak GO report persisted provenance missing "
+            "input_snapshot_sha256"
+        )
+        raise LiveTradingDisabledError(msg)
+    if _SHA256_HEX_PATTERN.fullmatch(digest) is None:
+        msg = (
+            "LIVE paper soak GO report persisted provenance "
+            "input_snapshot_sha256 must be a sha256 hex digest"
+        )
+        raise LiveTradingDisabledError(msg)
+    if digest in _PLACEHOLDER_SHA256_DIGESTS:
+        msg = (
+            "LIVE paper soak GO report persisted provenance "
+            "input_snapshot_sha256 must not be a placeholder hash"
+        )
+        raise LiveTradingDisabledError(msg)
 
 
 def _require_report_generated_at(
@@ -2074,11 +2242,27 @@ def _require_report_generated_at(
         msg = f"{label} persisted provenance generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
 
-    aware_generated_at = _coerce_aware_datetime(generated_at)
+    aware_generated_at = _require_aware_datetime(
+        generated_at,
+        label=label,
+        field_name="persisted provenance generated_at",
+    )
     if aware_generated_at > datetime.now(tz=UTC):
         msg = f"{label} persisted provenance generated_at is in the future"
         raise LiveTradingDisabledError(msg)
     return aware_generated_at
+
+
+def _require_aware_datetime(
+    value: datetime,
+    *,
+    label: str,
+    field_name: str,
+) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        msg = f"{label} {field_name} must include timezone"
+        raise LiveTradingDisabledError(msg)
+    return value.astimezone(UTC)
 
 
 def _require_report_fresh(
@@ -2175,7 +2359,7 @@ def _require_live_operator_rehearsal_report(settings: PMSSettings) -> datetime:
             "live_operator_rehearsal_report_path"
         )
         raise LiveTradingDisabledError(msg)
-    if _looks_like_placeholder(raw_path):
+    if _path_looks_like_placeholder(raw_path):
         msg = "LIVE operator rehearsal report path contains placeholder"
         raise LiveTradingDisabledError(msg)
 
@@ -2363,6 +2547,7 @@ def _require_live_operator_rehearsal_report_date_not_future(
 
 def _markdown_section_decision(report_text: str, *, heading: str) -> str | None:
     in_section = False
+    decisions: list[str] = []
     for raw_line in report_text.splitlines():
         line = raw_line.strip()
         if line.startswith("## "):
@@ -2370,8 +2555,13 @@ def _markdown_section_decision(report_text: str, *, heading: str) -> str | None:
             continue
         if not in_section or not line.startswith("**Decision:**"):
             continue
-        return line.removeprefix("**Decision:**").strip().strip("*").upper()
-    return None
+        decisions.append(line.removeprefix("**Decision:**").strip().strip("*").upper())
+    if len(decisions) > 1:
+        msg = f"{heading} contains multiple decision rows"
+        raise LiveTradingDisabledError(msg)
+    if not decisions:
+        return None
+    return decisions[0]
 
 
 def _require_live_operator_rehearsal_persisted_provenance(

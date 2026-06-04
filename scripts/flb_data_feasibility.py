@@ -5,21 +5,30 @@ Favorite-Longshot Bias (FLB) by probability decile with Wilson score
 confidence intervals, and evaluates H1 strategy viability.
 
 Each binary market is decomposed into two contract-level observations
-(YES at price ``p``, NO at price ``1-p``) so that the sample gate
-reflects the full tradable contract set.
+(YES at price ``p``, NO at price ``1-p``) for decile diagnostics.  The
+launch sample gate is stricter: it matches the runtime calibration artifact
+and counts original YES-price markets in the two H1 signal buckets.
 
 Usage:
     uv run python scripts/flb_data_feasibility.py [--limit N] [--output PATH]
-    uv run python scripts/flb_data_feasibility.py \
-        --source warehouse-csv --input exports/polymarket_resolved_binary.csv
+    uv run python scripts/export_flb_warehouse_from_dune.py \
+        --output "$PMS_SECURE_DIR/polymarket_resolved_binary.csv"
     uv run python scripts/flb_data_feasibility.py \
         --source warehouse-csv \
-        --input exports/polymarket_resolved_binary.csv \
-        --calibration-csv exports/flb_calibration.csv
+        --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv"
+    uv run python scripts/flb_data_feasibility.py \
+        --source warehouse-csv \
+        --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
+        --calibration-csv "$PMS_SECURE_DIR/flb-calibration.csv" \
+        --calibration-source-label warehouse-flb-v1 \
+        --calibration-provenance-json \
+          "$PMS_SECURE_DIR/flb-calibration.csv.provenance.json"
 
 Exit codes:
     0 — H1 viable (sample gate passed)
-    1 — H1 not viable (insufficient data in target buckets)
+    1 — H1 not viable (insufficient data in runtime signal buckets)
+    2 — operator/input error (missing input, malformed warehouse CSV,
+        unsafe artifact path, network/IO failure, or no resolved markets)
 
 Limitations:
     - **Entry price proxy:** Uses ``lastTradePrice`` from the Gamma API,
@@ -28,11 +37,11 @@ Limitations:
       near resolution time, not at a hypothetical entry point. For a real
       strategy P&L backtest, we would need timestamped price snapshots at
       a defined entry horizon (e.g., 24h before resolution).
-    - **Data source:** The Gamma API ``closed=true`` endpoint returns a
-      small window of recently resolved markets (typically <50). For
-      statistically robust FLB measurement (≥100 contracts per target
-      bucket), we need Dune Analytics on-chain data or a historical
-      warehouse with full Polymarket resolution history.
+    - **Data source:** The Gamma API ``closed=true`` endpoint is paginated
+      and may cap page size below the requested ``--limit``. It is still a
+      recent public window, so statistically robust FLB measurement
+      (≥100 contracts per target bucket) needs Dune Analytics on-chain data
+      or a historical warehouse with full Polymarket resolution history.
     - **This script is a feasibility check**, not a strategy backtest.
       It answers: "Does Polymarket data show measurable FLB?" — not
       "Would FLB trading have been profitable after fees and slippage?"
@@ -58,8 +67,18 @@ from uuid import uuid4
 
 import httpx
 
+from scripts.artifact_path_safety import require_path_outside_working_tree
+from pms.strategies.flb.artifacts import (
+    file_sha256_no_follow,
+    flb_calibration_provenance_path,
+    flb_calibration_provenance_payload,
+)
+from pms.strategies.flb.source import require_flb_calibration_source_label
+
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
-SAMPLE_GATE_MIN = 100  # minimum resolved contracts per target bucket
+GAMMA_CLOSED_MARKET_ORDER = "closedTime"
+GAMMA_CLOSED_MARKET_ASCENDING = False
+SAMPLE_GATE_MIN = 100  # minimum resolved markets per runtime H1 signal bucket
 DECILE_BOUNDARIES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 TARGET_BUCKETS = [0, 9]  # decile 0 = [0%, 10%), decile 9 = [90%, 100%]
 WILSON_Z = 1.96  # 95% confidence
@@ -104,9 +123,10 @@ class ContractObservation:
     - YES contract at price ``p`` (pays 1 if market resolves YES)
     - NO contract at price ``1-p`` (pays 1 if market resolves NO)
 
-    Bucketing by contract price ensures the full opportunity set is counted
-    in the sample gate (a market with YES at 0.08 also contributes a NO
-    contract at 0.92, filling both extreme buckets).
+    Bucketing by contract price exposes the full opportunity set for decile
+    diagnostics (a market with YES at 0.08 also contributes a NO contract at
+    0.92), but the launch sample gate is signal-specific and uses original
+    YES-price market buckets.
     """
 
     contract_side: str  # "YES" or "NO"
@@ -144,6 +164,21 @@ class FlbCalibrationArtifactRow:
     sample_count: int
     source_label: str
 
+    def __post_init__(self) -> None:
+        if self.signal_name not in {LONGSHOT_SIGNAL_NAME, FAVORITE_SIGNAL_NAME}:
+            msg = f"unsupported FLB calibration signal_name: {self.signal_name}"
+            raise ValueError(msg)
+        if self.probability_estimate <= 0.0 or self.probability_estimate >= 1.0:
+            msg = "probability_estimate must satisfy 0.0 < value < 1.0"
+            raise ValueError(msg)
+        if not math.isfinite(self.probability_estimate):
+            msg = "probability_estimate must be finite"
+            raise ValueError(msg)
+        if self.sample_count <= 0:
+            msg = "sample_count must be positive"
+            raise ValueError(msg)
+        require_flb_calibration_source_label(self.source_label)
+
 
 # ── Data Fetching ────────────────────────────────────────────────────────────
 
@@ -167,6 +202,8 @@ def fetch_resolved_markets(
                 "/markets",
                 params={
                     "closed": "true",
+                    "order": GAMMA_CLOSED_MARKET_ORDER,
+                    "ascending": _bool_param(GAMMA_CLOSED_MARKET_ASCENDING),
                     "limit": str(limit),
                     "offset": str(offset),
                 },
@@ -182,13 +219,15 @@ def fetch_resolved_markets(
                 if market is not None:
                     markets.append(market)
 
-            offset += limit
-
-            # Stop early if the API returned fewer than requested.
-            if len(payload) < limit:
-                break
+            # Gamma may cap responses below the requested limit. Advance by
+            # the actual row count and let an empty page or max_pages stop us.
+            offset += len(payload)
 
     return markets
+
+
+def _bool_param(value: bool) -> str:
+    return "true" if value else "false"
 
 
 def _parse_market(row: dict[str, Any]) -> ResolvedMarket | None:
@@ -492,8 +531,10 @@ def _parse_iso_datetime(value: str, *, column: str, row_number: int) -> datetime
         raise ValueError(
             f"warehouse row {row_number}: {column} must be ISO-8601"
         ) from exc
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(
+            f"warehouse row {row_number}: {column} must include timezone"
+        )
     return parsed.astimezone(UTC)
 
 
@@ -507,10 +548,10 @@ def markets_to_contracts(markets: list[ResolvedMarket]) -> list[ContractObservat
     - YES contract at ``yes_price`` — pays out if ``resolved_yes``
     - NO contract at ``1 - yes_price`` — pays out if ``not resolved_yes``
 
-    This doubles the observation count and ensures the sample gate reflects
-    the full tradable contract set.  A market with YES at 0.08 (longshot)
-    also contributes a NO contract at 0.92 (favorite), filling both extreme
-    buckets.
+    This doubles the observation count so the decile table reflects the full
+    tradable contract set.  A market with YES at 0.08 (longshot) also
+    contributes a NO contract at 0.92 (favorite), filling both extreme
+    diagnostic buckets.
     """
     contracts: list[ContractObservation] = []
     for m in markets:
@@ -657,24 +698,53 @@ def _wilson_interval(successes: int, trials: int) -> tuple[float, float]:
 class SampleGateResult:
     """Result of the H1 sample gate check."""
 
-    longshot_count: int  # markets in decile 0 [0%, 10%)
-    favorite_count: int  # markets in decile 9 [90%, 100%]
+    longshot_count: int  # original YES-price markets with YES < 10%
+    favorite_count: int  # original YES-price markets with YES > 90%
     longshot_passed: bool
     favorite_passed: bool
     passed: bool  # both buckets meet minimum
 
 
-def check_sample_gate(decile_stats: list[DecileStats]) -> SampleGateResult:
-    """Check whether enough data exists in the target FLB buckets.
+def _split_flb_signal_markets(
+    markets: Sequence[ResolvedMarket],
+) -> tuple[list[ResolvedMarket], list[ResolvedMarket]]:
+    """Split markets into the runtime H1 FLB calibration signal buckets."""
+    longshot_markets = [
+        market
+        for market in markets
+        if market.yes_price < DECILE_BOUNDARIES[1]
+    ]
+    favorite_markets = [
+        market
+        for market in markets
+        if market.yes_price > DECILE_BOUNDARIES[9]
+    ]
+    return longshot_markets, favorite_markets
 
-    The sample gate requires ≥100 resolved contracts in both the [0%, 10%)
-    (longshot) and [90%, 100%] (favorite) buckets.
+
+def check_sample_gate(
+    markets: Sequence[ResolvedMarket],
+    *,
+    min_sample_count: int = SAMPLE_GATE_MIN,
+) -> SampleGateResult:
+    """Check whether enough data exists in the runtime FLB signal buckets.
+
+    The sample gate requires enough resolved markets in both original
+    YES-price buckets used by runtime calibration:
+
+    - longshot signal: YES < 10%, BUY NO
+    - favorite signal: YES > 90%, BUY YES
     """
-    longshot_count = decile_stats[0].n
-    favorite_count = decile_stats[9].n
+    if min_sample_count <= 0:
+        msg = "min_sample_count must be positive"
+        raise ValueError(msg)
 
-    longshot_passed = longshot_count >= SAMPLE_GATE_MIN
-    favorite_passed = favorite_count >= SAMPLE_GATE_MIN
+    longshot_markets, favorite_markets = _split_flb_signal_markets(markets)
+    longshot_count = len(longshot_markets)
+    favorite_count = len(favorite_markets)
+
+    longshot_passed = longshot_count >= min_sample_count
+    favorite_passed = favorite_count >= min_sample_count
 
     return SampleGateResult(
         longshot_count=longshot_count,
@@ -712,30 +782,33 @@ def generate_report(
     gate_emoji = "✅" if gate.passed else "❌"
     lines.append(f"## Sample Gate: {gate_emoji}")
     lines.append("")
-    lines.append("| Bucket | Contract Count | Required | Status |")
-    lines.append("|--------|---------------|----------|--------|")
+    lines.append("| Signal | Market Count | Required | Status |")
+    lines.append("|--------|--------------|----------|--------|")
     ls = "✅" if gate.longshot_passed else "❌"
     fs = "✅" if gate.favorite_passed else "❌"
     lines.append(
-        f"| Longshot [0%-10%) | {gate.longshot_count} | ≥{SAMPLE_GATE_MIN} | {ls} |"
+        f"| Longshot: {LONGSHOT_SIGNAL_NAME} (YES < 10%, BUY NO) | "
+        f"{gate.longshot_count} | ≥{SAMPLE_GATE_MIN} | {ls} |"
     )
     lines.append(
-        f"| Favorite [90%-100%] | {gate.favorite_count} | ≥{SAMPLE_GATE_MIN} | {fs} |"
+        f"| Favorite: {FAVORITE_SIGNAL_NAME} (YES > 90%, BUY YES) | "
+        f"{gate.favorite_count} | ≥{SAMPLE_GATE_MIN} | {fs} |"
     )
     lines.append("")
 
     if gate.passed:
         lines.append(
-            "**H1 DATA VIABLE.** Extreme buckets meet the sample gate. "
-            "Proceed to the next backtest slice with fees, slippage, and "
-            "timestamped entry rules."
+            "**H1 DATA VIABLE.** Runtime FLB calibration signal buckets meet "
+            "the sample gate. Proceed to the next backtest slice with fees, "
+            "slippage, and timestamped entry rules."
         )
         lines.append("")
     else:
         lines.append(
-            "**H1 NOT VIABLE YET.** Insufficient resolved contracts in target "
-            "buckets. Next data-source gap: collect a broader Dune or "
-            "warehouse export before proceeding with FLB strategy."
+            "**H1 NOT VIABLE YET.** Insufficient resolved markets in runtime "
+            "calibration signal buckets. Next data-source gap: collect a "
+            "broader Dune or warehouse export before proceeding with FLB "
+            "strategy."
         )
         lines.append("")
 
@@ -819,10 +892,10 @@ def generate_report(
     lines.append("")
     lines.append(
         "1. **Contract-level analysis:** Each binary market contributes two "
-        "contract observations (YES at `p`, NO at `1-p`). The sample gate "
-        "counts contracts, not markets. FLB gap is measured per contract "
-        "side, so the same market-level mispricing appears in both the "
-        "longshot and favorite buckets from opposite sides."
+        "contract observations (YES at `p`, NO at `1-p`) for the decile "
+        "diagnostic table. The launch sample gate counts original YES-price "
+        "markets in the two runtime FLB calibration signal buckets, not "
+        "synthetic opposite-side contracts."
     )
     lines.append(
         "2. **Entry price proxy:** Uses `lastTradePrice` (last trade before "
@@ -965,6 +1038,54 @@ def save_flb_calibration_csv(
     )
 
 
+def save_flb_calibration_provenance_json(
+    rows: list[FlbCalibrationArtifactRow],
+    *,
+    warehouse_csv_path: Path,
+    warehouse_market_count: int,
+    calibration_csv_path: Path,
+    output_path: Path,
+    generated_at: datetime,
+) -> None:
+    """Save the runtime FLB calibration provenance sidecar."""
+    source_labels = {row.source_label for row in rows}
+    if len(source_labels) != 1:
+        msg = "FLB calibration provenance requires one calibration source label"
+        raise ValueError(msg)
+    by_signal = {row.signal_name: row for row in rows}
+    try:
+        longshot_count = by_signal[LONGSHOT_SIGNAL_NAME].sample_count
+        favorite_count = by_signal[FAVORITE_SIGNAL_NAME].sample_count
+    except KeyError as exc:
+        msg = f"FLB calibration provenance missing signal row: {exc.args[0]}"
+        raise ValueError(msg) from exc
+
+    payload = flb_calibration_provenance_payload(
+        generated_at=generated_at,
+        warehouse_csv_sha256=file_sha256_no_follow(
+            warehouse_csv_path,
+            label="FLB warehouse CSV input path",
+        ),
+        warehouse_market_count=warehouse_market_count,
+        warehouse_longshot_count=longshot_count,
+        warehouse_favorite_count=favorite_count,
+        calibration_csv_sha256=file_sha256_no_follow(
+            calibration_csv_path,
+            label="FLB calibration CSV output path",
+        ),
+        calibration_source_label=next(iter(source_labels)),
+    )
+    _prepare_private_output_parent(
+        output_path,
+        label="FLB calibration provenance JSON output parent",
+    )
+    _write_text_no_follow(
+        output_path,
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        label="FLB calibration provenance JSON output path",
+    )
+
+
 def _write_text_no_follow(path: Path, content: str, *, label: str) -> None:
     _require_regular_file_or_absent(path, label=label)
     fd, temp_path = _open_output_temp_file(path, label=label)
@@ -1045,6 +1166,7 @@ def _fsync_parent_directory(path: Path) -> None:
 
 
 def _prepare_private_output_parent(path: Path, *, label: str) -> None:
+    require_path_outside_working_tree(path, label=label, error_type=OSError)
     parent = path.parent
     try:
         mode = parent.lstat().st_mode
@@ -1184,9 +1306,49 @@ def main() -> int:
             "Output runtime FLB calibration CSV; requires --source=warehouse-csv"
         ),
     )
+    parser.add_argument(
+        "--calibration-source-label",
+        default=None,
+        help=(
+            "Auditable source slug written into --calibration-csv, for example "
+            "warehouse-flb-v1. Required with --calibration-csv."
+        ),
+    )
+    parser.add_argument(
+        "--calibration-provenance-json",
+        type=Path,
+        default=None,
+        help=(
+            "Output runtime FLB calibration provenance sidecar JSON; use "
+            "flb-calibration.csv.provenance.json for launch artifacts."
+        ),
+    )
     args = parser.parse_args()
     if args.calibration_csv is not None and args.source != "warehouse-csv":
         parser.error("--calibration-csv requires --source=warehouse-csv")
+    if args.calibration_source_label is not None and args.calibration_csv is None:
+        parser.error("--calibration-source-label requires --calibration-csv")
+    if args.calibration_provenance_json is not None and args.calibration_csv is None:
+        parser.error("--calibration-provenance-json requires --calibration-csv")
+    if args.calibration_provenance_json is not None and args.calibration_csv is not None:
+        expected_provenance_path = flb_calibration_provenance_path(
+            args.calibration_csv
+        )
+        if not _path_identities_match(
+            args.calibration_provenance_json,
+            expected_provenance_path,
+        ):
+            parser.error(
+                "--calibration-provenance-json must be the sidecar next to "
+                f"--calibration-csv: {expected_provenance_path}"
+            )
+    if args.calibration_csv is not None and args.calibration_source_label is None:
+        parser.error("--calibration-source-label is required with --calibration-csv")
+    if args.calibration_source_label is not None:
+        try:
+            require_flb_calibration_source_label(args.calibration_source_label)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.source == "warehouse-csv" and args.input is None:
         parser.error("--input is required when --source=warehouse-csv")
     _require_distinct_cli_artifact_paths(
@@ -1198,6 +1360,10 @@ def main() -> int:
             ("FLB report output path", args.output),
             ("FLB decile CSV output path", args.csv),
             ("FLB calibration CSV output path", args.calibration_csv),
+            (
+                "FLB calibration provenance JSON output path",
+                args.calibration_provenance_json,
+            ),
         ],
     )
 
@@ -1245,8 +1411,8 @@ def main() -> int:
     # Step 3: Compute FLB by decile (contract-level).
     decile_stats = compute_decile_stats(contracts)
 
-    # Step 4: Check sample gate (contract-level counts).
-    gate = check_sample_gate(decile_stats)
+    # Step 4: Check launch sample gate (runtime signal-specific market counts).
+    gate = check_sample_gate(markets)
 
     # Step 5: Generate report.
     report = generate_report(
@@ -1286,19 +1452,53 @@ def main() -> int:
         print(f"CSV written to {args.csv}", file=sys.stderr)
 
     if args.calibration_csv:
+        if not gate.passed:
+            print(_sample_gate_failure_message(gate), file=sys.stderr)
+            return 1
         try:
             calibration_rows = build_flb_calibration_rows(
                 markets,
-                source_label=source_label,
+                source_label=args.calibration_source_label,
             )
             save_flb_calibration_csv(calibration_rows, args.calibration_csv)
+            if args.calibration_provenance_json is not None:
+                if args.input is None:
+                    msg = "warehouse CSV input path is required for calibration provenance"
+                    raise ValueError(msg)
+                save_flb_calibration_provenance_json(
+                    calibration_rows,
+                    warehouse_csv_path=args.input,
+                    warehouse_market_count=len(markets),
+                    calibration_csv_path=args.calibration_csv,
+                    output_path=args.calibration_provenance_json,
+                    generated_at=fetched_at,
+                )
         except (OSError, ValueError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         print(f"FLB calibration CSV written to {args.calibration_csv}", file=sys.stderr)
+        if args.calibration_provenance_json is not None:
+            print(
+                "FLB calibration provenance JSON written to "
+                f"{args.calibration_provenance_json}",
+                file=sys.stderr,
+            )
 
     # Return exit code based on gate.
     return 0 if gate.passed else 1
+
+
+def _sample_gate_failure_message(gate: SampleGateResult) -> str:
+    failures: list[str] = []
+    if not gate.longshot_passed:
+        failures.append(
+            f"{LONGSHOT_SIGNAL_NAME} {gate.longshot_count} < {SAMPLE_GATE_MIN}"
+        )
+    if not gate.favorite_passed:
+        failures.append(
+            f"{FAVORITE_SIGNAL_NAME} {gate.favorite_count} < {SAMPLE_GATE_MIN}"
+        )
+    return "insufficient FLB calibration samples: " + "; ".join(failures)
 
 
 def _require_distinct_cli_artifact_paths(
@@ -1355,6 +1555,10 @@ def _path_identities(path: Path) -> frozenset[Path]:
             expanded.resolve(strict=False),
         )
     )
+
+
+def _path_identities_match(left: Path, right: Path) -> bool:
+    return bool(_path_identities(left) & _path_identities(right))
 
 
 def _path_identities_overlap(left: frozenset[Path], right: frozenset[Path]) -> bool:

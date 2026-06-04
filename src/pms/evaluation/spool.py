@@ -5,6 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import timedelta
 from math import isfinite
 from typing import Protocol, cast
 
@@ -86,7 +87,11 @@ class EvalSpool:
             fill, decision, decision_evidence = await self._queue.get()
             try:
                 if fill.resolved_outcome is None:
-                    await self._record_quote_eval(fill, decision)
+                    await self._record_quote_eval(
+                        fill,
+                        decision,
+                        decision_evidence,
+                    )
                     continue
                 await self.store.append(
                     self.scorer.score(
@@ -116,18 +121,25 @@ class EvalSpool:
         self,
         fill: FillRecord,
         decision: TradeDecision,
+        decision_evidence: Mapping[str, object] | None,
     ) -> None:
-        if self.quote_store is None or self.quote_reader is None:
+        if self.quote_store is None:
             logger.info(
                 "skipping unresolved fill in evaluator spool: %s",
                 fill.trade_id,
             )
             return
         try:
-            quote = await self.quote_reader.latest_book_summary(
-                fill.market_id,
-                fill.token_id,
-            )
+            quote = None
+            quote_source = None
+            if self.quote_reader is not None:
+                quote = await self.quote_reader.latest_book_summary(
+                    fill.market_id,
+                    fill.token_id,
+                )
+            if quote is None:
+                quote = _quote_from_decision_evidence(decision_evidence, fill)
+                quote_source = _quote_source_from_decision_evidence(decision_evidence)
             if quote is None:
                 logger.info(
                     "skipping unresolved fill without quote in evaluator spool: %s",
@@ -140,6 +152,7 @@ class EvalSpool:
                     decision,
                     quote,
                     quote_lag_seconds=self.quote_lag_seconds,
+                    quote_source=quote_source,
                 )
             )
         except Exception:  # noqa: BLE001
@@ -175,3 +188,97 @@ def _probability_or_none(value: object) -> float | None:
     if not isfinite(probability) or probability < 0.0 or probability > 1.0:
         return None
     return probability
+
+
+def _quote_from_decision_evidence(
+    decision_evidence: Mapping[str, object] | None,
+    fill: FillRecord,
+) -> BookSummary | None:
+    if decision_evidence is None:
+        return None
+    raw_top_levels = decision_evidence.get("book_top_levels")
+    if not isinstance(raw_top_levels, Mapping):
+        return None
+    top_levels = cast(Mapping[str, object], raw_top_levels)
+    bids = _price_size_levels(top_levels.get("bids"))
+    asks = _price_size_levels(top_levels.get("asks"))
+    if not bids or not asks:
+        return None
+
+    best_bid = max(price for price, _size in bids)
+    best_ask = min(price for price, _size in asks)
+    midpoint = (best_bid + best_ask) / 2.0
+    if midpoint <= 0.0:
+        return None
+    top_bid_depth = sum(price * size for price, size in bids if price == best_bid)
+    top_ask_depth = sum(price * size for price, size in asks if price == best_ask)
+    book_age_ms = _nonnegative_float(decision_evidence.get("book_age_ms"))
+    book_ts = (
+        fill.filled_at - timedelta(milliseconds=book_age_ms)
+        if book_age_ms is not None
+        else fill.filled_at
+    )
+    return BookSummary(
+        best_bid=best_bid,
+        best_ask=best_ask,
+        spread_bps=((best_ask - best_bid) / midpoint) * 10_000.0,
+        depth_usdc=top_bid_depth + top_ask_depth,
+        timestamp=book_ts,
+    )
+
+
+def _price_size_levels(raw_levels: object) -> list[tuple[float, float]]:
+    if not isinstance(raw_levels, list):
+        return []
+    parsed: list[tuple[float, float]] = []
+    for raw_level in raw_levels:
+        if not isinstance(raw_level, Mapping):
+            return []
+        level = cast(Mapping[str, object], raw_level)
+        price = _positive_float(level.get("price"))
+        size = _positive_float(level.get("size"))
+        if price is None or size is None:
+            return []
+        parsed.append((price, size))
+    return parsed
+
+
+def _positive_float(value: object) -> float | None:
+    parsed = _float_or_none(value)
+    if parsed is None or parsed <= 0.0:
+        return None
+    return parsed
+
+
+def _nonnegative_float(value: object) -> float | None:
+    parsed = _float_or_none(value)
+    if parsed is None or parsed < 0.0:
+        return None
+    return parsed
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(cast(int | float | str, value))
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(parsed):
+        return None
+    return parsed
+
+
+def _quote_source_from_decision_evidence(
+    decision_evidence: Mapping[str, object] | None,
+) -> str | None:
+    if decision_evidence is None:
+        return None
+    for key in ("direct_outcome_book_source", "quote_source"):
+        value = decision_evidence.get(key)
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    return "decision_evidence"

@@ -197,12 +197,17 @@ def _rejected_order_state(decision: TradeDecision, reason: str) -> OrderState:
     )
 
 
-def _dedup_release_outcome(order_state: OrderState) -> str:
+def _dedup_release_outcome(order_state: OrderState) -> str | None:
     status = _normalize_order_status(order_state.status)
     raw_status = order_state.raw_status.lower()
 
     if raw_status == "venue_rejection":
         return "venue_rejection"
+    if status in {
+        OrderStatus.LIVE.value,
+        OrderStatus.UNMATCHED.value,
+    }:
+        return None
     if status in {OrderStatus.MATCHED.value, "partial"}:
         return "matched"
     if status == "rejected":
@@ -234,6 +239,8 @@ def _dedup_release_outcome(order_state: OrderState) -> str:
 
 def _normalize_order_status(status: str) -> str:
     normalized = status.lower()
+    if normalized == "open":
+        return OrderStatus.LIVE.value
     if normalized == "canceled":
         return OrderStatus.CANCELLED.value
     return normalized

@@ -2,14 +2,23 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from pms.config import LLMSettings, PMSSettings, RiskSettings
+from pms.artifact_path_safety import (
+    require_path_outside_working_tree,
+    require_private_parent,
+)
+from pms.config import PMSSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.factor_snapshot import (
     FactorSnapshotReader,
     NullFactorSnapshotReader,
 )
-from pms.controller.forecasters.llm import LLMForecaster
+from pms.controller.forecasters.llm import (
+    LLMForecaster,
+    validate_llm_runtime_dependencies,
+)
+from pms.controller.forecasters.flb import FlbForecaster
 from pms.controller.forecasters.paper_canary import PaperCanaryForecaster
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
@@ -18,10 +27,15 @@ from pms.controller.outcome_tokens import (
     NullOutcomeTokenResolver,
     OutcomeTokenResolver,
 )
-from pms.controller.pipeline import ControllerPipeline
+from pms.controller.pipeline import ControllerPipeline, DirectBookSnapshotReader
 from pms.controller.router import Router
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.interfaces import IForecaster
+from pms.strategies.flb.artifacts import (
+    flb_calibration_provenance_path,
+    require_flb_calibration_provenance_for_model,
+)
+from pms.strategies.flb.source import load_flb_calibration_csv
 from pms.strategies.projections import ActiveStrategy, FactorCompositionStep
 
 
@@ -34,6 +48,7 @@ class ControllerPipelineFactory:
     outcome_token_resolver: OutcomeTokenResolver = field(
         default_factory=NullOutcomeTokenResolver
     )
+    direct_book_reader: DirectBookSnapshotReader | None = None
 
     def build_many(
         self,
@@ -52,6 +67,7 @@ class ControllerPipelineFactory:
             strategy_version_id=strategy.strategy_version_id,
             factor_reader=self.factor_reader,
             outcome_token_resolver=self.outcome_token_resolver,
+            direct_book_reader=self.direct_book_reader,
             forecasters=self._build_forecasters(strategy),
             calibrator=NetcalCalibrator(),
             sizer=KellySizer(
@@ -72,7 +88,7 @@ class ControllerPipelineFactory:
             _build_forecaster(
                 name=name,
                 raw_params=raw_params,
-                llm_settings=self.settings.llm,
+                settings=self.settings,
                 mode=self.settings.mode,
                 factor_reader=self.factor_reader,
                 factor_composition=strategy.config.factor_composition,
@@ -87,7 +103,7 @@ def _build_forecaster(
     *,
     name: str,
     raw_params: tuple[tuple[str, str], ...],
-    llm_settings: LLMSettings,
+    settings: PMSSettings,
     mode: RunMode,
     factor_reader: FactorSnapshotReader,
     factor_composition: tuple[FactorCompositionStep, ...],
@@ -120,7 +136,42 @@ def _build_forecaster(
                 f"{raw_params!r}"
             )
             raise ValueError(msg)
-        return LLMForecaster(config=llm_settings)
+        validate_llm_runtime_dependencies(settings.llm)
+        return LLMForecaster(config=settings.llm)
+    if name == "flb":
+        if raw_params:
+            msg = (
+                "FlbForecaster does not yet accept per-strategy params: "
+                f"{raw_params!r}"
+            )
+            raise ValueError(msg)
+        raw_path = settings.strategies.flb_calibration_path
+        if raw_path is None or raw_path.strip() == "":
+            msg = "flb forecaster requires strategies.flb_calibration_path"
+            raise ValueError(msg)
+        path = Path(raw_path).expanduser()
+        require_path_outside_working_tree(path, label="FLB calibration artifact")
+        require_private_parent(path, label="FLB calibration artifact")
+        provenance_path = flb_calibration_provenance_path(path)
+        require_path_outside_working_tree(
+            provenance_path,
+            label="FLB calibration provenance JSON",
+        )
+        require_private_parent(
+            provenance_path,
+            label="FLB calibration provenance JSON",
+        )
+        calibration_model = load_flb_calibration_csv(
+            path,
+            min_sample_count=settings.strategies.flb_min_calibration_samples,
+        )
+        require_flb_calibration_provenance_for_model(
+            path,
+            model=calibration_model,
+        )
+        return FlbForecaster(
+            calibration_model=calibration_model,
+        )
     if name == "paper_canary":
         if mode != RunMode.PAPER:
             msg = "paper_canary forecaster is PAPER-only"
@@ -149,7 +200,10 @@ def _risk_settings(
         max_daily_loss_usdc=fallback.max_daily_loss_usdc,
         max_open_positions=fallback.max_open_positions,
         max_exposure_per_risk_group=fallback.max_exposure_per_risk_group,
-        min_order_usdc=strategy.risk.min_order_size_usdc,
+        min_order_usdc=max(
+            strategy.risk.min_order_size_usdc,
+            fallback.min_order_usdc,
+        ),
         slippage_threshold_bps=fallback.slippage_threshold_bps,
         max_quantity_shares=fallback.max_quantity_shares,
     )

@@ -201,22 +201,20 @@ def _settings(mode: RunMode) -> PMSSettings:
     else:
         paper_report_path = None
         rehearsal_report_path = None
+    attested_at = datetime.now(tz=UTC) if mode == RunMode.LIVE else None
     settings = PMSSettings(
         mode=mode,
         secret_source="fly" if mode == RunMode.LIVE else None,
         live_trading_enabled=mode == RunMode.LIVE,
+        api_token="live-api-token" if mode == RunMode.LIVE else None,
         live_exit_criteria_ratified_by=(
             "test-operator" if mode == RunMode.LIVE else None
         ),
-        live_exit_criteria_ratified_at=(
-            datetime(2026, 5, 25, tzinfo=UTC) if mode == RunMode.LIVE else None
-        ),
+        live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by=(
             "test-compliance" if mode == RunMode.LIVE else None
         ),
-        live_compliance_reviewed_at=(
-            datetime(2026, 5, 25, tzinfo=UTC) if mode == RunMode.LIVE else None
-        ),
+        live_compliance_reviewed_at=attested_at,
         live_compliance_jurisdiction="US" if mode == RunMode.LIVE else None,
         live_paper_soak_report_path=paper_report_path,
         live_operator_rehearsal_report_path=rehearsal_report_path,
@@ -723,15 +721,17 @@ async def test_reselection_caps_subscription_asset_ids(
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-runner-active-capped-reports-"
     )
+    attested_at = datetime.now(tz=UTC)
 
     settings = PMSSettings(
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_exit_criteria_ratified_by="test-operator",
-        live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by="test-compliance",
-        live_compliance_reviewed_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_reviewed_at=attested_at,
         live_compliance_jurisdiction="US",
         live_paper_soak_report_path=paper_report_path,
         live_operator_rehearsal_report_path=rehearsal_report_path,
@@ -858,6 +858,7 @@ async def test_refresh_subscription_caps_asset_ids() -> None:
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-runner-active-refresh-reports-"
     )
+    attested_at = datetime.now(tz=UTC)
 
     @dataclass
     class RecordingSubscriptionController:
@@ -869,10 +870,11 @@ async def test_refresh_subscription_caps_asset_ids() -> None:
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_exit_criteria_ratified_by="test-operator",
-        live_exit_criteria_ratified_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_exit_criteria_ratified_at=attested_at,
         live_compliance_reviewed_by="test-compliance",
-        live_compliance_reviewed_at=datetime(2026, 5, 25, tzinfo=UTC),
+        live_compliance_reviewed_at=attested_at,
         live_compliance_jurisdiction="US",
         live_paper_soak_report_path=paper_report_path,
         live_operator_rehearsal_report_path=rehearsal_report_path,
@@ -939,6 +941,7 @@ async def test_refresh_subscription_protects_open_position_tokens_under_cap() ->
             mode=RunMode.LIVE,
             secret_source="fly",
             live_trading_enabled=True,
+            api_token="live-api-token",
             auto_migrate_default_v2=False,
             database=DatabaseSettings(
                 dsn="postgresql://localhost/pms_test_runner",

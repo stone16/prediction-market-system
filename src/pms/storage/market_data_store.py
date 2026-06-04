@@ -443,7 +443,17 @@ class PostgresMarketDataStore:
             markets.created_at,
             markets.last_seen_at,
             markets.volume_24h,
+            markets.risk_group_id,
+            markets.category,
+            markets.event_id,
+            markets.yes_price,
+            markets.no_price,
+            markets.best_bid,
+            markets.best_ask,
+            markets.last_trade_price,
             markets.liquidity,
+            markets.spread_bps,
+            markets.price_updated_at,
             markets.active,
             markets.closed,
             markets.accepting_orders,
@@ -477,6 +487,8 @@ class PostgresMarketDataStore:
                 )
           )
         ORDER BY
+            COALESCE(markets.volume_24h, 0) DESC,
+            COALESCE(markets.liquidity, 0) DESC,
             markets.condition_id ASC,
             CASE tokens.outcome WHEN 'YES' THEN 0 WHEN 'NO' THEN 1 ELSE 2 END,
             tokens.token_id ASC
@@ -504,7 +516,25 @@ class PostgresMarketDataStore:
                             created_at=cast(datetime, row["created_at"]),
                             last_seen_at=cast(datetime, row["last_seen_at"]),
                             volume_24h=cast(float | None, row["volume_24h"]),
+                            risk_group_id=cast(
+                                str | None,
+                                _row_value(row, "risk_group_id"),
+                            ),
+                            category=cast(str | None, _row_value(row, "category")),
+                            event_id=cast(str | None, _row_value(row, "event_id")),
+                            yes_price=_optional_float(_row_value(row, "yes_price")),
+                            no_price=_optional_float(_row_value(row, "no_price")),
+                            best_bid=_optional_float(_row_value(row, "best_bid")),
+                            best_ask=_optional_float(_row_value(row, "best_ask")),
+                            last_trade_price=_optional_float(
+                                _row_value(row, "last_trade_price")
+                            ),
                             liquidity=_optional_float(row["liquidity"]),
+                            spread_bps=cast(int | None, _row_value(row, "spread_bps")),
+                            price_updated_at=cast(
+                                datetime | None,
+                                _row_value(row, "price_updated_at"),
+                            ),
                             active=cast(bool | None, _row_value(row, "active")),
                             closed=cast(bool | None, _row_value(row, "closed")),
                             accepting_orders=cast(
@@ -621,9 +651,17 @@ class PostgresMarketDataStore:
 
     async def read_market_signal_metadata(self, market_id: str) -> dict[str, str]:
         query = """
-        SELECT risk_group_id, category, event_id
+        SELECT
+            markets.risk_group_id,
+            markets.category,
+            markets.event_id,
+            MAX(CASE WHEN tokens.outcome = 'YES' THEN tokens.token_id END) AS yes_token_id,
+            MAX(CASE WHEN tokens.outcome = 'NO' THEN tokens.token_id END) AS no_token_id
         FROM markets
-        WHERE condition_id = $1
+        LEFT JOIN tokens
+            ON tokens.condition_id = markets.condition_id
+        WHERE markets.condition_id = $1
+        GROUP BY markets.risk_group_id, markets.category, markets.event_id
         """
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(query, market_id)
@@ -631,7 +669,13 @@ class PostgresMarketDataStore:
             return {}
 
         metadata: dict[str, str] = {}
-        for field_name in ("risk_group_id", "category", "event_id"):
+        for field_name in (
+            "risk_group_id",
+            "category",
+            "event_id",
+            "yes_token_id",
+            "no_token_id",
+        ):
             value = cast(str | None, _row_value(row, field_name))
             if value is not None and value.strip() != "":
                 metadata[field_name] = value

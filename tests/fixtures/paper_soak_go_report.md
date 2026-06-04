@@ -8,6 +8,7 @@
 | generated_at | 2026-05-25T00:00:00+00:00 |
 | artifact_mode | persisted |
 | output_path | docs/paper-reports/2026-05-25.md |
+| input_snapshot_sha256 | 1d46d830e25cc110a2058d39faabcdfa5c5aa29d545ae8a07adcb011cb79dfac |
 
 ## Summary
 
@@ -22,7 +23,12 @@
 | Check | Status | Detail |
 |---|---|---|
 | soak_days | PASS | 30 >= 30 |
-| fills | PASS | 10 >= 10 |
+| decisions_accepted | PASS | 50 >= 30 |
+| fills | PASS | 50 >= 50 |
+| distinct_markets | PASS | 3 >= 3 |
+| distinct_risk_groups | PASS | 3 >= 3 |
+| max_market_fill_share | PASS | 0.4000 <= 0.6000 |
+| max_risk_group_fill_share | PASS | 0.4000 <= 0.6000 |
 | fill_rate | PASS | 0.4000 > 0.0000 |
 | average_slippage_bps | PASS | 10.0000 <= 50.0000 |
 | todays_pnl | PASS | 0.0000 >= -20.0000 |
@@ -36,6 +42,7 @@
 | average_edge_bps | PASS | 50.0 >= 5.0 |
 | average_net_edge_bps | PASS | 20.0 >= 0.0 |
 | sharpe_ratio | PASS | 0.5000 > 0.0000 |
+| readiness | PASS | status=ready; eod_scheduler=disabled; event_loop=ready; halt_subscriber=disabled; sensors=ready |
 | strategy_evidence | PASS | default@4d326514fa853b9278502ad43750b9648ac8f4f6ad8685ba522b2a4aa5f47d25 |
 | unresolved_incidents | PASS | 0 unresolved |
 | risk_events | PASS | 0 risk event(s) |
@@ -44,10 +51,10 @@
 
 | Baseline | Decisions | Coverage |
 |---|---:|---:|
-| market_implied | 10 / 10 | 100.0% |
-| mid_quote | 10 / 10 | 100.0% |
-| last_trade | 8 / 10 | 80.0% |
-| category_prior | 10 / 10 | 100.0% |
+| market_implied | 50 / 50 | 100.0% |
+| mid_quote | 50 / 50 | 100.0% |
+| last_trade | 40 / 50 | 80.0% |
+| category_prior | 50 / 50 | 100.0% |
 
 ## Secondary Baseline Brier
 

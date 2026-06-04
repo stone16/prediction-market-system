@@ -13,14 +13,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import asyncpg
+from pydantic import SecretStr
 
 from pms.controller.factory import ControllerPipelineFactory
 from pms.config import (
     PMSSettings,
     live_runtime_dependency_requirements,
+    validate_live_readiness_reports_for_submission,
     validate_live_mode_ready,
 )
-from pms.controller.baselines import load_category_prior_observations_csv
+from pms.core.category_prior import load_category_prior_observations_csv
 from pms.core.enums import RunMode
 from pms.core.models import (
     LiveTradingDisabledError,
@@ -39,6 +41,11 @@ from pms.redaction import redact_database_error, redact_live_error_values
 from pms.research.spec_codec import deserialize_execution_model
 from pms.storage.schema_check import ensure_schema_current
 from pms.storage.strategy_registry import PostgresStrategyRegistry
+from pms.strategies.flb.artifacts import (
+    file_sha256_no_follow,
+    flb_calibration_provenance_path,
+    load_flb_calibration_provenance_json,
+)
 from pms.strategies.flb.source import load_flb_calibration_csv
 from pms.strategies.projections import ActiveStrategy
 from pms.strategies.versioning import serialize_strategy_config_json
@@ -168,9 +175,10 @@ def live_preflight_result_is_final_go_no_go_valid(
     result: LivePreflightResult,
     *,
     skip_venue: bool,
+    skip_credentials: bool = False,
     database_url_override_used: bool,
 ) -> bool:
-    if not result.ok or skip_venue or database_url_override_used:
+    if not result.ok or skip_venue or skip_credentials or database_url_override_used:
         return False
     if (
         result.active_strategies_fingerprint is None
@@ -205,16 +213,23 @@ async def run_live_preflight(
     pool: asyncpg.Pool | None = None,
     venue_reconciler: PolymarketVenueAccountReconciler | None = None,
     skip_venue: bool = False,
+    skip_credentials: bool = False,
 ) -> LivePreflightResult:
     checks: list[LivePreflightCheck] = []
     credentials_ok = False
+    non_venue_config_ok = False
     active_strategies_fingerprint: str | None = None
 
     try:
         if settings.mode != RunMode.LIVE:
             msg = f"mode must be live, got {settings.mode.value}"
             raise ValueError(msg)
-        validate_live_mode_ready(settings)
+        validation_settings = (
+            _settings_with_diagnostic_credentials(settings)
+            if skip_credentials
+            else settings
+        )
+        validate_live_mode_ready(validation_settings)
         _validate_live_strategy_artifacts(settings)
     except Exception as exc:  # noqa: BLE001
         checks.append(
@@ -225,8 +240,15 @@ async def run_live_preflight(
             )
         )
     else:
-        credentials_ok = True
-        checks.append(LivePreflightCheck("live_config", True, "LIVE config validates"))
+        non_venue_config_ok = True
+        credentials_ok = not skip_credentials
+        detail = (
+            "LIVE config validates with diagnostic credentials; final preflight "
+            "still requires real credentials"
+            if skip_credentials
+            else "LIVE config validates"
+        )
+        checks.append(LivePreflightCheck("live_config", True, detail))
 
     checks.append(_runtime_dependencies_check(settings))
     checks.append(_operator_approval_check(settings))
@@ -281,8 +303,10 @@ async def run_live_preflight(
                 settings,
                 active_pool,
                 venue_reconciler=venue_reconciler,
-                skip_venue=skip_venue,
-                credentials_ok=credentials_ok,
+                skip_venue=skip_venue or skip_credentials,
+                credentials_ok=(
+                    credentials_ok or (skip_credentials and non_venue_config_ok)
+                ),
             )
         )
     finally:
@@ -292,6 +316,49 @@ async def run_live_preflight(
     return LivePreflightResult(
         tuple(checks),
         active_strategies_fingerprint=active_strategies_fingerprint,
+    )
+
+
+def _settings_with_diagnostic_credentials(settings: PMSSettings) -> PMSSettings:
+    """Fill secret-shaped fields only to keep non-credential checks running."""
+    polymarket = settings.polymarket.model_copy(
+        update={
+            "private_key": "diagnostic-polymarket-private-key",
+            "api_key": "diagnostic-polymarket-api-key",
+            "api_secret": "diagnostic-polymarket-api-secret",
+            "api_passphrase": "diagnostic-polymarket-api-passphrase",
+            "signature_type": 1,
+            "funder_address": "0x1111111111111111111111111111111111111111",
+        }
+    )
+    llm = settings.llm
+    if llm.enabled and (llm.api_key is None or llm.api_key.strip() == ""):
+        llm = llm.model_copy(update={"api_key": "diagnostic-llm-api-key"})
+    discord = settings.discord
+    if discord.webhook_url is None:
+        discord = discord.model_copy(
+            update={
+                "webhook_url": SecretStr(
+                    "https://discord.example/webhooks/diagnostic/preflight"
+                )
+            }
+        )
+    api_token = settings.api_token
+    if (
+        api_token is None
+        or api_token.strip() == ""
+        or _looks_like_preflight_placeholder_detail(api_token)
+    ):
+        api_token = "diagnostic-api-token"
+    return settings.model_copy(
+        update={
+            "secret_source": "fly",
+            "local_secret_file": None,
+            "api_token": api_token,
+            "polymarket": polymarket,
+            "llm": llm,
+            "discord": discord,
+        }
     )
 
 
@@ -484,6 +551,12 @@ def _validate_live_preflight_artifact(
         raise LiveTradingDisabledError(msg)
     if artifact.get("skip_venue") is not False:
         msg = "LIVE credentialed preflight artifact must not skip venue reconciliation"
+        raise LiveTradingDisabledError(msg)
+    if artifact.get("skip_credentials") is not False:
+        msg = (
+            "LIVE credentialed preflight artifact skip_credentials must be false; "
+            "must not skip credential validation"
+        )
         raise LiveTradingDisabledError(msg)
     if artifact.get("database_url_override_used") is not False:
         msg = (
@@ -689,12 +762,14 @@ def _require_preflight_generated_at(artifact: Mapping[str, object]) -> datetime:
     except ValueError as exc:
         msg = "LIVE credentialed preflight artifact generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    if generated_at_dt.tzinfo is None:
-        generated_at_dt = generated_at_dt.replace(tzinfo=UTC)
-    if generated_at_dt.astimezone(UTC) > datetime.now(tz=UTC):
+    generated_at_utc = _require_timezone_aware_datetime(
+        generated_at_dt,
+        label="LIVE credentialed preflight artifact",
+    )
+    if generated_at_utc > datetime.now(tz=UTC):
         msg = "LIVE credentialed preflight artifact generated_at is in the future"
         raise LiveTradingDisabledError(msg)
-    return generated_at_dt.astimezone(UTC)
+    return generated_at_utc
 
 
 def _require_preflight_after_readiness(
@@ -850,7 +925,14 @@ def _emergency_audit_record_timestamp(
             f"chronology: {path}:{line_number} invalid timestamp"
         )
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_preflight_datetime(parsed)
+    return _require_timezone_aware_datetime(
+        parsed,
+        label=(
+            "LIVE emergency audit record invalid for credentialed preflight "
+            f"chronology: {path}:{line_number}"
+        ),
+        field_name="timestamp",
+    )
 
 
 def _readiness_report_generated_at_values(
@@ -916,7 +998,7 @@ def _json_artifact_generated_at(raw_path: str | None, *, label: str) -> datetime
     except ValueError as exc:
         msg = f"{label} generated_at is invalid for credentialed preflight chronology"
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_preflight_datetime(parsed)
+    return _require_timezone_aware_datetime(parsed, label=label)
 
 
 def _readiness_report_generated_at(raw_path: str | None, *, label: str) -> datetime:
@@ -939,7 +1021,11 @@ def _readiness_report_generated_at(raw_path: str | None, *, label: str) -> datet
     except ValueError as exc:
         msg = f"{label} persisted provenance generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    return _coerce_preflight_datetime(generated_at)
+    return _require_timezone_aware_datetime(
+        generated_at,
+        label=label,
+        field_name="persisted provenance generated_at",
+    )
 
 
 def _markdown_report_provenance_value(
@@ -990,6 +1076,18 @@ def _require_preflight_fresh(
 def _coerce_preflight_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _require_timezone_aware_datetime(
+    value: datetime,
+    *,
+    label: str,
+    field_name: str = "generated_at",
+) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        msg = f"{label} {field_name} must include timezone"
+        raise LiveTradingDisabledError(msg)
     return value.astimezone(UTC)
 
 
@@ -1144,6 +1242,7 @@ def _runtime_dependencies_check(settings: PMSSettings) -> LivePreflightCheck:
 
 
 def _validate_live_strategy_artifacts(settings: PMSSettings) -> None:
+    validate_live_readiness_reports_for_submission(settings)
     _validate_live_execution_model_artifact(settings)
     _validate_live_paper_backtest_diff_artifact(settings)
     _validate_live_category_prior_artifact(settings)
@@ -1185,6 +1284,12 @@ def _validate_live_execution_model_artifact(settings: PMSSettings) -> None:
         payload,
         max_age_s=settings.live_readiness_report_max_age_s,
     )
+    _require_strategy_artifact_strategy_evidence(
+        payload,
+        artifact_label="LIVE execution-model artifact",
+        expected_labels=_paper_soak_report_strategy_labels(settings),
+    )
+    _require_live_execution_model_input_hash(payload)
     try:
         execution_model = deserialize_execution_model(payload)
     except (KeyError, TypeError, ValueError) as exc:
@@ -1348,6 +1453,12 @@ def _validate_live_paper_backtest_diff_artifact(settings: PMSSettings) -> None:
         label="LIVE paper-vs-backtest execution diff artifact",
         max_age_s=settings.live_readiness_report_max_age_s,
     )
+    _require_strategy_artifact_strategy_evidence(
+        payload,
+        artifact_label="LIVE paper-vs-backtest execution diff artifact",
+        expected_labels=_paper_soak_report_strategy_labels(settings),
+    )
+    _require_paper_backtest_diff_input_hashes(payload)
     if payload.get("final_go_no_go_valid") is not True:
         msg = (
             "LIVE paper-vs-backtest execution diff artifact must be final GO"
@@ -1437,6 +1548,85 @@ def _require_paper_backtest_diff_metric_number(
     return value
 
 
+def _require_paper_backtest_diff_input_hashes(payload: Mapping[str, object]) -> None:
+    raw_value = payload.get("input_csv_sha256")
+    if not isinstance(raw_value, dict):
+        msg = (
+            "LIVE paper-vs-backtest execution diff artifact "
+            "input_csv_sha256 is required"
+        )
+        raise LiveTradingDisabledError(msg)
+    for field_name in ("paper", "backtest"):
+        digest = raw_value.get(field_name)
+        if not isinstance(digest, str) or not _is_sha256_hexdigest(digest):
+            msg = (
+                "LIVE paper-vs-backtest execution diff artifact "
+                f"input_csv_sha256.{field_name} must be a sha256 hex digest"
+            )
+            raise LiveTradingDisabledError(msg)
+
+
+def _require_live_execution_model_input_hash(payload: Mapping[str, object]) -> None:
+    digest = payload.get("input_csv_sha256")
+    if not isinstance(digest, str) or not _is_sha256_hexdigest(digest):
+        msg = (
+            "LIVE execution-model artifact input_csv_sha256 "
+            "must be a sha256 hex digest"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _require_strategy_artifact_strategy_evidence(
+    payload: Mapping[str, object],
+    *,
+    artifact_label: str,
+    expected_labels: Sequence[str],
+) -> None:
+    raw_value = payload.get("strategy_evidence")
+    if not isinstance(raw_value, str) or raw_value.strip() == "":
+        msg = f"{artifact_label} strategy_evidence is required"
+        raise LiveTradingDisabledError(msg)
+    observed_labels = _strategy_evidence_labels(raw_value, artifact_label=artifact_label)
+    expected = set(expected_labels)
+    observed = set(observed_labels)
+    if observed != expected:
+        msg = (
+            f"{artifact_label} strategy_evidence must match active strategies from "
+            "paper-soak GO report: "
+            f"expected={', '.join(sorted(expected))}; "
+            f"observed={', '.join(sorted(observed))}"
+        )
+        raise LiveTradingDisabledError(msg)
+
+
+def _strategy_evidence_labels(
+    raw_value: str,
+    *,
+    artifact_label: str,
+) -> tuple[str, ...]:
+    labels = tuple(
+        label.strip()
+        for label in raw_value.split(",")
+        if label.strip() != ""
+    )
+    if (
+        not labels
+        or len(set(labels)) != len(labels)
+        or any(
+            label.lower() == "unknown"
+            or "@" not in label
+            or _looks_like_preflight_placeholder_detail(label)
+            for label in labels
+        )
+    ):
+        msg = (
+            f"{artifact_label} strategy_evidence must contain concrete "
+            "strategy_id@strategy_version_id"
+        )
+        raise LiveTradingDisabledError(msg)
+    return labels
+
+
 def _require_json_artifact_generated_at(
     payload: Mapping[str, object],
     *,
@@ -1454,7 +1644,7 @@ def _require_json_artifact_generated_at(
     except ValueError as exc:
         msg = f"{label} generated_at is invalid"
         raise LiveTradingDisabledError(msg) from exc
-    generated_at = _coerce_preflight_datetime(generated_at)
+    generated_at = _require_timezone_aware_datetime(generated_at, label=label)
     now = datetime.now(tz=UTC)
     if generated_at > now:
         msg = f"{label} generated_at is in the future"
@@ -1672,12 +1862,33 @@ def _validate_live_flb_calibration_artifact(settings: PMSSettings) -> None:
         label="LIVE FLB calibration artifact",
     )
     try:
-        load_flb_calibration_csv(
+        model = load_flb_calibration_csv(
             flb_path,
             min_sample_count=settings.strategies.flb_min_calibration_samples,
         )
+        calibration_sha256 = file_sha256_no_follow(
+            flb_path,
+            label="LIVE FLB calibration artifact",
+        )
     except ValueError as exc:
         msg = f"LIVE FLB calibration artifact invalid: {exc}"
+        raise LiveTradingDisabledError(msg) from exc
+    provenance_path = _require_live_strategy_artifact_path(
+        str(flb_calibration_provenance_path(flb_path)),
+        label="LIVE FLB calibration provenance JSON",
+    )
+    try:
+        load_flb_calibration_provenance_json(
+            provenance_path,
+            calibration_csv_sha256=calibration_sha256,
+            source_labels=tuple(row.source_label for row in model.calibrations),
+            signal_sample_counts={
+                row.signal_name: row.sample_count for row in model.calibrations
+            },
+            min_sample_count=model.min_sample_count,
+        )
+    except ValueError as exc:
+        msg = f"LIVE FLB calibration provenance JSON invalid: {exc}"
         raise LiveTradingDisabledError(msg) from exc
 
 
@@ -1900,6 +2111,15 @@ def _emergency_audit_check(settings: PMSSettings) -> LivePreflightCheck:
             non_regular_detail,
         )
 
+    try:
+        _latest_live_emergency_audit_timestamp(str(path))
+    except LiveTradingDisabledError as exc:
+        return LivePreflightCheck(
+            "emergency_audit",
+            False,
+            str(exc),
+        )
+
     return LivePreflightCheck(
         "emergency_audit",
         True,
@@ -2094,6 +2314,35 @@ async def _market_data_freshness_check(
             ),
         )
 
+    try:
+        missing_subscribed_usable_token_count = (
+            await _fresh_usable_launch_token_missing_count(
+                pool,
+                max_age_s=max_age_s,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        return LivePreflightCheck(
+            "market_data_freshness",
+            False,
+            redact_live_error(str(exc), settings),
+        )
+    if missing_subscribed_usable_token_count > 0:
+        noun = (
+            "token"
+            if missing_subscribed_usable_token_count == 1
+            else "tokens"
+        )
+        return LivePreflightCheck(
+            "market_data_freshness",
+            False,
+            (
+                f"{missing_subscribed_usable_token_count} launch {noun} "
+                "lack fresh usable book depth; live launch subscription "
+                "and strategy freshness is not proven"
+            ),
+        )
+
     if settings.risk.max_exposure_per_risk_group is not None:
         try:
             missing_risk_metadata_count = (
@@ -2190,17 +2439,185 @@ async def _latest_usable_book_snapshot_age_s(pool: asyncpg.Pool) -> float | None
     return max(0.0, float(value))
 
 
-async def _fresh_usable_book_market_missing_risk_metadata_count(
+_LIVE_LAUNCH_TOKENS_CTE = """
+manual_tokens AS (
+    SELECT token_id
+    FROM market_subscriptions
+    WHERE source = 'user'
+),
+active_strategy_specs AS (
+    SELECT
+        versions.config_json->'market_selection' AS market_selection,
+        CASE
+            WHEN versions.config_json->'market_selection' ? 'spread_max_bps'
+                THEN NULLIF(
+                    versions.config_json->'market_selection'->>'spread_max_bps',
+                    ''
+                )::double precision
+            ELSE 100.0
+        END AS spread_max_bps,
+        CASE
+            WHEN versions.config_json->'market_selection' ? 'depth_min_usdc'
+                THEN NULLIF(
+                    versions.config_json->'market_selection'->>'depth_min_usdc',
+                    ''
+                )::double precision
+            ELSE 250.0
+        END AS depth_min_usdc,
+        COALESCE(
+            (
+                versions.config_json->'market_selection'->>'accepting_orders'
+            )::boolean,
+            true
+        ) AS accepting_orders
+    FROM strategies
+    JOIN strategy_versions AS versions
+        ON versions.strategy_version_id = strategies.active_version_id
+    WHERE strategies.active_version_id IS NOT NULL
+      AND strategies.archived IS NOT TRUE
+),
+active_strategy_tokens AS (
+    SELECT tokens.token_id
+    FROM active_strategy_specs
+    JOIN markets
+        ON markets.venue = COALESCE(
+            active_strategy_specs.market_selection->>'venue',
+            'polymarket'
+        )
+    JOIN tokens
+        ON tokens.condition_id = markets.condition_id
+    WHERE tokens.token_id IS NOT NULL
+      AND tokens.outcome IN ('YES', 'NO')
+      AND (
+          COALESCE(
+              NULLIF(
+                  active_strategy_specs.market_selection->>'volume_min_usdc',
+                  ''
+              )::double precision,
+              0.0
+          ) <= 0.0
+          OR (
+              markets.volume_24h IS NOT NULL
+              AND markets.volume_24h >= COALESCE(
+                  NULLIF(
+                      active_strategy_specs.market_selection->>'volume_min_usdc',
+                      ''
+                  )::double precision,
+                  0.0
+              )
+          )
+      )
+      AND (
+          (
+              NULLIF(
+                  active_strategy_specs.market_selection
+                      ->>'resolution_time_max_horizon_days',
+                  ''
+              ) IS NULL
+              AND (
+                  markets.resolves_at IS NULL
+                  OR markets.resolves_at > NOW()
+              )
+          )
+          OR (
+              NULLIF(
+                  active_strategy_specs.market_selection
+                      ->>'resolution_time_max_horizon_days',
+                  ''
+              ) IS NOT NULL
+              AND markets.resolves_at IS NOT NULL
+              AND markets.resolves_at > NOW()
+              AND markets.resolves_at <= (
+                  NOW() + (
+                      NULLIF(
+                          active_strategy_specs.market_selection
+                              ->>'resolution_time_max_horizon_days',
+                          ''
+                      )::integer * INTERVAL '1 day'
+                  )
+              )
+          )
+      )
+      AND (
+          active_strategy_specs.accepting_orders IS NOT TRUE
+          OR markets.accepting_orders IS NOT FALSE
+      )
+      AND (
+          NULLIF(
+              active_strategy_specs.market_selection->>'liquidity_min_usdc',
+              ''
+          ) IS NULL
+          OR (
+              markets.liquidity IS NOT NULL
+              AND markets.liquidity >= NULLIF(
+                  active_strategy_specs.market_selection->>'liquidity_min_usdc',
+                  ''
+              )::double precision
+          )
+      )
+      AND (
+          active_strategy_specs.spread_max_bps IS NULL
+          OR (
+              markets.spread_bps IS NOT NULL
+              AND markets.spread_bps <= active_strategy_specs.spread_max_bps
+          )
+      )
+      AND (
+          active_strategy_specs.depth_min_usdc IS NULL
+          OR (
+              markets.liquidity IS NOT NULL
+              AND markets.liquidity >= active_strategy_specs.depth_min_usdc
+          )
+      )
+      AND (
+          NULLIF(
+              active_strategy_specs.market_selection->>'yes_price_min',
+              ''
+          ) IS NULL
+          OR (
+              markets.yes_price IS NOT NULL
+              AND markets.yes_price >= NULLIF(
+                  active_strategy_specs.market_selection->>'yes_price_min',
+                  ''
+              )::double precision
+          )
+      )
+      AND (
+          NULLIF(
+              active_strategy_specs.market_selection->>'yes_price_max',
+              ''
+          ) IS NULL
+          OR (
+              markets.yes_price IS NOT NULL
+              AND markets.yes_price <= NULLIF(
+                  active_strategy_specs.market_selection->>'yes_price_max',
+                  ''
+              )::double precision
+          )
+      )
+),
+launch_tokens AS (
+    SELECT token_id FROM manual_tokens
+    UNION
+    SELECT token_id FROM active_strategy_tokens
+)
+"""
+
+
+async def _fresh_usable_launch_token_missing_count(
     pool: asyncpg.Pool,
     *,
     max_age_s: float,
 ) -> int:
     async with pool.acquire() as connection:
         value = await connection.fetchval(
-            """
-            WITH missing_market_risk_metadata AS (
-                SELECT DISTINCT book_snapshots.market_id
+            f"""
+            WITH {_LIVE_LAUNCH_TOKENS_CTE},
+            latest_usable_launch_tokens AS (
+                SELECT book_snapshots.token_id, MAX(book_snapshots.ts) AS latest_ts
                 FROM book_snapshots
+                JOIN launch_tokens
+                    ON launch_tokens.token_id = book_snapshots.token_id
                 JOIN book_levels AS bid_levels
                     ON bid_levels.snapshot_id = book_snapshots.id
                    AND bid_levels.side = 'BUY'
@@ -2211,13 +2628,63 @@ async def _fresh_usable_book_market_missing_risk_metadata_count(
                    AND ask_levels.side = 'SELL'
                    AND ask_levels.size > 0.0
                    AND ask_levels.price > 0.0
-                LEFT JOIN markets
-                    ON markets.condition_id = book_snapshots.market_id
                 WHERE book_snapshots.ts IS NOT NULL
                   AND book_snapshots.ts >= (
                       NOW() - ($1::double precision * INTERVAL '1 second')
                   )
-                  AND (
+                GROUP BY book_snapshots.token_id
+            ),
+            missing_launch_usable_tokens AS (
+                SELECT launch_tokens.token_id
+                FROM launch_tokens
+                LEFT JOIN latest_usable_launch_tokens
+                    ON latest_usable_launch_tokens.token_id = launch_tokens.token_id
+                WHERE latest_usable_launch_tokens.token_id IS NULL
+            )
+            SELECT COUNT(*)::bigint
+            FROM missing_launch_usable_tokens
+            """,
+            max_age_s,
+        )
+    return int(value or 0)
+
+
+async def _fresh_usable_book_market_missing_risk_metadata_count(
+    pool: asyncpg.Pool,
+    *,
+    max_age_s: float,
+) -> int:
+    async with pool.acquire() as connection:
+        value = await connection.fetchval(
+            f"""
+            WITH {_LIVE_LAUNCH_TOKENS_CTE},
+            fresh_usable_launch_markets AS (
+                SELECT DISTINCT book_snapshots.market_id
+                FROM book_snapshots
+                JOIN launch_tokens
+                    ON launch_tokens.token_id = book_snapshots.token_id
+                JOIN book_levels AS bid_levels
+                    ON bid_levels.snapshot_id = book_snapshots.id
+                   AND bid_levels.side = 'BUY'
+                   AND bid_levels.size > 0.0
+                   AND bid_levels.price > 0.0
+                JOIN book_levels AS ask_levels
+                    ON ask_levels.snapshot_id = book_snapshots.id
+                   AND ask_levels.side = 'SELL'
+                   AND ask_levels.size > 0.0
+                   AND ask_levels.price > 0.0
+                WHERE book_snapshots.ts IS NOT NULL
+                  AND book_snapshots.ts >= (
+                      NOW() - ($1::double precision * INTERVAL '1 second')
+                  )
+            ),
+            missing_market_risk_metadata AS (
+                SELECT fresh_usable_launch_markets.market_id
+                FROM fresh_usable_launch_markets
+                LEFT JOIN markets
+                    ON markets.condition_id = fresh_usable_launch_markets.market_id
+                WHERE markets.condition_id IS NULL
+                   OR (
                       markets.risk_group_id IS NULL
                       OR btrim(markets.risk_group_id) = ''
                   )
@@ -2307,7 +2774,7 @@ async def _persisted_live_open_order_count(pool: asyncpg.Pool) -> int:
             SELECT COUNT(*)
             FROM orders
             WHERE venue = 'polymarket'
-              AND LOWER(COALESCE(status, '')) IN ('live', 'unmatched', 'partial')
+              AND LOWER(COALESCE(status, '')) IN ('live', 'open', 'unmatched', 'partial')
               AND remaining_notional_usdc > 1e-9
             """
         )

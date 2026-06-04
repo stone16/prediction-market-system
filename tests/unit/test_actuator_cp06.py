@@ -8,7 +8,7 @@ import importlib.machinery
 import importlib.util
 import logging
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -47,6 +47,7 @@ from pms.config import (
 from pms.core.enums import FeedbackSource, FeedbackTarget, OrderStatus, RunMode, Side, TimeInForce
 from pms.core.models import (
     LiveTradingDisabledError,
+    MarketSignal,
     OrderState,
     Portfolio,
     TradeDecision,
@@ -139,6 +140,11 @@ def _order_state(
         strategy_id=decision.strategy_id,
         strategy_version_id=decision.strategy_version_id,
         filled_quantity=filled_quantity,
+        action=decision.action,
+        outcome=decision.outcome,
+        time_in_force=decision.time_in_force.value,
+        intent_key=decision.intent_key,
+        risk_group_id=decision.risk_group_id,
     )
 
 
@@ -869,6 +875,184 @@ def test_risk_manager_rejects_total_exposure_and_drawdown() -> None:
     )
 
 
+def test_risk_manager_reserves_risk_group_exposure_for_live_open_orders() -> None:
+    manager = RiskManager(
+        RiskSettings(
+            max_position_per_market=100.0,
+            max_total_exposure=1000.0,
+            max_exposure_per_risk_group=10.0,
+        )
+    )
+    decision = replace(
+        _decision(
+            decision_id="risk-open-order",
+            notional_usdc=6.0,
+        ),
+        risk_group_id="event:risk-group",
+    )
+    order = _order_state(
+        decision,
+        status=OrderStatus.LIVE.value,
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+
+    manager.record_open_order_state(order)
+
+    rejected = manager.check(
+        replace(
+            _decision(
+                decision_id="risk-next-order",
+                notional_usdc=5.0,
+            ),
+            risk_group_id="event:risk-group",
+        ),
+        _portfolio(),
+    )
+    assert rejected.approved is False
+    assert rejected.reason == "max_exposure_per_risk_group"
+
+    manager.record_order_filled(order.order_id)
+
+    approved = manager.check(
+        replace(
+            _decision(
+                decision_id="risk-after-fill-order",
+                notional_usdc=5.0,
+            ),
+            risk_group_id="event:risk-group",
+        ),
+        _portfolio(),
+    )
+    assert approved.approved is True
+
+
+def test_risk_manager_reserves_total_exposure_for_live_open_orders() -> None:
+    manager = RiskManager(
+        RiskSettings(max_position_per_market=100.0, max_total_exposure=10.0)
+    )
+    first_decision = _decision(
+        decision_id="total-open-order",
+        market_id="m-total-a",
+        notional_usdc=6.0,
+    )
+    first_order = _order_state(
+        first_decision,
+        status=OrderStatus.LIVE.value,
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+
+    manager.record_open_order_state(first_order)
+
+    rejected = manager.check(
+        _decision(
+            decision_id="total-next-order",
+            market_id="m-total-b",
+            notional_usdc=5.0,
+        ),
+        _portfolio(),
+    )
+    assert rejected.approved is False
+    assert rejected.reason == "max_total_exposure"
+
+
+def test_risk_manager_reserves_market_exposure_for_live_open_orders() -> None:
+    manager = RiskManager(
+        RiskSettings(max_position_per_market=10.0, max_total_exposure=1000.0)
+    )
+    first_decision = _decision(
+        decision_id="market-open-order",
+        market_id="m-market-cap",
+        notional_usdc=6.0,
+    )
+    first_order = _order_state(
+        first_decision,
+        status=OrderStatus.LIVE.value,
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+
+    manager.record_open_order_state(first_order)
+
+    rejected = manager.check(
+        _decision(
+            decision_id="market-next-order",
+            market_id="m-market-cap",
+            notional_usdc=5.0,
+        ),
+        _portfolio(),
+    )
+    assert rejected.approved is False
+    assert rejected.reason == "max_position_per_market"
+
+
+def test_risk_manager_reserves_free_cash_for_live_open_orders() -> None:
+    manager = RiskManager(
+        RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
+    )
+    first_decision = _decision(
+        decision_id="cash-open-order",
+        market_id="m-cash-a",
+        notional_usdc=6.0,
+    )
+    first_order = _order_state(
+        first_decision,
+        status=OrderStatus.LIVE.value,
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+
+    manager.record_open_order_state(first_order)
+
+    rejected = manager.check(
+        _decision(
+            decision_id="cash-next-order",
+            market_id="m-cash-b",
+            notional_usdc=5.0,
+        ),
+        Portfolio(
+            total_usdc=10.0,
+            free_usdc=10.0,
+            locked_usdc=0.0,
+            open_positions=[],
+        ),
+    )
+    assert rejected.approved is False
+    assert rejected.reason == "insufficient_free_usdc"
+
+
+def test_risk_manager_does_not_reserve_exposure_for_live_open_sell_orders() -> None:
+    manager = RiskManager(
+        RiskSettings(max_position_per_market=10.0, max_total_exposure=10.0)
+    )
+    exit_decision = _decision(
+        decision_id="sell-open-order",
+        market_id="m-open-sell",
+        side=Side.SELL.value,
+        action=Side.SELL.value,
+        notional_usdc=6.0,
+    )
+    exit_order = _order_state(
+        exit_decision,
+        status=OrderStatus.LIVE.value,
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+
+    manager.record_open_order_state(exit_order)
+
+    approved = manager.check(
+        _decision(
+            decision_id="buy-after-open-sell",
+            market_id="m-open-sell",
+            notional_usdc=10.0,
+        ),
+        _portfolio(),
+    )
+    assert approved.approved is True
+
+
 @pytest.mark.asyncio
 async def test_paper_actuator_fills_buy_at_best_ask() -> None:
     actuator = PaperActuator(
@@ -1043,6 +1227,7 @@ def _live_settings(
 ) -> PMSSettings:
     return PMSSettings(
         live_trading_enabled=True,
+        api_token="live-api-token",
         controller=ControllerSettings(time_in_force="IOC"),
         polymarket=PolymarketSettings(
             private_key="private-key",
@@ -1064,6 +1249,9 @@ _SECRET_CREDENTIAL_VALUES = (
     "0x2222222222222222222222222222222222222222",
 )
 _SECRET_DSN = "postgresql://admin:supersecret@db.internal.example.com:5432/pms_live"
+_LIVE_FIXTURE_STRATEGY_EVIDENCE = (
+    "default@4d326514fa853b9278502ad43750b9648ac8f4f6ad8685ba522b2a4aa5f47d25"
+)
 
 
 def _live_settings_with_secret_credentials() -> PMSSettings:
@@ -1082,11 +1270,12 @@ def _true_live_settings_without_preflight_artifact(tmp_path: Path) -> PMSSetting
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-actuator-live-preflight-reports-"
     )
-    attested_at = datetime(2026, 5, 25, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     return PMSSettings(
         mode=RunMode.LIVE,
         secret_source="fly",
         live_trading_enabled=True,
+        api_token="live-api-token",
         live_account_reconciliation_required=True,
         live_emergency_audit_path=str(approval_dir / "live-emergency-audit.jsonl"),
         live_first_order_audit_path=str(approval_dir / "first-order-audit.jsonl"),
@@ -1141,6 +1330,7 @@ def _stage_readiness_fingerprint_files(settings: PMSSettings, root: Path) -> Non
                 "artifact_mode": "telemetry_execution_model",
                 "generated_at": generated_at.isoformat(),
                 "generated_by": "scripts/execution_model_from_telemetry.py",
+                "strategy_evidence": _LIVE_FIXTURE_STRATEGY_EVIDENCE,
                 "fee_rate": 0.04,
                 "slippage_bps": 6.0,
                 "latency_ms": 500.0,
@@ -1152,6 +1342,7 @@ def _stage_readiness_fingerprint_files(settings: PMSSettings, root: Path) -> Non
                 "price_invalidation_streak": 10,
                 "replay_window_ms": 86_400_000,
                 "calibration_source": "telemetry_calibrated",
+                "input_csv_sha256": "c" * 64,
                 "min_samples": 10,
                 "telemetry_sample_count": 10,
                 "adverse_selection_sample_count": 10,
@@ -1168,6 +1359,11 @@ def _stage_readiness_fingerprint_files(settings: PMSSettings, root: Path) -> Non
                 "generated_by": "scripts/paper_backtest_execution_diff.py",
                 "artifact_mode": "paper_backtest_execution_diff",
                 "generated_at": generated_at.isoformat(),
+                "strategy_evidence": _LIVE_FIXTURE_STRATEGY_EVIDENCE,
+                "input_csv_sha256": {
+                    "paper": "a" * 64,
+                    "backtest": "b" * 64,
+                },
                 "final_go_no_go_valid": True,
                 "thresholds": {
                     "min_matched_decisions": 10,
@@ -1213,6 +1409,29 @@ def _stage_readiness_fingerprint_files(settings: PMSSettings, root: Path) -> Non
                 "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
                 "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
             )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    Path(f"{flb_calibration_path}.provenance.json").write_text(
+        json.dumps(
+            {
+                "artifact_type": "flb_calibration_provenance",
+                "generated_by": "scripts/flb_data_feasibility.py",
+                "source": "warehouse-csv",
+                "generated_at": generated_at.isoformat(),
+                "warehouse_csv_sha256": sha256(
+                    b"unit warehouse provenance fixture"
+                ).hexdigest(),
+                "warehouse_market_count": 301,
+                "warehouse_longshot_count": 150,
+                "warehouse_favorite_count": 151,
+                "calibration_csv_sha256": sha256(
+                    flb_calibration_path.read_bytes()
+                ).hexdigest(),
+                "calibration_source_label": "warehouse-flb-v1",
+            },
+            sort_keys=True,
         )
         + "\n",
         encoding="utf-8",
@@ -1716,6 +1935,54 @@ async def test_polymarket_actuator_rejects_incomplete_preflight_artifact_for_dir
 
 
 @pytest.mark.asyncio
+async def test_polymarket_actuator_rejects_naive_preflight_generated_at_for_direct_live_submit(
+    tmp_path: Path,
+    live_sdk_dependency_available: None,
+) -> None:
+    del live_sdk_dependency_available
+    settings = _true_live_settings_without_preflight_artifact(tmp_path)
+    artifact_path = tmp_path / "secure" / "credentialed-preflight.json"
+    settings.live_preflight_artifact_path = str(artifact_path)
+    _stage_readiness_fingerprint_files(settings, artifact_path.parent)
+    _write_final_live_preflight_artifact(
+        settings,
+        artifact_path,
+        generated_at=datetime.now(UTC).replace(tzinfo=None),
+    )
+    approval_path = Path(cast(str, settings.polymarket.first_live_order_approval_path))
+    approval_payload = _approval_payload()
+    approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
+    _sidecar_path(approval_path).write_text(
+        json.dumps(_approval_sidecar_payload(approval_payload)),
+        encoding="utf-8",
+    )
+    client = RecordingPolymarketClient()
+    gate = FileFirstLiveOrderGate(
+        approval_path,
+        require_approver_sidecar=True,
+        approval_max_age_s=settings.polymarket.operator_approval_max_age_s,
+    )
+    actuator = PolymarketActuator(
+        settings,
+        client=client,
+        operator_gate=gate,
+        quote_provider=AllowQuoteProvider(),
+    )
+
+    try:
+        with pytest.raises(
+            LiveTradingDisabledError,
+            match="generated_at must include timezone",
+        ):
+            await actuator.execute(_decision(), _portfolio())
+    finally:
+        approval_path.unlink(missing_ok=True)
+        _sidecar_path(approval_path).unlink(missing_ok=True)
+
+    assert client.submitted == []
+
+
+@pytest.mark.asyncio
 async def test_polymarket_actuator_rejects_wrong_settings_preflight_artifact_for_direct_live_submit(
     tmp_path: Path,
     live_sdk_dependency_available: None,
@@ -2114,6 +2381,8 @@ async def test_polymarket_actuator_rejects_preflight_before_emergency_audit_for_
     _stage_readiness_fingerprint_files(settings, artifact_path.parent)
     generated_at = datetime.now(UTC) - timedelta(seconds=20)
     emergency_audit_at = datetime.now(UTC) - timedelta(seconds=10)
+    settings.live_exit_criteria_ratified_at = generated_at - timedelta(seconds=1)
+    settings.live_compliance_reviewed_at = generated_at - timedelta(seconds=1)
     Path(settings.live_emergency_audit_path).write_text(
         json.dumps(
             {
@@ -2199,6 +2468,8 @@ async def test_polymarket_actuator_rechecks_preflight_artifact_after_runner_star
     _stage_readiness_fingerprint_files(settings, artifact_path.parent)
     generated_at = datetime.now(UTC) - timedelta(seconds=20)
     emergency_audit_at = datetime.now(UTC) - timedelta(seconds=10)
+    settings.live_exit_criteria_ratified_at = generated_at - timedelta(seconds=1)
+    settings.live_compliance_reviewed_at = generated_at - timedelta(seconds=1)
     _write_final_live_preflight_artifact(
         settings,
         artifact_path,
@@ -3267,6 +3538,38 @@ async def test_executor_releases_mapped_outcome_from_returned_order_state(
 
 
 @pytest.mark.asyncio
+async def test_executor_tracks_open_status_as_live_order_lifecycle() -> None:
+    store = cast(FeedbackStore, InMemoryFeedbackStore())
+    decision = _decision(decision_id="d-open-lifecycle")
+    returned_state = _order_state(
+        decision,
+        status="open",
+        raw_status="open",
+        filled_notional_usdc=0.0,
+    )
+    risk = RiskManager(
+        RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
+    )
+    dedup_store = RecordingDedupStore()
+    actuator = executor.ActuatorExecutor(
+        adapter=StaticAdapter(returned_state),
+        risk=risk,
+        feedback=ActuatorFeedback(store),
+        dedup_store=dedup_store,
+    )
+
+    await actuator.execute(decision, _portfolio())
+
+    halt_state = risk.check_auto_halt(
+        _portfolio(),
+        now=returned_state.submitted_at + timedelta(minutes=31),
+    )
+    assert halt_state.halted is True
+    assert halt_state.trigger_kind == "order_without_fill"
+    assert dedup_store.release_calls == []
+
+
+@pytest.mark.asyncio
 async def test_executor_releases_invalid_for_risk_rejection() -> None:
     store = cast(FeedbackStore, InMemoryFeedbackStore())
     dedup_store = RecordingDedupStore()
@@ -3866,6 +4169,41 @@ async def test_polymarket_sdk_parses_partial_fill_response(
     assert result.status == "live"
 
 
+@pytest.mark.asyncio
+async def test_polymarket_sdk_normalizes_open_status_to_live_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_partial_fill_sdk(
+        monkeypatch,
+        response={
+            "orderID": "sdk-open-resting-1",
+            "status": "open",
+            "success": True,
+            "errorMsg": "",
+        },
+    )
+
+    result = await PolymarketSDKClient().submit_order(
+        PolymarketOrderRequest(
+            market_id="m-cp06",
+            token_id="t-yes",
+            side=Side.BUY.value,
+            price=0.5,
+            size=20.0,
+            notional_usdc=10.0,
+            estimated_quantity=20.0,
+            order_type="limit",
+            time_in_force=TimeInForce.IOC.value,
+            max_slippage_bps=50,
+        ),
+        _live_settings().polymarket.credentials(),
+    )
+
+    assert result.status == OrderStatus.LIVE.value
+    assert result.raw_status == "open"
+    assert result.remaining_notional_usdc == pytest.approx(10.0)
+
+
 def test_fill_from_order_emits_fill_for_partial_status() -> None:
     """Codex finding f3, runner side: `_fill_from_order` must emit a
     FillRecord whenever filled_notional > 0 AND fill_price > 0 — not
@@ -3967,6 +4305,41 @@ def test_fill_from_order_applies_configured_fee_rate() -> None:
     # 4.0 notional * 0.04 * (1 - 0.5) = 0.08
     assert fill.fees == pytest.approx(0.08)
     assert fill.fee_bps == 400
+
+
+def test_fill_from_order_uses_signal_fee_rate_bps_when_available() -> None:
+    """Paper fills should use market fee evidence carried by the signal.
+
+    Polymarket fees are market/category specific, so a global fallback rate can
+    corrupt paper P&L and net-edge evidence when the feed includes fee_rate_bps.
+    """
+    from pms.runner import _fill_from_order
+
+    decision = _decision(notional_usdc=10.0)
+    signal = MarketSignal(
+        market_id=decision.market_id,
+        token_id=decision.token_id,
+        venue=decision.venue,
+        title="Will signal fees be used?",
+        yes_price=0.5,
+        volume_24h=1000.0,
+        resolves_at=datetime(2026, 4, 26, tzinfo=UTC),
+        orderbook={},
+        external_signal={"fee_rate_bps": "300"},
+        fetched_at=datetime(2026, 4, 25, tzinfo=UTC),
+        market_status="open",
+    )
+    fill = _fill_from_order(
+        _filled_state(decision),
+        decision,
+        signal,
+        fee_rate=0.07,
+    )
+
+    assert fill is not None
+    # 4.0 notional * 0.03 * (1 - 0.5) = 0.06
+    assert fill.fees == pytest.approx(0.06)
+    assert fill.fee_bps == 300
 
 
 def test_fill_from_order_omits_fee_when_rate_is_none() -> None:

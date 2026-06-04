@@ -218,6 +218,7 @@ async def test_positions_and_trades_routes_reflect_persisted_paper_fill(
                     "mark_age_seconds": None,
                     "strategy_id": "default",
                     "strategy_version_id": "default-v1",
+                    "risk_group_id": None,
                 }
             ]
         }
@@ -240,6 +241,7 @@ async def test_positions_and_trades_routes_reflect_persisted_paper_fill(
         assert trade["status"] == "matched"
         assert trade["strategy_id"] == "default"
         assert trade["strategy_version_id"] == "default-v1"
+        assert trade["risk_group_id"] is None
         assert trade["executed_at"].endswith("Z")
         assert trade["filled_at"].endswith("Z")
     finally:

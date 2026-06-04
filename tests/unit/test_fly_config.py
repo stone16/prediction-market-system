@@ -15,7 +15,24 @@ def test_fly_binds_api_host_via_env_and_checks_readiness() -> None:
 
     assert fly_config["env"]["PMS_API_HOST"] == "0.0.0.0"
     assert fly_config["env"]["PMS_CONFIG_PATH"] == "/app/config.live-soak.yaml"
+    assert fly_config["mounts"]["source"] == "pms_paper_soak_secure"
+    assert fly_config["mounts"]["destination"] == "/secure/pms"
     assert fly_config["http_service"]["checks"][0]["path"] == "/readiness"
+
+
+def test_fly_paper_soak_deploy_runbook_stages_required_artifacts() -> None:
+    runbook = Path("docs/operations/fly-deploy-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    normalized = " ".join(runbook.split())
+
+    assert "scripts/export_category_prior_observations.py" in runbook
+    assert "--output /secure/pms/category-prior-observations.csv" in runbook
+    assert (
+        "--file-local "
+        "/secure/pms/category-prior-observations.csv="
+        "/secure/pms/category-prior-observations.csv"
+    ) in normalized
 
 
 def test_docker_cmd_uses_pms_api_host_env_not_deprecated_host_flag() -> None:
@@ -54,6 +71,9 @@ def test_fly_live_capital_template_is_separate_from_paper_soak_app() -> None:
     assert live_env["PMS_SECRET_SOURCE"] == "fly"
     assert live_env["PMS_LIVE_TRADING_ENABLED"] == "true"
     assert live_env["PMS_LIVE_ACCOUNT_RECONCILIATION_REQUIRED"] == "true"
+    assert live_env["PMS_LIVE_PAPER_SOAK_REPORT_PATH"] == (
+        "/secure/pms/paper-soak-go-report.md"
+    )
     assert live_env["PMS_AUTO_START"] == "1"
     assert live_env["PMS_API_HOST"] == "0.0.0.0"
     assert live_env["PMS_CONTROLLER__TIME_IN_FORCE"] == "IOC"
@@ -68,7 +88,7 @@ def test_fly_live_capital_template_is_separate_from_paper_soak_app() -> None:
     )
     assert live_env["PMS_STRATEGIES__FLB_MIN_CALIBRATION_SAMPLES"] == "100"
     assert live_env["PMS_STRATEGIES__FLB_ENTRY_EXECUTION_COST_BPS"] == "15.0"
-    assert live_env["PMS_STRATEGIES__FLB_FEE_RATE"] == "0.04"
+    assert live_env["PMS_STRATEGIES__FLB_FEE_RATE"] == "0.07"
     assert live_env["PMS_POLYMARKET__OPERATOR_APPROVAL_MODE"] == "every_order"
     assert live_env["PMS_LLM__ENABLED"] == "false"
     assert "PMS_CONFIG_PATH" not in live_env
@@ -145,6 +165,9 @@ def test_fly_live_capital_template_env_values_parse_as_live_settings(
     assert settings.controller.category_prior_observations_path == (
         "/secure/pms/category-prior-observations.csv"
     )
+    assert settings.live_paper_soak_report_path == (
+        "/secure/pms/paper-soak-go-report.md"
+    )
     assert settings.live_execution_model_path == "/secure/pms/execution-model.json"
     assert settings.live_paper_backtest_diff_path == (
         "/secure/pms/paper-backtest-execution-diff.json"
@@ -153,5 +176,5 @@ def test_fly_live_capital_template_env_values_parse_as_live_settings(
         "/secure/pms/flb-calibration.csv"
     )
     assert settings.strategies.flb_entry_execution_cost_bps == 15.0
-    assert settings.strategies.flb_fee_rate == 0.04
+    assert settings.strategies.flb_fee_rate == 0.07
     assert settings.polymarket.operator_approval_mode == "every_order"

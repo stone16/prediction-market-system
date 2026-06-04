@@ -8,47 +8,36 @@ from pms.core.models import MarketSignal
 
 
 def best_ask(signal: MarketSignal) -> float | None:
+    orderbook_ask = _best_orderbook_price(signal, "asks")
+    if orderbook_ask is not None:
+        return orderbook_ask
     raw_external_ask = signal.external_signal.get("best_ask")
-    external_ask = open_probability_or_none(raw_external_ask)
-    if external_ask is not None:
-        return external_ask
-
-    raw_asks = signal.orderbook.get("asks")
-    if not isinstance(raw_asks, list):
-        return None
-    asks: list[float] = []
-    for raw_level in raw_asks:
-        if not isinstance(raw_level, dict):
-            continue
-        price = open_probability_or_none(raw_level.get("price"))
-        size = positive_float_or_none(raw_level.get("size"))
-        if price is not None and size is not None:
-            asks.append(price)
-    if not asks:
-        return None
-    return min(asks)
+    return open_probability_or_none(raw_external_ask)
 
 
 def best_bid(signal: MarketSignal) -> float | None:
+    orderbook_bid = _best_orderbook_price(signal, "bids")
+    if orderbook_bid is not None:
+        return orderbook_bid
     raw_external_bid = signal.external_signal.get("best_bid")
-    external_bid = open_probability_or_none(raw_external_bid)
-    if external_bid is not None:
-        return external_bid
+    return open_probability_or_none(raw_external_bid)
 
-    raw_bids = signal.orderbook.get("bids")
-    if not isinstance(raw_bids, list):
+
+def _best_orderbook_price(signal: MarketSignal, side: str) -> float | None:
+    raw_levels = signal.orderbook.get(side)
+    if side not in {"bids", "asks"} or not isinstance(raw_levels, list):
         return None
-    bids: list[float] = []
-    for raw_level in raw_bids:
+    prices: list[float] = []
+    for raw_level in raw_levels:
         if not isinstance(raw_level, dict):
             continue
         price = open_probability_or_none(raw_level.get("price"))
         size = positive_float_or_none(raw_level.get("size"))
         if price is not None and size is not None:
-            bids.append(price)
-    if not bids:
+            prices.append(price)
+    if not prices:
         return None
-    return max(bids)
+    return max(prices) if side == "bids" else min(prices)
 
 
 def spread_bps_at_decision(

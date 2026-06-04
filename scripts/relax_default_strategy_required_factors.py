@@ -36,8 +36,12 @@ def _relax(config: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """Return (relaxed config, list of factor_ids whose required flag flipped)."""
     relaxed = copy.deepcopy(config)
     flipped: list[str] = []
-    factors = relaxed["config"]["factor_composition"]
+    factors = relaxed.get("config", {}).get("factor_composition", [])
+    if not isinstance(factors, list):
+        return relaxed, flipped
     for factor in factors:
+        if not isinstance(factor, dict):
+            continue
         if (
             factor.get("factor_id") in TARGET_FACTORS
             and factor.get("required", True)
@@ -75,10 +79,7 @@ def main() -> int:
 
         # Verify the target factors exist (defends against future seed
         # changes that rename or remove them silently).
-        present = {
-            f["factor_id"]
-            for f in config_json["config"]["factor_composition"]
-        }
+        present = _factor_ids(config_json)
         missing = TARGET_FACTORS - present
         if missing:
             print(
@@ -128,6 +129,20 @@ def main() -> int:
     print(f"new_version_id: {new_version_id}")
     print(f"flipped: {sorted(flipped)}")
     return 0
+
+
+def _factor_ids(config: dict[str, Any]) -> set[str]:
+    factors = config.get("config", {}).get("factor_composition", [])
+    if not isinstance(factors, list):
+        return set()
+    factor_ids: set[str] = set()
+    for factor in factors:
+        if not isinstance(factor, dict):
+            continue
+        factor_id = factor.get("factor_id")
+        if isinstance(factor_id, str):
+            factor_ids.add(factor_id)
+    return factor_ids
 
 
 if __name__ == "__main__":

@@ -5,32 +5,175 @@ passphrases into chat, issues, PRs, logs, or config files.
 
 ## PAPER Soak
 
-1. Start from the first-live soak config:
-   `cp config.live-soak.yaml config.local.live-soak.yaml`.
+1. Start from a repo-ignored local copy of the first-live soak config. Local
+   machines may not be able to create root-level `/secure`; use a private
+   user-owned artifact directory and let the helper rewrite local artifact
+   paths:
+
+   ```bash
+   export PMS_SECURE_DIR="${PMS_SECURE_DIR:-$HOME/.local/share/pms/secure}"
+   uv run python scripts/prepare_local_paper_soak_config.py \
+     --secure-dir "$PMS_SECURE_DIR"
+   ```
+
+   Re-run the helper with `--overwrite` only after preserving local edits in
+   `config.local.live-soak.yaml`. Fly/LIVE volume staging still uses
+   `/secure/pms`; this local helper is only for PAPER soak development hosts.
 2. Confirm the risk envelope before every soak run:
-   `max_position_per_market=$5`, `max_total_exposure=$50`,
+   `max_position_per_market=$1`, `max_total_exposure=$50`,
    `max_drawdown_pct=20%`, `max_daily_loss_usdc=$20`,
-   `max_open_positions=5`, `max_exposure_per_risk_group=$15`,
-   `max_quantity_shares=500`, and `slippage_threshold_bps=50`.
-3. Run PAPER mode against live market data with the soak config:
-   `uv run pms-api --config config.live-soak.yaml`.
+   `max_open_positions=50`, `max_exposure_per_risk_group=$1`,
+   `max_quantity_shares=500`, `slippage_threshold_bps=50`, and
+   `llm.max_daily_llm_cost_usdc=$0.05`.
+
+   Optional local no-credential plumbing smoke: use `paper_canary_v1` only to
+   verify live-data ingestion, controller fan-out, and the paper actuator before
+   warehouse FLB artifacts are staged. This is not paper-soak performance
+   evidence and must not be used for a final GO report.
+
+   ```bash
+   uv run python scripts/prepare_local_paper_soak_config.py \
+     --output config.local.paper-canary.yaml \
+     --paper-canary
+   ```
+
+   The helper writes the canary config with `paper_soak_strategy_id: null`,
+   `paper_soak_archive_default: false`,
+   `controller.category_prior_observations_path: null`, and
+   `strategies.flb_calibration_path: null`. Those null artifact paths are
+   required for the no-credential smoke because Runner loads configured
+   category-prior and FLB artifacts during construction even when H1 FLB is not
+   the active strategy. After applying migrations, install the canary as the
+   only active strategy:
+
+   Before running migrations or installing a canary strategy, verify that
+   `DATABASE_URL` points at the intended Postgres server and database; another
+   local Postgres on port 5432 can silently catch `localhost` traffic.
+
+   ```bash
+   docker compose up -d postgres
+   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/pms_test
+   psql "$DATABASE_URL" -Atc "select current_database(), inet_server_addr(), inet_server_port(), version();"
+   uv run alembic upgrade head
+   uv run python scripts/install_paper_canary_strategy.py \
+     --database-url "$DATABASE_URL" \
+     --archive-default \
+     --sample-modulus 1
+   export PMS_API_TOKEN="$(openssl rand -hex 32)"
+   PMS_CONFIG_PATH=config.local.paper-canary.yaml uv run pms-api
+   ```
+
+   In a second shell with the same `PMS_API_TOKEN`, start the runner, wait
+   until `/status.controller.decisions_total` and `/status.actuator.fills_total`
+   are nonzero, then capture the smoke snapshots while the runner is still
+   running:
+
+   ```bash
+   export PAPER_CANARY_EVIDENCE_DIR="$(mktemp -d)"
+   curl -fsS -X POST \
+     -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/run/start
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/status \
+     > "$PAPER_CANARY_EVIDENCE_DIR/status.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/readiness \
+     > "$PAPER_CANARY_EVIDENCE_DIR/readiness.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/strategies \
+     > "$PAPER_CANARY_EVIDENCE_DIR/strategies.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     "http://127.0.0.1:8000/markets?limit=5" \
+     > "$PAPER_CANARY_EVIDENCE_DIR/markets.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     "http://127.0.0.1:8000/decisions?limit=50" \
+     > "$PAPER_CANARY_EVIDENCE_DIR/decisions.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     "http://127.0.0.1:8000/trades?limit=50" \
+     > "$PAPER_CANARY_EVIDENCE_DIR/trades.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/positions \
+     > "$PAPER_CANARY_EVIDENCE_DIR/positions.json"
+   curl -fsS -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/metrics \
+     > "$PAPER_CANARY_EVIDENCE_DIR/metrics.json"
+
+   uv run python scripts/check_paper_canary_smoke.py \
+     --status-json "$PAPER_CANARY_EVIDENCE_DIR/status.json" \
+     --readiness-json "$PAPER_CANARY_EVIDENCE_DIR/readiness.json" \
+     --strategies-json "$PAPER_CANARY_EVIDENCE_DIR/strategies.json" \
+     --markets-json "$PAPER_CANARY_EVIDENCE_DIR/markets.json" \
+     --decisions-json "$PAPER_CANARY_EVIDENCE_DIR/decisions.json" \
+     --trades-json "$PAPER_CANARY_EVIDENCE_DIR/trades.json" \
+     --positions-json "$PAPER_CANARY_EVIDENCE_DIR/positions.json" \
+     --metrics-json "$PAPER_CANARY_EVIDENCE_DIR/metrics.json"
+   ```
+
+   The checker must pass before treating the canary as plumbing evidence. A
+   pass only proves live market data, controller fan-out, paper actuator fill
+   persistence, and selection-funnel metrics for `paper_canary_v1`; it still
+   cannot satisfy H1 launch artifact readiness or the 30-day paper-soak GO
+   gate.
+3. Start the PAPER soak API control plane against live market data with the
+   soak config. Keep the token private; `scripts/paper_report.py` reads the
+   same token from `PMS_API_TOKEN` when polling protected paper API endpoints.
+
+   ```bash
+   export PMS_API_TOKEN="$(openssl rand -hex 32)"
+   uv run pms-api --config config.local.live-soak.yaml
+   ```
+
    For process managers that cannot pass CLI args, set
-   `PMS_CONFIG_PATH=config.live-soak.yaml`.
-4. Confirm `/status` reports every active sensor as `running`, not `stale` or
+   `PMS_CONFIG_PATH=config.local.live-soak.yaml`.
+4. In another shell, start the runner explicitly. The `pms-api` command starts
+   the API control plane; it does not start the runner until an authenticated
+   `POST /run/start` succeeds.
+
+   ```bash
+   curl -X POST \
+     -H "Authorization: Bearer $PMS_API_TOKEN" \
+     http://127.0.0.1:8000/run/start
+   ```
+
+5. Confirm `/status` reports `running=true` and every active sensor as
+   `running`, not `stale` or
    `failed`. `MarketDataSensor` must have a fresh `last_signal_at`; a runner
    process that is alive but has stale market-data signals is not a valid soak.
-5. Confirm `/strategies` shows the intended active strategy. Use
+6. Confirm `/strategies` shows the intended active strategy. Use
    `paper_canary_v1` when the goal is to verify live-data -> controller ->
    paper-actuator plumbing. Use the real default strategy only after its
    required factors are populated; 0 decisions from missing factors is not a
    market signal. `/status.strategy` is only a legacy display fallback; an
    empty or versionless `/strategies` response blocks a final GO report.
-6. Confirm `/trades`, `/positions`, and evaluator metrics update when the
+7. Confirm `/trades`, `/positions`, and evaluator metrics update when the
    selected strategy emits paper decisions.
-7. Review order notional, slippage, rejected orders, and portfolio exposure.
-8. Keep `live_trading_enabled=false` until the 30-day soak and compliance
+
+   For H1 FLB runtime smoke, capture `/status`, `/readiness`, `/strategies`,
+   `/markets`, `/decisions`, `/trades`, `/positions`, and `/metrics` JSON
+   snapshots while the runner is still running, then validate the snapshots
+   with the H1 checker:
+
+   ```bash
+   uv run python scripts/check_h1_flb_smoke.py \
+     --status-json "$H1_FLB_EVIDENCE_DIR/status.json" \
+     --readiness-json "$H1_FLB_EVIDENCE_DIR/readiness.json" \
+     --strategies-json "$H1_FLB_EVIDENCE_DIR/strategies.json" \
+     --markets-json "$H1_FLB_EVIDENCE_DIR/markets.json" \
+     --decisions-json "$H1_FLB_EVIDENCE_DIR/decisions.json" \
+     --trades-json "$H1_FLB_EVIDENCE_DIR/trades.json" \
+     --positions-json "$H1_FLB_EVIDENCE_DIR/positions.json" \
+     --metrics-json "$H1_FLB_EVIDENCE_DIR/metrics.json" \
+     --min-decisions 1 \
+     --min-trades 1 \
+     --min-positions 1
+   ```
+
+   The H1 FLB runtime smoke is plumbing evidence only; it does not satisfy the
+   30-day paper-soak GO gate.
+8. Review order notional, slippage, rejected orders, and portfolio exposure.
+9. Keep `live_trading_enabled=false` until the 30-day soak and compliance
    checklist are accepted.
-9. Ratify the strategic exit criteria (the kill plan) defined in
+10. Ratify the strategic exit criteria (the kill plan) defined in
    [live-exit-criteria.md](live-exit-criteria.md) **before** the first live
    order. Do not flip `live_trading_enabled=true` until
    `live_exit_criteria_ratified_by` and `live_exit_criteria_ratified_at` are
@@ -69,6 +212,7 @@ exposure cap.
 Generate the daily soak report after each paper run:
 
 ```bash
+export PMS_API_TOKEN="<load from operator secret store>"
 uv run python scripts/paper_report.py --date 2026-05-03
 ```
 
@@ -76,8 +220,10 @@ Reports are written under `docs/paper-reports/YYYY-MM-DD.md` by default for
 daily review. The final LIVE go/no-go report must instead be regenerated at the
 exact private launch path referenced by `live_paper_soak_report_path`. Use
 `--output` for that final artifact and `--dry-run` to print the report in CI or
-during review. Add `--require-go` for the machine-checkable paper-soak gate; it
-returns exit code 1 until every gate row passes:
+during review. `scripts/paper_report.py` reads `PMS_API_TOKEN` from the same
+environment as `pms-api` and sends it as a bearer token when polling protected
+paper API endpoints. Add `--require-go` for the machine-checkable paper-soak
+gate; it returns exit code 1 until every gate row passes:
 
 ```bash
 export PAPER_SOAK_REPORT_DATE="$(date -u +%F)"  # use the completed soak report date
@@ -91,10 +237,15 @@ uv run python scripts/paper_report.py \
   --require-go
 ```
 
+`scripts/paper_report.py --require-go` also fetches `/readiness` and records a
+NO-GO risk event unless readiness status is `ready` and every check is `ready`
+or `disabled`.
+
 Persisted report files include a `Report Provenance` section with
-`artifact_mode` set to `persisted` and a parseable `generated_at` timestamp.
-Dry-run output is marked `dry_run` and is rejected by true LIVE validation even
-if redirected into a Markdown file.
+`artifact_mode` set to `persisted`, a parseable `generated_at` timestamp, the
+exact `output_path`, and `input_snapshot_sha256` for the canonical API snapshot
+used to compute the report. Dry-run output is marked `dry_run` and is rejected
+by true LIVE validation even if redirected into a Markdown file.
 The final `--require-go` report date must not be in the future; the report
 generator refuses future-dated final GO artifacts, and LIVE validation rejects
 any future-dated paper-soak report before startup. LIVE validation also rejects
@@ -136,12 +287,17 @@ book hash, observed book token id, submitted decision token id and outcome,
 book age, quote source, factor snapshot hash, spread, source signal timestamp,
 and market-implied / mid-quote / last-trade baseline probabilities, plus
 `category_prior_baseline_prob_estimate` when the signal supplies a calibrated
-decision-time prior. Configure `controller.category_prior_observations_path`
+decision-time prior. Baseline probability fields are in the final evaluator's
+YES-outcome coordinate (`baseline_probability_coordinate: YES`); for NO
+orders, use `decision_outcome_market_implied_prob_estimate` when checking the
+traded token's implied probability. Configure
+`controller.category_prior_observations_path`
 to load that prior from a historical resolution CSV export with columns
 `market_id,category,yes_payout,no_payout,resolved_at`. Startup fails closed if
 the file is missing, has duplicate `market_id` rows, or contains price-like
-payouts such as `0.99,0.01`; only exact settled vectors `1,0` / `0,1` are
-scored, while `0.5,0.5` refund rows are skipped. The loader feeds
+payouts such as `0.99,0.01`; Decimal-equivalent settled vectors such as
+`1,0`, `1.0,0.0`, `0,1`, and `0.0,1.0` are scored, while `0.5,0.5` refund
+rows are skipped. The loader feeds
 `pms.controller.baselines.CategoryPriorBaselineEstimator`, which filters out
 observations resolved at or after the signal timestamp and falls back from
 category to global only when the configured sample gates are met. Resolved
@@ -154,17 +310,24 @@ artifact and rejects files with fewer resolved rows than
 fingerprint binds the staged CSV contents, so replacing the category-prior
 artifact after preflight invalidates the launch artifact.
 
-For H1 FLB runs, configure `strategies.flb_calibration_path` only after a
-warehouse model artifact exists. The CSV schema is
-`signal_name,probability_estimate,sample_count,source_label`, and it must
-contain both `longshot_yes_overpriced_buy_no` and
-`favorite_yes_underpriced_buy_yes`. Startup fails closed when either signal is
-missing, `sample_count < strategies.flb_min_calibration_samples`, or the
-probability is outside `(0, 1)`. When configured, FLB uses the artifact
+The launch paper-soak config (`config.live-soak.yaml`) is bound to H1 FLB and
+requires `controller.category_prior_observations_path` and
+`strategies.flb_calibration_path` to point at staged warehouse artifacts. The
+FLB CSV schema is
+`signal_name,probability_estimate,sample_count,source_label`, and the same
+directory must contain the required
+`flb-calibration.csv.provenance.json` sidecar. The CSV must contain both
+`longshot_yes_overpriced_buy_no` and `favorite_yes_underpriced_buy_yes`.
+Startup fails closed when either signal is missing,
+`sample_count < strategies.flb_min_calibration_samples`, the probability is
+outside `(0, 1)`, or the provenance sidecar does not bind the CSV to the
+warehouse source counts and hash. When configured, FLB uses the artifact
 probability and suppresses signals whose net edge is below `min_expected_edge`;
-when null, the old `limit_price + min_expected_edge` placeholder remains
-paper-plumbing only. Net edge subtracts `strategies.flb_entry_execution_cost_bps`
-and the configured `strategies.flb_fee_rate` fee estimate before sizing.
+do not run the launch soak with a null FLB calibration path. Net edge subtracts
+`strategies.flb_entry_execution_cost_bps`
+and the configured `strategies.flb_fee_rate` fee estimate before sizing. Keep
+the static fee estimate conservative until per-market fee telemetry is wired;
+Polymarket fees are market/category specific and queryable per market.
 `pms-live preflight` validates this artifact before it writes a credentialed
 preflight JSON, so a missing or malformed FLB model cannot be discovered only
 after deploy startup. The credentialed preflight fingerprint also binds the
@@ -176,20 +339,63 @@ strategies:
   flb_calibration_path: /secure/pms/flb-calibration.csv
   flb_min_calibration_samples: 100
   flb_entry_execution_cost_bps: 15.0
-  flb_fee_rate: 0.04
+  flb_fee_rate: 0.07
 ```
 
 Replace the static cost fields with paper/live telemetry before promotion.
 
-Generate the artifact from the strict warehouse resolution export with:
+Generate the local PAPER artifact from the strict warehouse resolution export
+with the commands below. The checked-in Dune SQL template lives at
+`docs/research/flb_polymarket_resolved_binary_dune.sql`; the Dune API key is a
+credential, but the exported CSV and generated calibration CSV are non-secret
+launch artifacts. The exporter validates the downloaded CSV with the same
+strict warehouse loader as `scripts/flb_data_feasibility.py` and refuses to
+publish an under-sampled launch export unless `--allow-under-sampled` is
+explicitly passed for diagnostics. These artifact generators also reject output
+paths inside the repo working tree:
 
 ```bash
+export DUNE_API_KEY="<load from operator secret store>"
+uv run python scripts/export_flb_warehouse_from_dune.py \
+  --output "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
+  --performance large
 uv run python scripts/flb_data_feasibility.py \
   --source warehouse-csv \
-  --input /secure/pms/polymarket_resolved_binary.csv \
-  --output /secure/pms/flb-feasibility.md \
-  --csv /secure/pms/flb-deciles.csv \
-  --calibration-csv /secure/pms/flb-calibration.csv
+  --input "$PMS_SECURE_DIR/polymarket_resolved_binary.csv" \
+  --output "$PMS_SECURE_DIR/flb-feasibility.md" \
+  --csv "$PMS_SECURE_DIR/flb-deciles.csv" \
+  --calibration-csv "$PMS_SECURE_DIR/flb-calibration.csv" \
+  --calibration-source-label warehouse-flb-v1 \
+  --calibration-provenance-json \
+    "$PMS_SECURE_DIR/flb-calibration.csv.provenance.json"
+```
+
+Generate the required local category-prior artifact that
+`scripts/prepare_local_paper_soak_config.py` wires into
+`config.local.live-soak.yaml`:
+
+```bash
+uv run python scripts/export_category_prior_observations.py \
+  --output "$PMS_SECURE_DIR/category-prior-observations.csv" \
+  --min-observations 100
+```
+
+For Fly/LIVE volume staging, keep the same artifact filenames under
+`/secure/pms`, including `/secure/pms/category-prior-observations.csv`,
+`/secure/pms/flb-calibration.csv`, and
+`/secure/pms/flb-calibration.csv.provenance.json`.
+
+Before starting the paper-soak API, run the local artifact check. It uses the
+same FLB calibration and category-prior CSV loaders as runtime
+startup, rejects launch artifacts staged inside a repo working tree, and
+verifies each configured private artifact parent before the API process gets as
+far as `Runner(...)` construction. A missing, malformed, in-tree, or
+permissively staged launch artifact fails here instead of during paper-soak
+startup:
+
+```bash
+uv run python scripts/check_paper_soak_artifacts.py \
+  --config config.local.live-soak.yaml
 ```
 
 When using research backtests to justify a live rollout, do not leave the
@@ -199,32 +405,72 @@ paper/live telemetry and include both `displayed_depth_fill_ratio` and
 eligibility, so tight limits that would drift out of reach do not appear as
 free fills in promotion reports.
 
+First export strict PAPER execution CSVs from the PMS API. The exporter reads
+`/decisions` and `/trades`, computes filled-row slippage and latency from
+decision/trade timestamps and prices, and fails closed when launch-critical
+fields such as explicit execution PnL or adverse-selection evidence are absent:
+
+```bash
+uv run python scripts/export_paper_execution_from_api.py \
+  --execution-output /secure/pms/paper-execution-export.csv \
+  --telemetry-output /secure/pms/paper-execution-telemetry.csv \
+  --strategy-id h1_flb \
+  --strategy-version-id <h1-flb-version-id> \
+  --require-adverse-selection
+```
+
+Both outputs must live outside the repo in a private owner-writable directory.
+Use `--decisions-json` and `--trades-json` only for captured API payload
+replays; final launch artifacts should be generated against the completed PAPER
+soak API snapshot. Keep `--strategy-id` and `--strategy-version-id` pinned to
+the final H1 active strategy version so canary or rehearsal decisions cannot
+enter the execution-model or paper/backtest-diff evidence.
+
 Generate the execution-model artifact from paper/live telemetry with:
 
 ```bash
 uv run python scripts/execution_model_from_telemetry.py \
   --input /secure/pms/paper-execution-telemetry.csv \
   --output /secure/pms/execution-model.json \
-  --fee-rate 0.04 \
+  --fee-rate 0.07 \
   --staleness-ms 120000 \
   --displayed-depth-fill-ratio 0.75 \
   --require-adverse-selection \
-  --min-samples 30
+  --min-samples 30 \
+  --strategy-id h1_flb \
+  --strategy-version-id <h1-flb-version-id>
 ```
 
-The telemetry CSV must contain `slippage_bps` and `latency_ms`; live-promotion
-artifacts should also include `adverse_selection_bps`. The JSON output is the
-`execution_model` object to embed in the research backtest spec, plus telemetry
-sample metadata (`min_samples`, `telemetry_sample_count`,
-`adverse_selection_sample_count`, and `require_adverse_selection`). Stage the
-same artifact at `live_execution_model_path`; true LIVE validation and
-credentialed preflight reject missing artifacts, static calibration sources,
-profiles with no positive `adverse_selection_bps`, artifacts without the sample
-contract, or sample contracts below the LIVE floor of 10 observations, and the
-preflight fingerprint binds the artifact contents.
+The telemetry CSV must contain `slippage_bps`, `latency_ms`, `strategy_id`,
+and `strategy_version_id`; live-promotion artifacts should also include
+`adverse_selection_bps`. When `--strategy-id` and `--strategy-version-id` are
+provided, the model builder rejects telemetry rows that are missing those
+strategy columns or whose row-level identity does not match the supplied H1
+scope. The JSON output is the `execution_model` object to embed in the research
+backtest spec, plus telemetry sample metadata (`min_samples`,
+`telemetry_sample_count`, `adverse_selection_sample_count`, and
+`require_adverse_selection`), `input_csv_sha256` for the exact telemetry CSV
+bytes, and `strategy_evidence` matching the final H1 active strategy version.
+Stage the same artifact at
+`live_execution_model_path`; true LIVE validation and credentialed preflight
+reject missing artifacts, static calibration sources, profiles with no positive
+`adverse_selection_bps`, artifacts without the sample contract, sample
+contracts below the LIVE floor of 10 observations, artifacts without the input
+CSV hash, or strategy-mismatched model artifacts, and the preflight fingerprint
+binds the artifact contents.
 
 Before treating a research backtest as launch evidence, compare the paper
 execution export against the matching backtest replay export:
+
+```bash
+uv run python scripts/export_backtest_execution_from_db.py \
+  --run-id <backtest-run-id> \
+  --output /secure/pms/backtest-execution-export.csv
+```
+
+The exporter refuses to read execution rows from a queued, running, failed, or
+cancelled backtest run. Use the `run_id` for the completed replay that used the
+same telemetry-calibrated execution model staged for launch.
 
 ```bash
 uv run python scripts/paper_backtest_execution_diff.py \
@@ -239,21 +485,44 @@ uv run python scripts/paper_backtest_execution_diff.py \
   --require-pass
 ```
 
-Both CSVs must contain `decision_id`, `market_id`, `status`, `slippage_bps`,
-`pnl`, and `rejection_reason`. The diff fails on unmatched decision ids,
-fill/rejection status mismatches, thin matched samples, or threshold breaches.
-A failing artifact means the current execution model is not trusted enough for
-promotion. Stage the passing JSON at `live_paper_backtest_diff_path`; true LIVE
-validation and credentialed preflight require it and bind its contents into the
-preflight fingerprint.
+Both CSVs must contain `decision_id`, `strategy_id`, `strategy_version_id`,
+`market_id`, `status`, `slippage_bps`, `pnl`, and `rejection_reason`. The
+script rejects paper/backtest exports whose `strategy_id@strategy_version_id`
+sets differ, and the JSON output records that set as `strategy_evidence` plus
+`input_csv_sha256.paper` and `input_csv_sha256.backtest` for the exact source
+CSV bytes compared. The diff fails on unmatched decision ids, fill/rejection
+status mismatches, thin matched samples, or threshold breaches. A failing
+artifact means the current execution model is not trusted enough for promotion.
+Stage the passing JSON at `live_paper_backtest_diff_path`; true LIVE validation
+and credentialed preflight require it, require `strategy_evidence` to match the final paper-soak GO report's Summary `Strategy` row, require the input CSV hash
+provenance fields, and bind its contents into the preflight fingerprint. Final
+submission/preflight artifact validation also revalidates the paper-soak GO
+report and operator rehearsal PASS report content, not just their fingerprints.
+
+Before moving to credentialed preflight, run the credential-free LIVE
+submission artifact check against the config that carries the final private
+artifact paths:
+
+```bash
+uv run python scripts/check_live_submission_artifacts.py \
+  --config config.live-soak.yaml
+```
+
+This validates the paper-soak GO report, operator rehearsal PASS report,
+execution model, paper-vs-backtest diff, category-prior CSV, FLB calibration
+CSV, and FLB provenance sidecar with the same content validators used by LIVE
+preflight artifact binding. It does not read Polymarket credentials or contact
+the venue. Use `--json` for machine-readable evidence and treat any `FAIL`
+row as a launch-blocking artifact gap.
 
 ## Credential Setup
 
-Install the live SDK in the runtime environment. The committed paper-soak
-config enables the LLM forecaster, so paper-soak environments also install the
-LLM extra. The true LIVE template keeps `llm.enabled=false` so the first
-real-money path does not require a second provider secret. True LIVE validation
-always requires `py_clob_client_v2` to be importable before runner startup:
+Install the live SDK in the runtime environment. The committed paper-soak config
+keeps `llm.enabled: false`; H1 FLB does not use an LLM forecaster, so the first
+real-money path does not require a second provider secret. Keep installing the
+LLM extra in launch environments when you want preflight/runtime parity with
+operator opt-in LLM checks, but true LIVE validation always requires
+`py_clob_client_v2` to be importable before runner startup:
 
 ```bash
 uv sync --extra live --extra llm
@@ -331,9 +600,10 @@ cp config.live.yaml.example config.live.yaml
 `config.live.yaml` is ignored by git. Do not add Polymarket credential fields
 to it; credentials belong only in `local_secret_file` or the production secret
 manager. Config loading rejects non-null Polymarket credential fields before
-runtime validation. Keep the template's tight risk envelope unless a new
-paper-soak gate and operator ratification explicitly replace it. The template includes
-`secret_source: local_file`, `live_account_reconciliation_required: true`,
+runtime validation. Keep the template's tight risk envelope
+(`max_position_per_market=$1`, `max_exposure_per_risk_group=$1`) unless a new
+paper-soak gate and operator ratification explicitly replace it. The template
+includes `secret_source: local_file`, `live_account_reconciliation_required: true`,
 `live_exit_criteria_ratified_by`, and `live_compliance_jurisdiction`; do not
 remove those lines for LIVE. It also pins `time_in_force: IOC` for the initial
 real-money phase.
@@ -411,10 +681,14 @@ every required gate check: `soak_days`, `fills`, `fill_rate`,
 non-empty `Detail` cell, because the launch gate treats blank evidence and
 placeholder text such as `TODO` as an invalid report. The `strategy_evidence`
 detail must match the Summary `Strategy` row, so the report cannot mix a
-current strategy label with gate evidence from another run. The committed GO gate
-requires at least 10 simulated fills before the report can pass. Runtime LIVE
-validation also requires the generated `Baseline Evidence Coverage` and
-`Secondary Baseline Brier` sections: `market_implied`, `mid_quote`, and
+current strategy label with gate evidence from another run. Paper-only strategies
+such as `paper_canary_v1` cannot be final GO evidence. The committed GO gate
+requires at least 50 simulated fills before the report can pass.
+Runtime LIVE validation also requires the report provenance
+`input_snapshot_sha256` field so a hand-edited Markdown report cannot replace
+the API snapshot evidence used by `scripts/paper_report.py`.
+Runtime LIVE validation also requires the generated `Baseline Evidence Coverage`
+and `Secondary Baseline Brier` sections: `market_implied`, `mid_quote`, and
 `category_prior` coverage must be complete over the reported decision set, and
 every coverage row must use that same reported-decision denominator. Every
 baseline source label must be concrete, non-placeholder, lowercase `snake_case`
@@ -619,12 +893,14 @@ than accepting unknown or non-finite cash evidence.
 `risk.max_total_exposure` value, so a passing preflight and the actual LIVE
 startup reconcile against the same cash budget.
 
-`--skip-venue` is only for local config/debugging when credentials or venue
-network access are unavailable. It intentionally produces an incomplete
-preflight result and nonzero CLI exit. If `--output` is used with
-`--skip-venue`, the artifact is marked `artifact_mode: incomplete_preflight`
-and `final_go_no_go_valid: false`. A final go/no-go preflight must include the
-venue check.
+`--skip-credentials` is only for local non-secret readiness audits: it fills
+diagnostic placeholder secrets so config, artifact, strategy, database, and
+market-data checks can still surface non-credential blockers. It intentionally
+skips venue reconciliation, returns a nonzero CLI exit, and can only write
+`artifact_mode: incomplete_preflight` with `final_go_no_go_valid: false`.
+`--skip-venue` is likewise only for local config/debugging when venue network
+access is unavailable. A final go/no-go preflight must use real credentials and
+must include the venue check.
 
 ## Operator Approval Gate
 

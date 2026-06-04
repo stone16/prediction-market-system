@@ -33,7 +33,11 @@ def _load_symbol(module_name: str, symbol_name: str) -> Any:
     return getattr(module, symbol_name)
 
 
-def _signal(*, yes_price: float = 0.4) -> MarketSignal:
+def _signal(
+    *,
+    yes_price: float = 0.4,
+    external_signal: dict[str, Any] | None = None,
+) -> MarketSignal:
     return MarketSignal(
         market_id="market-runtime-contract",
         token_id="yes-token",
@@ -46,7 +50,9 @@ def _signal(*, yes_price: float = 0.4) -> MarketSignal:
             "bids": [{"price": 0.39, "size": 10.0}],
             "asks": [{"price": 0.41, "size": 10.0}],
         },
-        external_signal={"fair_value": 0.58},
+        external_signal=(
+            external_signal if external_signal is not None else {"fair_value": 0.58}
+        ),
         fetched_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
         market_status="open",
     )
@@ -185,6 +191,7 @@ async def test_controller_pipeline_uses_strategy_factor_composition_not_forecast
     assert decision.expected_edge == pytest.approx(0.32)
     assert opportunity.expected_edge == pytest.approx(0.32)
     assert opportunity.selected_factor_values == {
+        "orderbook_imbalance": pytest.approx(0.0),
         "yes_price": pytest.approx(0.4),
         "rules": pytest.approx(0.10),
         "llm": pytest.approx(0.90),
@@ -204,6 +211,14 @@ async def test_controller_pipeline_uses_strategy_factor_composition_not_forecast
         "traded_probability": pytest.approx(0.72),
         "traded_price": pytest.approx(0.4),
         "traded_edge": pytest.approx(0.32),
+        "gross_edge": pytest.approx(0.32),
+        "spread_bps_at_decision": 500,
+        "spread_edge": pytest.approx(0.02),
+        "fee_rate": pytest.approx(0.07),
+        "fee_edge": pytest.approx(0.042),
+        "max_slippage_bps": 50,
+        "slippage_edge": pytest.approx(0.002),
+        "net_edge_after_costs": pytest.approx(0.256),
     }
     assert factor_reader.calls == [
         {
@@ -214,6 +229,45 @@ async def test_controller_pipeline_uses_strategy_factor_composition_not_forecast
             "strategy_version_id": "alpha-v1",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_controller_uses_signal_fee_rate_bps_for_decision_cost_evidence() -> None:
+    factor_snapshot_cls = _load_symbol("pms.controller.factor_snapshot", "FactorSnapshot")
+    strategy = _active_strategy(
+        factor_composition=(
+            _step("snapshot_probability", role="runtime_probability"),
+        ),
+        forecaster_names=("rules",),
+    )
+    factor_reader = RecordingFactorReader(
+        factor_snapshot_cls(
+            values={("snapshot_probability", ""): 0.72},
+            missing_factors=(),
+            snapshot_hash="snapshot-72",
+        )
+    )
+    pipeline = ControllerPipeline(
+        strategy=strategy,
+        factor_reader=factor_reader,
+        forecasters=(StaticForecaster(0.10),),
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0)),
+    )
+
+    emission = await pipeline.on_signal(
+        _signal(external_signal={"fair_value": 0.58, "fee_rate_bps": "300"}),
+        portfolio=_portfolio(),
+    )
+
+    assert emission is not None
+    opportunity, _ = emission
+    assert opportunity.composition_trace["fee_rate"] == pytest.approx(0.03)
+    assert opportunity.composition_trace["fee_edge"] == pytest.approx(0.018)
+    assert opportunity.composition_trace["net_edge_after_costs"] == pytest.approx(
+        0.28
+    )
 
 
 @pytest.mark.asyncio
@@ -262,11 +316,16 @@ def test_controller_pipeline_factory_passes_strategy_and_factor_reader() -> None
         factor_snapshot_cls(values={}, missing_factors=(), snapshot_hash="snapshot")
     )
 
-    factory = factory_cls(factor_reader=factor_reader)
+    direct_book_reader = object()
+    factory = factory_cls(
+        factor_reader=factor_reader,
+        direct_book_reader=direct_book_reader,
+    )
     pipeline = factory.build(strategy)
 
     assert pipeline.strategy == strategy
     assert pipeline.factor_reader is factor_reader
+    assert pipeline.direct_book_reader is direct_book_reader
 
 
 def test_snapshot_hash_distinguishes_missing_factors_and_strategy_identity() -> None:

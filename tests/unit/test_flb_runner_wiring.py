@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
-from pms.config import PMSSettings, RiskSettings, StrategyRuntimeSettings
+from pms.config import (
+    ControllerSettings,
+    PMSSettings,
+    RiskSettings,
+    StrategyRuntimeSettings,
+)
 from pms.core.enums import RunMode
 from pms.runner import Runner
 from pms.strategies.flb import FlbAgent, FlbController, FlbStrategyModule, LiveFlbSource
@@ -91,6 +98,64 @@ def _settings() -> PMSSettings:
     )
 
 
+def _write_flb_calibration(
+    path: Path,
+    *,
+    longshot_probability: float = 0.99,
+) -> Path:
+    path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                (
+                    "longshot_yes_overpriced_buy_no,"
+                    f"{longshot_probability},150,warehouse-flb-v1"
+                ),
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    Path(f"{path}.provenance.json").write_text(
+        json.dumps(
+            {
+                "artifact_type": "flb_calibration_provenance",
+                "generated_by": "scripts/flb_data_feasibility.py",
+                "source": "warehouse-csv",
+                "generated_at": "2026-06-01T00:00:00+00:00",
+                "warehouse_csv_sha256": sha256(
+                    b"unit warehouse provenance fixture"
+                ).hexdigest(),
+                "warehouse_market_count": 301,
+                "warehouse_longshot_count": 150,
+                "warehouse_favorite_count": 151,
+                "calibration_csv_sha256": sha256(path.read_bytes()).hexdigest(),
+                "calibration_source_label": "warehouse-flb-v1",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_category_prior(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            [
+                "market_id,category,yes_payout,no_payout,resolved_at",
+                "m-1,politics,1,0,2026-01-01T00:00:00Z",
+                "m-2,politics,0,1,2026-01-02T00:00:00Z",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _market(**overrides: object) -> FlbMarketSnapshot:
     data = {
         "market_id": "market-flb-1",
@@ -160,6 +225,123 @@ def test_runner_builds_flb_strategy_module_with_live_components() -> None:
     assert module.strategy_version_id == "h1-flb-v1"
 
 
+def test_runner_rejects_configured_flb_calibration_without_provenance(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "flb-calibration.csv"
+    model_path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="FLB calibration provenance JSON"):
+        Runner(
+            config=PMSSettings(
+                mode=RunMode.PAPER,
+                risk=RiskSettings(max_position_per_market=5.0),
+                strategies=StrategyRuntimeSettings(
+                    flb_calibration_path=str(model_path),
+                ),
+            ),
+        )
+
+
+def test_runner_rejects_configured_flb_calibration_inside_working_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    artifact_dir = repo_dir / "private"
+    artifact_dir.mkdir(mode=0o700)
+    model_path = _write_flb_calibration(artifact_dir / "flb-calibration.csv")
+    monkeypatch.chdir(repo_dir)
+
+    with pytest.raises(ValueError, match="outside the working tree"):
+        Runner(
+            config=PMSSettings(
+                mode=RunMode.PAPER,
+                risk=RiskSettings(max_position_per_market=5.0),
+                strategies=StrategyRuntimeSettings(
+                    flb_calibration_path=str(model_path),
+                ),
+            ),
+        )
+
+
+def test_runner_rejects_configured_flb_calibration_permissive_parent(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "permissive"
+    artifact_dir.mkdir()
+    artifact_dir.chmod(0o755)
+    model_path = _write_flb_calibration(artifact_dir / "flb-calibration.csv")
+
+    with pytest.raises(ValueError, match="too permissive"):
+        Runner(
+            config=PMSSettings(
+                mode=RunMode.PAPER,
+                risk=RiskSettings(max_position_per_market=5.0),
+                strategies=StrategyRuntimeSettings(
+                    flb_calibration_path=str(model_path),
+                ),
+            ),
+        )
+
+
+def test_runner_rejects_configured_category_prior_inside_working_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    artifact_dir = repo_dir / "private"
+    artifact_dir.mkdir(mode=0o700)
+    category_prior_path = _write_category_prior(artifact_dir / "category-prior.csv")
+    monkeypatch.chdir(repo_dir)
+
+    with pytest.raises(ValueError, match="outside the working tree"):
+        Runner(
+            config=PMSSettings(
+                mode=RunMode.PAPER,
+                risk=RiskSettings(max_position_per_market=5.0),
+                controller=ControllerSettings(
+                    category_prior_observations_path=str(category_prior_path),
+                    category_prior_min_global_samples=2,
+                ),
+            ),
+        )
+
+
+def test_runner_rejects_configured_category_prior_permissive_parent(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "permissive"
+    artifact_dir.mkdir()
+    artifact_dir.chmod(0o755)
+    category_prior_path = _write_category_prior(artifact_dir / "category-prior.csv")
+
+    with pytest.raises(ValueError, match="too permissive"):
+        Runner(
+            config=PMSSettings(
+                mode=RunMode.PAPER,
+                risk=RiskSettings(max_position_per_market=5.0),
+                controller=ControllerSettings(
+                    category_prior_observations_path=str(category_prior_path),
+                    category_prior_min_global_samples=2,
+                ),
+            ),
+        )
+
+
 @pytest.mark.asyncio
 async def test_runner_calls_flb_module_without_live_capital() -> None:
     runner = Runner(config=_settings())
@@ -194,17 +376,7 @@ async def test_runner_calls_flb_module_without_live_capital() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_wires_configured_flb_calibration_model(tmp_path: Path) -> None:
-    model_path = tmp_path / "flb-calibration.csv"
-    model_path.write_text(
-        "\n".join(
-            (
-                "signal_name,probability_estimate,sample_count,source_label",
-                "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
-                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
-            )
-        ),
-        encoding="utf-8",
-    )
+    model_path = _write_flb_calibration(tmp_path / "flb-calibration.csv")
     runner = Runner(
         config=PMSSettings(
             mode=RunMode.PAPER,
@@ -232,16 +404,9 @@ async def test_runner_wires_configured_flb_calibration_model(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_runner_wires_configured_flb_entry_costs(tmp_path: Path) -> None:
-    model_path = tmp_path / "flb-calibration.csv"
-    model_path.write_text(
-        "\n".join(
-            (
-                "signal_name,probability_estimate,sample_count,source_label",
-                "longshot_yes_overpriced_buy_no,0.985,150,warehouse-flb-v1",
-                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
-            )
-        ),
-        encoding="utf-8",
+    model_path = _write_flb_calibration(
+        tmp_path / "flb-calibration.csv",
+        longshot_probability=0.985,
     )
     runner = Runner(
         config=PMSSettings(

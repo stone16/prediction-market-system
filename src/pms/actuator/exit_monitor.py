@@ -111,12 +111,7 @@ def build_exit_decision(
     position = exit_signal.position
     side = _opposing_side(position.side)
     limit_price = _limit_order_price(exit_signal.current_price)
-    notional = float(
-        max(
-            _decimal(limit_price) * _decimal(position.shares_held),
-            Decimal("0.01"),
-        )
-    )
+    notional = float(_decimal(limit_price) * _decimal(position.shares_held))
     decision_id = f"exit-{exit_signal.trigger}-{uuid4().hex}"
     outcome = _position_outcome(position, signal)
     return TradeDecision(
@@ -139,6 +134,7 @@ def build_exit_decision(
         limit_price=limit_price,
         outcome=outcome,
         model_id=f"position-exit:{exit_signal.trigger}",
+        risk_group_id=position.risk_group_id,
     )
 
 
@@ -175,6 +171,8 @@ def _limit_order_price(current_price: float) -> float:
 
 
 def _mark_price_for_position(position: Position, signal: MarketSignal) -> float | None:
+    if position.token_id is not None and signal.token_id is None:
+        return None
     bid = _best_book_price(signal.orderbook.get("bids"), side="bid")
     ask = _best_book_price(signal.orderbook.get("asks"), side="ask")
     if (

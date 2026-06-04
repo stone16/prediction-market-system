@@ -13,7 +13,7 @@ from pms.actuator.risk import RiskDecision
 from pms.api.app import create_app
 from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import RunMode, Side, TimeInForce
-from pms.core.models import Opportunity, Portfolio, TradeDecision
+from pms.core.models import Opportunity, Portfolio, Position, TradeDecision
 from pms.runner import Runner
 
 
@@ -32,7 +32,7 @@ class _StoredDecisionRow:
 class _DecisionStoreDouble:
     def __init__(self, row: _StoredDecisionRow | None) -> None:
         self.row = row
-        self.read_calls: list[tuple[int, str | None, bool]] = []
+        self.read_calls: list[tuple[int, int, str | None, bool, datetime | None]] = []
         self.get_calls: list[tuple[str, bool]] = []
         self.update_calls: list[tuple[str, str, str]] = []
 
@@ -40,10 +40,12 @@ class _DecisionStoreDouble:
         self,
         *,
         limit: int,
+        offset: int = 0,
         status: str | None = None,
         include_opportunity: bool = False,
+        until: datetime | None = None,
     ) -> list[_StoredDecisionRow]:
-        self.read_calls.append((limit, status, include_opportunity))
+        self.read_calls.append((limit, offset, status, include_opportunity, until))
         if self.row is None:
             return []
         if status is not None and self.row.status != status:
@@ -128,6 +130,8 @@ def _decision() -> TradeDecision:
         limit_price=0.41,
         action=Side.BUY.value,
         model_id="model-cp08",
+        risk_group_id="event:cp08",
+        spread_bps_at_decision=75,
     )
 
 
@@ -312,6 +316,92 @@ async def test_accept_decision_returns_422_with_risk_rule_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_accept_decision_rejects_when_capacity_fills_before_enqueue() -> None:
+    store = _DecisionStoreDouble(_stored_decision_row())
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            auto_migrate_default_v2=False,
+            risk=RiskSettings(
+                max_open_positions=1,
+                max_position_per_market=1_000.0,
+                max_total_exposure=10_000.0,
+            ),
+        )
+    )
+    dedup_store = _DedupStoreDouble(acquire_allowed=True)
+    runner.decision_store = cast(Any, store)
+    runner.portfolio = replace(
+        _portfolio(),
+        open_positions=[
+            Position(
+                market_id="market-existing",
+                token_id="token-existing-yes",
+                venue="polymarket",
+                side=Side.BUY.value,
+                shares_held=10.0,
+                avg_entry_price=0.5,
+                unrealized_pnl=0.0,
+                locked_usdc=5.0,
+            )
+        ],
+    )
+    runner.actuator_executor = cast(
+        Any,
+        SimpleNamespace(
+            risk=_RiskManagerDouble(),
+            dedup_store=dedup_store,
+        ),
+    )
+    app = create_app(runner, auto_start=False)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/decisions/decision-cp08/accept",
+            json={"factor_snapshot_hash": "snapshot-cp08"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "max_open_positions_capacity"}
+    assert dedup_store.acquire_calls == ["decision-cp08"]
+    assert dedup_store.release_calls == [("decision-cp08", "rejected")]
+    assert store.update_calls == [
+        ("decision-cp08", "pending", "accepted"),
+        ("decision-cp08", "accepted", "rejected"),
+    ]
+    assert runner._decision_queue.empty()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_accept_decision_rolls_back_when_enqueue_rejects_after_accept() -> None:
+    store = _DecisionStoreDouble(_stored_decision_row())
+    runner, dedup_store, enqueue = _runner(store)
+    enqueue.return_value = False
+    app = create_app(runner, auto_start=False)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/decisions/decision-cp08/accept",
+            json={"factor_snapshot_hash": "snapshot-cp08"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "max_open_positions_capacity"}
+    assert dedup_store.acquire_calls == ["decision-cp08"]
+    assert dedup_store.release_calls == [("decision-cp08", "rejected")]
+    assert store.update_calls == [
+        ("decision-cp08", "pending", "accepted"),
+        ("decision-cp08", "accepted", "rejected"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_get_decisions_include_opportunity_embeds_factor_payload() -> None:
     store = _DecisionStoreDouble(_stored_decision_row())
     runner, _, _ = _runner(store)
@@ -352,6 +442,8 @@ async def test_get_decisions_include_opportunity_embeds_factor_payload() -> None
             "expires_at": "2026-04-23T10:15:00+00:00",
             "forecaster": "model-cp08",
             "kelly_size": 25.0,
+            "spread_bps_at_decision": 75,
+            "risk_group_id": "event:cp08",
             "decision_evidence": {
                 "book_hash": "book-hash-cp08",
                 "quote_source": "postgres_snapshot",
@@ -375,4 +467,4 @@ async def test_get_decisions_include_opportunity_embeds_factor_payload() -> None
             },
         }
     ]
-    assert store.read_calls == [(1, None, True)]
+    assert store.read_calls == [(1, 0, None, True, None)]

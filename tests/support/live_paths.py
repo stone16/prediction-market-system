@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 from pms.config import PMSSettings
@@ -29,11 +30,16 @@ def make_live_report_paths(*, prefix: str = "pms-live-reports-") -> tuple[str, s
     root.chmod(0o700)
     paper_report_path = root / "paper-soak-go-report.md"
     rehearsal_report_path = root / "operator-rehearsal-pass-report.md"
+    generated_at = datetime.now(tz=UTC) - timedelta(seconds=60)
+    generated_at_line = f"| generated_at | {generated_at.isoformat()} |"
     paper_report_text = (
         ROOT / "tests" / "fixtures" / "paper_soak_go_report.md"
     ).read_text(encoding="utf-8")
     paper_report_path.write_text(
         paper_report_text.replace(
+            "| generated_at | 2026-05-25T00:00:00+00:00 |",
+            generated_at_line,
+        ).replace(
             "| output_path | docs/paper-reports/2026-05-25.md |",
             f"| output_path | {paper_report_path} |",
         ),
@@ -44,6 +50,9 @@ def make_live_report_paths(*, prefix: str = "pms-live-reports-") -> tuple[str, s
     ).read_text(encoding="utf-8")
     rehearsal_report_path.write_text(
         rehearsal_report_text.replace(
+            "| generated_at | 2026-05-25T00:00:00+00:00 |",
+            generated_at_line,
+        ).replace(
             "| output_path | docs/live/operator-rehearsal-report.md |",
             f"| output_path | {rehearsal_report_path} |",
         ),
@@ -65,6 +74,10 @@ def make_live_execution_model_path(
                 "generated_by": "scripts/execution_model_from_telemetry.py",
                 "artifact_mode": "telemetry_execution_model",
                 "generated_at": datetime.now(tz=UTC).isoformat(),
+                "strategy_evidence": (
+                    "default@"
+                    "4d326514fa853b9278502ad43750b9648ac8f4f6ad8685ba522b2a4aa5f47d25"
+                ),
                 "fee_rate": 0.04,
                 "slippage_bps": 6.0,
                 "latency_ms": 500.0,
@@ -76,6 +89,7 @@ def make_live_execution_model_path(
                 "price_invalidation_streak": 10,
                 "replay_window_ms": 86_400_000,
                 "calibration_source": "telemetry_calibrated",
+                "input_csv_sha256": "c" * 64,
                 "min_samples": 10,
                 "telemetry_sample_count": 10,
                 "adverse_selection_sample_count": 10,
@@ -102,6 +116,14 @@ def make_live_paper_backtest_diff_path(
                 "generated_by": "scripts/paper_backtest_execution_diff.py",
                 "artifact_mode": "paper_backtest_execution_diff",
                 "generated_at": datetime.now(tz=UTC).isoformat(),
+                "strategy_evidence": (
+                    "default@"
+                    "4d326514fa853b9278502ad43750b9648ac8f4f6ad8685ba522b2a4aa5f47d25"
+                ),
+                "input_csv_sha256": {
+                    "paper": "a" * 64,
+                    "backtest": "b" * 64,
+                },
                 "final_go_no_go_valid": True,
                 "thresholds": {
                     "min_matched_decisions": 10,
@@ -177,6 +199,28 @@ def make_live_flb_calibration_path(
         + "\n",
         encoding="utf-8",
     )
+    provenance_path = Path(f"{path}.provenance.json")
+    provenance_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "flb_calibration_provenance",
+                "generated_by": "scripts/flb_data_feasibility.py",
+                "source": "warehouse-csv",
+                "generated_at": "2026-06-01T00:00:00+00:00",
+                "warehouse_csv_sha256": sha256(
+                    b"unit warehouse provenance fixture"
+                ).hexdigest(),
+                "warehouse_market_count": 301,
+                "warehouse_longshot_count": 150,
+                "warehouse_favorite_count": 151,
+                "calibration_csv_sha256": sha256(path.read_bytes()).hexdigest(),
+                "calibration_source_label": "warehouse-flb-v1",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return str(path)
 
 
@@ -227,6 +271,7 @@ def make_live_preflight_artifact_path(
                 "artifact_mode": "credentialed_preflight",
                 "final_go_no_go_valid": True,
                 "skip_venue": False,
+                "skip_credentials": False,
                 "config_path": "config.live.yaml",
                 "database_url_override_used": False,
                 "settings_fingerprint": live_preflight_settings_fingerprint(settings),

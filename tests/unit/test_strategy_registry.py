@@ -271,6 +271,44 @@ async def test_set_active_rejects_version_payload_that_does_not_match_id() -> No
 
 
 @pytest.mark.asyncio
+async def test_archive_strategy_clears_active_version_and_notifies_callbacks() -> None:
+    connection = FakeConnection()
+    observed: list[str] = []
+
+    async def on_strategy_change() -> None:
+        observed.append("changed")
+
+    registry = PostgresStrategyRegistry(FakePool(connection))
+    registry.register_change_callback(on_strategy_change)
+
+    await registry.archive_strategy("default")
+
+    assert len(connection.execute_calls) == 1
+    query, args = connection.execute_calls[0]
+    assert "archived = TRUE" in query
+    assert "active_version_id = NULL" in query
+    assert args == ("default",)
+    assert observed == ["changed"]
+
+
+@pytest.mark.asyncio
+async def test_archive_strategy_raises_without_notifying_when_target_missing() -> None:
+    connection = FakeConnection(execute_results=["UPDATE 0"])
+    observed: list[str] = []
+
+    async def on_strategy_change() -> None:
+        observed.append("changed")
+
+    registry = PostgresStrategyRegistry(FakePool(connection))
+    registry.register_change_callback(on_strategy_change)
+
+    with pytest.raises(LookupError, match="No strategies row matched archive target"):
+        await registry.archive_strategy("missing")
+
+    assert observed == []
+
+
+@pytest.mark.asyncio
 async def test_get_by_id_round_trips_json_string_and_handles_missing_rows() -> None:
     strategy = _strategy()
     connection = FakeConnection(
@@ -349,6 +387,7 @@ async def test_list_active_strategies_returns_full_projection_rows() -> None:
             market_selection=strategy.market_selection,
         )
     ]
+    assert "strategies.archived IS NOT TRUE" in connection.fetch_calls[0][0]
 
 
 @pytest.mark.asyncio
@@ -403,6 +442,7 @@ async def test_list_market_selections_returns_projection_rows_for_active_version
     ]
     assert len(connection.fetch_calls) == 1
     assert "active_version_id IS NOT NULL" in connection.fetch_calls[0][0]
+    assert "strategies.archived IS NOT TRUE" in connection.fetch_calls[0][0]
 
 
 def test_ensure_utc_rejects_non_datetime_values() -> None:
@@ -492,6 +532,8 @@ def test_strategy_from_config_json_validates_nested_fields() -> None:
 
 def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None:
     payload = json.loads(serialize_strategy_config_json(*_strategy().snapshot()))
+    assert "yes_price_min" not in payload["market_selection"]
+    assert "yes_price_max" not in payload["market_selection"]
     del payload["market_selection"]["spread_max_bps"]
     del payload["market_selection"]["depth_min_usdc"]
     payload["calibration"] = {}
@@ -501,6 +543,8 @@ def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None
     assert selection.spread_max_bps == 100.0
     assert selection.depth_min_usdc == 250.0
     assert selection.liquidity_min_usdc is None
+    assert selection.yes_price_min is None
+    assert selection.yes_price_max is None
     assert selection.accepting_orders is True
     assert calibration.enabled is True
     assert calibration.shrinkage_factor == 0.35
@@ -519,6 +563,8 @@ def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None
             "spread_max_bps": 80.0,
             "depth_min_usdc": 300.0,
             "liquidity_min_usdc": 500.0,
+            "yes_price_min": 0.02,
+            "yes_price_max": 0.98,
             "accepting_orders": False,
         }
     )
@@ -529,6 +575,8 @@ def test_strategy_config_json_loads_calibration_and_selection_defaults() -> None
     assert selection.spread_max_bps == 80.0
     assert selection.depth_min_usdc == 300.0
     assert selection.liquidity_min_usdc == 500.0
+    assert selection.yes_price_min == 0.02
+    assert selection.yes_price_max == 0.98
     assert selection.accepting_orders is False
     assert calibration.shrinkage_factor == 0.2
     assert calibration.shrinkage_bias == -0.1

@@ -177,6 +177,27 @@ async def test_paper_fill_consumes_multiple_levels_vwap() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paper_sell_preserves_requested_notional_when_fill_price_differs() -> None:
+    decision = _decision(notional_usdc=10.0, limit_price=0.45)
+    object.__setattr__(decision, "side", "SELL")
+    object.__setattr__(decision, "action", "SELL")
+    actuator = PaperActuator(
+        orderbooks={
+            "token-yes": {
+                "bids": [{"price": 0.50, "size": 30.0}],
+                "asks": [{"price": 0.52, "size": 30.0}],
+            }
+        }
+    )
+
+    state = await actuator.execute(decision, _portfolio())
+
+    assert state.requested_notional_usdc == pytest.approx(10.0)
+    assert state.filled_quantity == pytest.approx(10.0 / 0.45)
+    assert state.filled_notional_usdc == pytest.approx((10.0 / 0.45) * 0.50)
+
+
+@pytest.mark.asyncio
 async def test_paper_actuator_rejects_insufficient_notional_depth() -> None:
     actuator = PaperActuator(
         orderbooks={
@@ -344,3 +365,31 @@ async def test_paper_sell_slippage_band_admits_bid_below_limit() -> None:
     )
 
     assert state.fill_price == pytest.approx(0.298)
+
+
+@pytest.mark.asyncio
+async def test_paper_sell_notional_represents_limit_valued_target_quantity() -> None:
+    target_quantity = 4.0
+    limit_price = 0.125
+    actuator = PaperActuator(
+        orderbooks={
+            "token-yes": {
+                "bids": [{"price": 0.40, "size": 1_000.0}],
+                "asks": [{"price": 0.41, "size": 1_000.0}],
+            }
+        }
+    )
+
+    state = await actuator.execute(
+        _decision_with_slippage(
+            limit_price=limit_price,
+            max_slippage_bps=0,
+            side="SELL",
+            notional_usdc=target_quantity * limit_price,
+        ),
+        _portfolio(),
+    )
+
+    assert state.fill_price == pytest.approx(0.40)
+    assert state.filled_quantity == pytest.approx(target_quantity)
+    assert state.filled_notional_usdc == pytest.approx(target_quantity * 0.40)

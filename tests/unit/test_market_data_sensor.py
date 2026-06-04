@@ -11,6 +11,8 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 from pms.config import PMSSettings, SensorSettings
 from pms.core.enums import RunMode
@@ -108,6 +110,12 @@ class FakeWebSocket:
         return self._messages.pop(0)
 
 
+class ClosingSendWebSocket(FakeWebSocket):
+    async def send(self, payload: str) -> None:
+        del payload
+        raise ConnectionClosedError(None, Close(1000, ""))
+
+
 class FakeConnect:
     def __init__(self, websocket: Any) -> None:
         self.websocket = websocket
@@ -124,7 +132,7 @@ class HeartbeatWebSocket:
         self,
         messages: Sequence[str | bytes],
         *,
-        ping_outcomes: Sequence[float | None] | None = None,
+        ping_outcomes: Sequence[float | None | BaseException] | None = None,
         message_delays_s: Sequence[float] | None = None,
     ) -> None:
         self._messages = list(messages)
@@ -144,6 +152,8 @@ class HeartbeatWebSocket:
             min(self.ping_count, len(self._ping_outcomes) - 1)
         ]
         self.ping_count += 1
+        if isinstance(outcome, BaseException):
+            raise outcome
         future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
         if outcome is not None:
             future.set_result(outcome)
@@ -254,6 +264,8 @@ async def test_market_data_sensor_enriches_signals_with_market_risk_metadata() -
         "risk_group_id": "event:2028-us-presidential-election",
         "event_id": "2028-us-presidential-election",
         "category": "Politics",
+        "yes_token_id": "asset-election-risk-yes",
+        "no_token_id": "asset-election-risk",
     }
     sensor = MarketDataSensor(store=store)
 
@@ -274,6 +286,10 @@ async def test_market_data_sensor_enriches_signals_with_market_risk_metadata() -
     )
     assert signal.external_signal["event_id"] == "2028-us-presidential-election"
     assert signal.external_signal["category"] == "Politics"
+    assert signal.external_signal["yes_token_id"] == "asset-election-risk-yes"
+    assert signal.external_signal["no_token_id"] == "asset-election-risk"
+    assert signal.external_signal["signal_token_outcome"] == "NO"
+    assert isinstance(signal.external_signal["book_received_at"], str)
     store_mock.read_market_signal_metadata_mock.assert_awaited_once_with(
         "m-election-risk"
     )
@@ -303,6 +319,38 @@ async def test_market_data_sensor_retries_empty_market_risk_metadata_lookup() ->
 
     assert "risk_group_id" not in first.external_signal
     assert second.external_signal["risk_group_id"] == "category:Politics"
+    assert store_mock.read_market_signal_metadata_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_retries_incomplete_outcome_token_metadata_lookup() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.read_market_signal_metadata_mock.side_effect = [
+        {"category": "Politics"},
+        {
+            "category": "Politics",
+            "yes_token_id": "asset-late-metadata-yes",
+            "no_token_id": "asset-late-metadata-no",
+        },
+    ]
+    sensor = MarketDataSensor(store=store)
+    message = {
+        "event_type": "book",
+        "market": "m-late-token-metadata",
+        "asset_id": "asset-late-metadata-no",
+        "timestamp": "1757908892352",
+        "bids": [{"price": "0.48", "size": "12"}],
+        "asks": [{"price": "0.51", "size": "10"}],
+    }
+
+    first = await sensor._handle_book(message)
+    second = await sensor._handle_book(message)
+    await sensor.aclose()
+
+    assert first.external_signal["category"] == "Politics"
+    assert "signal_token_outcome" not in first.external_signal
+    assert second.external_signal["signal_token_outcome"] == "NO"
     assert store_mock.read_market_signal_metadata_mock.await_count == 2
 
 
@@ -397,6 +445,7 @@ async def test_market_data_sensor_bounds_websocket_close_timeout(
 
     assert signal.market_id == "m-close-timeout"
     assert captured_kwargs["close_timeout"] == 1.0
+    assert captured_kwargs["max_size"] == 8 * 1024 * 1024
     assert captured_kwargs["proxy"] is None
 
 
@@ -460,6 +509,137 @@ async def test_market_data_sensor_persists_last_trade_price_and_emits_signal(
     assert trade_signal.market_id == "m-trade"
     assert trade_signal.token_id == "asset-trade"
     assert trade_signal.yes_price == 0.456
+    assert trade_signal.external_signal["last_trade_price"] == 0.456
+    assert trade_signal.external_signal["fee_rate_bps"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_carries_last_trade_fee_rate_into_book_signal() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    sensor = MarketDataSensor(store=store)
+
+    trade_signals = await sensor._handle_message(
+        {
+            "event_type": "last_trade_price",
+            "market": "m-fee",
+            "asset_id": "asset-fee",
+            "price": "0.456",
+            "side": "BUY",
+            "size": "219.217767",
+            "fee_rate_bps": "300",
+            "timestamp": "1750428146322",
+        }
+    )
+    book_signals = await sensor._handle_message(
+        {
+            "event_type": "book",
+            "market": "m-fee",
+            "asset_id": "asset-fee",
+            "timestamp": "1757908892351",
+            "hash": "book-hash-fee",
+            "bids": [{"price": "0.48", "size": "30"}],
+            "asks": [{"price": "0.52", "size": "25"}],
+            "last_trade_price": "0.50",
+        }
+    )
+
+    assert trade_signals[0].external_signal["fee_rate_bps"] == 300.0
+    assert book_signals[0].external_signal["fee_rate_bps"] == 300.0
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_preserves_cached_fee_rate_on_trade_without_fee() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    sensor = MarketDataSensor(store=store)
+
+    await sensor._handle_message(
+        {
+            "event_type": "book",
+            "market": "m-trade-fee-cache",
+            "asset_id": "asset-trade-fee-cache",
+            "timestamp": "1757908892351",
+            "hash": "book-hash-fee-cache",
+            "bids": [{"price": "0.48", "size": "30"}],
+            "asks": [{"price": "0.52", "size": "25"}],
+            "fee_rate_bps": "300",
+        }
+    )
+    trade_signals = await sensor._handle_message(
+        {
+            "event_type": "last_trade_price",
+            "market": "m-trade-fee-cache",
+            "asset_id": "asset-trade-fee-cache",
+            "price": "0.456",
+            "side": "BUY",
+            "size": "219.217767",
+            "timestamp": "1750428146322",
+        }
+    )
+    await sensor.aclose()
+
+    assert trade_signals[0].external_signal["fee_rate_bps"] == 300.0
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_carries_last_trade_price_into_book_signal() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    sensor = MarketDataSensor(store=store)
+
+    trade_signals = await sensor._handle_message(
+        {
+            "event_type": "last_trade_price",
+            "market": "m-last-trade",
+            "asset_id": "asset-last-trade",
+            "price": "0.456",
+            "side": "BUY",
+            "size": "219.217767",
+            "timestamp": "1750428146322",
+        }
+    )
+    book_signals = await sensor._handle_message(
+        {
+            "event_type": "book",
+            "market": "m-last-trade",
+            "asset_id": "asset-last-trade",
+            "timestamp": "1757908892351",
+            "hash": "book-hash-last-trade",
+            "bids": [{"price": "0.48", "size": "30"}],
+            "asks": [{"price": "0.52", "size": "25"}],
+        }
+    )
+
+    assert trade_signals[0].external_signal["last_trade_price"] == 0.456
+    assert book_signals[0].external_signal["last_trade_price"] == 0.456
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_ignores_book_payload_last_trade_without_token_event() -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    sensor = MarketDataSensor(store=store)
+
+    book_signals = await sensor._handle_message(
+        {
+            "event_type": "book",
+            "market": "m-book-last-trade",
+            "asset_id": "yes-token",
+            "timestamp": "1757908892351",
+            "hash": "book-hash-last-trade",
+            "bids": [{"price": "0.09", "size": "150"}],
+            "asks": [{"price": "0.10", "size": "150"}],
+            "last_trade_price": "0.904",
+        }
+    )
+
+    assert book_signals[0].yes_price == pytest.approx(0.095)
+    assert "last_trade_price" not in book_signals[0].external_signal
 
 
 @pytest.mark.asyncio
@@ -518,6 +698,26 @@ async def test_market_data_sensor_dynamic_update_sends_subscribe_and_unsubscribe
         },
     ]
     assert sensor._subscribed_asset_ids == frozenset({"asset-b", "asset-c"})
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_accepts_subscription_update_when_socket_closes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sensor = MarketDataSensor(store=_store_mock(), asset_ids=["asset-a"])
+    fake_websocket = ClosingSendWebSocket([])
+    sensor._websocket = cast(Any, fake_websocket)
+    sensor._subscribed_asset_ids = frozenset({"asset-a"})
+
+    with caplog.at_level(logging.WARNING):
+        await sensor.update_subscription(["asset-b"])
+
+    assert sensor._asset_ids == ["asset-b"]
+    assert fake_websocket.closed is True
+    assert sensor._websocket is None
+    assert sensor._subscribed_asset_ids == frozenset()
+    assert "market data sensor websocket closed; reconnecting" in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
 
 
 @pytest.mark.asyncio
@@ -926,6 +1126,58 @@ async def test_market_data_sensor_retries_after_websocket_handshake_error(
 
 
 @pytest.mark.asyncio
+async def test_market_data_sensor_logs_expected_websocket_close_as_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    active_close = ConnectionClosedError(None, Close(1000, ""))
+    second_websocket = HeartbeatWebSocket(
+        [
+            json.dumps(
+                {
+                    "event_type": "book",
+                    "market": "m-active-close",
+                    "asset_id": "asset-active-close",
+                    "timestamp": "1757908892351",
+                    "hash": "book-reconnect",
+                    "bids": [{"price": "0.44", "size": "11"}],
+                    "asks": [{"price": "0.56", "size": "7"}],
+                    "last_trade_price": "0.45",
+                }
+            )
+        ],
+        ping_outcomes=[0.0],
+    )
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.connect",
+        ConnectSequence([active_close, second_websocket]),
+    )
+    sensor = MarketDataSensor(
+        store=store,
+        ws_url="ws://market-data.example.test",
+        asset_ids=["asset-active-close"],
+    )
+    sensor._INITIAL_BACKOFF_S = 0.0
+    sensor._heartbeat_interval_s = 1.0
+    iterator = cast(Any, sensor.__aiter__())
+
+    with caplog.at_level(logging.WARNING):
+        signal = await asyncio.wait_for(anext(iterator), timeout=0.5)
+
+    await asyncio.wait_for(iterator.aclose(), timeout=0.5)
+    await sensor.aclose()
+
+    assert signal.market_id == "m-active-close"
+    assert store_mock.write_book_snapshot_mock.await_count == 1
+    assert "market data sensor websocket closed; reconnecting" in caplog.text
+    assert "market data sensor receive loop failed" not in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
 async def test_market_data_sensor_reconnects_when_pong_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -974,6 +1226,63 @@ async def test_market_data_sensor_reconnects_when_pong_is_missing(
     snapshot = store_mock.write_book_snapshot_mock.await_args.args[0]
     assert snapshot.source == "reconnect"
     assert reconnect_signal.market_id == "m-pong"
+
+
+@pytest.mark.asyncio
+async def test_market_data_sensor_logs_heartbeat_connection_close_as_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.return_value = 1
+    first_websocket = HeartbeatWebSocket(
+        [],
+        ping_outcomes=[ConnectionClosedError(None, Close(1000, ""))],
+    )
+    second_websocket = HeartbeatWebSocket(
+        [
+            json.dumps(
+                {
+                    "event_type": "book",
+                    "market": "m-heartbeat-close",
+                    "asset_id": "asset-heartbeat-close",
+                    "timestamp": "1757908892351",
+                    "hash": "book-reconnect",
+                    "bids": [{"price": "0.44", "size": "11"}],
+                    "asks": [{"price": "0.56", "size": "7"}],
+                    "last_trade_price": "0.45",
+                }
+            )
+        ],
+        ping_outcomes=[0.0],
+    )
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.connect",
+        ConnectSequence([first_websocket, second_websocket]),
+    )
+    sensor = MarketDataSensor(
+        store=store,
+        ws_url="ws://market-data.example.test",
+        asset_ids=["asset-heartbeat-close"],
+    )
+    sensor._heartbeat_interval_s = 0.01
+    sensor._pong_timeout_s = 0.02
+    sensor._watchdog.timeout_s = 1.0
+    iterator = cast(Any, sensor.__aiter__())
+
+    with caplog.at_level(logging.WARNING):
+        reconnect_signal = await asyncio.wait_for(anext(iterator), timeout=0.5)
+
+    await iterator.aclose()
+    await sensor.aclose()
+
+    assert first_websocket.closed is True
+    assert store_mock.write_book_snapshot_mock.await_args is not None
+    assert reconnect_signal.market_id == "m-heartbeat-close"
+    assert "market data sensor websocket closed; reconnecting" in caplog.text
+    assert "market data sensor heartbeat failed" not in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
 
 
 @pytest.mark.asyncio
@@ -1248,5 +1557,6 @@ async def test_runner_builds_market_discovery_and_market_data_sensors_for_non_ba
     assert isinstance(sensors[0], MarketDiscoverySensor)
     assert isinstance(sensors[1], MarketDataSensor)
     assert sensors[1].max_reconnect_interval_s == 9.0
+    assert sensors[1].max_message_size_bytes == 8 * 1024 * 1024
     await sensors[0].aclose()
     await sensors[1].aclose()

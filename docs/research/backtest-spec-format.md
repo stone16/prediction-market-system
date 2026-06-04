@@ -272,11 +272,14 @@ uv run python scripts/paper_backtest_execution_diff.py \
   --require-pass
 ```
 
-The input CSV schema is `decision_id`, `market_id`, `status`, `slippage_bps`,
-`pnl`, and `rejection_reason`. The command compares matched decision ids,
-fill/rejection rates, average slippage, and total PnL. A nonzero exit with
-`--require-pass` means the sample is too thin or the execution model and paper
-fills are not aligned enough for promotion.
+The input CSV schema is `decision_id`, `strategy_id`, `strategy_version_id`,
+`market_id`, `status`, `slippage_bps`, `pnl`, and `rejection_reason`. The
+command rejects paper/backtest exports whose `strategy_id@strategy_version_id`
+sets differ, emits that set as `strategy_evidence`, and compares matched
+decision ids, fill/rejection rates, average slippage, and total PnL. A nonzero
+exit with `--require-pass` means the sample is too thin, strategy evidence does
+not match, or the execution model and paper fills are not aligned enough for
+promotion.
 
 ## Recalibrating from Live `/metrics`
 

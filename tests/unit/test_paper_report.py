@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import stat
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -11,10 +13,25 @@ import pytest
 from pms.config import RiskSettings
 from pms.core.enums import TimeInForce
 from pms.core.models import EvalRecord, TradeDecision
+from pms.metrics import (
+    LLM_BUDGET_EXHAUSTED_TOTAL_METRIC,
+    LLM_DAILY_COST_LIMIT_USDC_METRIC,
+    LLM_DAILY_COST_USDC_METRIC,
+    LLM_ESTIMATED_COST_USDC_TOTAL_METRIC,
+    SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC,
+    SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_ROUTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_SELECTED_TOTAL_METRIC,
+    SELECTION_FUNNEL_TRADED_TOTAL_METRIC,
+)
 from scripts.paper_report import (
+    ExecutionConcentration,
     PaperSoakGateConfig,
     PaperReportMetrics,
+    PaperReportProvenance,
     TradeCostBreakdown,
+    _fetch_api_list_pages,
     _fetch_api_payload,
     evaluate_paper_soak_gate,
     build_paper_report_diagnostics,
@@ -76,7 +93,11 @@ def test_paper_report_contains_all_gate_three_metrics() -> None:
 
     report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
 
-    assert "| Fills | 2 |" in report
+    assert "| Controller diagnostic sample | 9 | - |" in report
+    assert "| Decisions rejected |" not in report
+    assert "| Entry fills | 2 |" in report
+    assert "| Distinct traded markets | N/A | >= 3 by soak end |" in report
+    assert "| Max risk group fill share | N/A | <= 60% by soak end |" in report
     assert "| Today's P&L | +$1.25 |" in report
     assert "| Max exposure | $50.00 |" in report
     assert "| Brier score (14d rolling) | 0.18 | < 0.20 |" in report
@@ -116,7 +137,7 @@ def test_paper_report_escapes_freeform_table_values() -> None:
 
     assert "| Strategy | default\\|paper v1 | - |" in report
     assert "| 12\\|00 | bad trigger | operator saw \\| FAIL \\| text |" in report
-    assert "| decision\\|1 | market 1 | 12.0% | 1.0% | 11.0% |" in report
+    assert "| decision\\|1 | market 1 | 12.0% | 1.0% | 0.0% | 0.0% | 11.0% |" in report
     assert "| missing\\|required factor | 1 |" in report
     assert "| market\\|clamp 1 | 2 |" in report
 
@@ -136,12 +157,19 @@ def test_paper_soak_gate_passes_when_metrics_meet_go_live_thresholds() -> None:
 
     assert gate.ok is True
     assert all(check.ok for check in gate.checks)
+    assert gate.require_check("readiness").detail == (
+        "status=ready; eod_scheduler=disabled; event_loop=ready; "
+        "halt_subscriber=disabled; sensors=ready"
+    )
     assert gate.require_check("brier_improvement").detail == "0.0500 > 0.0000"
+    assert gate.require_check("distinct_markets").detail == "3 >= 3"
+    assert gate.require_check("distinct_risk_groups").detail == "3 >= 3"
 
 
 def test_paper_soak_gate_fails_missing_or_bad_production_metrics() -> None:
     metrics = _passing_gate_metrics(
         day_of_soak=4,
+        decisions_accepted=0,
         fills=0,
         brier_improvement_7d=None,
         sharpe_ratio=-0.1,
@@ -162,12 +190,61 @@ def test_paper_soak_gate_fails_missing_or_bad_production_metrics() -> None:
 
     assert gate.ok is False
     assert gate.require_check("soak_days").ok is False
-    assert gate.require_check("fills").detail == "0 < 10"
+    assert gate.require_check("decisions_accepted").detail == "0 < 30"
+    assert gate.require_check("fills").detail == "0 < 50"
     assert gate.require_check("brier_improvement").detail == "missing"
     assert gate.require_check("sharpe_ratio").detail == "-0.1000 <= 0.0000"
     assert gate.require_check("average_net_edge_bps").detail == "-1.0000 <= 0.0000"
     assert gate.require_check("unresolved_incidents").detail == "1 unresolved"
     assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_without_ready_readiness_evidence() -> None:
+    metrics = _passing_gate_metrics(
+        readiness_status="not_ready",
+        readiness_checks=(
+            ("sensors", "ready"),
+            ("event_loop", "shutting_down"),
+            ("halt_subscriber", "disabled"),
+        ),
+    )
+
+    gate = evaluate_paper_soak_gate(metrics, risk=RiskSettings())
+
+    assert gate.ok is False
+    assert gate.require_check("readiness").detail == (
+        "status=not_ready; event_loop=shutting_down"
+    )
+
+
+def test_paper_soak_gate_fails_concentrated_execution_sample() -> None:
+    metrics = replace(
+        _passing_gate_metrics(),
+        execution_concentration=ExecutionConcentration(
+            entry_fills=50,
+            distinct_markets=1,
+            distinct_risk_groups=1,
+            missing_risk_group_fills=0,
+            max_market_fill_share=1.0,
+            max_risk_group_fill_share=1.0,
+        ),
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert gate.ok is False
+    assert gate.require_check("distinct_markets").detail == "1 < 3"
+    assert gate.require_check("distinct_risk_groups").detail == "1 < 3"
+    assert gate.require_check("max_market_fill_share").detail == "1.0000 > 0.6000"
+    assert gate.require_check("max_risk_group_fill_share").detail == "1.0000 > 0.6000"
 
 
 def test_paper_soak_gate_fails_without_concrete_strategy_version_evidence() -> None:
@@ -189,8 +266,14 @@ def test_paper_soak_gate_fails_without_concrete_strategy_version_evidence() -> N
     )
 
 
-def test_paper_soak_gate_requires_launch_sample_size() -> None:
-    metrics = _passing_gate_metrics(fills=9)
+def test_paper_soak_gate_rejects_paper_only_strategy_evidence() -> None:
+    metrics = _passing_gate_metrics(
+        strategy=(
+            "h1_flb@live-v1, "
+            "paper_canary_v1@canary-v1, "
+            "paper_multi_factor_v1@paper-v1"
+        ),
+    )
 
     gate = evaluate_paper_soak_gate(
         metrics,
@@ -203,7 +286,28 @@ def test_paper_soak_gate_requires_launch_sample_size() -> None:
     )
 
     assert gate.ok is False
-    assert gate.require_check("fills").detail == "9 < 10"
+    assert gate.require_check("strategy_evidence").detail == (
+        "paper-only strategy cannot be final GO evidence: "
+        "paper_canary_v1@canary-v1, paper_multi_factor_v1@paper-v1"
+    )
+
+
+def test_paper_soak_gate_requires_launch_sample_size() -> None:
+    metrics = _passing_gate_metrics(decisions_accepted=29, fills=49)
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert gate.ok is False
+    assert gate.require_check("decisions_accepted").detail == "29 < 30"
+    assert gate.require_check("fills").detail == "49 < 50"
 
 
 def test_paper_report_renders_machine_checkable_go_no_go_gate() -> None:
@@ -220,6 +324,8 @@ def test_paper_report_renders_machine_checkable_go_no_go_gate() -> None:
     assert "## Go/No-Go Gate" in report
     assert "**Decision:** GO" in report
     assert "| brier_improvement | PASS | 0.0500 > 0.0000 |" in report
+    assert "| distinct_markets | PASS | 3 >= 3 |" in report
+    assert "| max_risk_group_fill_share | PASS | 0.4000 <= 0.6000 |" in report
 
 
 def test_paper_report_require_go_returns_nonzero_when_gate_fails(
@@ -401,6 +507,22 @@ def test_paper_report_persisted_file_can_target_exact_output_path(
     assert "| artifact_mode | persisted |" in report
     assert f"| output_path | {output_path} |" in report
     assert not (output_path.parent / "2026-05-03.md").exists()
+
+
+def test_paper_report_provenance_records_input_snapshot_hash() -> None:
+    input_snapshot_sha256 = sha256(b"paper report API snapshot").hexdigest()
+
+    report = render_report(
+        PaperReportMetrics.empty(report_date=date(2026, 5, 3)),
+        risk=RiskSettings(max_total_exposure=50.0),
+        provenance=PaperReportProvenance(
+            artifact_mode="persisted",
+            output_path="/secure/pms/paper-soak-go-report.md",
+            input_snapshot_sha256=input_snapshot_sha256,
+        ),
+    )
+
+    assert f"| input_snapshot_sha256 | {input_snapshot_sha256} |" in report
 
 
 def test_paper_report_returns_operator_error_for_unsafe_config_path(
@@ -1037,7 +1159,7 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
 
     assert metrics.strategy == "default@default-v2"
     assert metrics.day_of_soak == 2
-    assert metrics.decisions_made == 17
+    assert metrics.decisions_made == 2
     assert metrics.decisions_rejected == 3
     assert metrics.fills == 2
     assert metrics.open_positions == 2
@@ -1051,7 +1173,23 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
     assert metrics.average_slippage_bps == pytest.approx(20.0)
     assert metrics.average_fee_bps == pytest.approx(2.5)
     assert metrics.average_edge_bps == pytest.approx(350.0)
-    assert metrics.average_net_edge_bps == pytest.approx(252.5)
+    assert metrics.average_net_edge_bps == pytest.approx(288.2375)
+    assert metrics.trade_costs == (
+        TradeCostBreakdown(
+            decision_id="d-1",
+            market_id="m-1",
+            gross_edge=0.04,
+            spread_cost=0.006,
+            net_edge=0.034,
+        ),
+        TradeCostBreakdown(
+            decision_id="d-2",
+            market_id="m-2",
+            gross_edge=0.03,
+            spread_cost=0.00345,
+            net_edge=0.026549999999999997,
+        ),
+    )
     assert metrics.rejection_reasons == (
         ("missing_no_token", 2),
         ("missing_required_factors", 1),
@@ -1069,12 +1207,304 @@ def test_metrics_from_api_payloads_uses_live_runner_status() -> None:
     ) in metrics.risk_events
 
 
+def test_trade_cost_breakdown_uses_decision_evidence_cost_basis() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T00:00:00+00:00",
+            "sensors": [],
+            "controller": {"decisions_total": 1, "diagnostic_counts": {}},
+            "actuator": {"fills_total": 1},
+            "evaluator": {},
+            "quality": {},
+        },
+        decisions=[
+            {
+                "decision_id": "d-cost-evidence",
+                "market_id": "m-cost-evidence",
+                "prob_estimate": 0.62,
+                "limit_price": 0.41,
+                "expected_edge": 0.21,
+                "spread_bps_at_decision": 80,
+                "created_at": "2026-05-05T00:00:00+00:00",
+                "decision_evidence": {
+                    "fee_edge_at_decision": 0.0177,
+                    "slippage_edge_at_decision": 0.00205,
+                    "net_edge_after_costs": 0.18697,
+                },
+            }
+        ],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.trade_costs == (
+        TradeCostBreakdown(
+            decision_id="d-cost-evidence",
+            market_id="m-cost-evidence",
+            gross_edge=0.21,
+            spread_cost=0.00328,
+            fee_cost=0.0177,
+            slippage_cost=0.00205,
+            net_edge=0.18697,
+        ),
+    )
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert "## Trade Cost Decomposition" in report
+    assert (
+        "| d-cost-evidence | m-cost-evidence | 21.0% | 0.3% | 1.8% | 0.2% | 18.7% |"
+        in report
+    )
+
+
+def test_metrics_from_api_payloads_counts_only_elapsed_soak_days() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 31),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-01T23:30:00+00:00",
+            "runtime_continuity": {
+                "source": "postgres_runtime_heartbeats",
+                "healthy_days": 29,
+                "last_observed_at": "2026-05-31T00:10:00+00:00",
+            },
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0, "halt_recovery_cycles_7d": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        trades={},
+        positions={},
+    )
+
+    assert metrics.day_of_soak == 29
+
+
+def test_metrics_from_api_payloads_treats_zero_sample_win_rate_as_missing() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 31),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-31T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 1, "halt_recovery_cycles_7d": 0},
+            "evaluator": {"eval_records_total": 0},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "record_count": 0,
+            "fill_rate": 1.0,
+            "win_rate": 0.0,
+            "slippage_bps": 0.0,
+            "pnl_series": _pnl_series(date(2026, 5, 31), pnl=0.0),
+        },
+        decisions=[
+            {
+                "decision_id": "d-1",
+                "market_id": "m-1",
+                "prob_estimate": 0.64,
+                "limit_price": 0.60,
+                "expected_edge": 0.04,
+                "spread_bps_at_decision": 10,
+                "created_at": "2026-05-31T00:00:00+00:00",
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "fill_notional_usdc": 2.0,
+                    "fees": 0.0,
+                    "filled_at": "2026-05-31T00:00:01+00:00",
+                }
+            ],
+        },
+        positions={"positions": []},
+    )
+
+    assert metrics.hit_rate is None
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(max_total_exposure=50.0),
+    )
+    assert gate.require_check("hit_rate").detail == "missing"
+
+
+def test_metrics_from_api_payloads_preserves_resolved_zero_win_rate() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 31),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-31T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 1, "halt_recovery_cycles_7d": 0},
+            "evaluator": {"eval_records_total": 1},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "record_count": 1,
+            "fill_rate": 1.0,
+            "win_rate": 0.0,
+            "slippage_bps": 0.0,
+            "pnl_series": _pnl_series(date(2026, 5, 31), pnl=0.0),
+        },
+        decisions=[
+            {
+                "decision_id": "d-1",
+                "market_id": "m-1",
+                "prob_estimate": 0.64,
+                "limit_price": 0.60,
+                "expected_edge": 0.04,
+                "spread_bps_at_decision": 10,
+                "created_at": "2026-05-31T00:00:00+00:00",
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "fill_notional_usdc": 2.0,
+                    "fees": 0.0,
+                    "filled_at": "2026-05-31T00:00:01+00:00",
+                }
+            ],
+        },
+        positions={"positions": []},
+    )
+
+    assert metrics.hit_rate == 0.0
+
+
+def test_report_net_edge_gate_excludes_position_exit_decisions() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "controller": {
+                "decisions_total": 2,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 2},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "slippage_bps": 0.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+        },
+        decisions=[
+            {
+                "decision_id": "entry-1",
+                "market_id": "m-1",
+                "expected_edge": 0.10,
+                "spread_bps_at_decision": 100,
+                "created_at": "2026-05-30T00:00:00+00:00",
+            },
+            {
+                "decision_id": "exit-stop_loss-1",
+                "market_id": "m-1",
+                "expected_edge": 0.0,
+                "spread_bps_at_decision": 100,
+                "created_at": "2026-05-30T00:01:00+00:00",
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "decision_id": "entry-1",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.40,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                },
+                {
+                    "decision_id": "exit-stop_loss-1",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.80,
+                    "filled_at": "2026-05-30T00:01:00+00:00",
+                },
+            ],
+        },
+        positions={"positions": []},
+    )
+
+    assert metrics.average_fee_bps == pytest.approx(600.0)
+    assert metrics.average_edge_bps == pytest.approx(1000.0)
+    assert metrics.average_net_edge_bps == pytest.approx(500.0)
+    assert metrics.trade_costs == (
+        TradeCostBreakdown(
+            decision_id="entry-1",
+            market_id="m-1",
+            gross_edge=0.10,
+            spread_cost=0.01,
+            net_edge=0.09000000000000001,
+        ),
+    )
+
+
+def test_metrics_from_api_payloads_flags_active_actuator_halt() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T09:03:03.240858+00:00",
+            "sensors": [],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {
+                "fills_total": 1,
+                "halted": True,
+                "halt_reason": "daily_loss_limit",
+                "halt_triggered_at": "2026-05-05T00:00:00+00:00",
+            },
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={},
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+        strategies={
+            "strategies": [
+                {"strategy_id": "default", "active_version_id": "default-v2"}
+            ]
+        },
+    )
+
+    assert (
+        "actuator",
+        "active_halt",
+        "daily_loss_limit since 2026-05-05T00:00:00+00:00",
+    ) in metrics.risk_events
+
+
 def test_metrics_from_api_payloads_derives_report_day_pnl_from_pnl_series() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -1127,12 +1557,692 @@ def test_metrics_from_api_payloads_derives_report_day_pnl_from_pnl_series() -> N
     ) not in metrics.risk_events
 
 
+def test_metrics_from_api_payloads_uses_pnl_series_for_cumulative_pnl() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "pnl_series": [
+                {
+                    "recorded_at": "2026-05-29T23:59:00+00:00",
+                    "pnl": 5.0,
+                },
+                {
+                    "recorded_at": "2026-05-30T12:00:00+00:00",
+                    "pnl": 7.5,
+                },
+                {
+                    "recorded_at": "2026-05-31T00:00:00+00:00",
+                    "pnl": 999.0,
+                },
+            ],
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": [{"locked_usdc": 10.0, "unrealized_pnl": 99.0}]},
+    )
+
+    assert metrics.cumulative_pnl == pytest.approx(7.5)
+
+
+def test_metrics_from_api_payloads_deducts_llm_cost_from_pnl() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "pnl_series": [
+                {
+                    "recorded_at": "2026-05-30T12:00:00+00:00",
+                    "pnl": 2.0,
+                },
+            ],
+            LLM_DAILY_COST_USDC_METRIC: 0.75,
+            LLM_ESTIMATED_COST_USDC_TOTAL_METRIC: 1.25,
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.llm_cost_usdc == pytest.approx(1.25)
+    assert metrics.todays_pnl == pytest.approx(1.25)
+    assert metrics.cumulative_pnl == pytest.approx(0.75)
+
+
+def test_metrics_from_api_payloads_rejects_process_global_llm_cost_for_window() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "window_started_at": "2026-04-30T00:00:00+00:00",
+            "window_ended_at": "2026-05-31T00:00:00+00:00",
+            "pnl_series": [
+                {
+                    "recorded_at": "2026-05-30T12:00:00+00:00",
+                    "pnl": 2.0,
+                },
+            ],
+            LLM_DAILY_COST_USDC_METRIC: 0.75,
+            LLM_ESTIMATED_COST_USDC_TOTAL_METRIC: 1.25,
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.llm_cost_usdc == pytest.approx(0.0)
+    assert metrics.todays_pnl == pytest.approx(1.25)
+    assert metrics.cumulative_pnl == pytest.approx(2.0)
+    assert (
+        "llm",
+        "windowed LLM cost evidence missing",
+        "pms_llm_estimated_cost_usdc_total=1.2500 is process-global and cannot "
+        "be deducted from a paper-soak window",
+    ) in metrics.risk_events
+
+
+def test_metrics_from_api_payloads_flags_llm_budget_exhaustion() -> None:
+    report_date = date(2026, 5, 30)
+
+    metrics = metrics_from_api_payloads(
+        report_date=report_date,
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "pnl_series": _pnl_series(report_date, pnl=0.0),
+            LLM_BUDGET_EXHAUSTED_TOTAL_METRIC: 2.0,
+            LLM_DAILY_COST_USDC_METRIC: 0.05,
+            LLM_DAILY_COST_LIMIT_USDC_METRIC: 0.05,
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.llm_budget_exhaustions == 2
+    assert (
+        "llm",
+        "daily LLM budget exhausted",
+        "2 exhaustion(s); daily_cost=0.0500, limit=0.0500; "
+        "forecasts are falling back to non-LLM branches",
+    ) in metrics.risk_events
+
+
+def test_metrics_from_api_payloads_falls_back_to_quote_mtm_pnl_series() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "pnl_series": [],
+            "max_drawdown_pct": 0.0,
+            "quote_calibration": {
+                "max_drawdown_pct": 3.5,
+                "pnl_series": [
+                    {
+                        "recorded_at": "2026-05-29T23:59:00+00:00",
+                        "pnl": 4.0,
+                        "source": "quote_mtm",
+                    },
+                    {
+                        "recorded_at": "2026-05-30T12:00:00+00:00",
+                        "pnl": 1.25,
+                        "source": "quote_mtm",
+                    },
+                    {
+                        "recorded_at": "2026-05-31T00:00:00+00:00",
+                        "pnl": 999.0,
+                        "source": "quote_mtm",
+                    },
+                ]
+            },
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={
+            "positions": [
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.25},
+                {"locked_usdc": 5.0, "unrealized_pnl": -0.25},
+            ]
+        },
+    )
+
+    assert metrics.todays_pnl == pytest.approx(-2.75)
+    assert metrics.cumulative_pnl == pytest.approx(1.25)
+    assert metrics.current_unrealized_pnl == pytest.approx(2.0)
+    assert metrics.pnl_source == "quote_mtm"
+    assert metrics.max_drawdown_pct == pytest.approx(3.5)
+    assert (
+        "report generation",
+        "daily P&L evidence missing",
+        "metrics.pnl_series is empty",
+    ) not in metrics.risk_events
+
+
+def test_paper_report_renders_current_open_position_mtm_separately_from_gate_pnl() -> None:
+    report = render_report(
+        PaperReportMetrics(
+            report_date=date(2026, 5, 30),
+            todays_pnl=-2.75,
+            cumulative_pnl=1.25,
+            pnl_source="quote_mtm",
+            current_unrealized_pnl=2.0,
+        ),
+        risk=RiskSettings(),
+    )
+
+    assert "| Cumulative P&L | +$1.25 | > 0 by soak end |" in report
+    assert "| P&L source | quote_mtm | - |" in report
+    assert "| Current open-position MTM | +$2.00 | informational |" in report
+
+
+def test_metrics_from_api_payloads_prefers_final_pnl_series_over_quote_mtm() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "pnl_series": [
+                {
+                    "recorded_at": "2026-05-30T12:00:00+00:00",
+                    "pnl": 7.5,
+                }
+            ],
+            "quote_calibration": {
+                "pnl_series": [
+                    {
+                        "recorded_at": "2026-05-30T12:00:00+00:00",
+                        "pnl": -9.0,
+                        "source": "quote_mtm",
+                    }
+                ]
+            },
+        },
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.todays_pnl == pytest.approx(7.5)
+    assert metrics.cumulative_pnl == pytest.approx(7.5)
+    assert metrics.pnl_source == "final_eval"
+
+
+def test_metrics_from_api_payloads_counts_downstream_statuses_as_accepted() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 8,
+                "diagnostics_total": 5,
+                "diagnostic_counts": {"decision_net_edge_not_positive": 5},
+            },
+            "actuator": {"fills_total": 6},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(date(2026, 5, 30), pnl=1.0)},
+        decisions=[
+            {
+                "decision_id": "decision-accepted",
+                "status": "accepted",
+                "created_at": "2026-05-30T01:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-queued",
+                "status": "queued",
+                "created_at": "2026-05-30T02:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-submitted",
+                "status": "submitted",
+                "created_at": "2026-05-30T03:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-partial",
+                "status": "partially_filled",
+                "created_at": "2026-05-30T04:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-filled",
+                "status": "filled",
+                "created_at": "2026-05-30T05:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-matched",
+                "status": "matched",
+                "created_at": "2026-05-30T06:00:00+00:00",
+            },
+            {
+                "decision_id": "decision-open",
+                "status": "pending",
+                "created_at": "2026-05-30T07:00:00+00:00",
+            },
+            {
+                "decision_id": "exit-stop_loss-filled",
+                "status": "filled",
+                "created_at": "2026-05-30T08:00:00+00:00",
+            },
+        ],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.decisions_accepted == 6
+
+
+def test_metrics_from_api_payloads_counts_entry_fills_for_sample_gate() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 3,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 3},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(date(2026, 5, 30), pnl=1.0)},
+        decisions=[
+            {
+                "decision_id": "decision-entry",
+                "created_at": "2026-05-30T01:00:00+00:00",
+            },
+            {
+                "decision_id": "exit-stop_loss-1",
+                "created_at": "2026-05-30T02:00:00+00:00",
+            },
+            {
+                "decision_id": "exit-profit_take-2",
+                "created_at": "2026-05-30T03:00:00+00:00",
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": "trade-entry",
+                    "decision_id": "decision-entry",
+                    "filled_at": "2026-05-30T01:00:01+00:00",
+                },
+                {
+                    "trade_id": "trade-exit-stop",
+                    "decision_id": "exit-stop_loss-1",
+                    "filled_at": "2026-05-30T02:00:01+00:00",
+                },
+                {
+                    "trade_id": "trade-exit-profit",
+                    "decision_id": "exit-profit_take-2",
+                    "filled_at": "2026-05-30T03:00:01+00:00",
+                },
+            ]
+        },
+        positions={"positions": []},
+    )
+
+    assert metrics.fills == 1
+    assert metrics.decisions_accepted == 1
+
+
+def test_metrics_from_api_payloads_flags_concentrated_entry_fill_sample() -> None:
+    report_date = date(2026, 5, 30)
+    metrics = metrics_from_api_payloads(
+        report_date=report_date,
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 50,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 50},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "pnl_series": _pnl_series(report_date, pnl=1.0),
+            **_baseline_score_metrics(),
+        },
+        decisions=[
+            {
+                "decision_id": f"decision-entry-{index}",
+                "market_id": "market-concentrated",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 10,
+                "decision_evidence": _decision_evidence(),
+                "created_at": "2026-05-30T01:00:00+00:00",
+            }
+            for index in range(50)
+        ],
+        trades={
+            "trades": [
+                {
+                    "trade_id": f"trade-entry-{index}",
+                    "decision_id": f"decision-entry-{index}",
+                    "market_id": "market-concentrated",
+                    "risk_group_id": "event:concentrated",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.01,
+                    "filled_at": "2026-05-30T01:00:01+00:00",
+                }
+                for index in range(50)
+            ]
+        },
+        positions={"positions": []},
+    )
+
+    assert metrics.execution_concentration == ExecutionConcentration(
+        entry_fills=50,
+        distinct_markets=1,
+        distinct_risk_groups=1,
+        missing_risk_group_fills=0,
+        max_market_fill_share=1.0,
+        max_risk_group_fill_share=1.0,
+    )
+    assert (
+        "report generation",
+        "execution market concentration too high",
+        "distinct_markets=1 < 3",
+    ) in metrics.risk_events
+    assert (
+        "report generation",
+        "execution risk group concentration too high",
+        "distinct_risk_groups=1 < 3",
+    ) in metrics.risk_events
+    assert evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(max_total_exposure=50.0),
+    ).require_check("max_risk_group_fill_share").ok is False
+
+
+def test_paper_report_renders_pnl_source() -> None:
+    metrics = _passing_gate_metrics(risk_events=())
+
+    report = render_report(
+        metrics,
+        risk=RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0),
+    )
+
+    assert "| P&L source | final_eval | -" in report
+
+
+def test_metrics_from_api_payloads_flags_unprofitable_active_strategy_metrics() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(date(2026, 5, 30), pnl=10.0)},
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+        strategies={
+            "strategies": [
+                {"strategy_id": "winner", "active_version_id": "winner-v1"},
+                {"strategy_id": "loser", "active_version_id": "loser-v1"},
+            ]
+        },
+        strategy_metrics={
+            "strategies": [
+                {
+                    "strategy_id": "winner",
+                    "strategy_version_id": "winner-v1",
+                    "record_count": 4,
+                    "insufficient_samples": False,
+                    "pnl": 2.0,
+                    "fill_rate": 0.5,
+                    "brier_improvement_overall": 0.01,
+                },
+                {
+                    "strategy_id": "loser",
+                    "strategy_version_id": "loser-v1",
+                    "record_count": 4,
+                    "insufficient_samples": False,
+                    "pnl": -1.0,
+                    "fill_rate": 0.5,
+                    "brier_improvement_overall": 0.01,
+                },
+            ]
+        },
+    )
+
+    assert (
+        "strategy",
+        "active strategy pnl not positive",
+        "loser@loser-v1 pnl=-1.0000",
+    ) in metrics.risk_events
+
+
+def test_insufficient_strategy_samples_do_not_emit_derived_zero_metric_events() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 10},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(date(2026, 5, 30), pnl=10.0)},
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+        strategies={
+            "strategies": [
+                {"strategy_id": "new", "active_version_id": "new-v1"},
+            ]
+        },
+        strategy_metrics={
+            "strategies": [
+                {
+                    "strategy_id": "new",
+                    "strategy_version_id": "new-v1",
+                    "record_count": 0,
+                    "insufficient_samples": True,
+                    "pnl": 0.0,
+                    "fill_rate": 0.0,
+                    "brier_improvement_overall": 0.0,
+                },
+            ]
+        },
+    )
+
+    assert (
+        "strategy",
+        "active strategy samples insufficient",
+        "new@new-v1 record_count=0",
+    ) in metrics.risk_events
+    assert not any(
+        event[0] == "strategy"
+        and event[1]
+        in {
+            "active strategy pnl not positive",
+            "active strategy fill rate not positive",
+            "active strategy brier improvement not positive",
+        }
+        for event in metrics.risk_events
+    )
+
+
+def test_insufficient_strategy_samples_still_flag_negative_quote_mtm_pnl() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [],
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 2},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(date(2026, 5, 30), pnl=10.0)},
+        decisions=[],
+        trades={"trades": []},
+        positions={"positions": []},
+        strategies={
+            "strategies": [
+                {"strategy_id": "new", "active_version_id": "new-v1"},
+            ]
+        },
+        strategy_metrics={
+            "strategies": [
+                {
+                    "strategy_id": "new",
+                    "strategy_version_id": "new-v1",
+                    "record_count": 0,
+                    "insufficient_samples": True,
+                    "pnl": -0.25,
+                    "pnl_source": "quote_mtm",
+                    "fill_rate": 1.0,
+                    "brier_improvement_overall": None,
+                    "quote_record_count": 2,
+                    "quote_mtm_pnl": -0.25,
+                },
+            ]
+        },
+    )
+
+    assert (
+        "strategy",
+        "active strategy samples insufficient",
+        "new@new-v1 record_count=0",
+    ) in metrics.risk_events
+    assert (
+        "strategy",
+        "active strategy quote-mtm pnl not positive",
+        "new@new-v1 quote_mtm_pnl=-0.2500",
+    ) in metrics.risk_events
+    assert not any(
+        event[0] == "strategy"
+        and event[1] == "active strategy pnl not positive"
+        for event in metrics.risk_events
+    )
+
+
 def test_metrics_from_api_payloads_reads_max_drawdown_pct_from_metrics_payload() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -1174,6 +2284,7 @@ def test_metrics_from_api_payloads_reads_sharpe_ratio_from_metrics_payload() -> 
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -1323,12 +2434,156 @@ def test_paper_soak_gate_fails_when_rejection_reason_key_is_blank() -> None:
     assert gate.require_check("risk_events").detail == "1 risk event(s)"
 
 
+def test_metrics_from_api_payloads_surfaces_live_clamp_rejection_summary() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 20,
+            "diagnostics_total": 37,
+            "diagnostic_counts": {"calibration_clamp_rejected": 37},
+        },
+    )
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert metrics.rejection_reasons == (("calibration_clamp_rejected", 37),)
+    assert metrics.clamp_rejections == (("aggregate", 37),)
+    assert "| calibration_clamp_rejected | 37 |" in report
+    assert "| aggregate | 37 |" in report
+    assert "No clamp rejections recorded." not in report
+
+
+def test_metrics_from_api_payloads_surfaces_live_selection_funnel() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 20,
+            "diagnostics_total": 3,
+            "diagnostic_counts": {"decision_edge_not_positive": 3},
+        },
+        metrics_override={
+            SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC: 120.0,
+            SELECTION_FUNNEL_SELECTED_TOTAL_METRIC: 40.0,
+            SELECTION_FUNNEL_ROUTED_TOTAL_METRIC: 23.0,
+            SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC: 11.0,
+            SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC: 4.0,
+            SELECTION_FUNNEL_TRADED_TOTAL_METRIC: 3.0,
+        },
+    )
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert metrics.selection_funnel is not None
+    assert metrics.selection_funnel.discovered == 120
+    assert metrics.selection_funnel.selected == 40
+    assert metrics.selection_funnel.routed == 23
+    assert metrics.selection_funnel.forecasted == 11
+    assert metrics.selection_funnel.controller_emitted == 4
+    assert metrics.selection_funnel.traded == 3
+    assert "| Discovered | 120 |" in report
+    assert "| Forecasted | 11 |" in report
+    assert "| Controller Emitted | 4 |" in report
+    assert "| Traded | 3 |" in report
+    assert "No funnel events recorded." not in report
+
+
+def test_metrics_from_api_payloads_flags_inconsistent_selection_funnel() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        metrics_override={
+            SELECTION_FUNNEL_DISCOVERED_TOTAL_METRIC: 120.0,
+            SELECTION_FUNNEL_SELECTED_TOTAL_METRIC: 40.0,
+            SELECTION_FUNNEL_ROUTED_TOTAL_METRIC: 23.0,
+            SELECTION_FUNNEL_FORECASTED_TOTAL_METRIC: 11.0,
+            SELECTION_FUNNEL_CONTROLLER_EMITTED_TOTAL_METRIC: 5.0,
+            SELECTION_FUNNEL_TRADED_TOTAL_METRIC: 6.0,
+        },
+    )
+
+    assert metrics.selection_funnel is not None
+    assert metrics.selection_funnel.traded == 6
+    assert (
+        "selection_funnel",
+        "selection funnel stage count inverted",
+        "traded=6 > controller_emitted=5",
+    ) in metrics.risk_events
+
+
+def test_paper_soak_gate_fails_without_persisted_runtime_continuity_evidence() -> None:
+    metrics = _passing_metrics_from_api_payloads(include_runtime_continuity=False)
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "report generation",
+        "runtime continuity evidence missing",
+        "status.runtime_continuity from postgres_runtime_heartbeats is required once soak_days >= 30",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_current_controller_runtime_is_unavailable() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={"current_runtimes_total": 0}
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "controller",
+        "controller runtime unavailable",
+        "status.controller.current_runtimes_total=0",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_paper_soak_gate_fails_when_runtime_heartbeat_observed_detachment() -> None:
+    continuity = _runtime_continuity_status()
+    continuity["unhealthy_heartbeat_count"] = 1
+    continuity["min_controller_runtimes"] = 0
+    metrics = _passing_metrics_from_api_payloads(runtime_continuity=continuity)
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert (
+        "runtime",
+        "unhealthy runtime heartbeats",
+        "unhealthy_heartbeat_count=1",
+    ) in metrics.risk_events
+    assert gate.ok is False
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
 def test_paper_soak_gate_fails_when_daily_pnl_evidence_is_missing() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -1369,6 +2624,8 @@ def test_paper_soak_gate_fails_when_daily_pnl_evidence_is_missing() -> None:
             "trades": [
                 {
                     "trade_id": f"trade-{index}",
+                    "market_id": f"m-paper-soak-{index % 4}",
+                    "risk_group_id": f"event:paper-soak-{index % 3}",
                     "fill_notional_usdc": 10.0,
                     "fees": 0.01,
                     "filled_at": "2026-05-30T00:00:00+00:00",
@@ -1378,7 +2635,7 @@ def test_paper_soak_gate_fails_when_daily_pnl_evidence_is_missing() -> None:
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -1589,6 +2846,80 @@ def test_baseline_evidence_coverage_uses_reported_decision_denominator() -> None
     assert "| mid_quote | 1 / 2 | 50.0% |" in report
 
 
+def test_baseline_evidence_coverage_excludes_position_exit_decisions() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T00:00:00+00:00",
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-05T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 2,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 2},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 1.0,
+            "win_rate": 0.5,
+            "slippage_bps": 10.0,
+            "pnl_series": _pnl_series(date(2026, 5, 5)),
+            "baseline_brier_by_source": {
+                "market_implied": 0.24,
+                "mid_quote": 0.23,
+            },
+            "brier_improvement_by_source": {
+                "market_implied": 0.08,
+                "mid_quote": 0.07,
+            },
+        },
+        decisions=[
+            {
+                "decision_id": "entry-with-evidence",
+                "market_id": "m-entry",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-05T00:00:00+00:00",
+                "decision_evidence": {
+                    "market_implied_baseline_prob_estimate": 0.60,
+                    "mid_quote_baseline_prob_estimate": 0.59,
+                },
+            },
+            {
+                "decision_id": "exit-stop_loss-no-evidence",
+                "market_id": "m-entry",
+                "expected_edge": 0.0,
+                "spread_bps_at_decision": None,
+                "created_at": "2026-05-05T00:01:00+00:00",
+            },
+        ],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.baseline_evidence is not None
+    assert metrics.baseline_evidence.decisions == 1
+    assert metrics.baseline_evidence.market_implied_count == 1
+    assert metrics.baseline_evidence.mid_quote_count == 1
+    assert not any(
+        event[1] == "secondary baseline evidence incomplete"
+        for event in metrics.risk_events
+    )
+
+
 def test_paper_soak_gate_fails_when_reported_decisions_lack_baseline_evidence() -> None:
     metrics = _passing_metrics_from_api_payloads(include_decision_evidence=False)
 
@@ -1635,7 +2966,7 @@ def test_paper_soak_gate_fails_when_decision_payload_is_incomplete() -> None:
         ),
     )
 
-    assert metrics.decisions_made == 2
+    assert metrics.decisions_made == 1
     assert metrics.baseline_evidence is not None
     assert metrics.baseline_evidence.decisions == 1
     assert (
@@ -1645,6 +2976,23 @@ def test_paper_soak_gate_fails_when_decision_payload_is_incomplete() -> None:
     ) in metrics.risk_events
     assert gate.ok is False
     assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
+def test_metrics_from_api_payloads_uses_durable_decision_rows_for_decisions_made() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        controller={
+            "decisions_total": 1,
+            "diagnostics_total": 0,
+            "diagnostic_counts": {},
+        },
+        decision_payload_count=3,
+    )
+
+    assert metrics.decisions_made == 3
+    assert not any(
+        trigger == "decision payload incomplete"
+        for _event_time, trigger, _status in metrics.risk_events
+    )
 
 
 def test_metrics_from_api_payloads_surfaces_secondary_baseline_scores() -> None:
@@ -1850,6 +3198,7 @@ def test_paper_soak_gate_fails_when_secondary_baseline_source_label_is_placehold
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -1900,7 +3249,7 @@ def test_paper_soak_gate_fails_when_secondary_baseline_source_label_is_placehold
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
         strategies={
@@ -1991,12 +3340,66 @@ def test_metrics_from_api_payloads_flags_missing_required_baseline_evidence() ->
     ) in metrics.risk_events
 
 
+def test_secondary_baseline_scores_are_not_due_before_resolved_eval_samples() -> None:
+    report_date = date(2026, 5, 30)
+    metrics = metrics_from_api_payloads(
+        report_date=report_date,
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {
+                "eval_records_total": 0,
+                "brier_14d": None,
+                "baseline_brier_14d": None,
+                "brier_improvement_14d": None,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(report_date)},
+        decisions=[
+            {
+                "decision_id": "d-no-resolved-eval",
+                "market_id": "m-no-resolved-eval",
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "decision_evidence": {
+                    "market_implied_baseline_prob_estimate": 0.60,
+                    "mid_quote_baseline_prob_estimate": 0.59,
+                },
+            },
+        ],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert not any(
+        trigger == "secondary baseline score incomplete"
+        for _event_time, trigger, _status in metrics.risk_events
+    )
+
+
 def test_paper_soak_gate_fails_when_covered_secondary_baseline_lacks_score() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -2060,7 +3463,7 @@ def test_paper_soak_gate_fails_when_covered_secondary_baseline_lacks_score() -> 
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
         strategies={
@@ -2126,6 +3529,134 @@ def test_metrics_from_api_payloads_prefers_active_strategy_versions_over_status_
     assert metrics.strategy == "default@default-v2, h1-flb@h1-flb-v7"
 
 
+def test_metrics_from_api_payloads_ignores_inactive_strategy_rows_for_label() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T09:03:03.240858+00:00",
+        },
+        trades={"trades": []},
+        positions={"positions": []},
+        strategies={
+            "strategies": [
+                {"strategy_id": "default", "active_version_id": None},
+                {
+                    "strategy_id": "paper_multi_factor_v1",
+                    "active_version_id": "paper-v1",
+                },
+            ],
+        },
+    )
+
+    assert metrics.strategy == "paper_multi_factor_v1@paper-v1"
+
+
+def test_metrics_from_api_payloads_derives_execution_fill_rate_from_window_rows() -> None:
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-05T00:00:00+00:00",
+            "controller": {
+                "decisions_total": 4,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 2},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"fill_rate": 0.0},
+        decisions=[
+            {"decision_id": f"d-{index}", "created_at": "2026-05-05T00:00:00+00:00"}
+            for index in range(4)
+        ],
+        trades={
+            "trades": [
+                {"trade_id": f"t-{index}", "filled_at": "2026-05-05T00:00:00+00:00"}
+                for index in range(2)
+            ]
+        },
+        positions={"positions": []},
+    )
+
+    assert metrics.fill_rate == pytest.approx(0.5)
+
+
+def test_metrics_from_api_payloads_uses_decimal_internals_for_position_pnl() -> None:
+    report_date = date(2026, 5, 30)
+
+    metrics = metrics_from_api_payloads(
+        report_date=report_date,
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-29T00:00:00+00:00",
+            "controller": {"decisions_total": 0, "diagnostics_total": 0},
+            "actuator": {"fills_total": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(report_date, pnl=0.0)},
+        trades={"trades": []},
+        positions={
+            "positions": [
+                {"locked_usdc": 1.0, "unrealized_pnl": 0.1},
+                {"locked_usdc": 1.0, "unrealized_pnl": 0.2},
+            ],
+        },
+    )
+
+    assert metrics.current_unrealized_pnl == 0.3
+
+
+def test_metrics_from_api_payloads_surfaces_position_mark_sources() -> None:
+    report_date = date(2026, 5, 30)
+
+    metrics = metrics_from_api_payloads(
+        report_date=report_date,
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-29T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "controller": {
+                "decisions_total": 0,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 0},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={"pnl_series": _pnl_series(report_date, pnl=0.0)},
+        trades={"trades": []},
+        positions={
+            "positions": [
+                {"locked_usdc": 1.0, "unrealized_pnl": 0.1, "mark_source": "clob"},
+                {"locked_usdc": 1.0, "unrealized_pnl": 0.2, "mark_source": "gamma"},
+                {"locked_usdc": 1.0, "unrealized_pnl": 0.3},
+            ],
+        },
+    )
+
+    report = render_report(metrics, risk=RiskSettings(max_total_exposure=50.0))
+
+    assert metrics.position_mark_sources == (
+        ("clob", 1),
+        ("gamma", 1),
+        ("unknown", 1),
+    )
+    assert (
+        "positions",
+        "open-position MTM uses non-CLOB mark source",
+        "gamma=1, unknown=1; current open-position MTM is informational",
+    ) in metrics.risk_events
+    assert "## Position Mark Sources" in report
+    assert "| clob | 1 |" in report
+    assert "| gamma | 1 |" in report
+    assert "| unknown | 1 |" in report
+
+
 def test_paper_soak_gate_fails_when_strategies_endpoint_has_no_active_versions() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
@@ -2133,6 +3664,7 @@ def test_paper_soak_gate_fails_when_strategies_endpoint_has_no_active_versions()
             "mode": "paper",
             "strategy": "default@legacy-v1",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -2183,7 +3715,7 @@ def test_paper_soak_gate_fails_when_strategies_endpoint_has_no_active_versions()
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
         strategies={"strategies": []},
@@ -2242,6 +3774,7 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fetched_json_paths: list[str] = []
+    paginated_until_values: list[str] = []
 
     def fake_fetch_api_json(
         *,
@@ -2257,6 +3790,7 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
                 {
                     "mode": "paper",
                     "runner_started_at": "2026-04-30T00:00:00+00:00",
+                    "runtime_continuity": _runtime_continuity_status(),
                     "sensors": [
                         {
                             "name": "MarketDataSensor",
@@ -2279,7 +3813,64 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
                 },
                 None,
             )
-        if path == "/trades?limit=200":
+        if path == "/positions":
+            return (
+                {
+                    "positions": [
+                        {
+                            "locked_usdc": 10.0,
+                            "unrealized_pnl": 2.0,
+                            "mark_source": "clob",
+                        }
+                    ]
+                },
+                None,
+            )
+        if path == "/readiness":
+            return (
+                {
+                    "status": "ready",
+                    "checks": {
+                        "sensors": "ready",
+                        "event_loop": "ready",
+                        "halt_subscriber": "disabled",
+                        "eod_scheduler": "disabled",
+                    },
+                },
+                None,
+            )
+        if path.startswith("/metrics"):
+            return (
+                {
+                    "fill_rate": 0.5,
+                    "win_rate": 0.5,
+                    "slippage_bps": 10.0,
+                    "window_started_at": "2026-04-30T00:00:00+00:00",
+                    "window_ended_at": "2026-05-31T00:00:00+00:00",
+                },
+                None,
+            )
+        if path == "/strategies":
+            return ({"strategies": []}, None)
+        if path.startswith("/strategies/metrics"):
+            return ({"strategies": []}, None)
+        raise AssertionError(f"unexpected JSON path: {path}")
+
+    def fake_fetch_api_payload(
+        *,
+        api_base_url: str,
+        path: str,
+        api_token: str | None,
+    ) -> tuple[object, str | None]:
+        assert api_base_url == "http://api.test"
+        assert api_token == "token"
+        parsed = urlsplit(path)
+        query = parse_qs(parsed.query)
+        assert query["limit"] == ["200"]
+        assert query["offset"] == ["0"]
+        assert len(query["until"]) == 1
+        paginated_until_values.append(query["until"][0])
+        if parsed.path == "/trades":
             return (
                 {
                     "trades": [
@@ -2294,32 +3885,7 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
                 },
                 None,
             )
-        if path == "/positions":
-            return ({"positions": [{"locked_usdc": 10.0, "unrealized_pnl": 2.0}]}, None)
-        if path.startswith("/metrics"):
-            return (
-                {
-                    "fill_rate": 0.5,
-                    "win_rate": 0.5,
-                    "slippage_bps": 10.0,
-                    "window_started_at": "2026-04-30T00:00:00+00:00",
-                    "window_ended_at": "2026-05-31T00:00:00+00:00",
-                },
-                None,
-            )
-        if path == "/strategies":
-            return ({"strategies": []}, None)
-        raise AssertionError(f"unexpected JSON path: {path}")
-
-    def fake_fetch_api_payload(
-        *,
-        api_base_url: str,
-        path: str,
-        api_token: str | None,
-    ) -> tuple[object, str | None]:
-        assert api_base_url == "http://api.test"
-        assert path == "/decisions?limit=200"
-        assert api_token == "token"
+        assert parsed.path == "/decisions"
         return (
             [
                 {
@@ -2350,7 +3916,123 @@ def test_load_live_metrics_fetches_metrics_for_soak_window(
         "since": ["2026-04-30T00:00:00+00:00"],
         "until": ["2026-05-31T00:00:00+00:00"],
     }
+    assert "/readiness" in fetched_json_paths
+    strategy_metrics_path = next(
+        path for path in fetched_json_paths if path.startswith("/strategies/metrics")
+    )
+    strategy_metrics_query = parse_qs(urlsplit(strategy_metrics_path).query)
+    assert strategy_metrics_query == {
+        "since": ["2026-04-30T00:00:00+00:00"],
+        "until": ["2026-05-31T00:00:00+00:00"],
+    }
+    assert len(set(paginated_until_values)) == 1
     assert metrics.average_slippage_bps == pytest.approx(10.0)
+    assert isinstance(metrics.input_snapshot_sha256, str)
+    assert len(metrics.input_snapshot_sha256) == 64
+    int(metrics.input_snapshot_sha256, 16)
+
+
+def test_fetch_api_list_pages_follows_limit_offset_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    def fake_fetch_api_payload(
+        *,
+        api_base_url: str,
+        path: str,
+        api_token: str | None,
+    ) -> tuple[object, str | None]:
+        assert api_base_url == "http://api.test"
+        assert api_token == "token"
+        paths.append(path)
+        if path == "/decisions?limit=200&offset=0":
+            return ([{"decision_id": f"d-{index}"} for index in range(200)], None)
+        if path == "/decisions?limit=200&offset=200":
+            return ([{"decision_id": "d-200"}], None)
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr("scripts.paper_report._fetch_api_payload", fake_fetch_api_payload)
+
+    rows, error = _fetch_api_list_pages(
+        api_base_url="http://api.test",
+        path="/decisions",
+        api_token="token",
+    )
+
+    assert error is None
+    assert len(rows) == 201
+    assert paths == [
+        "/decisions?limit=200&offset=0",
+        "/decisions?limit=200&offset=200",
+    ]
+
+
+def test_fetch_api_list_pages_handles_envelope_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    def fake_fetch_api_payload(
+        *,
+        api_base_url: str,
+        path: str,
+        api_token: str | None,
+    ) -> tuple[object, str | None]:
+        assert api_base_url == "http://api.test"
+        assert api_token == "token"
+        paths.append(path)
+        if path == "/trades?limit=200&offset=0":
+            return (
+                {"trades": [{"trade_id": f"t-{index}"} for index in range(200)]},
+                None,
+            )
+        if path == "/trades?limit=200&offset=200":
+            return ({"trades": [{"trade_id": "t-200"}]}, None)
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr("scripts.paper_report._fetch_api_payload", fake_fetch_api_payload)
+
+    rows, error = _fetch_api_list_pages(
+        api_base_url="http://api.test",
+        path="/trades",
+        api_token="token",
+        payload_key="trades",
+    )
+
+    assert error is None
+    assert len(rows) == 201
+    assert rows[-1] == {"trade_id": "t-200"}
+    assert paths == [
+        "/trades?limit=200&offset=0",
+        "/trades?limit=200&offset=200",
+    ]
+
+
+def test_fetch_api_list_pages_fails_when_pagination_does_not_advance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = [{"decision_id": f"d-{index}"} for index in range(200)]
+
+    def fake_fetch_api_payload(
+        *,
+        api_base_url: str,
+        path: str,
+        api_token: str | None,
+    ) -> tuple[object, str | None]:
+        del api_base_url, path, api_token
+        return (list(page), None)
+
+    monkeypatch.setattr("scripts.paper_report._fetch_api_payload", fake_fetch_api_payload)
+
+    rows, error = _fetch_api_list_pages(
+        api_base_url="http://api.test",
+        path="/decisions",
+        api_token="token",
+    )
+
+    assert rows == []
+    assert error == "pagination did not advance"
 
 
 def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
@@ -2361,13 +4043,14 @@ def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
             "fees": 0.01,
             "filled_at": "2026-05-30T00:00:00+00:00",
         }
-        for index in range(9)
+        for index in range(49)
     ]
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -2380,7 +4063,7 @@ def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
                 "diagnostics_total": 0,
                 "diagnostic_counts": {},
             },
-            "actuator": {"fills_total": 10},
+            "actuator": {"fills_total": 50},
             "evaluator": {
                 "brier_14d": 0.16,
                 "baseline_brier_14d": 0.24,
@@ -2404,7 +4087,7 @@ def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
         trades={"trades": trades},
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -2419,9 +4102,9 @@ def test_paper_soak_gate_uses_persisted_trade_rows_for_fill_sample() -> None:
         ),
     )
 
-    assert metrics.fills == 9
+    assert metrics.fills == 49
     assert gate.ok is False
-    assert gate.require_check("fills").detail == "9 < 10"
+    assert gate.require_check("fills").detail == "49 < 50"
 
 
 def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
@@ -2432,7 +4115,7 @@ def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
             "fees": 0.01,
             "filled_at": "2026-05-30T00:00:00+00:00",
         }
-        for index in range(9)
+        for index in range(49)
     ]
     trades.append(
         {
@@ -2447,6 +4130,7 @@ def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -2459,7 +4143,7 @@ def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
                 "diagnostics_total": 0,
                 "diagnostic_counts": {},
             },
-            "actuator": {"fills_total": 10},
+            "actuator": {"fills_total": 50},
             "evaluator": {
                 "brier_14d": 0.16,
                 "baseline_brier_14d": 0.24,
@@ -2483,7 +4167,7 @@ def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
         trades={"trades": trades},
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -2498,9 +4182,9 @@ def test_paper_soak_gate_excludes_trades_outside_soak_window() -> None:
         ),
     )
 
-    assert metrics.fills == 9
+    assert metrics.fills == 49
     assert gate.ok is False
-    assert gate.require_check("fills").detail == "9 < 10"
+    assert gate.require_check("fills").detail == "49 < 50"
 
 
 def test_paper_soak_gate_excludes_decisions_outside_soak_window() -> None:
@@ -2509,6 +4193,7 @@ def test_paper_soak_gate_excludes_decisions_outside_soak_window() -> None:
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -2563,7 +4248,7 @@ def test_paper_soak_gate_excludes_decisions_outside_soak_window() -> None:
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -2584,12 +4269,91 @@ def test_paper_soak_gate_excludes_decisions_outside_soak_window() -> None:
     assert gate.require_check("average_net_edge_bps").detail == "-60.0000 <= 0.0000"
 
 
+def test_paper_soak_gate_preserves_negative_decision_edge_sign() -> None:
+    decisions = [
+        {
+            "decision_id": f"d-negative-edge-{index}",
+            "market_id": f"m-negative-edge-{index % 3}",
+            "expected_edge": -0.05,
+            "spread_bps_at_decision": 0,
+            "decision_evidence": _decision_evidence(),
+            "created_at": "2026-05-30T00:00:00+00:00",
+        }
+        for index in range(50)
+    ]
+    trades = [
+        {
+            "trade_id": f"trade-negative-edge-{index}",
+            "decision_id": f"d-negative-edge-{index}",
+            "market_id": f"m-negative-edge-{index % 3}",
+            "risk_group_id": f"event:negative-edge-{index % 3}",
+            "fill_notional_usdc": 1.0,
+            "fees": 0.0,
+            "filled_at": "2026-05-30T00:00:01+00:00",
+        }
+        for index in range(50)
+    ]
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "sensors": [
+                {
+                    "name": "MarketDataSensor",
+                    "status": "running",
+                    "last_signal_at": "2026-05-30T00:00:00+00:00",
+                }
+            ],
+            "controller": {
+                "decisions_total": 50,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 50},
+            "evaluator": {
+                "brier_14d": 0.16,
+                "baseline_brier_14d": 0.24,
+                "brier_improvement_14d": 0.08,
+            },
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "fill_rate": 1.0,
+            "win_rate": 0.5,
+            "slippage_bps": 0.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30), pnl=1.0),
+            **_baseline_score_metrics(),
+        },
+        decisions=decisions,
+        trades={"trades": trades},
+        positions={"positions": []},
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(
+            max_total_exposure=50.0,
+            max_drawdown_pct=20.0,
+            max_daily_loss_usdc=20.0,
+            max_open_positions=5,
+        ),
+    )
+
+    assert metrics.average_edge_bps == pytest.approx(-500.0)
+    assert metrics.average_net_edge_bps == pytest.approx(-500.0)
+    assert gate.require_check("average_edge_bps").detail == "-500.0000 <= 5.0000"
+    assert gate.require_check("average_net_edge_bps").detail == "-500.0000 <= 0.0000"
+
+
 def test_paper_soak_gate_fails_when_metrics_payload_contains_non_finite_value() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 30),
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -2640,7 +4404,7 @@ def test_paper_soak_gate_fails_when_metrics_payload_contains_non_finite_value() 
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -2672,6 +4436,7 @@ def test_paper_soak_gate_fails_when_position_payload_contains_non_finite_value()
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -2722,7 +4487,11 @@ def test_paper_soak_gate_fails_when_position_payload_contains_non_finite_value()
         },
         positions={
             "positions": [
-                {"locked_usdc": "nan", "unrealized_pnl": 2.0},
+                {
+                    "locked_usdc": "nan",
+                    "unrealized_pnl": 2.0,
+                    "mark_source": "clob",
+                },
             ],
         },
     )
@@ -2753,6 +4522,7 @@ def test_paper_soak_gate_fails_when_trade_payload_contains_non_finite_fee_value(
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -2804,7 +4574,7 @@ def test_paper_soak_gate_fails_when_trade_payload_contains_non_finite_fee_value(
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -2835,6 +4605,7 @@ def test_paper_soak_gate_fails_when_decision_payload_contains_non_finite_edge_va
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -2887,7 +4658,7 @@ def test_paper_soak_gate_fails_when_decision_payload_contains_non_finite_edge_va
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -2902,7 +4673,7 @@ def test_paper_soak_gate_fails_when_decision_payload_contains_non_finite_edge_va
         ),
     )
 
-    assert metrics.average_net_edge_bps == pytest.approx(430.0)
+    assert metrics.average_net_edge_bps == pytest.approx(465.0)
     assert (
         "report generation",
         "non-finite numeric evidence",
@@ -2918,6 +4689,7 @@ def test_paper_soak_gate_fails_when_unresolved_incident_evidence_is_missing() ->
         status={
             "mode": "paper",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -2964,7 +4736,7 @@ def test_paper_soak_gate_fails_when_unresolved_incident_evidence_is_missing() ->
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -2995,6 +4767,7 @@ def test_paper_soak_gate_fails_when_status_mode_is_not_paper() -> None:
         status={
             "mode": "backtest",
             "runner_started_at": "2026-04-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
             "sensors": [
                 {
                     "name": "MarketDataSensor",
@@ -3042,7 +4815,7 @@ def test_paper_soak_gate_fails_when_status_mode_is_not_paper() -> None:
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
     )
@@ -3092,6 +4865,27 @@ def test_metrics_from_api_payloads_records_missing_status_as_risk_event() -> Non
     ) in metrics.risk_events
 
 
+def test_paper_soak_gate_fails_when_readiness_is_not_ready() -> None:
+    metrics = _passing_metrics_from_api_payloads(
+        readiness={
+            "status": "not_ready",
+            "checks": {
+                "sensors": "ready",
+                "event_loop": "shutting_down",
+                "halt_subscriber": "disabled",
+            },
+        }
+    )
+
+    assert (
+        "readiness",
+        "readiness not ready",
+        "status=not_ready; event_loop=shutting_down",
+    ) in metrics.risk_events
+    gate = evaluate_paper_soak_gate(metrics, risk=RiskSettings())
+    assert gate.require_check("risk_events").detail == "1 risk event(s)"
+
+
 def test_paper_report_renders_calibration_and_cost_diagnostics() -> None:
     diagnostics = build_paper_report_diagnostics(
         eval_records=[
@@ -3130,8 +4924,8 @@ def test_paper_report_renders_calibration_and_cost_diagnostics() -> None:
     assert "## Calibration Reliability" in report
     assert "| [10%-20%) | 3 | insufficient data |" in report
     assert "| [50%-60%) | 5 | 60.0% |" in report
-    assert "## Spread Cost Decomposition" in report
-    assert "| d-cost-1 | m-cost | 12.0% | 0.8% | 11.2% |" in report
+    assert "## Trade Cost Decomposition" in report
+    assert "| d-cost-1 | m-cost | 12.0% | 0.4% | 0.0% | 0.3% | 11.3% |" in report
     assert "## Extreme Probability Rejections" in report
     assert "| m-extreme | 2 |" in report
     assert "## Selection Funnel" in report
@@ -3139,7 +4933,7 @@ def test_paper_report_renders_calibration_and_cost_diagnostics() -> None:
     assert "| Selected | 5 |" in report
     assert "| Routed | 4 |" in report
     assert "| Forecasted | 3 |" in report
-    assert "| Traded | 1 |" in report
+    assert "| Controller Emitted | 1 |" in report
 
 
 def _eval_record(decision_id: str, *, prob: float, outcome: float) -> EvalRecord:
@@ -3161,18 +4955,27 @@ def _passing_gate_metrics(
     *,
     strategy: str = "default@default-v2",
     day_of_soak: int = 30,
-    fills: int = 10,
+    decisions_accepted: int = 50,
+    fills: int = 50,
     brier_improvement_7d: float | None = 0.05,
     sharpe_ratio: float | None = 0.5,
     average_net_edge_bps: float | None = 5.0,
     unresolved_incidents: int = 0,
     risk_events: tuple[tuple[str, str, str], ...] = (),
+    readiness_status: str = "ready",
+    readiness_checks: tuple[tuple[str, str], ...] = (
+        ("sensors", "ready"),
+        ("event_loop", "ready"),
+        ("halt_subscriber", "disabled"),
+        ("eod_scheduler", "disabled"),
+    ),
 ) -> PaperReportMetrics:
     return PaperReportMetrics(
         report_date=date(2026, 5, 30),
         strategy=strategy,
         day_of_soak=day_of_soak,
         decisions_made=100,
+        decisions_accepted=decisions_accepted,
         fills=fills,
         fill_rate=0.4,
         average_slippage_bps=10.0,
@@ -3189,8 +4992,18 @@ def _passing_gate_metrics(
         average_fee_bps=2.0,
         average_net_edge_bps=average_net_edge_bps,
         sharpe_ratio=sharpe_ratio,
+        readiness_status=readiness_status,
+        readiness_checks=readiness_checks,
         unresolved_incidents=unresolved_incidents,
         risk_events=risk_events,
+        execution_concentration=ExecutionConcentration(
+            entry_fills=fills,
+            distinct_markets=3,
+            distinct_risk_groups=3,
+            missing_risk_group_fills=0,
+            max_market_fill_share=0.4,
+            max_risk_group_fill_share=0.4,
+        ),
     )
 
 
@@ -3208,6 +5021,16 @@ def _pnl_series(report_date: date, *, pnl: float = 0.0) -> list[dict[str, object
             "pnl": pnl,
         }
     ]
+
+
+def _runtime_continuity_status() -> dict[str, object]:
+    return {
+        "source": "postgres_runtime_heartbeats",
+        "healthy_days": 30,
+        "max_gap_seconds": 60.0,
+        "unhealthy_heartbeat_count": 0,
+        "min_controller_runtimes": 1,
+    }
 
 
 def _baseline_score_metrics() -> dict[str, object]:
@@ -3235,9 +5058,14 @@ def _passing_metrics_from_api_payloads(
     controller: dict[str, object] | None = None,
     include_decision_evidence: bool = True,
     decision_payload_count: int | None = None,
+    include_runtime_continuity: bool = True,
+    runtime_continuity: dict[str, object] | None = None,
+    readiness: dict[str, object] | None = None,
+    metrics_override: dict[str, object] | None = None,
 ) -> PaperReportMetrics:
     report_date = date(2026, 5, 30)
     controller_payload: dict[str, object] = {
+        "current_runtimes_total": 1,
         "decisions_total": 1,
         "diagnostics_total": 0,
         "diagnostic_counts": {},
@@ -3265,27 +5093,35 @@ def _passing_metrics_from_api_payloads(
             decision_row["decision_evidence"] = _decision_evidence()
         decision_rows.append(decision_row)
 
+    status_payload: dict[str, object] = {
+        "mode": "paper",
+        "runner_started_at": "2026-04-30T00:00:00+00:00",
+        "sensors": [
+            {
+                "name": "MarketDataSensor",
+                "status": "running",
+                "last_signal_at": "2026-05-30T00:00:00+00:00",
+            }
+        ],
+        "controller": controller_payload,
+        "actuator": {"fills_total": 10},
+        "evaluator": {
+            "brier_14d": 0.16,
+            "baseline_brier_14d": 0.24,
+            "brier_improvement_14d": 0.08,
+        },
+        "supervision": {"unresolved_feedback_total": 0},
+    }
+    if include_runtime_continuity:
+        status_payload["runtime_continuity"] = (
+            _runtime_continuity_status()
+            if runtime_continuity is None
+            else runtime_continuity
+        )
+
     return metrics_from_api_payloads(
         report_date=report_date,
-        status={
-            "mode": "paper",
-            "runner_started_at": "2026-04-30T00:00:00+00:00",
-            "sensors": [
-                {
-                    "name": "MarketDataSensor",
-                    "status": "running",
-                    "last_signal_at": "2026-05-30T00:00:00+00:00",
-                }
-            ],
-            "controller": controller_payload,
-            "actuator": {"fills_total": 10},
-            "evaluator": {
-                "brier_14d": 0.16,
-                "baseline_brier_14d": 0.24,
-                "brier_improvement_14d": 0.08,
-            },
-            "supervision": {"unresolved_feedback_total": 0},
-        },
+        status=status_payload,
         metrics={
             "fill_rate": 0.5,
             "win_rate": 0.5,
@@ -3294,8 +5130,22 @@ def _passing_metrics_from_api_payloads(
             "sharpe_ratio": 1.5,
             "pnl_series": _pnl_series(report_date),
             **_baseline_score_metrics(),
+            **(metrics_override or {}),
         },
         decisions=decision_rows,
+        readiness=(
+            {
+                "status": "ready",
+                "checks": {
+                    "sensors": "ready",
+                    "event_loop": "ready",
+                    "halt_subscriber": "disabled",
+                    "eod_scheduler": "disabled",
+                },
+            }
+            if readiness is None
+            else readiness
+        ),
         trades={
             "trades": [
                 {
@@ -3309,7 +5159,7 @@ def _passing_metrics_from_api_payloads(
         },
         positions={
             "positions": [
-                {"locked_usdc": 10.0, "unrealized_pnl": 2.0},
+                {"locked_usdc": 10.0, "unrealized_pnl": 2.0, "mark_source": "clob"},
             ],
         },
         strategies={

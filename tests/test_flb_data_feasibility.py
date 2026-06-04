@@ -7,17 +7,20 @@ sample gate, report generation) without hitting the Gamma API.
 from __future__ import annotations
 
 import csv
+import json
 import os
 import stat
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from types import TracebackType
-from typing import IO, cast
+from typing import IO, ClassVar, cast
 
 import pytest
 
+import scripts.flb_data_feasibility as flb_data_feasibility
 from scripts.flb_data_feasibility import (
     DecileStats,
     FlbCalibrationArtifactRow,
@@ -28,14 +31,24 @@ from scripts.flb_data_feasibility import (
     build_flb_calibration_rows,
     check_sample_gate,
     compute_decile_stats,
+    fetch_resolved_markets,
     generate_report,
     load_warehouse_markets,
     main,
     markets_to_contracts,
     save_decile_csv,
     save_flb_calibration_csv,
+    save_flb_calibration_provenance_json,
 )
 from pms.strategies.flb.source import load_flb_calibration_csv
+
+
+def test_flb_data_feasibility_docstring_documents_operator_error_exit_code() -> None:
+    docstring = flb_data_feasibility.__doc__
+
+    assert docstring is not None
+    assert "2 — operator/input error" in docstring
+    assert "malformed warehouse CSV" in docstring
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -113,6 +126,17 @@ def _market(
     )
 
 
+class _FakeGammaResponse:
+    def __init__(self, payload: list[dict[str, object]]) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> list[dict[str, object]]:
+        return self._payload
+
+
 WAREHOUSE_COLUMNS = [
     "market_id",
     "question",
@@ -125,6 +149,142 @@ WAREHOUSE_COLUMNS = [
     "resolved_at",
     "category",
 ]
+
+
+def test_fetch_resolved_markets_orders_gamma_by_recent_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gamma's default closed-market sort is oldest-first and mostly cleared rows."""
+
+    class RecordingGammaClient:
+        calls: ClassVar[list[tuple[str, dict[str, str]]]] = []
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def __enter__(self) -> "RecordingGammaClient":
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            del exc_type, exc, traceback
+
+        def get(self, path: str, *, params: dict[str, str]) -> _FakeGammaResponse:
+            self.calls.append((path, dict(params)))
+            return _FakeGammaResponse(
+                [
+                    {
+                        "id": "recent-closed-market",
+                        "question": "Recent closed market?",
+                        "outcomes": '["Yes", "No"]',
+                        "outcomePrices": '["1", "0"]',
+                        "lastTradePrice": 0.49,
+                        "volumeNum": 10_000.0,
+                        "liquidityNum": 500.0,
+                        "endDate": "2026-06-01T23:20:00Z",
+                        "slug": "recent-closed-market",
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(
+        "scripts.flb_data_feasibility.httpx.Client",
+        RecordingGammaClient,
+    )
+
+    markets = fetch_resolved_markets(limit=10, max_pages=1)
+
+    assert RecordingGammaClient.calls == [
+        (
+            "/markets",
+            {
+                "closed": "true",
+                "order": "closedTime",
+                "ascending": "false",
+                "limit": "10",
+                "offset": "0",
+            },
+        )
+    ]
+    assert markets == [
+        ResolvedMarket(
+            market_id="recent-closed-market",
+            question="Recent closed market?",
+            yes_price=0.49,
+            resolved_yes=True,
+            volume=10_000.0,
+            liquidity=500.0,
+            end_date="2026-06-01T23:20:00Z",
+            category="other",
+        )
+    ]
+
+
+def test_fetch_resolved_markets_paginates_when_gamma_caps_page_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gamma may cap responses below the requested limit; keep paginating."""
+
+    def gamma_row(market_id: str, *, last_trade_price: float) -> dict[str, object]:
+        return {
+            "id": market_id,
+            "question": f"Resolved market {market_id}?",
+            "outcomes": '["Yes", "No"]',
+            "outcomePrices": '["1", "0"]',
+            "lastTradePrice": last_trade_price,
+            "volumeNum": 10_000.0,
+            "liquidityNum": 500.0,
+            "endDate": "2026-06-01T23:20:00Z",
+            "slug": f"resolved-market-{market_id}",
+        }
+
+    class CappedGammaClient:
+        calls: ClassVar[list[tuple[str, dict[str, str]]]] = []
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def __enter__(self) -> "CappedGammaClient":
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            del exc_type, exc, traceback
+
+        def get(self, path: str, *, params: dict[str, str]) -> _FakeGammaResponse:
+            self.calls.append((path, dict(params)))
+            offset = params["offset"]
+            if offset == "0":
+                return _FakeGammaResponse(
+                    [gamma_row("page-1", last_trade_price=0.08)]
+                )
+            if offset == "1":
+                return _FakeGammaResponse(
+                    [gamma_row("page-2", last_trade_price=0.92)]
+                )
+            return _FakeGammaResponse([])
+
+    monkeypatch.setattr(
+        "scripts.flb_data_feasibility.httpx.Client",
+        CappedGammaClient,
+    )
+
+    markets = fetch_resolved_markets(limit=500, max_pages=3)
+
+    assert [market.market_id for market in markets] == ["page-1", "page-2"]
+    assert [call[1]["offset"] for call in CappedGammaClient.calls] == [
+        "0",
+        "1",
+        "2",
+    ]
 
 
 def _write_warehouse_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -354,9 +514,9 @@ class TestWarehouseCsvLoading:
         with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
             load_warehouse_markets(path)
 
-    def test_mixed_timezone_timestamps_are_normalized(self, tmp_path: Path) -> None:
-        """Naive and Z-suffixed ISO fields should compare as UTC instants."""
-        path = tmp_path / "mixed_timezone.csv"
+    def test_rejects_naive_entry_timestamp(self, tmp_path: Path) -> None:
+        """Warehouse chronology must not silently treat local-time entries as UTC."""
+        path = tmp_path / "naive_entry_timestamp.csv"
         _write_warehouse_csv(path, [
             _warehouse_row(
                 entry_timestamp="2025-12-01T00:00:00",
@@ -364,9 +524,21 @@ class TestWarehouseCsvLoading:
             )
         ])
 
-        markets, _ = load_warehouse_markets(path)
+        with pytest.raises(ValueError, match="entry_timestamp must include timezone"):
+            load_warehouse_markets(path)
 
-        assert len(markets) == 1
+    def test_rejects_naive_resolved_at(self, tmp_path: Path) -> None:
+        """Warehouse resolution times must carry explicit timezone provenance."""
+        path = tmp_path / "naive_resolved_at.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(
+                entry_timestamp="2025-12-01T00:00:00Z",
+                resolved_at="2026-01-01T00:00:00",
+            )
+        ])
+
+        with pytest.raises(ValueError, match="resolved_at must include timezone"):
+            load_warehouse_markets(path)
 
     def test_mixed_dataset_normal_and_fifty_fifty_resolutions(
         self, tmp_path: Path
@@ -398,11 +570,11 @@ class TestWarehouseCsvLoading:
         assert markets[0].resolved_yes is True
         assert markets[1].resolved_yes is False
 
-    def test_mixed_timezone_post_resolution_entry_is_validation_error(
+    def test_rejects_naive_post_resolution_entry_before_order_check(
         self, tmp_path: Path
     ) -> None:
-        """Mixed timezone formats should not raise TypeError on unsafe rows."""
-        path = tmp_path / "mixed_timezone_bad_order.csv"
+        """Timezone validation should run before chronology ordering."""
+        path = tmp_path / "naive_post_resolution_entry.csv"
         _write_warehouse_csv(path, [
             _warehouse_row(
                 entry_timestamp="2026-01-02T00:00:00",
@@ -410,10 +582,10 @@ class TestWarehouseCsvLoading:
             )
         ])
 
-        with pytest.raises(ValueError, match="entry_timestamp must be before resolved_at"):
+        with pytest.raises(ValueError, match="entry_timestamp must include timezone"):
             load_warehouse_markets(path)
 
-    def test_warehouse_contracts_can_pass_extreme_sample_gate(
+    def test_warehouse_longshot_contracts_do_not_imply_signal_viability(
         self, tmp_path: Path
     ) -> None:
         path = tmp_path / "sample_gate.csv"
@@ -426,7 +598,7 @@ class TestWarehouseCsvLoading:
         assert skipped == 0  # no 50/50 resolutions in this dataset
         contracts = markets_to_contracts(markets)
         stats = compute_decile_stats(contracts)
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=contracts,
@@ -437,11 +609,49 @@ class TestWarehouseCsvLoading:
         )
 
         assert len(markets) == 120
+        assert stats[0].n == 120
+        assert stats[9].n == 120
+        assert gate.longshot_count == 120
+        assert gate.favorite_count == 0
+        assert gate.passed is False
+        assert "H1 NOT VIABLE YET" in report
+        assert "warehouse CSV:" in report
+
+    def test_warehouse_signal_gate_passes_when_both_runtime_buckets_exist(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "sample_gate.csv"
+        _write_warehouse_csv(path, [
+            _warehouse_row(market_id=f"longshot-{i}", entry_yes_price="0.05")
+            for i in range(120)
+        ] + [
+            _warehouse_row(
+                market_id=f"favorite-{i}",
+                entry_yes_price="0.95",
+                yes_payout="1",
+                no_payout="0",
+            )
+            for i in range(120)
+        ])
+
+        markets, skipped = load_warehouse_markets(path)
+        assert skipped == 0
+        contracts = markets_to_contracts(markets)
+        stats = compute_decile_stats(contracts)
+        gate = check_sample_gate(markets)
+        report = generate_report(
+            markets=markets,
+            contracts=contracts,
+            decile_stats=stats,
+            gate=gate,
+            fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
+            source_label=f"warehouse CSV: {path}",
+        )
+
         assert gate.longshot_count == 120
         assert gate.favorite_count == 120
         assert gate.passed is True
         assert "H1 DATA VIABLE" in report
-        assert "warehouse CSV:" in report
 
 
 class TestFlbCalibrationArtifact:
@@ -518,6 +728,72 @@ class TestFlbCalibrationArtifact:
             "longshot_yes_overpriced_buy_no"
         ).probability_estimate == pytest.approx(0.99)
 
+    def test_save_flb_calibration_provenance_json_binds_calibration_and_warehouse(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        rows = [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=0.99,
+                sample_count=150,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=0.97,
+                sample_count=151,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+        warehouse_path = tmp_path / "warehouse.csv"
+        _write_warehouse_csv(
+            warehouse_path,
+            [
+                _warehouse_row(
+                    market_id=f"longshot-{index}",
+                    entry_yes_price="0.05",
+                    yes_payout="0",
+                    no_payout="1",
+                )
+                for index in range(150)
+            ]
+            + [
+                _warehouse_row(
+                    market_id=f"favorite-{index}",
+                    entry_yes_price="0.95",
+                    yes_payout="1",
+                    no_payout="0",
+                )
+                for index in range(151)
+            ],
+        )
+        calibration_path = tmp_path / "flb-calibration.csv"
+        provenance_path = tmp_path / "flb-calibration.csv.provenance.json"
+
+        save_flb_calibration_csv(rows, calibration_path)
+        save_flb_calibration_provenance_json(
+            rows,
+            warehouse_csv_path=warehouse_path,
+            warehouse_market_count=301,
+            calibration_csv_path=calibration_path,
+            output_path=provenance_path,
+            generated_at=datetime(2026, 6, 1, tzinfo=UTC),
+        )
+
+        payload = json.loads(provenance_path.read_text(encoding="utf-8"))
+        assert payload["artifact_type"] == "flb_calibration_provenance"
+        assert payload["source"] == "warehouse-csv"
+        assert payload["warehouse_csv_sha256"] == sha256(
+            warehouse_path.read_bytes()
+        ).hexdigest()
+        assert payload["calibration_csv_sha256"] == sha256(
+            calibration_path.read_bytes()
+        ).hexdigest()
+        assert payload["warehouse_longshot_count"] == 150
+        assert payload["warehouse_favorite_count"] == 151
+        assert payload["calibration_source_label"] == "warehouse-flb-v1"
+
     def test_save_flb_calibration_csv_creates_output_parent_private(
         self,
         tmp_path: Path,
@@ -571,6 +847,38 @@ class TestFlbCalibrationArtifact:
             output_dir.chmod(0o700)
 
         assert not (output_dir / "flb-calibration.csv").exists()
+
+    def test_save_flb_calibration_csv_refuses_output_inside_working_tree(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        rows = [
+            FlbCalibrationArtifactRow(
+                signal_name="longshot_yes_overpriced_buy_no",
+                probability_estimate=0.99,
+                sample_count=150,
+                source_label="warehouse-flb-v1",
+            ),
+            FlbCalibrationArtifactRow(
+                signal_name="favorite_yes_underpriced_buy_yes",
+                probability_estimate=0.97,
+                sample_count=151,
+                source_label="warehouse-flb-v1",
+            ),
+        ]
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        (repo_dir / ".git").mkdir()
+        output_dir = repo_dir / "artifacts"
+        output_dir.mkdir(mode=0o700)
+        output_path = output_dir / "flb-calibration.csv"
+        monkeypatch.chdir(repo_dir)
+
+        with pytest.raises(OSError, match="working tree"):
+            save_flb_calibration_csv(rows, output_path)
+
+        assert not output_path.exists()
 
     def test_save_flb_calibration_csv_preserves_existing_output_when_write_fails(
         self,
@@ -800,6 +1108,8 @@ class TestFlbCalibrationArtifact:
                 str(input_path),
                 "--calibration-csv",
                 str(output_path),
+                "--calibration-source-label",
+                "warehouse-flb-v1",
             ],
         )
 
@@ -812,6 +1122,219 @@ class TestFlbCalibrationArtifact:
         assert exit_code == 2
         assert "FLB calibration CSV output parent" in captured.err
         assert "too permissive" in captured.err
+        assert not output_path.exists()
+
+    def test_cli_writes_flb_calibration_provenance_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        rows = [
+            _warehouse_row(
+                market_id=f"longshot-{index}",
+                entry_yes_price="0.05",
+                yes_payout="0",
+                no_payout="1",
+            )
+            for index in range(120)
+        ] + [
+            _warehouse_row(
+                market_id=f"favorite-{index}",
+                entry_yes_price="0.95",
+                yes_payout="1",
+                no_payout="0",
+            )
+            for index in range(120)
+        ]
+        _write_warehouse_csv(input_path, rows)
+        calibration_path = tmp_path / "flb-calibration.csv"
+        provenance_path = Path(f"{calibration_path}.provenance.json")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--calibration-csv",
+                str(calibration_path),
+                "--calibration-source-label",
+                "warehouse-flb-v1",
+                "--calibration-provenance-json",
+                str(provenance_path),
+            ],
+        )
+
+        exit_code = main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert calibration_path.exists()
+        assert provenance_path.exists()
+        assert "FLB calibration CSV written" in captured.err
+        assert "FLB calibration provenance JSON written" in captured.err
+        payload = json.loads(provenance_path.read_text(encoding="utf-8"))
+        assert payload["warehouse_market_count"] == 240
+        assert payload["warehouse_longshot_count"] == 120
+        assert payload["warehouse_favorite_count"] == 120
+        assert payload["calibration_csv_sha256"] == sha256(
+            calibration_path.read_bytes()
+        ).hexdigest()
+
+    def test_cli_rejects_calibration_provenance_not_beside_calibration_csv(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        rows = [
+            _warehouse_row(
+                market_id=f"longshot-{index}",
+                entry_yes_price="0.05",
+                yes_payout="0",
+                no_payout="1",
+            )
+            for index in range(120)
+        ] + [
+            _warehouse_row(
+                market_id=f"favorite-{index}",
+                entry_yes_price="0.95",
+                yes_payout="1",
+                no_payout="0",
+            )
+            for index in range(120)
+        ]
+        _write_warehouse_csv(input_path, rows)
+        calibration_path = tmp_path / "flb-calibration.csv"
+        provenance_path = tmp_path / "elsewhere" / "flb-calibration.csv.provenance.json"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--calibration-csv",
+                str(calibration_path),
+                "--calibration-source-label",
+                "warehouse-flb-v1",
+                "--calibration-provenance-json",
+                str(provenance_path),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        captured = capsys.readouterr()
+
+        assert exc_info.value.code == 2
+        assert "must be the sidecar next to --calibration-csv" in captured.err
+        assert not calibration_path.exists()
+        assert not provenance_path.exists()
+
+    def test_cli_returns_sample_gate_exit_for_thin_calibration_source(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        output_path = tmp_path / "flb-calibration.csv"
+        _write_warehouse_csv(
+            input_path,
+            [
+                _warehouse_row(
+                    market_id="longshot-1",
+                    entry_yes_price="0.05",
+                    yes_payout="0",
+                    no_payout="1",
+                ),
+                _warehouse_row(
+                    market_id="favorite-1",
+                    entry_yes_price="0.95",
+                    yes_payout="1",
+                    no_payout="0",
+                ),
+            ],
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--calibration-csv",
+                str(output_path),
+                "--calibration-source-label",
+                "warehouse-flb-v1",
+            ],
+        )
+
+        exit_code = main()
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "insufficient FLB calibration samples" in captured.err
+        assert "ERROR:" not in captured.err
+        assert "# H1 FLB Data Feasibility Report" in captured.out
+        assert not output_path.exists()
+
+    def test_cli_requires_explicit_calibration_source_label(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        input_path = tmp_path / "warehouse.csv"
+        output_path = tmp_path / "flb-calibration.csv"
+        _write_warehouse_csv(
+            input_path,
+            [
+                _warehouse_row(
+                    market_id=f"longshot-{index}",
+                    entry_yes_price="0.05",
+                    yes_payout="0",
+                    no_payout="1",
+                )
+                for index in range(100)
+            ]
+            + [
+                _warehouse_row(
+                    market_id=f"favorite-{index}",
+                    entry_yes_price="0.95",
+                    yes_payout="1",
+                    no_payout="0",
+                )
+                for index in range(100)
+            ],
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "flb_data_feasibility.py",
+                "--source",
+                "warehouse-csv",
+                "--input",
+                str(input_path),
+                "--calibration-csv",
+                str(output_path),
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 2
         assert not output_path.exists()
 
     def test_save_flb_calibration_csv_atomic_publish_does_not_mutate_hardlink_swap_target(
@@ -901,6 +1424,8 @@ class TestFlbCalibrationArtifact:
                 str(input_path),
                 "--calibration-csv",
                 str(input_path),
+                "--calibration-source-label",
+                "warehouse-flb-v1",
             ],
         )
 
@@ -1190,50 +1715,37 @@ class TestComputeDecileStats:
 
 
 class TestSampleGate:
-    def _stats_with_counts(
+    def _markets_with_signal_counts(
         self, longshot_n: int, favorite_n: int
-    ) -> list[DecileStats]:
-        """Build decile stats with specified counts in target buckets."""
-        stats = []
-        for d in range(10):
-            n = longshot_n if d == 0 else (favorite_n if d == 9 else 0)
-            stats.append(DecileStats(
-                decile=d,
-                lower=d / 10.0,
-                upper=(d + 1) / 10.0 if d < 9 else 1.0,
-                n=n,
-                n_yes=0,
-                implied_prob=0.0,
-                actual_rate=0.0,
-                flb_gap=0.0,
-                wilson_lower=0.0,
-                wilson_upper=0.0,
-                recommended_side="no_edge",
-            ))
-        return stats
+    ) -> list[ResolvedMarket]:
+        """Build markets with specified counts in runtime FLB signal buckets."""
+        return (
+            [_market(0.05, False) for _ in range(longshot_n)]
+            + [_market(0.95, True) for _ in range(favorite_n)]
+        )
 
     def test_gate_passes_when_both_buckets_sufficient(self) -> None:
-        stats = self._stats_with_counts(150, 120)
-        gate = check_sample_gate(stats)
+        markets = self._markets_with_signal_counts(150, 120)
+        gate = check_sample_gate(markets)
         assert gate.passed is True
 
     def test_gate_fails_when_longshot_insufficient(self) -> None:
-        stats = self._stats_with_counts(50, 120)
-        gate = check_sample_gate(stats)
+        markets = self._markets_with_signal_counts(50, 120)
+        gate = check_sample_gate(markets)
         assert gate.passed is False
         assert gate.longshot_passed is False
         assert gate.favorite_passed is True
 
     def test_gate_fails_when_favorite_insufficient(self) -> None:
-        stats = self._stats_with_counts(150, 30)
-        gate = check_sample_gate(stats)
+        markets = self._markets_with_signal_counts(150, 30)
+        gate = check_sample_gate(markets)
         assert gate.passed is False
         assert gate.longshot_passed is True
         assert gate.favorite_passed is False
 
     def test_gate_fails_when_both_insufficient(self) -> None:
-        stats = self._stats_with_counts(10, 10)
-        gate = check_sample_gate(stats)
+        markets = self._markets_with_signal_counts(10, 10)
+        gate = check_sample_gate(markets)
         assert gate.passed is False
 
 
@@ -1244,7 +1756,7 @@ class TestReportGeneration:
     def test_report_contains_gate_section(self) -> None:
         markets = [_market(0.50, True)]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1259,7 +1771,7 @@ class TestReportGeneration:
     def test_report_contains_decile_table(self) -> None:
         markets = [_market(0.50, True)]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1274,7 +1786,7 @@ class TestReportGeneration:
     def test_report_contains_side_semantics(self) -> None:
         markets = [_market(0.50, True)]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1289,7 +1801,7 @@ class TestReportGeneration:
     def test_report_shows_not_viable_when_gate_fails(self) -> None:
         markets = [_market(0.50, True)]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1306,7 +1818,7 @@ class TestReportGeneration:
             markets.append(_market(0.05, False))  # longshot bucket
             markets.append(_market(0.95, True))   # favorite bucket
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1322,7 +1834,7 @@ class TestReportGeneration:
             _market(0.30, False, category="sports"),
         ]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1334,11 +1846,11 @@ class TestReportGeneration:
         assert "politics" in report
         assert "sports" in report
 
-    def test_report_uses_consistent_boundary_language(self) -> None:
-        """Report should use [0%-10%) and [90%-100%] not <10% and >90%."""
+    def test_report_uses_runtime_signal_boundary_language(self) -> None:
+        """Report gate rows should match runtime calibration signal buckets."""
         markets = [_market(0.50, True)]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1346,8 +1858,8 @@ class TestReportGeneration:
             gate=gate,
             fetched_at=datetime(2026, 5, 3, tzinfo=UTC),
         )
-        assert "[0%-10%)" in report
-        assert "[90%-100%]" in report
+        assert "YES < 10%" in report
+        assert "YES > 90%" in report
 
 
 # ── P1 Regression: outcomePrices ordering ───────────────────────────────────
@@ -1435,30 +1947,25 @@ class TestOutcomePricesOrdering:
 
 
 class TestNinetyPercentBoundary:
-    """P2: verify that exactly 90% markets land in decile 9 (favorite bucket).
-
-    The sample gate counts decile 9 as the favorite bucket. Markets at
-    exactly 90% should be counted, not excluded.
-    """
+    """P2: keep contract deciles and runtime signal gates distinct."""
 
     def test_exactly_90_in_favorite_decile(self) -> None:
         """Markets at exactly 90% should be in decile 9."""
         assert _assign_decile(0.90) == 9
 
-    def test_exactly_90_counted_in_sample_gate(self) -> None:
-        """120 markets at exactly 90% should pass the favorite gate."""
+    def test_exactly_90_not_counted_in_signal_sample_gate(self) -> None:
+        """Runtime favorite calibration uses the strict YES > 90% signal bucket."""
         markets = [_market(0.90, True) for _ in range(120)]
-        stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
-        assert gate.favorite_count == 120
-        assert gate.favorite_passed is True
+        gate = check_sample_gate(markets)
+        assert gate.favorite_count == 0
+        assert gate.favorite_passed is False
 
     def test_just_below_90_not_in_favorite(self) -> None:
         """Markets at 89.9% should be in decile 8, not the favorite bucket."""
         assert _assign_decile(0.899) == 8
 
     def test_boundary_does_not_overstate_favorite_sample(self) -> None:
-        """Only markets ≥90% should count; 89% markets should not inflate."""
+        """Only markets >90% should count; 89% markets should not inflate."""
         # 50 markets at 89% (decile 8) + 50 at 91% (decile 9)
         markets = [_market(0.89, True) for _ in range(50)]
         markets += [_market(0.91, True) for _ in range(50)]
@@ -1466,6 +1973,8 @@ class TestNinetyPercentBoundary:
         # Only the 91% markets should be in the favorite bucket
         assert stats[9].n == 50
         assert stats[8].n == 50
+        gate = check_sample_gate(markets)
+        assert gate.favorite_count == 50
 
 
 # ── Regression: binary-only parser ──────────────────────────────────────────
@@ -1547,7 +2056,7 @@ class TestMedianVolume:
             _market(0.53, True, volume=400.0),
         ]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1566,7 +2075,7 @@ class TestMedianVolume:
             _market(0.52, True, volume=300.0),
         ]
         stats = compute_decile_stats(markets_to_contracts(markets))
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
         report = generate_report(
             markets=markets,
             contracts=markets_to_contracts(markets),
@@ -1767,8 +2276,8 @@ class TestContractLevelAnalysis:
         assert stats[9].actual_rate == 1.0
         assert stats[9].flb_gap == pytest.approx(-0.08, abs=1e-10)  # NO underpriced
 
-    def test_sample_gate_counts_contracts_not_markets(self) -> None:
-        """With 3 markets, should get 6 contracts, affecting sample gate."""
+    def test_sample_gate_counts_original_yes_price_signal_buckets(self) -> None:
+        """Contract deciles are diagnostic; runtime sample gate counts signals."""
         markets = [
             ResolvedMarket(market_id=f"m{i}", question=f"Q{i}", yes_price=0.05,
                           resolved_yes=(i % 2 == 0), volume=1000.0, liquidity=100.0,
@@ -1778,7 +2287,7 @@ class TestContractLevelAnalysis:
 
         contracts = markets_to_contracts(markets)
         stats = compute_decile_stats(contracts)
-        gate = check_sample_gate(stats)
+        gate = check_sample_gate(markets)
 
         # Should have 6 contracts (3 markets × 2)
         assert len(contracts) == 6
@@ -1789,10 +2298,13 @@ class TestContractLevelAnalysis:
 
         assert len(longshot_contracts) == 3  # Three 0.05 contracts
         assert len(favorite_contracts) == 3  # Three 0.95 contracts
+        assert stats[0].n == 3
+        assert stats[9].n == 3
 
-        # Sample gate should reflect contract counts
+        # Runtime signal gate should not count synthetic NO contracts as
+        # favorite_yes_underpriced_buy_yes calibration samples.
         assert gate.longshot_count == 3
-        assert gate.favorite_count == 3
+        assert gate.favorite_count == 0
 
     def test_flb_gap_same_magnitude_opposite_sign(self) -> None:
         """FLB gap should have same magnitude for both sides of same market."""

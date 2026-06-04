@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from hashlib import sha256
 import importlib
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from pms.config import PMSSettings
+from pms.config import PMSSettings, StrategyRuntimeSettings
+from pms.controller.forecasters.flb import FlbForecaster
 from pms.core.enums import RunMode
 from pms.core.models import EvalRecord, MarketSignal, Portfolio
+from pms.strategies.flb import H1_FLB_STRATEGY_ID, build_h1_flb_strategy
 from pms.strategies.projections import (
     EvalSpec,
     CalibrationSpec,
@@ -57,6 +62,42 @@ def _portfolio() -> Portfolio:
         locked_usdc=0.0,
         open_positions=[],
     )
+
+
+def _write_valid_flb_calibration_csv(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    Path(f"{path}.provenance.json").write_text(
+        json.dumps(
+            {
+                "artifact_type": "flb_calibration_provenance",
+                "generated_by": "scripts/flb_data_feasibility.py",
+                "source": "warehouse-csv",
+                "generated_at": "2026-06-01T00:00:00+00:00",
+                "warehouse_csv_sha256": sha256(
+                    b"unit warehouse provenance fixture"
+                ).hexdigest(),
+                "warehouse_market_count": 301,
+                "warehouse_longshot_count": 150,
+                "warehouse_favorite_count": 151,
+                "calibration_csv_sha256": sha256(path.read_bytes()).hexdigest(),
+                "calibration_source_label": "warehouse-flb-v1",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def _active_strategy(
@@ -247,6 +288,126 @@ def test_live_controller_factory_requires_strategy_evidence_metadata() -> None:
 
     with pytest.raises(ValueError, match="alpha_source"):
         factory.build(strategy)
+
+
+def test_live_controller_factory_builds_h1_flb_with_calibration_artifact(
+    tmp_path: Path,
+) -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    calibration_path = _write_valid_flb_calibration_csv(
+        tmp_path / "flb-calibration.csv"
+    )
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        strategies=StrategyRuntimeSettings(
+            flb_calibration_path=str(calibration_path),
+        ),
+    )
+    strategy = build_h1_flb_strategy().to_active(
+        strategy_version_id="h1-flb-test-v1"
+    )
+
+    pipeline = factory_cls(settings=settings).build(strategy)
+
+    assert strategy.strategy_id == H1_FLB_STRATEGY_ID
+    assert pipeline.strategy_id == H1_FLB_STRATEGY_ID
+    assert tuple(type(item) for item in pipeline.forecasters) == (FlbForecaster,)
+
+
+def test_live_controller_factory_rejects_h1_flb_calibration_inside_working_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    artifact_dir = repo_dir / "private"
+    artifact_dir.mkdir(mode=0o700)
+    calibration_path = _write_valid_flb_calibration_csv(
+        artifact_dir / "flb-calibration.csv"
+    )
+    monkeypatch.chdir(repo_dir)
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        strategies=StrategyRuntimeSettings(
+            flb_calibration_path=str(calibration_path),
+        ),
+    )
+    strategy = build_h1_flb_strategy().to_active(
+        strategy_version_id="h1-flb-test-v1"
+    )
+
+    with pytest.raises(ValueError, match="outside the working tree"):
+        factory_cls(settings=settings).build(strategy)
+
+
+def test_live_controller_factory_rejects_h1_flb_calibration_permissive_parent(
+    tmp_path: Path,
+) -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    artifact_dir = tmp_path / "permissive"
+    artifact_dir.mkdir()
+    artifact_dir.chmod(0o755)
+    calibration_path = _write_valid_flb_calibration_csv(
+        artifact_dir / "flb-calibration.csv"
+    )
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        strategies=StrategyRuntimeSettings(
+            flb_calibration_path=str(calibration_path),
+        ),
+    )
+    strategy = build_h1_flb_strategy().to_active(
+        strategy_version_id="h1-flb-test-v1"
+    )
+
+    with pytest.raises(ValueError, match="too permissive"):
+        factory_cls(settings=settings).build(strategy)
+
+
+def test_live_controller_factory_rejects_h1_flb_without_calibration_provenance(
+    tmp_path: Path,
+) -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    calibration_path = tmp_path / "flb-calibration.csv"
+    calibration_path.write_text(
+        "\n".join(
+            (
+                "signal_name,probability_estimate,sample_count,source_label",
+                "longshot_yes_overpriced_buy_no,0.99,150,warehouse-flb-v1",
+                "favorite_yes_underpriced_buy_yes,0.97,151,warehouse-flb-v1",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        strategies=StrategyRuntimeSettings(
+            flb_calibration_path=str(calibration_path),
+        ),
+    )
+    strategy = build_h1_flb_strategy().to_active(
+        strategy_version_id="h1-flb-test-v1"
+    )
+
+    with pytest.raises(ValueError, match="FLB calibration provenance JSON"):
+        factory_cls(settings=settings).build(strategy)
+
+
+def test_live_controller_factory_rejects_h1_flb_without_calibration_artifact() -> None:
+    factory_cls = _load_symbol("pms.controller.factory", "ControllerPipelineFactory")
+    settings = PMSSettings(
+        mode=RunMode.LIVE,
+        strategies=StrategyRuntimeSettings(flb_calibration_path=None),
+    )
+    strategy = build_h1_flb_strategy().to_active(
+        strategy_version_id="h1-flb-test-v1"
+    )
+
+    with pytest.raises(ValueError, match="flb_calibration_path"):
+        factory_cls(settings=settings).build(strategy)
 
 
 @pytest.mark.asyncio

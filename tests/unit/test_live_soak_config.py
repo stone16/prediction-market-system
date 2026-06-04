@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pms.config import PMSSettings
+from pms.config import PMSSettings, SensorSettings
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -14,37 +14,54 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture(autouse=True)
 def stub_llm_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provide a stub PMS_LLM__API_KEY so config.live-soak.yaml passes validation.
-
-    The soak YAML enables the LLM forecaster; the validator at
-    ``LLMSettings._validate_when_enabled`` requires ``api_key`` to be non-empty
-    when ``enabled=True``. In production the key is supplied by the operator's
-    shell (``export PMS_LLM__API_KEY=sk-ant-...``); tests stub it so they don't
-    depend on operator state.
-    """
+    """Keep config loading independent of any operator shell LLM credentials."""
     monkeypatch.setenv("PMS_LLM__API_KEY", "sk-stub-test-only")
 
 
 def test_live_soak_config_loads_tight_first_live_risk_caps() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
-    assert settings.risk.max_position_per_market == 5.0
+    assert settings.risk.max_position_per_market == 1.0
     assert settings.risk.max_total_exposure == 50.0
     assert settings.risk.max_drawdown_pct == 20.0
     assert settings.risk.max_daily_loss_usdc == 20.0
-    assert settings.risk.max_open_positions == 5
-    assert settings.risk.max_exposure_per_risk_group == 15.0
+    assert settings.risk.max_open_positions == 50
+    assert settings.risk.max_exposure_per_risk_group == 1.0
     assert settings.risk.max_quantity_shares == 500.0
     assert settings.risk.min_order_usdc == 1.0
     assert settings.risk.slippage_threshold_bps == 50.0
     assert settings.strategies.flb_entry_execution_cost_bps == 15.0
-    assert settings.strategies.flb_fee_rate == 0.04
+    assert settings.strategies.flb_fee_rate == 0.07
 
 
 def test_live_soak_config_relaxes_paper_factor_gate_for_phase_a() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
     assert settings.controller.strict_factor_gates is False
+
+
+def test_live_soak_config_uses_tight_paper_snapshot_freshness_window() -> None:
+    settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
+
+    assert settings.mode == "paper"
+    assert settings.live_trading_enabled is False
+    assert settings.controller.quote_source == "postgres_snapshot"
+    assert settings.controller.max_book_age_ms == pytest.approx(2_000.0)
+    assert settings.controller.venue_book_refresh_enabled is True
+    assert settings.controller.venue_book_refresh_timeout_s == pytest.approx(5.0)
+
+
+def test_live_soak_config_uses_tradeable_paper_strategy() -> None:
+    settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
+
+    assert settings.paper_soak_strategy_id == "h1_flb"
+    assert settings.paper_soak_archive_default is True
+    assert settings.controller.category_prior_observations_path == (
+        "/secure/pms/category-prior-observations.csv"
+    )
+    assert settings.strategies.flb_calibration_path == (
+        "/secure/pms/flb-calibration.csv"
+    )
 
 
 def test_live_soak_config_has_no_dead_top_level_calibration_section() -> None:
@@ -56,16 +73,49 @@ def test_live_soak_config_has_no_dead_top_level_calibration_section() -> None:
     assert settings.position_exit.stop_loss_pct == pytest.approx(30.0)
     assert settings.position_exit.profit_take_pct == pytest.approx(50.0)
     assert settings.position_exit.max_holding_days == 7
+    assert settings.position_exit.reentry_cooldown_s == pytest.approx(3600.0)
 
 
 def test_live_soak_config_tunes_gamma_discovery_http_pool() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
+    assert settings.sensor.poll_interval_s == pytest.approx(60.0)
+    assert settings.sensor.market_data_ws_max_size_bytes == 8_388_608
+    assert settings.sensor.discovery_page_limit == 100
+    assert settings.sensor.discovery_max_pages == 30
+    assert settings.sensor.discovery_pagination_mode == "keyset"
+    assert settings.sensor.discovery_order == "volume24hr"
+    assert settings.sensor.discovery_ascending is False
     assert settings.sensor.discovery_http_timeout_s == pytest.approx(10.0)
     assert settings.sensor.discovery_http_pool_timeout_s == pytest.approx(10.0)
     assert settings.sensor.discovery_http_max_connections == 10
     assert settings.sensor.discovery_http_max_keepalive_connections == 5
     assert settings.sensor.discovery_http_keepalive_expiry_s == pytest.approx(120.0)
+    assert settings.sensor.max_subscription_asset_ids == 100
+
+
+def test_default_keyset_discovery_page_limit_matches_gamma_cap() -> None:
+    settings = SensorSettings()
+
+    assert settings.discovery_pagination_mode == "keyset"
+    assert settings.discovery_page_limit == 100
+
+
+def test_keyset_discovery_rejects_page_limit_above_gamma_cap() -> None:
+    with pytest.raises(ValueError, match="discovery_page_limit.*keyset.*100"):
+        SensorSettings(
+            discovery_pagination_mode="keyset",
+            discovery_page_limit=101,
+        )
+
+
+def test_offset_discovery_keeps_legacy_page_limit_cap() -> None:
+    settings = SensorSettings(
+        discovery_pagination_mode="offset",
+        discovery_page_limit=500,
+    )
+
+    assert settings.discovery_page_limit == 500
 
 
 def test_live_soak_config_uses_distinct_audit_sinks() -> None:
@@ -86,12 +136,15 @@ def test_live_soak_config_keeps_credentials_env_only() -> None:
     assert settings.polymarket.funder_address is None
 
 
-def test_live_soak_config_enables_llm_forecaster_with_widened_budget() -> None:
+def test_live_soak_config_disables_llm_for_h1_flb_soak() -> None:
     settings = PMSSettings.load(ROOT / "config.live-soak.yaml")
 
-    assert settings.llm.enabled is True
+    assert settings.llm.enabled is False
     assert settings.llm.provider == "anthropic"
-    assert settings.llm.max_daily_llm_cost_usdc == 25.0
+    llm_daily_cap = settings.llm.max_daily_llm_cost_usdc
+    assert llm_daily_cap is not None
+    assert llm_daily_cap == pytest.approx(0.05)
+    assert llm_daily_cap <= settings.risk.min_order_usdc * 0.05
 
 
 def test_live_soak_config_yaml_does_not_pin_model_or_credentials() -> None:
@@ -153,12 +206,12 @@ def test_live_config_example_is_non_secret_and_uses_soak_risk_envelope() -> None
     )
 
     assert payload["risk"] == {
-        "max_position_per_market": 5.0,
+        "max_position_per_market": 1.0,
         "max_total_exposure": 50.0,
         "max_drawdown_pct": 20.0,
         "max_daily_loss_usdc": 20.0,
         "max_open_positions": 5,
-        "max_exposure_per_risk_group": 15.0,
+        "max_exposure_per_risk_group": 1.0,
         "min_order_usdc": 1.0,
         "slippage_threshold_bps": 50.0,
         "max_quantity_shares": 500.0,
@@ -174,12 +227,12 @@ def test_live_config_example_is_non_secret_and_uses_soak_risk_envelope() -> None
         "flb_calibration_path": "/secure/pms/flb-calibration.csv",
         "flb_min_calibration_samples": 100,
         "flb_entry_execution_cost_bps": 15.0,
-        "flb_fee_rate": 0.04,
+        "flb_fee_rate": 0.07,
     }
     assert payload["llm"] == {
         "enabled": False,
         "provider": "anthropic",
-        "max_daily_llm_cost_usdc": 25.0,
+        "max_daily_llm_cost_usdc": 0.05,
     }
     assert payload["polymarket"] == {
         "operator_approval_mode": "every_order",

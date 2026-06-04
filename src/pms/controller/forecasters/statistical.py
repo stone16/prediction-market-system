@@ -29,7 +29,6 @@ EDGE_FACTOR_IDS = frozenset(
         "anchoring_lag_divergence",
         "fair_value_spread",
         "favorite_longshot_bias",
-        "orderbook_imbalance",
     }
 )
 PROBABILITY_FACTOR_IDS = frozenset(

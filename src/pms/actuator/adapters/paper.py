@@ -26,8 +26,25 @@ class PaperActuator:
         if decision.venue == Venue.KALSHI.value:
             raise kalshi_stub_error("PaperActuator.execute")
         orderbook = _orderbook_for_decision(self.orderbooks, decision)
-        fill_price, filled_quantity = _vwap_fill(orderbook, decision)
-        return _matched_order_state(decision, fill_price, filled_quantity, "paper")
+        fill_price, filled_quantity, filled_notional = _vwap_fill(orderbook, decision)
+        return _matched_order_state(
+            decision,
+            fill_price,
+            filled_quantity,
+            filled_notional,
+            "paper",
+        )
+
+
+def paper_orderbook_fill_failure(
+    orderbook: dict[str, Any],
+    decision: TradeDecision,
+) -> str | None:
+    try:
+        _vwap_fill(orderbook, decision)
+    except InsufficientLiquidityError as error:
+        return str(error)
+    return None
 
 
 def _orderbook_for_decision(
@@ -45,7 +62,10 @@ def _orderbook_for_decision(
     )
 
 
-def _vwap_fill(orderbook: dict[str, Any], decision: TradeDecision) -> tuple[float, float]:
+def _vwap_fill(
+    orderbook: dict[str, Any],
+    decision: TradeDecision,
+) -> tuple[float, float, float]:
     requested_notional_usdc = _positive_decimal(
         decision.notional_usdc,
         "decision notional must be positive",
@@ -80,7 +100,11 @@ def _vwap_fill(orderbook: dict[str, Any], decision: TradeDecision) -> tuple[floa
         levels.append((price, size))
 
     levels.sort(key=lambda item: item[0], reverse=not is_buy)
-    remaining = requested_notional_usdc
+    target_quantity = (
+        requested_notional_usdc / limit_price if not is_buy else Decimal("0")
+    )
+    remaining_notional = requested_notional_usdc
+    remaining_quantity = target_quantity
     filled_notional = Decimal("0")
     filled_quantity = Decimal("0")
     epsilon = Decimal("1e-9")
@@ -89,20 +113,35 @@ def _vwap_fill(orderbook: dict[str, Any], decision: TradeDecision) -> tuple[floa
             break
         if not is_buy and price < effective_limit:
             break
-        take_notional = min(remaining, price * size)
+        if is_buy:
+            take_notional = min(remaining_notional, price * size)
+            take_quantity = take_notional / price
+        else:
+            take_quantity = min(remaining_quantity, size)
+            take_notional = take_quantity * price
         filled_notional += take_notional
-        filled_quantity += take_notional / price
-        remaining -= take_notional
-        if remaining <= epsilon:
+        filled_quantity += take_quantity
+        if is_buy:
+            remaining_notional -= take_notional
+            done = remaining_notional <= epsilon
+        else:
+            remaining_quantity -= take_quantity
+            done = remaining_quantity <= epsilon
+        if done:
             break
 
+    remaining = remaining_notional if is_buy else remaining_quantity
     if remaining > epsilon or filled_quantity <= 0:
         raise InsufficientLiquidityError(
             f"{side_key} executable depth is insufficient at "
             f"limit={decision.limit_price} effective={float(effective_limit):.6f} "
             f"(slippage={decision.max_slippage_bps}bps)"
         )
-    return float(filled_notional / filled_quantity), float(filled_quantity)
+    return (
+        float(filled_notional / filled_quantity),
+        float(filled_quantity),
+        float(filled_notional),
+    )
 
 
 def _slippage_adjusted_limit(
@@ -123,10 +162,10 @@ def _matched_order_state(
     decision: TradeDecision,
     fill_price: float,
     filled_quantity: float,
+    filled_notional_usdc: float,
     order_id_prefix: str,
 ) -> OrderState:
     now = datetime.now(tz=UTC)
-    filled_notional_usdc = _decision_notional_usdc(decision)
     return OrderState(
         order_id=f"{order_id_prefix}-{uuid4().hex}",
         decision_id=decision.decision_id,
@@ -134,7 +173,7 @@ def _matched_order_state(
         market_id=decision.market_id,
         token_id=decision.token_id,
         venue=decision.venue,
-        requested_notional_usdc=filled_notional_usdc,
+        requested_notional_usdc=_decision_notional_usdc(decision),
         filled_notional_usdc=filled_notional_usdc,
         remaining_notional_usdc=0.0,
         fill_price=fill_price,

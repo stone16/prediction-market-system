@@ -25,9 +25,7 @@ function installMemoryLocalStorage(): void {
   });
 }
 
-if (typeof window.localStorage.clear !== 'function') {
-  installMemoryLocalStorage();
-}
+installMemoryLocalStorage();
 
 afterEach(() => {
   cleanup();

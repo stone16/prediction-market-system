@@ -33,6 +33,232 @@ def test_readme_and_claude_explicitly_document_gated_polymarket_live_mode() -> N
     assert "operator gate" in claude_text
 
 
+def test_readme_paper_api_examples_use_bearer_token_when_token_is_configured() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert 'export PMS_API_TOKEN="$(openssl rand -hex 32)"' in readme_text
+    assert "Authorization: Bearer $PMS_API_TOKEN" in readme_text
+    assert "scripts/paper_report.py reads the same token" in readme_text
+
+
+def test_paper_soak_docs_explicitly_start_runner_after_api_control_plane() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    normalized_readme = _normalized_doc_text(readme_text)
+    normalized_runbook = _normalized_doc_text(runbook_text)
+
+    expected_control_plane_warning = (
+        "The `pms-api` command starts the API control plane; it does not start "
+        "the runner until an authenticated `POST /run/start` succeeds."
+    )
+    expected_start_command = "http://127.0.0.1:8000/run/start"
+
+    assert expected_control_plane_warning in normalized_readme
+    assert expected_control_plane_warning in normalized_runbook
+    assert expected_start_command in readme_text
+    assert expected_start_command in runbook_text
+
+
+def test_h1_flb_runtime_smoke_docs_use_machine_checker_and_scope_evidence() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    normalized_readme = _normalized_doc_text(readme_text)
+    normalized_runbook = _normalized_doc_text(runbook_text)
+    expected_scope = (
+        "The H1 FLB runtime smoke is plumbing evidence only; it does not "
+        "satisfy the 30-day paper-soak GO gate."
+    )
+
+    assert "scripts/check_h1_flb_smoke.py" in readme_text
+    assert "scripts/check_h1_flb_smoke.py" in runbook_text
+    assert "--readiness-json" in readme_text
+    assert "--readiness-json" in runbook_text
+    assert "--min-decisions 1" in readme_text
+    assert "--min-decisions 1" in runbook_text
+    assert "--min-trades 1" in readme_text
+    assert "--min-trades 1" in runbook_text
+    assert expected_scope in normalized_readme
+    assert expected_scope in normalized_runbook
+
+
+def test_runtime_smoke_docs_capture_readiness_snapshots_for_machine_checkers() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "readiness.json" in readme_text
+    assert "readiness.json" in runbook_text
+    assert "/readiness" in readme_text
+    assert "/readiness" in runbook_text
+    assert "scripts/check_paper_canary_smoke.py" in readme_text
+    assert "scripts/check_paper_canary_smoke.py" in runbook_text
+    assert "scripts/check_h1_flb_smoke.py" in readme_text
+    assert "scripts/check_h1_flb_smoke.py" in runbook_text
+
+
+def test_paper_go_report_docs_state_readiness_endpoint_is_gated() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    normalized_readme = _normalized_doc_text(readme_text)
+    normalized_runbook = _normalized_doc_text(runbook_text)
+
+    expected = (
+        "`scripts/paper_report.py --require-go` also fetches `/readiness` "
+        "and records a NO-GO risk event unless readiness status is `ready` "
+        "and every check is `ready` or `disabled`."
+    )
+
+    assert expected in normalized_readme
+    assert expected in normalized_runbook
+
+
+def test_paper_soak_docs_verify_database_target_before_migrations() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    normalized_readme = _normalized_doc_text(readme_text)
+    normalized_runbook = _normalized_doc_text(runbook_text)
+
+    expected_warning = (
+        "Before running migrations or installing a canary strategy, verify "
+        "that `DATABASE_URL` points at the intended Postgres server and "
+        "database; another local Postgres on port 5432 can silently catch "
+        "`localhost` traffic."
+    )
+    expected_probe = (
+        "psql \"$DATABASE_URL\" -Atc "
+        "\"select current_database(), inet_server_addr(), inet_server_port(), version();\""
+    )
+
+    assert expected_warning in normalized_readme
+    assert expected_warning in normalized_runbook
+    assert expected_probe in readme_text
+    assert expected_probe in runbook_text
+
+
+def test_readme_autostart_example_mentions_required_discord_webhook() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    normalized = _normalized_doc_text(readme_text)
+
+    assert "PMS_AUTO_START=1 requires PMS_DISCORD__WEBHOOK_URL" in normalized
+    assert "PMS_AUTO_START=1 uv run pms-api" not in readme_text
+
+
+def _normalized_doc_text(text: str) -> str:
+    lines = [
+        line.lstrip("#").strip()
+        for line in text.splitlines()
+    ]
+    return " ".join(" ".join(lines).split())
+
+
+def _configured_flb_fee_rate(config_text: str) -> str:
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("flb_fee_rate:"):
+            return stripped.split(":", maxsplit=1)[1].strip()
+    raise AssertionError("config.live-soak.yaml missing flb_fee_rate")
+
+
+def _configured_llm_enabled(config_text: str) -> bool:
+    in_llm_section = False
+    for line in config_text.splitlines():
+        if line.startswith("llm:"):
+            in_llm_section = True
+            continue
+        if in_llm_section and line and not line.startswith(" "):
+            break
+        stripped = line.strip()
+        if in_llm_section and stripped.startswith("enabled:"):
+            raw_value = stripped.split(":", maxsplit=1)[1].strip()
+            if raw_value == "true":
+                return True
+            if raw_value == "false":
+                return False
+            raise AssertionError(f"unexpected llm.enabled value: {raw_value}")
+    raise AssertionError("config.live-soak.yaml missing llm.enabled")
+
+
+def test_readme_paper_soak_status_mentions_required_launch_artifacts() -> None:
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    normalized = " ".join(readme_text.split())
+
+    assert "Paper Soak Blocked Pending Launch Artifacts" in readme_text
+    assert (
+        "does not start until `/secure/pms/category-prior-observations.csv`, "
+        "`/secure/pms/flb-calibration.csv`, and the FLB `.provenance.json` "
+        "sidecar exist"
+    ) in normalized
+    assert "not credentials" in normalized
+    assert "not a launch artifact" in normalized
+
+
+def test_launch_fee_rate_docs_match_live_soak_config() -> None:
+    config_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
+    runbook_text = (
+        ROOT / "docs" / "operations" / "live-polymarket-runbook.md"
+    ).read_text(encoding="utf-8")
+    readiness_text = (
+        ROOT / "agent_docs" / "production-readiness-2026-05.md"
+    ).read_text(encoding="utf-8")
+    fee_rate = _configured_flb_fee_rate(config_text)
+
+    assert f"flb_fee_rate: {fee_rate}" in runbook_text
+    assert f"--fee-rate {fee_rate}" in runbook_text
+    assert f"`strategies.flb_fee_rate={fee_rate}`" in readiness_text
+    assert f"confirm `{fee_rate}`" in readiness_text
+    assert "--fee-rate 0.04" not in runbook_text
+    assert "`strategies.flb_fee_rate=0.04`" not in readiness_text
+
+
+def test_live_runbook_llm_guidance_matches_live_soak_config() -> None:
+    config_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
+    runbook_text = (
+        ROOT / "docs" / "operations" / "live-polymarket-runbook.md"
+    ).read_text(encoding="utf-8")
+    normalized_runbook = _normalized_doc_text(runbook_text)
+
+    assert _configured_llm_enabled(config_text) is False
+    assert (
+        "The committed paper-soak config keeps `llm.enabled: false`"
+        in normalized_runbook
+    )
+    assert "committed paper-soak config enables the LLM forecaster" not in runbook_text
+
+
+def test_readme_llm_guidance_matches_live_soak_config() -> None:
+    config_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    normalized_readme = _normalized_doc_text(readme_text)
+
+    assert _configured_llm_enabled(config_text) is False
+    assert (
+        "H1 FLB keeps `llm.enabled: false` for the launch soak"
+        in normalized_readme
+    )
+    assert "and the LLM forecaster" not in readme_text
+
+
+def test_live_soak_config_llm_secret_comment_matches_disabled_llm() -> None:
+    config_text = (ROOT / "config.live-soak.yaml").read_text(encoding="utf-8")
+
+    assert _configured_llm_enabled(config_text) is False
+    assert (
+        "PMS_LLM__API_KEY is required only if you explicitly enable LLM"
+        in config_text
+    )
+    assert "(always required)" not in config_text
+    assert "Required env vars when running this config" not in config_text
+
+
 def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_gate() -> None:
     runbook_text = (ROOT / "docs" / "operations" / "live-polymarket-runbook.md").read_text(
         encoding="utf-8"
@@ -54,6 +280,8 @@ def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_ga
     assert "permissive approval" in runbook_text
     assert "private and owner-writable" in runbook_text
     assert "max_exposure_per_risk_group" in runbook_text
+    assert "max_exposure_per_risk_group=$1" in runbook_text
+    assert "llm.max_daily_llm_cost_usdc=$0.05" in runbook_text
     assert "risk_group_id" in runbook_text
     assert "decisions without a risk group are rejected" in runbook_text
     assert "market_data_freshness" in runbook_text
@@ -71,6 +299,8 @@ def test_live_runbook_first_order_example_includes_outcome_and_reconciliation_ga
     assert "cannot bypass the\nstartup artifact gate" in runbook_text
     assert "PAPER_SOAK_REPORT_DATE" in runbook_text
     assert "--output /secure/pms/paper-soak-go-report.md" in runbook_text
+    assert "requires at least 50 simulated fills before the report can pass" in runbook_text
+    assert "requires at least 10 simulated fills before the report can pass" not in runbook_text
     assert "`artifact_mode` set to `persisted`" in runbook_text
     assert "`generated_at` timestamp" in runbook_text
     assert "Dry-run output is marked `dry_run`" in runbook_text
@@ -183,10 +413,41 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
     assert "credentialed preflight artifact to still validate" in readme_text
     assert "PAPER_SOAK_REPORT_DATE" in readme_text
     assert "--output /secure/pms/paper-soak-go-report.md" in readme_text
+    assert "--calibration-csv /secure/pms/flb-calibration.csv" in readme_text
+    assert "--calibration-source-label warehouse-flb-v1" in readme_text
+    normalized_readme_text = " ".join(readme_text.split())
+    assert (
+        "--calibration-provenance-json "
+        "/secure/pms/flb-calibration.csv.provenance.json"
+    ) in normalized_readme_text
+    assert "max_exposure_per_risk_group=$1" in readme_text
+    assert "max_exposure_per_risk_group=$15" not in readme_text
+    assert "scripts/prepare_local_paper_soak_config.py" in readme_text
+    assert "scripts/prepare_local_paper_soak_config.py" in runbook_text
+    assert "--paper-canary" in runbook_text
+    assert "scripts/install_paper_canary_strategy.py" in runbook_text
+    assert "--archive-default" in runbook_text
+    assert "--sample-modulus 1" in runbook_text
+    assert "paper_soak_strategy_id: null" in runbook_text
+    assert "flb_calibration_path: null" in runbook_text
+    assert "Decimal-equivalent settled vectors" in runbook_text
+    assert "PMS_SECURE_DIR" in readme_text
+    assert "PMS_SECURE_DIR" in runbook_text
+    assert "private artifact parent" in readme_text
+    assert "private artifact parent" in runbook_text
+    assert "scripts/check_paper_soak_artifacts.py" in readme_text
+    assert "scripts/check_paper_soak_artifacts.py" in runbook_text
     assert "credentialed preflight artifact is missing/invalid" in readme_text
+    assert "strategy_id`, `strategy_version_id`" in runbook_text
+    assert "strategy_evidence` to match the final paper-soak" in runbook_text
+    assert "Paper-only strategies" in runbook_text
+    assert "`paper_canary_v1` cannot be final GO evidence" in runbook_text
     assert "Create the approval JSON only after preview review" in readme_text
     assert "true LIVE template leaves LLM disabled by default" in readme_text
-    assert "The true LIVE template keeps `llm.enabled=false`" in runbook_text
+    assert (
+        "The committed paper-soak config keeps `llm.enabled: false`"
+        in _normalized_doc_text(runbook_text)
+    )
     assert "PMS_LLM__API_KEY is required only if you explicitly enable LLM" in runbook_text
     assert "PMS_RUN_LIVE_PREFLIGHT=1" in runbook_text
     assert "tests/integration/test_live_credentialed_preflight.py" in runbook_text
@@ -195,5 +456,10 @@ def test_kalshi_mentions_are_stubbed_and_live_launch_docs_are_not_stale() -> Non
         ROOT / "docs" / "operations" / "fly-deploy-runbook.md"
     ).read_text(encoding="utf-8")
     assert "fly.live.toml.example" in fly_runbook_text
+    assert "fly volumes create pms_paper_soak_secure" in fly_runbook_text
+    assert "install -d -m 700 /secure/pms" in fly_runbook_text
+    assert "/secure/pms/category-prior-observations.csv" in fly_runbook_text
+    assert "/secure/pms/flb-calibration.csv" in fly_runbook_text
+    assert "/secure/pms/flb-calibration.csv.provenance.json" in fly_runbook_text
     assert "fly deploy -c fly.live.toml" in fly_runbook_text
     assert "DATABASE_URL" in fly_runbook_text

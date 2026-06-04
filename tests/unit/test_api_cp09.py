@@ -56,6 +56,22 @@ from tests.support.live_paths import make_live_report_paths, make_private_live_p
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
+AUTH_HEADERS = {"Authorization": "Bearer live-api-token"}
+
+
+class ReportingFillStoreDouble:
+    async def read_trades(
+        self,
+        *,
+        limit: int,
+        offset: int = 0,
+        until: datetime | None = None,
+    ) -> list[Any]:
+        del limit, offset, until
+        return []
+
+    async def read_positions(self) -> list[Position]:
+        return []
 
 
 def _settings() -> PMSSettings:
@@ -115,11 +131,12 @@ def _live_transition_settings(
     paper_report_path, rehearsal_report_path = make_live_report_paths(
         prefix="pms-api-live-transition-reports-"
     )
-    attested_at = datetime(2026, 5, 25, 12, 0, tzinfo=UTC)
+    attested_at = datetime.now(tz=UTC)
     return PMSSettings(
         mode=RunMode.PAPER,
         live_trading_enabled=True,
         secret_source="fly",
+        api_token="live-api-token",
         auto_migrate_default_v2=False,
         live_emergency_audit_path=str(
             Path(approval_path).parent / "live-emergency-audit.jsonl"
@@ -383,6 +400,7 @@ async def test_api_routes_expose_mock_runner_state() -> None:
         "task_done",
     }
     assert status["controller"] == {
+        "current_runtimes_total": 0,
         "decisions_total": 1,
         "diagnostics_total": 0,
         "diagnostic_counts": {},
@@ -392,6 +410,10 @@ async def test_api_routes_expose_mock_runner_state() -> None:
         "fills_total": 1,
         "mode": "backtest",
         "halt_recovery_cycles_7d": 0,
+        "halted": False,
+        "halt_reason": None,
+        "halt_trigger_kind": None,
+        "halt_triggered_at": None,
     }
     assert status["evaluator"] == {
         "eval_records_total": 1,
@@ -578,6 +600,146 @@ async def test_metrics_route_filters_quote_records_by_recorded_at_window() -> No
 
 
 @pytest.mark.asyncio
+async def test_metrics_route_exposes_quote_mtm_pnl_series() -> None:
+    later_quote = replace(
+        _quote_eval_record(),
+        fill_id="quote-later",
+        recorded_at=datetime(2026, 5, 30, 2, tzinfo=UTC),
+        mtm_pnl=-0.25,
+    )
+    earlier_quote = replace(
+        _quote_eval_record(),
+        fill_id="quote-earlier",
+        recorded_at=datetime(2026, 5, 30, 1, tzinfo=UTC),
+        mtm_pnl=1.5,
+    )
+    runner = _runner_with_state()
+    runner.quote_eval_store = cast(
+        QuoteEvalStore,
+        _QuoteEvalStore([later_quote, earlier_quote]),
+    )
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/metrics")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["quote_calibration"]["pnl_series"] == [
+        {
+            "recorded_at": "2026-05-30T01:00:00+00:00",
+            "pnl": 1.5,
+            "source": "quote_mtm",
+        },
+        {
+            "recorded_at": "2026-05-30T02:00:00+00:00",
+            "pnl": 1.25,
+            "source": "quote_mtm",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_metrics_route_deduplicates_repeated_quote_mtm_marks_by_fill() -> None:
+    first_mark = replace(
+        _quote_eval_record(),
+        fill_id="same-fill",
+        quote_lag_seconds=60,
+        recorded_at=datetime(2026, 5, 30, 1, tzinfo=UTC),
+        mtm_pnl=1.0,
+    )
+    latest_mark = replace(
+        _quote_eval_record(),
+        fill_id="same-fill",
+        quote_lag_seconds=120,
+        recorded_at=datetime(2026, 5, 30, 2, tzinfo=UTC),
+        mtm_pnl=2.0,
+    )
+    other_fill_mark = replace(
+        _quote_eval_record(),
+        fill_id="other-fill",
+        quote_lag_seconds=60,
+        recorded_at=datetime(2026, 5, 30, 3, tzinfo=UTC),
+        mtm_pnl=-0.5,
+    )
+    runner = _runner_with_state()
+    runner.quote_eval_store = cast(
+        QuoteEvalStore,
+        _QuoteEvalStore([first_mark, latest_mark, other_fill_mark]),
+    )
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/metrics")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["quote_calibration"]["mtm_pnl"] == 1.5
+    assert payload["quote_calibration"]["pnl_series"] == [
+        {
+            "recorded_at": "2026-05-30T01:00:00+00:00",
+            "pnl": 1.0,
+            "source": "quote_mtm",
+        },
+        {
+            "recorded_at": "2026-05-30T02:00:00+00:00",
+            "pnl": 2.0,
+            "source": "quote_mtm",
+        },
+        {
+            "recorded_at": "2026-05-30T03:00:00+00:00",
+            "pnl": 1.5,
+            "source": "quote_mtm",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_metrics_route_exposes_quote_mtm_max_drawdown_pct() -> None:
+    quote_records = [
+        replace(
+            _quote_eval_record(),
+            fill_id="quote-peak",
+            recorded_at=datetime(2026, 5, 30, 1, tzinfo=UTC),
+            mtm_pnl=5.0,
+        ),
+        replace(
+            _quote_eval_record(),
+            fill_id="quote-trough",
+            recorded_at=datetime(2026, 5, 30, 2, tzinfo=UTC),
+            mtm_pnl=-15.0,
+        ),
+        replace(
+            _quote_eval_record(),
+            fill_id="quote-recovery",
+            recorded_at=datetime(2026, 5, 30, 3, tzinfo=UTC),
+            mtm_pnl=3.0,
+        ),
+    ]
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.BACKTEST,
+            auto_migrate_default_v2=False,
+            risk=RiskSettings(max_total_exposure=50.0),
+        ),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+    )
+    runner.quote_eval_store = cast(QuoteEvalStore, _QuoteEvalStore(quote_records))
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/metrics")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["quote_calibration"]["max_drawdown_pct"] == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
 async def test_metrics_route_exposes_max_drawdown_pct_from_windowed_pnl() -> None:
     records = [
         replace(
@@ -756,7 +918,11 @@ async def test_api_feedback_resolve_and_config_errors() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resolved = await client.post("/feedback/fb-pending/resolve")
         missing = await client.post("/feedback/not-found/resolve")
-        blocked_live = await client.post("/config", json={"mode": "live"})
+        blocked_live = await client.post(
+            "/config",
+            json={"mode": "live"},
+            headers=AUTH_HEADERS,
+        )
 
     assert resolved.status_code == 200
     assert resolved.json()["resolved"] is True
@@ -775,7 +941,11 @@ async def test_api_config_rejects_live_mode_when_credentials_are_missing() -> No
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/config", json={"mode": "live"})
+        response = await client.post(
+            "/config",
+            json={"mode": "live"},
+            headers=AUTH_HEADERS,
+        )
 
     assert response.status_code == 400
     assert response.json()["detail"].startswith("Missing Polymarket credential fields:")
@@ -792,7 +962,11 @@ async def test_api_config_validates_candidate_live_mode_readiness() -> None:
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/config", json={"mode": "live"})
+        response = await client.post(
+            "/config",
+            json={"mode": "live"},
+            headers=AUTH_HEADERS,
+        )
 
     assert response.status_code == 400
     assert "operator readiness" in response.json()["detail"]
@@ -811,7 +985,11 @@ async def test_api_config_rejects_live_mode_without_credentialed_preflight_artif
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/config", json={"mode": "live"})
+        response = await client.post(
+            "/config",
+            json={"mode": "live"},
+            headers=AUTH_HEADERS,
+        )
 
     assert response.status_code == 400
     assert "preflight artifact" in response.json()["detail"]
@@ -867,7 +1045,11 @@ async def test_api_config_redacts_live_transition_refusal_detail(
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/config", json={"mode": "live"})
+        response = await client.post(
+            "/config",
+            json={"mode": "live"},
+            headers=AUTH_HEADERS,
+        )
 
     assert response.status_code == 400
     detail = response.json()["detail"]
@@ -904,7 +1086,11 @@ async def test_api_config_rejects_live_mode_switch_while_runner_is_active() -> N
             transport=transport,
             base_url="http://test",
         ) as client:
-            response = await client.post("/config", json={"mode": "live"})
+            response = await client.post(
+                "/config",
+                json={"mode": "live"},
+                headers=AUTH_HEADERS,
+            )
 
         assert response.status_code == 409
         assert response.json()["detail"] == "Stop the runner before changing mode."
@@ -922,6 +1108,7 @@ async def test_api_run_start_rejects_live_mode_when_credentials_are_missing() ->
         config=PMSSettings(
             mode=RunMode.LIVE,
             live_trading_enabled=True,
+            api_token="live-api-token",
             auto_migrate_default_v2=False,
         ),
         eval_store=cast(EvalStore, InMemoryEvalStore()),
@@ -931,7 +1118,7 @@ async def test_api_run_start_rejects_live_mode_when_credentials_are_missing() ->
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/run/start")
+        response = await client.post("/run/start", headers=AUTH_HEADERS)
 
     assert response.status_code == 400
     assert response.json()["detail"].startswith("Missing Polymarket credential fields:")
@@ -948,6 +1135,7 @@ async def test_api_run_start_redacts_live_runtime_startup_refusal(
         config=PMSSettings(
             mode=RunMode.LIVE,
             live_trading_enabled=True,
+            api_token="live-api-token",
             auto_migrate_default_v2=False,
         ),
         eval_store=cast(EvalStore, InMemoryEvalStore()),
@@ -965,7 +1153,7 @@ async def test_api_run_start_redacts_live_runtime_startup_refusal(
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/run/start")
+        response = await client.post("/run/start", headers=AUTH_HEADERS)
 
     assert response.status_code == 400
     detail = response.json()["detail"]
@@ -1020,7 +1208,7 @@ async def test_api_run_start_redacts_polymarket_credentials_from_live_startup_er
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/run/start")
+        response = await client.post("/run/start", headers=AUTH_HEADERS)
 
     assert response.status_code == 400
     detail = response.json()["detail"]
@@ -1078,7 +1266,7 @@ async def test_api_run_start_redacts_live_trading_disabled_error_detail(
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/run/start")
+        response = await client.post("/run/start", headers=AUTH_HEADERS)
 
     assert response.status_code == 400
     detail = response.json()["detail"]
@@ -1118,11 +1306,11 @@ async def test_api_run_start_stop_cycle(tmp_path: Path) -> None:
             base_url="http://test",
         ) as client:
             initial_status = (await client.get("/status")).json()
-            start_resp = await client.post("/run/start")
-            conflict_resp = await client.post("/run/start")
+            start_resp = await client.post("/run/start", headers=AUTH_HEADERS)
+            conflict_resp = await client.post("/run/start", headers=AUTH_HEADERS)
             await runner.wait_until_idle()
             running_status = (await client.get("/status")).json()
-            stop_resp = await client.post("/run/stop")
+            stop_resp = await client.post("/run/stop", headers=AUTH_HEADERS)
             stopped_status = (await client.get("/status")).json()
     finally:
         await runner.stop()
@@ -1136,6 +1324,36 @@ async def test_api_run_start_stop_cycle(tmp_path: Path) -> None:
     assert stop_resp.status_code == 200
     assert stop_resp.json() == {"status": "stopped"}
     assert stopped_status["running"] is False
+
+
+@pytest.mark.asyncio
+async def test_api_run_stop_keeps_reporting_pool_bound() -> None:
+    runner = Runner(
+        config=PMSSettings(
+            mode=RunMode.PAPER,
+            auto_migrate_default_v2=False,
+            api_token="live-api-token",
+        ),
+        eval_store=cast(EvalStore, InMemoryEvalStore()),
+        feedback_store=cast(FeedbackStore, InMemoryFeedbackStore()),
+        fill_store=cast(FillStore, ReportingFillStoreDouble()),
+    )
+    fake_pool = object()
+    runner.bind_pg_pool(cast(Any, fake_pool))
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        stop_resp = await client.post("/run/stop", headers=AUTH_HEADERS)
+        trades_resp = await client.get("/trades", headers=AUTH_HEADERS)
+        positions_resp = await client.get("/positions", headers=AUTH_HEADERS)
+
+    assert stop_resp.status_code == 200
+    assert runner.pg_pool is fake_pool
+    assert trades_resp.status_code == 200
+    assert trades_resp.json() == {"trades": [], "limit": 50, "offset": 0}
+    assert positions_resp.status_code == 200
+    assert positions_resp.json() == {"positions": []}
 
 
 @pytest.mark.asyncio
@@ -1305,7 +1523,7 @@ async def test_api_lifespan_stops_runner_started_via_api(
 
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            started = await client.post("/run/start")
+            started = await client.post("/run/start", headers=AUTH_HEADERS)
         assert started.status_code == 200
         assert any(not task.done() for task in runner.tasks)
 

@@ -539,6 +539,42 @@ CREATE TABLE IF NOT EXISTS strategy_runs (
         CHECK (strategy_id != '' AND strategy_version_id != '')
 );
 
+CREATE TABLE IF NOT EXISTS backtest_execution_rows (
+    backtest_execution_row_id UUID PRIMARY KEY,
+    run_id UUID NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+    strategy_id TEXT NOT NULL,
+    strategy_version_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    slippage_bps DOUBLE PRECISION,
+    pnl DOUBLE PRECISION,
+    rejection_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT backtest_execution_rows_strategy_identity_check
+        CHECK (strategy_id != '' AND strategy_version_id != ''),
+    CONSTRAINT backtest_execution_rows_decision_identity_check
+        CHECK (decision_id != '' AND market_id != ''),
+    CONSTRAINT backtest_execution_rows_status_check
+        CHECK (status IN ('filled', 'rejected')),
+    CONSTRAINT backtest_execution_rows_status_payload_check
+        CHECK (
+            (
+                status = 'filled'
+                AND slippage_bps IS NOT NULL
+                AND rejection_reason IS NULL
+            )
+            OR (
+                status = 'rejected'
+                AND slippage_bps IS NULL
+                AND rejection_reason IS NOT NULL
+                AND rejection_reason != ''
+            )
+        ),
+    CONSTRAINT backtest_execution_rows_unique_decision
+        UNIQUE (run_id, strategy_id, strategy_version_id, decision_id)
+);
+
 CREATE TABLE IF NOT EXISTS strategy_run_slices (
     strategy_run_slice_id UUID PRIMARY KEY,
     run_id UUID NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
@@ -628,6 +664,19 @@ CREATE TABLE IF NOT EXISTS backtest_live_comparisons (
 );
 
 -- END INNER-RING PRODUCT SHELLS
+
+CREATE TABLE IF NOT EXISTS runtime_heartbeats (
+    heartbeat_id BIGSERIAL PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    strategy_fingerprint TEXT,
+    component_status_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_heartbeats_run_observed
+    ON runtime_heartbeats (run_id, observed_at);
 
 -- default strategy seed (Invariant 3 NULLABLE→seed pattern).
 -- load-bearing legacy bootstrap row: changing `default-v1` requires a coordinated
@@ -924,6 +973,15 @@ CREATE INDEX IF NOT EXISTS idx_backtest_runs_queued_at_desc
 
 CREATE INDEX IF NOT EXISTS idx_strategy_runs_run_id
     ON strategy_runs(run_id);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_execution_rows_run_strategy
+    ON backtest_execution_rows(
+        run_id,
+        strategy_id,
+        strategy_version_id,
+        created_at,
+        decision_id
+    );
 
 CREATE INDEX IF NOT EXISTS idx_strategy_run_slices_run_strategy_identity
     ON strategy_run_slices(run_id, strategy_id, strategy_version_id, slice_start);
