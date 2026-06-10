@@ -440,6 +440,62 @@ async def test_gamma_resolution_source_parses_settled_closed_markets() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gamma_resolution_source_query_pins_closed_true_and_explicit_limit() -> None:
+    """Pins the outbound query-string contract, not a MockTransport echo.
+
+    Verified against live Gamma on 2026-06-10: batching closed markets'
+    condition_ids WITHOUT closed=true returns 0 rows (each id alone returns
+    its row), so production resolutions stay empty forever unless closed=true
+    is sent. The explicit limit pins the page size to the batch instead of
+    relying on the server default (measured: exactly 20) covering it.
+    """
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=[])
+
+    async with _gamma_client(handler) as client:
+        source = GammaResolutionSource(http_client=client)
+        await source.fetch_resolutions(["0xa", "0xb", "0xc"])
+
+    assert len(requests) == 1
+    query = requests[0].url.query.decode("ascii")
+    assert "closed=true" in query
+    assert "limit=3" in query
+    assert query.count("condition_ids=") == 3
+
+
+@pytest.mark.asyncio
+async def test_gamma_resolution_source_parses_recorded_live_closed_batch() -> None:
+    """Contract fixture recorded verbatim from live Gamma on 2026-06-10:
+
+    GET /markets?condition_ids=<a>&condition_ids=<b>&closed=true&limit=2
+
+    The same two condition_ids WITHOUT closed=true returned 0 rows, which is
+    the contract gap this fixture pins. Both markets settled NO, so the real
+    response shape exercises closed=True parsing, JSON-encoded outcome lists,
+    and the reversed-payout (yes=0, no=1) branch.
+    """
+    payload = json.loads(
+        Path("tests/fixtures/gamma_markets_closed_batch.json").read_text()
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    condition_ids = [
+        "0x6b45806ccf9734807ac19f9d968c9a634ac7335161d15349c694aae45e901570",
+        "0xed92e5fde4f1b6c6dc5bdfdb63941b08df7aa6310af29e19be95cf1c557fdce1",
+    ]
+    async with _gamma_client(handler) as client:
+        source = GammaResolutionSource(http_client=client)
+        resolutions = await source.fetch_resolutions(condition_ids)
+
+    assert resolutions == {condition_id: 0.0 for condition_id in condition_ids}
+
+
+@pytest.mark.asyncio
 async def test_gamma_resolution_source_batches_condition_ids() -> None:
     requests: list[httpx.Request] = []
 
@@ -460,6 +516,9 @@ async def test_gamma_resolution_source_batches_condition_ids() -> None:
         ["0xa", "0xb"],
         ["0xc"],
     ]
+    # Each request's explicit limit tracks its own batch size, so raising
+    # batch_size above the server default page size cannot truncate rows.
+    assert [request.url.params.get("limit") for request in requests] == ["2", "1"]
 
 
 class _RecordingConnection:

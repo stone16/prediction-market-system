@@ -79,10 +79,21 @@ class GammaResolutionSource:
         unique_ids = list(dict.fromkeys(condition_ids))
         for start in range(0, len(unique_ids), self.batch_size):
             batch = unique_ids[start : start + self.batch_size]
-            response = await self.http_client.get(
-                "/markets",
-                params=[("condition_ids", condition_id) for condition_id in batch],
-            )
+            # Live Gamma contract (verified 2026-06-10): batching closed
+            # markets' condition_ids WITHOUT closed=true returns 0 rows, so
+            # closed=true is load-bearing — without it no fill ever resolves.
+            # The explicit limit pins the page size to the batch instead of
+            # relying on the server default (measured: exactly 20).
+            # NOTE: /markets responds with `deprecation: true`,
+            # `sunset: 2026-05-01` (past) and `warning: 299 use
+            # /markets/keyset`; plan the keyset migration before the
+            # endpoint disappears.
+            params: list[tuple[str, str | int | float | bool | None]] = [
+                ("condition_ids", condition_id) for condition_id in batch
+            ]
+            params.append(("closed", "true"))
+            params.append(("limit", str(len(batch))))
+            response = await self.http_client.get("/markets", params=params)
             response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, list):
