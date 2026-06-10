@@ -1800,12 +1800,16 @@ class Runner:
                 result = await self._resolution_sweep_once()
                 self._resolution_sweeps_total += 1
                 self._resolution_fills_resolved_total += result.fills_resolved
+                # Per-fill processing failures (eval append or scoring) leave
+                # the fill unresolved for retry; they count as sweep failures
+                # so /status can distinguish them from healthy idle.
+                self._resolution_sweep_failures_total += result.fills_failed
                 if result.fills_resolved > 0:
                     logger.info(
-                        "resolution sweep resolved %d fill(s), enqueued %d "
+                        "resolution sweep resolved %d fill(s), appended %d "
                         "eval record(s) (%d still unresolved)",
                         result.fills_resolved,
-                        result.eval_records_enqueued,
+                        result.eval_records_appended,
                         result.unresolved_fills - result.fills_resolved,
                     )
             except Exception:  # noqa: BLE001

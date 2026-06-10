@@ -161,20 +161,21 @@ class RecordingEvalSpool:
         *,
         call_log: list[tuple[str, str]] | None = None,
     ) -> None:
-        self.enqueued: list[
+        self.processed: list[
             tuple[FillRecord, TradeDecision, Mapping[str, object] | None]
         ] = []
         self.call_log = call_log if call_log is not None else []
 
-    def enqueue(
+    async def process(
         self,
         fill: FillRecord,
         decision: TradeDecision,
         *,
         decision_evidence: Mapping[str, object] | None = None,
-    ) -> None:
-        self.enqueued.append((fill, decision, decision_evidence))
-        self.call_log.append(("enqueue", fill.fill_id or fill.trade_id))
+    ) -> bool:
+        self.processed.append((fill, decision, decision_evidence))
+        self.call_log.append(("process", fill.fill_id or fill.trade_id))
+        return True
 
 
 class _RecordingFeedbackGenerator:
@@ -203,10 +204,12 @@ def _sweeper(
 
 @pytest.mark.asyncio
 async def test_sweep_routes_resolved_fill_through_eval_spool_and_hooks() -> None:
-    """Swept resolutions must flow through EvalSpool._run — the exact live
-    scoring path — so post-append hooks (EvaluatorFeedback today, any
-    future post-append sink) fire for PAPER/LIVE eval records, which only
-    ever arrive via the sweep."""
+    """Swept resolutions must flow through EvalSpool.process — the exact
+    scoring path the live queue worker uses — so post-append hooks
+    (EvaluatorFeedback today, any future post-append sink) fire for
+    PAPER/LIVE eval records, which only ever arrive via the sweep. The
+    spool worker task is deliberately NOT started: swept evidence must
+    commit independently of the queue worker's liveness."""
     fill_store = FakeResolutionFillStore([_fill()])
     eval_store = InMemoryEvalStore()
     feedback_generator = _RecordingFeedbackGenerator()
@@ -236,17 +239,13 @@ async def test_sweep_routes_resolved_fill_through_eval_spool_and_hooks() -> None
         },
     )
 
-    await spool.start()
-    try:
-        result = await sweeper.sweep_once()
-        await asyncio.wait_for(spool.join(), timeout=2.0)
-    finally:
-        await spool.stop()
+    result = await sweeper.sweep_once()
 
     assert result == ResolutionSweepResult(
         unresolved_fills=1,
         fills_resolved=1,
-        eval_records_enqueued=1,
+        eval_records_appended=1,
+        fills_failed=0,
     )
     assert fill_store.resolve_calls == [("fill-res-1", 1.0)]
     assert fill_store.fills["fill-res-1"].resolved_outcome == 1.0
@@ -273,15 +272,40 @@ async def test_sweep_routes_resolved_fill_through_eval_spool_and_hooks() -> None
     assert feedback_generator.calls == 1
 
 
+class _CallLogEvalStore(InMemoryEvalStore):
+    """InMemoryEvalStore that records each committed append in a shared log."""
+
+    def __init__(self, call_log: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self._call_log = call_log
+
+    async def append(self, record: EvalRecord) -> None:
+        self._call_log.append(("append", record.decision_id))
+        await super().append(record)
+
+
+class _FailingEvalStore:
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def append(self, record: EvalRecord) -> None:
+        del record
+        self.attempts += 1
+        raise RuntimeError("transient eval store outage")
+
+
 @pytest.mark.asyncio
-async def test_sweep_enqueues_eval_evidence_before_resolving_fill() -> None:
-    """Ordering is the crash-safety contract: if the process dies after
-    enqueue but before resolve_fill commits, the fill stays unresolved and
-    the next sweep retries it; the eval store's ON CONFLICT guard absorbs
-    the duplicate append. Resolve-first would lose the record forever."""
+async def test_sweep_commits_eval_append_before_resolving_fill() -> None:
+    """Ordering is the crash-safety contract: eval_store.append has
+    COMMITTED (synchronously, via EvalSpool.process — no in-memory queue)
+    before resolve_fill commits the irreversible NULL -> value transition.
+    A crash in between leaves the fill unresolved and the next sweep
+    retries it; the eval store's ON CONFLICT guard absorbs the duplicate
+    append. Resolve-first would lose the record forever."""
     call_log: list[tuple[str, str]] = []
     fill_store = FakeResolutionFillStore([_fill()], call_log=call_log)
-    spool = RecordingEvalSpool(call_log=call_log)
+    eval_store = _CallLogEvalStore(call_log)
+    spool = EvalSpool(store=cast(EvalStore, eval_store), scorer=Scorer())
     sweeper = _sweeper(
         fill_store=fill_store,
         eval_spool=spool,
@@ -296,11 +320,46 @@ async def test_sweep_enqueues_eval_evidence_before_resolving_fill() -> None:
 
     await sweeper.sweep_once()
 
-    assert call_log == [("enqueue", "fill-res-1"), ("resolve", "fill-res-1")]
-    enqueued_fill, enqueued_decision, evidence = spool.enqueued[0]
-    assert enqueued_fill.resolved_outcome == 1.0
-    assert enqueued_decision.decision_id == "d-res-1"
-    assert evidence == {"mid_quote_baseline_prob_estimate": 0.45}
+    assert call_log == [("append", "d-res-1"), ("resolve", "fill-res-1")]
+    records = await eval_store.all()
+    assert len(records) == 1
+    assert records[0].decision_id == "d-res-1"
+    assert records[0].resolved_outcome == 1.0
+    # Decision evidence reached the scorer through process(), exactly as
+    # the live fill path passes it.
+    assert records[0].baseline_prob_estimates["mid_quote"] == 0.45
+
+
+@pytest.mark.asyncio
+async def test_failed_eval_append_leaves_fill_unresolved_for_retry() -> None:
+    """Append-before-resolve is the durability guarantee: a store whose
+    append fails must leave the fill UNRESOLVED so the next sweep retries
+    it. The old enqueue-then-resolve order committed the fill transition
+    while the eval record sat in an in-memory queue — one transient append
+    error killed the spool worker and lost the record forever."""
+    fill_store = FakeResolutionFillStore([_fill()])
+    failing_store = _FailingEvalStore()
+    spool = EvalSpool(store=cast(EvalStore, failing_store), scorer=Scorer())
+    sweeper = _sweeper(
+        fill_store=fill_store,
+        eval_spool=spool,
+        source=FakeResolutionSource({"0xmarket-1": 1.0}),
+        decisions={
+            "d-res-1": _StoredDecision(
+                decision=_decision(),
+                decision_evidence={},
+            )
+        },
+    )
+
+    result = await sweeper.sweep_once()
+
+    assert fill_store.fills["fill-res-1"].resolved_outcome is None
+    assert fill_store.resolve_calls == []
+    assert failing_store.attempts == 1
+    assert result.fills_resolved == 0
+    assert result.eval_records_appended == 0
+    assert result.fills_failed == 1
 
 
 @pytest.mark.asyncio
@@ -325,11 +384,12 @@ async def test_sweep_leaves_fills_for_unresolved_markets_untouched() -> None:
     assert result == ResolutionSweepResult(
         unresolved_fills=1,
         fills_resolved=0,
-        eval_records_enqueued=0,
+        eval_records_appended=0,
+        fills_failed=0,
     )
     assert fill_store.resolve_calls == []
     assert fill_store.fills["fill-res-1"].resolved_outcome is None
-    assert spool.enqueued == []
+    assert spool.processed == []
     assert source.calls == [["0xmarket-1"]]
 
 
@@ -353,20 +413,21 @@ async def test_second_sweep_does_not_duplicate_eval_records() -> None:
     first = await sweeper.sweep_once()
     second = await sweeper.sweep_once()
 
-    assert first.eval_records_enqueued == 1
+    assert first.eval_records_appended == 1
     assert second == ResolutionSweepResult(
         unresolved_fills=0,
         fills_resolved=0,
-        eval_records_enqueued=0,
+        eval_records_appended=0,
+        fills_failed=0,
     )
-    assert len(spool.enqueued) == 1
+    assert len(spool.processed) == 1
     # The second sweep finds no unresolved fills, so Gamma is not re-polled.
     assert source.calls == [["0xmarket-1"]]
 
 
 @pytest.mark.asyncio
-async def test_sweep_enqueues_evidence_even_when_resolve_update_loses_race() -> None:
-    """enqueue-first means a lost resolve race still enqueues the record:
+async def test_sweep_appends_evidence_even_when_resolve_update_loses_race() -> None:
+    """append-first means a lost resolve race still appends the record:
     dedup lives in the eval store's ON CONFLICT (decision_id) DO NOTHING,
     not in the fill UPDATE, so the append is safe to attempt either way."""
     fill_store = AlreadyResolvedElsewhereFillStore([_fill()])
@@ -388,9 +449,10 @@ async def test_sweep_enqueues_evidence_even_when_resolve_update_loses_race() -> 
     assert result == ResolutionSweepResult(
         unresolved_fills=1,
         fills_resolved=0,
-        eval_records_enqueued=1,
+        eval_records_appended=1,
+        fills_failed=0,
     )
-    assert len(spool.enqueued) == 1
+    assert len(spool.processed) == 1
 
 
 @pytest.mark.asyncio
@@ -409,25 +471,28 @@ async def test_sweep_resolves_fill_without_recoverable_decision_but_skips_eval()
     assert result == ResolutionSweepResult(
         unresolved_fills=1,
         fills_resolved=1,
-        eval_records_enqueued=0,
+        eval_records_appended=0,
+        fills_failed=0,
     )
     assert fill_store.fills["fill-res-1"].resolved_outcome == 1.0
-    assert spool.enqueued == []
+    assert spool.processed == []
 
 
 @pytest.mark.asyncio
 async def test_sweep_leaves_unscorable_fill_unresolved_for_retry() -> None:
-    """A deterministic scoring failure must NOT mark the fill resolved —
-    that ordering lost the eval record forever. The fill stays unresolved
-    (retried on every sweep, visible in unresolved counts), never reaches
-    the shared spool task, and the rest of the sweep proceeds."""
+    """A deterministic scoring failure inside EvalSpool.process must NOT
+    mark the fill resolved — that ordering lost the eval record forever.
+    The fill stays unresolved (retried on every sweep, visible in
+    unresolved counts and fills_failed), no eval record is appended for
+    it, and the rest of the sweep proceeds."""
     fill_store = FakeResolutionFillStore(
         [
             _fill(fill_id="fill-bad", decision_id="d-bad", market_id="0xmarket-1"),
             _fill(fill_id="fill-good", decision_id="d-good", market_id="0xmarket-2"),
         ]
     )
-    spool = RecordingEvalSpool()
+    eval_store = InMemoryEvalStore()
+    spool = EvalSpool(store=cast(EvalStore, eval_store), scorer=Scorer())
     sweeper = _sweeper(
         fill_store=fill_store,
         eval_spool=spool,
@@ -458,11 +523,12 @@ async def test_sweep_leaves_unscorable_fill_unresolved_for_retry() -> None:
     ]
     assert fill_store.fills["fill-bad"].resolved_outcome is None
     assert [
-        fill.fill_id for fill, _decision, _evidence in spool.enqueued
-    ] == ["fill-good"]
+        record.decision_id for record in await eval_store.all()
+    ] == ["d-good"]
     assert result.unresolved_fills == 2
     assert result.fills_resolved == 1
-    assert result.eval_records_enqueued == 1
+    assert result.eval_records_appended == 1
+    assert result.fills_failed == 1
 
     # The unscorable fill is retried on the next sweep instead of being
     # silently dropped from the unresolved set.
@@ -702,9 +768,10 @@ def _unresolved_fill_row() -> dict[str, object]:
 @pytest.mark.asyncio
 async def test_eval_store_append_is_idempotent_on_decision_id_conflict() -> None:
     """eval_records.decision_id is a PRIMARY KEY; the conflict guard is the
-    retry-safety contract for the resolution sweep (enqueue-first ordering
-    re-appends after a crash) and keeps LIVE partial fills — multiple fills
-    per decision — from raising UniqueViolation through the spool."""
+    retry-safety contract for the resolution sweep (append-first ordering
+    re-appends after a crash between append and resolve_fill) and keeps
+    LIVE partial fills — multiple fills per decision — from raising
+    UniqueViolation through the spool."""
     connection = _RecordingConnection()
     store = EvalStore(pool=cast(Any, _RecordingPool(connection)))
 
@@ -819,7 +886,8 @@ async def test_paper_runner_starts_resolution_sweep_task_and_stop_clears_it(
         return ResolutionSweepResult(
             unresolved_fills=0,
             fills_resolved=0,
-            eval_records_enqueued=0,
+            eval_records_appended=0,
+            fills_failed=0,
         )
 
     monkeypatch.setattr(runner, "_resolution_sweep_once", fake_sweep_once)
@@ -874,7 +942,8 @@ async def test_resolution_sweep_loop_survives_transient_errors(
         return ResolutionSweepResult(
             unresolved_fills=2,
             fills_resolved=1,
-            eval_records_enqueued=1,
+            eval_records_appended=1,
+            fills_failed=1 if calls == 2 else 0,
         )
 
     monkeypatch.setattr(runner, "_resolution_sweep_once", flaky_sweep_once)
@@ -887,9 +956,10 @@ async def test_resolution_sweep_loop_survives_transient_errors(
     assert calls >= 2
     assert runner.resolution_sweeps_total >= 1
     assert runner.resolution_fills_resolved_total >= 1
-    # Failed sweeps must increment a counter so /status can distinguish
-    # "Gamma down for a week" from healthy idle.
-    assert runner.resolution_sweep_failures_total == 1
+    # Failures must increment a counter so /status can distinguish "Gamma
+    # down for a week" from healthy idle: whole-sweep exceptions count 1
+    # each, and per-fill processing failures (fills_failed) add on top.
+    assert runner.resolution_sweep_failures_total == 2
 
 
 def test_resolution_poll_interval_defaults_to_five_minutes() -> None:

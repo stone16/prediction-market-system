@@ -82,30 +82,54 @@ class EvalSpool:
             await self._task
         self._task = None
 
+    async def process(
+        self,
+        fill: FillRecord,
+        decision: TradeDecision,
+        *,
+        decision_evidence: Mapping[str, object] | None = None,
+    ) -> bool:
+        """Score one fill and commit its evaluation evidence synchronously.
+
+        Resolved fills are scored and appended to the eval store — the
+        append has committed by the time this returns — then post-append
+        hooks (feedback generation) fire best-effort. Unresolved fills
+        route to quote evaluation instead. Returns ``True`` when an eval
+        record was appended. Scoring and append failures propagate to the
+        caller: the queue worker (``_run``) and the resolution sweeper
+        each own their failure policy.
+        """
+        if fill.resolved_outcome is None:
+            await self._record_quote_eval(
+                fill,
+                decision,
+                decision_evidence,
+            )
+            return False
+        await self.store.append(
+            self.scorer.score(
+                fill,
+                decision,
+                baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
+                    decision_evidence,
+                ),
+            )
+        )
+        try:
+            await self._generate_feedback()
+        except Exception:  # noqa: BLE001
+            logger.exception("feedback generation failed in evaluator spool")
+        return True
+
     async def _run(self) -> None:
         while True:
             fill, decision, decision_evidence = await self._queue.get()
             try:
-                if fill.resolved_outcome is None:
-                    await self._record_quote_eval(
-                        fill,
-                        decision,
-                        decision_evidence,
-                    )
-                    continue
-                await self.store.append(
-                    self.scorer.score(
-                        fill,
-                        decision,
-                        baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
-                            decision_evidence,
-                        ),
-                    )
+                await self.process(
+                    fill,
+                    decision,
+                    decision_evidence=decision_evidence,
                 )
-                try:
-                    await self._generate_feedback()
-                except Exception:  # noqa: BLE001
-                    logger.exception("feedback generation failed in evaluator spool")
             finally:
                 self._queue.task_done()
 
