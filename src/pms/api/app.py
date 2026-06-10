@@ -818,8 +818,17 @@ def create_app(
         active_runner.switch_mode(update.mode)
         return {"mode": active_runner.state.mode.value}
 
+    # Serializes /run/start and /run/stop: Runner.start's await-laden
+    # critical section is not safe to interleave — a losing concurrent
+    # start's cleanup destroys the winner's runtime and closes the pool.
+    run_lifecycle_lock = asyncio.Lock()
+
     @app.post("/run/start", dependencies=[Depends(require_api_token)])
     async def run_start() -> dict[str, Any]:
+        async with run_lifecycle_lock:
+            return await _run_start_locked()
+
+    async def _run_start_locked() -> dict[str, Any]:
         if _is_runner_running(active_runner):
             raise HTTPException(status_code=409, detail=RUNNER_ALREADY_RUNNING_DETAIL)
         try:
@@ -844,7 +853,8 @@ def create_app(
 
     @app.post("/run/stop", dependencies=[Depends(require_api_token)])
     async def run_stop() -> dict[str, Any]:
-        await active_runner.stop(close_pool=False)
+        async with run_lifecycle_lock:
+            await active_runner.stop(close_pool=False)
         return {"status": "stopped"}
 
     return app

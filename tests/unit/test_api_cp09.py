@@ -1655,3 +1655,54 @@ async def test_api_autostart_failure_log_redacts_live_credentials(
     assert "supersecret" not in log_text
     assert "keyword-secret" not in log_text
     assert "admin" not in log_text
+
+
+@pytest.mark.asyncio
+async def test_run_start_serializes_concurrent_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two concurrent /run/start requests must not interleave through
+    Runner.start: exactly one wins (200) and the loser gets 409 instead
+    of starting a second runtime whose cleanup destroys the winner's."""
+    runner = _runner_with_state()
+    start_calls = 0
+    first_start_entered = asyncio.Event()
+    release_first_start = asyncio.Event()
+    keepalive: list[asyncio.Task[None]] = []
+
+    async def slow_start() -> None:
+        nonlocal start_calls
+        start_calls += 1
+        first_start_entered.set()
+        await release_first_start.wait()
+        task = asyncio.create_task(asyncio.sleep(30.0))
+        keepalive.append(task)
+        runner._actuator_task = task  # noqa: SLF001
+
+    monkeypatch.setattr(runner, "start", slow_start)
+    app = create_app(runner)
+    transport = httpx.ASGITransport(app=app)
+
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            first = asyncio.create_task(
+                client.post("/run/start", headers=AUTH_HEADERS)
+            )
+            await asyncio.wait_for(first_start_entered.wait(), timeout=2.0)
+            second = asyncio.create_task(
+                client.post("/run/start", headers=AUTH_HEADERS)
+            )
+            await asyncio.sleep(0.05)
+            release_first_start.set()
+            first_response, second_response = await asyncio.gather(first, second)
+    finally:
+        for task in keepalive:
+            task.cancel()
+
+    statuses = sorted(
+        (first_response.status_code, second_response.status_code)
+    )
+    assert statuses == [200, 409]
+    assert start_calls == 1
