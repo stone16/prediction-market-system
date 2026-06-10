@@ -293,7 +293,10 @@ async def test_subscription_survives_runner_restart(
         await _wait_for_discovery_poll(sensors.discoveries[-1])
         await _wait_for_subscription_update(sensors.market_data_sensors[-1], token_id)
 
-        markets = await client.get("/markets?limit=20&offset=0")
+        markets = await client.get(
+            "/markets",
+            params={"limit": 20, "offset": 0, "q": "cp07-restart-market"},
+        )
         await client.post("/run/stop")
 
     assert markets.status_code == 200
@@ -336,7 +339,10 @@ async def test_live_reselection_reads_user_subscriptions_without_restart(
         await runner._request_reselection()  # noqa: SLF001
         await _wait_for_subscription_update(sensors.market_data_sensors[-1], token_id)
 
-        markets = await client.get("/markets?limit=20&offset=0")
+        markets = await client.get(
+            "/markets",
+            params={"limit": 20, "offset": 0, "q": "cp07-live-market"},
+        )
         await client.post("/run/stop")
 
     assert markets.status_code == 200
