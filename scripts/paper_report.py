@@ -1575,14 +1575,10 @@ def _trade_costs_from_decision_rows(
 ) -> tuple[TradeCostBreakdown, ...]:
     costs: list[TradeCostBreakdown] = []
     for row in _entry_decision_rows(decisions):
-        spread_bps = _optional_float_from_mapping(row, "spread_bps_at_decision")
+        spread_cost = _spread_cost_for_decision(row)
         gross_edge = _decision_edge(row)
-        if spread_bps is None or gross_edge is None:
+        if spread_cost is None or gross_edge is None:
             continue
-        spread_cost = _price_space_cost(
-            bps=spread_bps,
-            price=_decision_price(row),
-        )
         evidence_obj = row.get("decision_evidence")
         evidence: Mapping[str, object] = (
             evidence_obj if isinstance(evidence_obj, Mapping) else {}
@@ -3350,7 +3346,19 @@ def _spread_cost_for_decision(row: Mapping[str, object]) -> float | None:
     spread_bps = _optional_float_from_mapping(row, "spread_bps_at_decision")
     if spread_bps is None:
         return None
+    if _spread_already_in_price(row):
+        # Ask-frame decisions persist spread_already_in_price=True because
+        # expected_edge = p - ask already pays the spread; re-deriving it
+        # from raw spread_bps here would double-charge the gate input.
+        return 0.0
     return _price_space_cost(bps=spread_bps, price=_decision_price(row))
+
+
+def _spread_already_in_price(row: Mapping[str, object]) -> bool:
+    evidence = row.get("decision_evidence")
+    if not isinstance(evidence, Mapping):
+        return False
+    return evidence.get("spread_already_in_price") is True
 
 
 def _average_slippage_cost_bps(
