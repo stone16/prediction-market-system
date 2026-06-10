@@ -4060,12 +4060,12 @@ def _decision_cost_evidence(
     decision: TradeDecision,
     *,
     spread_already_in_price: bool = False,
-) -> dict[str, float]:
+) -> dict[str, float | bool]:
     price = Decimal(str(decision.limit_price))
     if not price.is_finite() or price < 0:
         return {}
 
-    evidence: dict[str, float] = {}
+    evidence: dict[str, float | bool] = {}
     total_cost_edge = Decimal("0")
     has_cost_evidence = False
 
@@ -4080,18 +4080,18 @@ def _decision_cost_evidence(
         has_cost_evidence = True
 
     spread_bps = _optional_float(decision.spread_bps_at_decision)
-    if spread_bps is not None and spread_bps >= 0.0:
+    if spread_already_in_price:
         # Ask-frame decisions already paid the spread inside expected_edge;
         # keep the key present (the h1_flb smoke check requires it) but
         # charge zero so net_edge_after_costs matches the gate arithmetic.
-        spread_edge = (
-            Decimal("0")
-            if spread_already_in_price
-            else (Decimal(str(spread_bps)) / Decimal("10000")) * price
-        )
+        spread_edge = Decimal("0")
         evidence["spread_edge_at_decision"] = float(spread_edge)
-        if spread_already_in_price:
-            evidence["spread_already_in_price"] = True
+        evidence["spread_already_in_price"] = True
+        total_cost_edge += spread_edge
+        has_cost_evidence = True
+    elif spread_bps is not None and spread_bps >= 0.0:
+        spread_edge = (Decimal(str(spread_bps)) / Decimal("10000")) * price
+        evidence["spread_edge_at_decision"] = float(spread_edge)
         total_cost_edge += spread_edge
         has_cost_evidence = True
 

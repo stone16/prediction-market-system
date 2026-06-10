@@ -858,6 +858,40 @@ def test_decision_evidence_excludes_spread_when_already_in_price() -> None:
     assert evidence["net_edge_after_costs"] == pytest.approx(0.19025)
 
 
+def test_decision_evidence_records_ask_frame_without_spread_bps() -> None:
+    signal = replace(
+        _signal(),
+        external_signal={
+            "resolved_outcome": 1.0,
+            "book_age_ms": 75.0,
+            "fee_rate_bps": 300.0,
+        },
+    )
+    decision = replace(
+        _decision(),
+        expected_edge=0.21,
+        limit_price=0.41,
+        max_slippage_bps=50,
+        spread_bps_at_decision=None,
+    )
+
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at,
+        spread_already_in_price=True,
+    )
+
+    assert evidence["spread_edge_at_decision"] == 0.0
+    assert evidence["spread_already_in_price"] is True
+    assert evidence["fee_edge_at_decision"] == pytest.approx(0.0177)
+    assert evidence["slippage_edge_at_decision"] == pytest.approx(0.00205)
+    assert evidence["total_cost_edge_at_decision"] == pytest.approx(0.01975)
+    assert evidence["net_edge_after_costs"] == pytest.approx(0.19025)
+
+
 def test_decision_evidence_projects_direct_no_book_baselines_to_yes_probability() -> None:
     signal = replace(
         _signal(),
