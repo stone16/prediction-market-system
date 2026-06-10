@@ -7,7 +7,7 @@ import logging
 from copy import deepcopy
 from math import isfinite
 from hashlib import sha256
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -62,6 +62,7 @@ from pms.core.interfaces import (
     SubscriptionManagedSensor,
 )
 from pms.core.models import (
+    EvalRecord,
     FillRecord,
     LiveTradingDisabledError,
     MarketSignal,
@@ -252,6 +253,19 @@ class DetachedControllerRuntime:
     task: asyncio.Task[None] | None
 
 
+def _runtime_calibration_add_samples(
+    runtime: StrategyControllerRuntime,
+) -> Callable[[str, list[EvalRecord]], None] | None:
+    # Duck-typed like pipeline._resolved_sample_count: extending the
+    # ICalibrator Protocol would break test fakes that satisfy only
+    # `calibrate`/`sample_count`.
+    calibrator = getattr(runtime.controller, "calibrator", None)
+    add_samples = getattr(calibrator, "add_samples", None)
+    if not callable(add_samples):
+        return None
+    return cast(Callable[[str, list[EvalRecord]], None], add_samples)
+
+
 @dataclass(frozen=True)
 class ActuatorWorkItem:
     decision: TradeDecision
@@ -415,6 +429,7 @@ class Runner:
             feedback_generator=EvaluatorFeedback(self.feedback_store),
             metrics_provider=self._metrics_by_strategy,
             quote_store=self.quote_eval_store,
+            calibration_sink=self._on_eval_record_for_calibration,
         )
         self._decision_queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
@@ -2783,6 +2798,58 @@ class Runner:
         with suppress(asyncio.CancelledError):
             await task
 
+    def _on_eval_record_for_calibration(self, record: EvalRecord) -> None:
+        runtime = self._controller_runtimes.get(record.strategy_id)
+        if (
+            runtime is None
+            or runtime.strategy_version_id != record.strategy_version_id
+        ):
+            # Stale-version records must not feed a new version's calibrator:
+            # those outcomes never tested the new forecaster spec.
+            logger.debug(
+                "dropping eval record for calibration without a matching "
+                "runtime: (%s, %s)",
+                record.strategy_id,
+                record.strategy_version_id,
+            )
+            return
+        add_samples = _runtime_calibration_add_samples(runtime)
+        if add_samples is None:
+            return
+        add_samples(record.model_id or "unknown", [record])
+
+    async def _hydrate_runtime_calibration(
+        self,
+        runtime: StrategyControllerRuntime,
+    ) -> None:
+        add_samples = _runtime_calibration_add_samples(runtime)
+        if add_samples is None:
+            return
+        records = await self.eval_store.all_for_strategy(
+            runtime.strategy_id,
+            runtime.strategy_version_id,
+        )
+        grouped: dict[str, list[EvalRecord]] = {}
+        for record in records:
+            grouped.setdefault(record.model_id or "unknown", []).append(record)
+        for model_id, model_records in grouped.items():
+            add_samples(model_id, model_records)
+        logger.info(
+            "calibration hydration loaded %d resolved eval records for %s@%s",
+            len(records),
+            runtime.strategy_id,
+            runtime.strategy_version_id,
+            extra={
+                "event": "calibration_hydration",
+                "strategy_id": runtime.strategy_id,
+                "strategy_version_id": runtime.strategy_version_id,
+                "resolved_records_by_model": {
+                    model_id: len(model_records)
+                    for model_id, model_records in grouped.items()
+                },
+            },
+        )
+
     def _attach_controller_runtime(self, runtime: StrategyControllerRuntime) -> None:
         signal_queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
         self._controller_runtimes[runtime.strategy_id] = runtime
@@ -2831,10 +2898,13 @@ class Runner:
                     or current_runtime.asset_ids != desired_runtime.asset_ids
                 ):
                     await self._release_controller_runtime_locked(strategy_id)
+                    await self._hydrate_runtime_calibration(desired_runtime)
                     self._attach_controller_runtime(desired_runtime)
 
             for strategy_id in sorted(desired_strategy_ids - current_strategy_ids):
-                self._attach_controller_runtime(desired_by_strategy[strategy_id])
+                desired_runtime = desired_by_strategy[strategy_id]
+                await self._hydrate_runtime_calibration(desired_runtime)
+                self._attach_controller_runtime(desired_runtime)
 
             await self._refresh_subscription_assets_locked()
 
@@ -2970,6 +3040,7 @@ class Runner:
             raise RuntimeError(msg)
         runtimes = await self._build_controller_runtimes()
         for runtime in runtimes:
+            await self._hydrate_runtime_calibration(runtime)
             self._attach_controller_runtime(runtime)
 
     async def _build_controller_runtimes(self) -> list[StrategyControllerRuntime]:

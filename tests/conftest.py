@@ -165,6 +165,53 @@ def _stub_fill_store_read_positions(
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_eval_store_all_for_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Stub `EvalStore.all_for_strategy` to return [] for non-integration
+    unit tests.
+
+    `Runner` hydrates each controller runtime's calibrator from
+    `EvalStore.all_for_strategy()` at attach time
+    (`_hydrate_runtime_calibration`). The default `EvalStore` queries the
+    bound asyncpg pool — which most unit tests replace with a minimal
+    fake that lacks `.acquire` or whose connection lacks `.fetch`.
+    Without this stub, every unit test that exercises `Runner.start`
+    would fail on a fake-pool AttributeError rather than the test's
+    actual assertion. Mirrors `_stub_fill_store_read_positions`; an
+    empty store is also the documented cold-start posture (hydration is
+    an exact no-op).
+
+    Opt out by tagging tests `@pytest.mark.real_eval_store` (used by
+    tests that exercise `EvalStore.all_for_strategy` directly) or
+    `@pytest.mark.integration` with `PMS_RUN_INTEGRATION=1` set. Tests
+    that replace the runner's `eval_store` field with their own fake
+    bypass this stub naturally.
+    """
+    if (
+        request.node.get_closest_marker("integration") is not None
+        and os.environ.get("PMS_RUN_INTEGRATION") == "1"
+    ):
+        return
+    if request.node.get_closest_marker("real_eval_store") is not None:
+        return
+
+    async def _empty_all_for_strategy(
+        self: object,
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> list[object]:
+        del self, strategy_id, strategy_version_id
+        return []
+
+    monkeypatch.setattr(
+        "pms.storage.eval_store.EvalStore.all_for_strategy",
+        _empty_all_for_strategy,
+    )
+
+
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "compose.yml"
 DEFAULT_COMPOSE_POSTGRES_DSN = "postgresql://postgres:postgres@127.0.0.1:5432/pms_test"
