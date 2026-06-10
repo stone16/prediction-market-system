@@ -9,9 +9,16 @@ from pms.core.models import EvalRecord
 class NetcalCalibrator:
     min_samples: int = 100
     _samples: dict[str, list[EvalRecord]] = field(default_factory=dict)
+    _ingested_decision_ids: dict[str, set[str]] = field(default_factory=dict)
 
     def add_samples(self, model_id: str, records: list[EvalRecord]) -> None:
-        self._samples.setdefault(model_id, []).extend(records)
+        samples = self._samples.setdefault(model_id, [])
+        ingested = self._ingested_decision_ids.setdefault(model_id, set())
+        for record in records:
+            if record.decision_id in ingested:
+                continue
+            ingested.add(record.decision_id)
+            samples.append(record)
 
     def sample_count(self, model_id: str) -> int:
         return len(self._samples.get(model_id, []))

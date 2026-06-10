@@ -130,6 +130,31 @@ def test_netcal_calibrator_applies_isotonic_at_100_samples() -> None:
     assert calibrator.calibrate(0.2, model_id="model-a") == pytest.approx(0.0)
 
 
+def test_netcal_calibrator_dedups_samples_by_decision_id() -> None:
+    """Hydration from the eval store and the live push path can deliver the
+    same resolved record twice (e.g. a record persisted before a mid-session
+    pipeline swap is both hydrated and pushed). Double-counting would let a
+    single resolution unlock graduation thresholds early."""
+    calibrator = NetcalCalibrator()
+    records = _records(3)
+
+    calibrator.add_samples("model-a", records)
+    calibrator.add_samples("model-a", records)
+
+    assert calibrator.sample_count("model-a") == 3
+
+
+def test_netcal_calibrator_dedup_is_scoped_per_model_bucket() -> None:
+    calibrator = NetcalCalibrator()
+    records = _records(2)
+
+    calibrator.add_samples("model-a", records)
+    calibrator.add_samples("model-b", records)
+
+    assert calibrator.sample_count("model-a") == 2
+    assert calibrator.sample_count("model-b") == 2
+
+
 def test_kelly_sizer_even_odds_fractional_bet() -> None:
     sizer = KellySizer(risk=RiskSettings(max_position_per_market=1000.0))
 
