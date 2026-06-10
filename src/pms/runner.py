@@ -1796,10 +1796,10 @@ class Runner:
                 self._resolution_fills_resolved_total += result.fills_resolved
                 if result.fills_resolved > 0:
                     logger.info(
-                        "resolution sweep resolved %d fill(s), appended %d "
+                        "resolution sweep resolved %d fill(s), enqueued %d "
                         "eval record(s) (%d still unresolved)",
                         result.fills_resolved,
-                        result.eval_records_appended,
+                        result.eval_records_enqueued,
                         result.unresolved_fills - result.fills_resolved,
                     )
             except Exception as error:  # noqa: BLE001
@@ -1821,7 +1821,7 @@ class Runner:
             sweeper = ResolutionSweeper(
                 fill_store=self.fill_store,
                 decision_reader=self.decision_store,
-                eval_store=self.eval_store,
+                eval_spool=self._evaluator_spool,
                 resolution_source=GammaResolutionSource(http_client=http_client),
             )
             return await sweeper.sweep_once()

@@ -8,9 +8,8 @@ from typing import Any, Protocol, cast
 
 import httpx
 
-from pms.core.models import EvalRecord, FillRecord, TradeDecision
+from pms.core.models import FillRecord, TradeDecision
 from pms.evaluation.adapters.scoring import Scorer
-from pms.evaluation.spool import _baseline_prob_estimates_from_evidence
 
 
 logger = logging.getLogger(__name__)
@@ -53,15 +52,31 @@ class ResolutionDecisionReader(Protocol):
     async def get_decision(self, decision_id: str) -> StoredDecisionLike | None: ...
 
 
-class EvalRecordAppender(Protocol):
-    async def append(self, record: EvalRecord) -> None: ...
+class ResolutionEvalSpool(Protocol):
+    """The shared evaluator spool: swept resolutions are enqueued through it
+    so scoring, eval-record appends, and post-append hooks (feedback
+    generation and any future sink) follow the exact live fill path."""
+
+    def enqueue(
+        self,
+        fill: FillRecord,
+        decision: TradeDecision,
+        *,
+        decision_evidence: Mapping[str, object] | None = None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
 class ResolutionSweepResult:
     unresolved_fills: int
     fills_resolved: int
-    eval_records_appended: int
+    eval_records_enqueued: int
+
+
+@dataclass(frozen=True)
+class _FillSweepOutcome:
+    eval_record_enqueued: bool
+    fill_resolved: bool
 
 
 @dataclass
@@ -116,14 +131,14 @@ class ResolutionSweeper:
     Live PAPER/LIVE fills are persisted with NULL ``resolved_outcome`` (only
     backtest replay carries it at fill time), so without this sweep no final
     Brier evidence ever accrues. Each sweep finds unresolved fills, asks the
-    resolution source which of their markets settled, marks the fills
-    resolved, and re-scores them into ``eval_records`` through the same
-    ``Scorer`` + decision-time-evidence path the live spool uses.
+    resolution source which of their markets settled, enqueues the resolved
+    fills through the shared evaluator spool — the exact live scoring path,
+    including post-append hooks — and then marks the fills resolved.
     """
 
     fill_store: ResolutionFillStore
     decision_reader: ResolutionDecisionReader
-    eval_store: EvalRecordAppender
+    eval_spool: ResolutionEvalSpool
     resolution_source: ResolutionSource
     scorer: Scorer = field(default_factory=Scorer)
 
@@ -133,69 +148,84 @@ class ResolutionSweeper:
             return ResolutionSweepResult(
                 unresolved_fills=0,
                 fills_resolved=0,
-                eval_records_appended=0,
+                eval_records_enqueued=0,
             )
         condition_ids = list(dict.fromkeys(fill.market_id for fill in unresolved))
         resolutions = await self.resolution_source.fetch_resolutions(condition_ids)
         fills_resolved = 0
-        eval_records_appended = 0
+        eval_records_enqueued = 0
         for fill in unresolved:
             resolved_outcome = resolutions.get(fill.market_id)
             if resolved_outcome is None:
                 continue
             try:
-                appended = await self._resolve_and_score(fill, resolved_outcome)
+                outcome = await self._enqueue_and_resolve(fill, resolved_outcome)
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "resolution scoring failed for fill %s",
+                    "resolution scoring failed for fill %s; leaving it "
+                    "unresolved for retry",
                     fill.fill_id or fill.trade_id,
                 )
                 continue
-            if appended is None:
-                continue
-            fills_resolved += 1
-            if appended:
-                eval_records_appended += 1
+            if outcome.fill_resolved:
+                fills_resolved += 1
+            if outcome.eval_record_enqueued:
+                eval_records_enqueued += 1
         return ResolutionSweepResult(
             unresolved_fills=len(unresolved),
             fills_resolved=fills_resolved,
-            eval_records_appended=eval_records_appended,
+            eval_records_enqueued=eval_records_enqueued,
         )
 
-    async def _resolve_and_score(
+    async def _enqueue_and_resolve(
         self,
         fill: FillRecord,
         resolved_outcome: float,
-    ) -> bool | None:
-        """Returns None when another writer already resolved the fill,
-        False when resolved without a recoverable decision, True when an
-        eval record was appended."""
-        stored_decision = await self.decision_reader.get_decision(fill.decision_id)
+    ) -> _FillSweepOutcome:
+        """Enqueue eval evidence through the evaluator spool, then commit
+        the fill's NULL -> value transition.
+
+        The ordering is load-bearing: evidence is enqueued BEFORE
+        ``resolve_fill`` commits, so a crash in between leaves the fill
+        unresolved and the next sweep retries it instead of permanently
+        losing the eval record. Duplicate appends from retries (and LIVE
+        partial fills sharing a decision_id) are absorbed by the eval
+        store's ``ON CONFLICT (decision_id) DO NOTHING`` insert.
+        """
         fill_id = fill.fill_id or fill.trade_id
+        stored_decision = await self.decision_reader.get_decision(fill.decision_id)
+        if stored_decision is None:
+            updated = await self.fill_store.resolve_fill(
+                fill_id,
+                resolved_outcome=resolved_outcome,
+            )
+            if updated:
+                logger.warning(
+                    "fill %s resolved to %s but decision %s is not recoverable; "
+                    "skipping eval record",
+                    fill_id,
+                    resolved_outcome,
+                    fill.decision_id,
+                )
+            return _FillSweepOutcome(
+                eval_record_enqueued=False,
+                fill_resolved=updated,
+            )
+        resolved_fill = replace(fill, resolved_outcome=resolved_outcome)
+        # Scorer.score is pure; validating here keeps deterministically
+        # unscorable fills out of the shared evaluator spool task and leaves
+        # them unresolved so they keep surfacing in unresolved counts.
+        self.scorer.score(resolved_fill, stored_decision.decision)
+        self.eval_spool.enqueue(
+            resolved_fill,
+            stored_decision.decision,
+            decision_evidence=stored_decision.decision_evidence,
+        )
         updated = await self.fill_store.resolve_fill(
             fill_id,
             resolved_outcome=resolved_outcome,
         )
-        if not updated:
-            return None
-        if stored_decision is None:
-            logger.warning(
-                "fill %s resolved to %s but decision %s is not recoverable; "
-                "skipping eval record",
-                fill_id,
-                resolved_outcome,
-                fill.decision_id,
-            )
-            return False
-        record = self.scorer.score(
-            replace(fill, resolved_outcome=resolved_outcome),
-            stored_decision.decision,
-            baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
-                stored_decision.decision_evidence,
-            ),
-        )
-        await self.eval_store.append(record)
-        return True
+        return _FillSweepOutcome(eval_record_enqueued=True, fill_resolved=updated)
 
 
 def _resolution_from_gamma_row(row: dict[str, Any]) -> tuple[str, float] | None:
