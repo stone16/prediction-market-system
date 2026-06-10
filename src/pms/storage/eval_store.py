@@ -84,6 +84,7 @@ async def insert_eval_record_row(
             $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12::jsonb,
             $13, $14, $15, $16, $17, $18, $19, $20, $21
         )
+        ON CONFLICT (decision_id) DO NOTHING
         """,
         record.decision_id,
         record.market_id,

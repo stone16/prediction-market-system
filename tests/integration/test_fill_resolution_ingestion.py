@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import asyncpg
 import pytest
 
-from pms.core.models import FillRecord, OrderState
+from pms.core.models import EvalRecord, FillRecord, OrderState
+from pms.storage.eval_store import EvalStore
 from pms.storage.fill_store import FillStore
 from pms.storage.order_store import OrderStore
 
@@ -120,3 +122,37 @@ async def test_resolve_fill_transitions_null_outcome_exactly_once(
     assert stored.decision_id == unresolved.decision_id
     assert stored.fill_price == unresolved.fill_price
     assert await fill_store.read_unresolved_fills() == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_eval_store_append_keeps_first_record_on_decision_id_conflict(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """Retried sweeps (enqueue-first ordering) and LIVE partial fills both
+    re-append the same decision_id; the PK conflict must drop the duplicate
+    silently instead of raising UniqueViolation through the spool."""
+    eval_store = EvalStore(pool=pg_pool)
+    record = EvalRecord(
+        market_id="0xmarket-res-3",
+        decision_id="decision-res-conflict-1",
+        strategy_id="default",
+        strategy_version_id="default-v2",
+        prob_estimate=0.7,
+        resolved_outcome=1.0,
+        brier_score=0.09,
+        fill_status="MATCHED",
+        recorded_at=datetime(2026, 6, 1, 9, 5, tzinfo=UTC),
+        citations=["trade-res-conflict-1"],
+    )
+
+    await eval_store.append(record)
+    await eval_store.append(replace(record, prob_estimate=0.9, brier_score=0.01))
+
+    stored = [
+        row
+        for row in await eval_store.all()
+        if row.decision_id == "decision-res-conflict-1"
+    ]
+    assert len(stored) == 1
+    assert stored[0].prob_estimate == 0.7
+    assert stored[0].brier_score == 0.09

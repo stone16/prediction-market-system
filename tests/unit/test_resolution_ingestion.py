@@ -13,13 +13,14 @@ import pytest
 
 from pms.config import DatabaseSettings, PMSSettings, RiskSettings
 from pms.core.enums import OrderStatus, RunMode, Side, TimeInForce
-from pms.core.models import FillRecord, MarketSignal, TradeDecision
+from pms.core.models import EvalRecord, FillRecord, MarketSignal, TradeDecision
 from pms.evaluation.resolution import (
     GammaResolutionSource,
     ResolutionSweeper,
     ResolutionSweepResult,
 )
 from pms.runner import Runner
+from pms.storage.eval_store import EvalStore
 from pms.storage.fill_store import FillStore
 from tests.support.fake_stores import InMemoryEvalStore
 
@@ -584,6 +585,35 @@ def _unresolved_fill_row() -> dict[str, object]:
             "resolved_outcome": None,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_eval_store_append_is_idempotent_on_decision_id_conflict() -> None:
+    """eval_records.decision_id is a PRIMARY KEY; the conflict guard is the
+    retry-safety contract for the resolution sweep (enqueue-first ordering
+    re-appends after a crash) and keeps LIVE partial fills — multiple fills
+    per decision — from raising UniqueViolation through the spool."""
+    connection = _RecordingConnection()
+    store = EvalStore(pool=cast(Any, _RecordingPool(connection)))
+
+    await store.append(
+        EvalRecord(
+            market_id="0xmarket-1",
+            decision_id="d-res-1",
+            strategy_id="default",
+            strategy_version_id="default-v1",
+            prob_estimate=0.7,
+            resolved_outcome=1.0,
+            brier_score=0.09,
+            fill_status=OrderStatus.MATCHED.value,
+            recorded_at=datetime(2026, 6, 1, tzinfo=UTC),
+            citations=["trade-fill-res-1"],
+        )
+    )
+
+    (query, args) = connection.execute_calls[0]
+    assert "ON CONFLICT (decision_id) DO NOTHING" in query
+    assert args[0] == "d-res-1"
 
 
 @pytest.mark.asyncio
