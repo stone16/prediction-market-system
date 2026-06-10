@@ -1361,7 +1361,22 @@ class Runner:
                     created_at=signal.fetched_at,
                     market_id=signal.market_id,
                 )
-                await self._emit_position_exit_decisions(signal)
+                try:
+                    await self._emit_position_exit_decisions(signal)
+                except (asyncpg.PostgresError, OSError, TimeoutError) as error:
+                    # A transient storage error must not kill the dispatcher:
+                    # every pipeline loop treats a finished dispatcher task as
+                    # clean shutdown and the whole trading path dismantles
+                    # silently. The exit key is only recorded after a
+                    # successful insert, so the exit retries on the next
+                    # signal for the same market.
+                    detail = _runtime_error_detail(error, self.config)
+                    await self.event_bus.publish(
+                        "error",
+                        f"position exit emission failed: {detail}",
+                        market_id=signal.market_id,
+                    )
+                    logger.warning("position exit emission failed: %s", detail)
                 for strategy_id, runtime in tuple(self._controller_runtimes.items()):
                     if not _matches_strategy_scope(runtime.asset_ids, signal):
                         continue
