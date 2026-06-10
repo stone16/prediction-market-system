@@ -10,7 +10,7 @@ from math import isfinite
 from typing import Protocol, cast
 
 from pms.core.models import BookSummary
-from pms.core.models import FillRecord, TradeDecision
+from pms.core.models import EvalRecord, FillRecord, TradeDecision
 from pms.evaluation.adapters.scoring import Scorer
 from pms.evaluation.feedback import EvaluatorFeedback
 from pms.evaluation.metrics import StrategyMetricsSnapshot, StrategyVersionKey
@@ -51,6 +51,7 @@ class EvalSpool:
     quote_reader: QuoteReader | None = None
     quote_scorer: QuoteScorer = field(default_factory=QuoteScorer)
     quote_lag_seconds: int = 0
+    calibration_sink: Callable[[EvalRecord], None] | None = None
     _queue: asyncio.Queue[
         tuple[FillRecord, TradeDecision, Mapping[str, object] | None]
     ] = field(
@@ -93,22 +94,39 @@ class EvalSpool:
                         decision_evidence,
                     )
                     continue
+                # Persist before pushing: restart re-hydration reads the eval
+                # store, so a record must never feed a calibrator unless it is
+                # also durable.
+                #
+                # Coordination contract (feat/resolution-ingestion): the
+                # resolution sweep re-enqueues late-resolved fills through
+                # this same queue, so ANY enqueue whose fill carries
+                # resolved_outcome reaches the sink — regardless of producer.
+                # Duplicate delivery for one decision_id (sweep retry, or
+                # ON CONFLICT-deduped store append) is safe: the sink's
+                # calibrator dedups per (model_id, decision_id).
                 try:
-                    await self.store.append(
-                        self.scorer.score(
-                            fill,
-                            decision,
-                            baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
-                                decision_evidence,
-                            ),
-                        )
+                    scored_record = self.scorer.score(
+                        fill,
+                        decision,
+                        baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
+                            decision_evidence,
+                        ),
                     )
+                    await self.store.append(scored_record)
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "fill evaluation failed in evaluator spool: %s",
                         fill.trade_id,
                     )
                     continue
+                if self.calibration_sink is not None:
+                    try:
+                        self.calibration_sink(scored_record)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "calibration sink failed in evaluator spool"
+                        )
                 try:
                     await self._generate_feedback()
                 except Exception:  # noqa: BLE001
