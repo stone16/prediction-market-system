@@ -71,4 +71,5 @@ def test_install_wc_flb_tail_fade_prints_registered_version(
     assert observed_archive_default == [True]
     assert "strategy_id: wc_flb_tail_fade_v1" in captured.out
     assert "strategy_version_id: version-789" in captured.out
+    assert "created_at: 2026-06-10T13:00:00+00:00" in captured.out
     assert "archived_default: true" in captured.out

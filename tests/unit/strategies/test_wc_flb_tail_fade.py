@@ -145,10 +145,9 @@ def test_wc_flb_tail_fade_version_id_is_content_addressed() -> None:
 
 def test_wc_flb_tail_fade_calibration_clamp_preserves_tail_probabilities() -> None:
     # Business invariant: the strategy only trades the tails, and the
-    # calibration-feedback loop never feeds NetcalCalibrator.add_samples
-    # (src/pms/controller/calibrators/netcal.py:13), so resolved_sample_count
-    # stays below min_resolved_for_extreme forever. The clamp window itself
-    # must therefore admit tail probabilities.
+    # strategy starts with fewer than min_resolved_for_extreme resolved
+    # samples. The clamp window itself must therefore admit initial tail
+    # probabilities.
     strategy = build_wc_flb_tail_fade_strategy()
 
     assert strategy.calibration.enabled is True

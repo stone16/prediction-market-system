@@ -99,12 +99,8 @@ def build_wc_flb_tail_fade_strategy() -> Strategy:
         ),
         # Wide clamp mirrors h1_flb (src/pms/strategies/flb/projection.py).
         # The whole edge lives in the tails (<0.10 / >0.90), so the default
-        # [0.08, 0.92] clamp would reject every tail forecast. The clamp can
-        # never unlock at runtime because calibration feedback is never wired
-        # into NetcalCalibrator.add_samples
-        # (src/pms/controller/calibrators/netcal.py:13), so
-        # resolved_sample_count stays below min_resolved_for_extreme forever —
-        # the clamp window itself must admit the tails outright.
+        # [0.08, 0.92] clamp would reject every initial tail forecast before
+        # the strategy has accumulated resolved calibration samples.
         calibration=CalibrationSpec(
             enabled=True,
             shrinkage_factor=1.0,
