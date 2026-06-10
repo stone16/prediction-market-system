@@ -7,9 +7,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import asyncpg
+import httpx
 import pytest
 
 import pms.runner as runner_module
+from pms.api.app import create_app
+from pms.api.health import readiness_payload
 from pms.config import PMSSettings, RiskSettings
 from pms.core.enums import MarketStatus, RunMode
 from pms.core.models import MarketSignal, Portfolio, TradeDecision
@@ -342,6 +345,148 @@ async def test_stop_during_dispatcher_backoff_blocks_respawn(
         "cancelled",
     }
     assert runner.tasks == ()
+
+
+async def _kill_dispatcher(
+    runner: Runner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail the dispatcher with an unlisted error so its wrapper completes
+    as `failed` while every other worker keeps running."""
+
+    def broken_remember(signal: MarketSignal) -> None:
+        del signal
+        msg = "unexpected bug"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(
+        runner,
+        "_remember_signal_for_decision_evidence",
+        broken_remember,
+    )
+    await runner.sensor_stream.queue.put(_signal())
+    await _wait_until(
+        lambda: runner.worker_health_snapshot()[
+            WORKER_CONTROLLER_DISPATCHER
+        ].state
+        == "failed"
+    )
+    dispatcher_task = runner.controller_task
+    assert dispatcher_task is not None
+    await _wait_until(lambda: dispatcher_task.done())
+    dispatcher_task.exception()
+
+
+# --- Monitoring surface (heartbeat / readiness / status) --------------------
+
+
+@pytest.mark.asyncio
+async def test_component_status_running_requires_alive_trading_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The heartbeat continuity gate keys on component_status.running: a
+    dead dispatcher must flip it false even while sensors stay healthy,
+    so dead-worker periods count as unhealthy in paper_report."""
+    runner = _runner()
+    try:
+        await runner.start()
+        status = runner._runtime_sensor_component_status()  # noqa: SLF001
+        assert status["running"] is True
+        workers = cast(dict[str, dict[str, object]], status["workers"])
+        assert workers[WORKER_CONTROLLER_DISPATCHER]["state"] == "running"
+
+        await _kill_dispatcher(runner, monkeypatch)
+
+        status = runner._runtime_sensor_component_status()  # noqa: SLF001
+        assert status["running"] is False
+        assert status["sensor_running"] is True
+        workers = cast(dict[str, dict[str, object]], status["workers"])
+        assert workers[WORKER_CONTROLLER_DISPATCHER]["state"] == "failed"
+        assert (
+            workers[WORKER_CONTROLLER_DISPATCHER]["last_error_class"]
+            == "RuntimeError"
+        )
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_readiness_fails_closed_on_dead_required_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _runner()
+    try:
+        await runner.start()
+        code, payload = readiness_payload(
+            runner,
+            halt_subscriber_task=None,
+            eod_scheduler_task=None,
+        )
+        assert code == 200
+        assert payload["checks"]["workers"] == "ready"
+        assert payload["workers"]["dead"] == []
+
+        await _kill_dispatcher(runner, monkeypatch)
+
+        code, payload = readiness_payload(
+            runner,
+            halt_subscriber_task=None,
+            eod_scheduler_task=None,
+        )
+        assert code == 503
+        assert payload["status"] == "not_ready"
+        assert payload["checks"]["workers"] == "not_ready"
+        assert WORKER_CONTROLLER_DISPATCHER in payload["workers"]["dead"]
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_readiness_workers_check_not_started_before_runner_start() -> None:
+    runner = _runner()
+    code, payload = readiness_payload(
+        runner,
+        halt_subscriber_task=None,
+        eod_scheduler_task=None,
+    )
+    assert code == 503
+    assert payload["checks"]["workers"] == "not_started"
+
+
+@pytest.mark.asyncio
+async def test_status_surfaces_worker_health_without_touching_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/status.running` semantics stay untouched (smoke-script
+    back-compat); the additive `healthy`/`workers` keys carry the truth."""
+    runner = _runner()
+    app = create_app(runner, auto_start=False)
+    transport = httpx.ASGITransport(app=app)
+    try:
+        await runner.start()
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            status = (await client.get("/status")).json()
+            assert status["running"] is True
+            assert status["healthy"] is True
+            assert (
+                status["workers"][WORKER_CONTROLLER_DISPATCHER]["state"]
+                == "running"
+            )
+
+            await _kill_dispatcher(runner, monkeypatch)
+
+            status = (await client.get("/status")).json()
+            assert status["running"] is True
+            assert status["healthy"] is False
+            assert (
+                status["workers"][WORKER_CONTROLLER_DISPATCHER]["state"]
+                == "failed"
+            )
+    finally:
+        await runner.stop()
 
 
 @pytest.mark.asyncio

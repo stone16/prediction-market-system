@@ -2405,11 +2405,16 @@ class Runner:
                 sensor_running
                 and len(self._controller_runtimes) > 0
                 and not self._stop_event.is_set()
+                # Dead trading workers (dispatcher/actuator/factor) must
+                # count as unhealthy heartbeat periods: this is the
+                # correction of the false-green the 2026-06-10 audit found.
+                and self._trading_workers_ok()
             ),
             "sensor_running": sensor_running,
             "sensor_tasks": running_tasks,
             "sensor_tasks_total": len(tasks),
             "sensor_task_failures": failed_tasks,
+            "workers": self._supervisor.component_payload(),
         }
 
     def _record_position_exit_reentry_quarantine(
