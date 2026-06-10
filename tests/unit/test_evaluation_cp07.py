@@ -139,6 +139,18 @@ class _InMemoryQuoteEvalStore:
         self.records.append(record)
 
 
+class _TransientFailureEvalStore(InMemoryEvalStore):
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self._failures_remaining = failures
+
+    async def append(self, record: EvalRecord) -> bool:
+        if self._failures_remaining > 0:
+            self._failures_remaining -= 1
+            raise RuntimeError("transient eval-store failure")
+        return await super().append(record)
+
+
 class _StaticQuoteReader:
     def __init__(self, quote: BookSummary | None) -> None:
         self.quote = quote
@@ -391,6 +403,43 @@ def test_scorer_pnl_for_buy_no_uses_complementary_contract_outcome() -> None:
     )
 
     assert record.pnl == pytest.approx(6.2)
+
+
+def test_scorer_realized_pnl_is_net_of_fill_fees_for_buy() -> None:
+    record = Scorer().score(
+        _fill(resolved_outcome=1.0, fill_price=0.42, fees=0.15),
+        _decision(prob=0.7, price=0.4),
+    )
+
+    # Realized PnL must be net of fees: (1.0 - 0.42) * 10 - 0.15, not 5.8.
+    assert record.pnl == pytest.approx(5.65)
+
+
+def test_scorer_realized_pnl_is_net_of_fill_fees_for_sell() -> None:
+    record = Scorer().score(
+        _fill(
+            resolved_outcome=0.0,
+            fill_price=0.42,
+            side=Side.SELL.value,
+            fees=0.12,
+        ),
+        _decision(prob=0.3, price=0.45, side=Side.SELL.value),
+    )
+
+    # Realized PnL must be net of fees: (0.42 - 0.0) * 10 - 0.12, not 4.2.
+    assert record.pnl == pytest.approx(4.08)
+
+
+def test_scorer_scores_fee_dominated_fill_as_loss() -> None:
+    record = Scorer().score(
+        _fill(resolved_outcome=1.0, fill_price=0.99, fees=0.25),
+        _decision(prob=0.995, price=0.99),
+    )
+
+    # Gross edge (0.10) is smaller than fees (0.25): the trade is a loss and
+    # must not count as a win in win_rate (metrics count record.pnl > 0.0).
+    assert record.pnl == pytest.approx(-0.15)
+    assert record.pnl < 0.0
 
 
 def test_scorer_brier_for_buy_no_uses_yes_probability_basis() -> None:
@@ -782,6 +831,67 @@ async def test_eval_spool_logs_feedback_errors_and_keeps_scoring(
         "d-after-error",
     ]
     assert "feedback generation failed in evaluator spool" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_survives_transient_store_failure_and_keeps_scoring(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _TransientFailureEvalStore(failures=1)
+    spool = EvalSpool(store=cast(EvalStore, store), scorer=Scorer())
+    await spool.start()
+    try:
+        caplog.set_level("ERROR", logger="pms.evaluation.spool")
+        spool.enqueue(
+            _fill(decision_id="d-store-error", resolved_outcome=1.0),
+            _decision(decision_id="d-store-error"),
+        )
+        spool.enqueue(
+            _fill(decision_id="d-after-store-error", resolved_outcome=1.0),
+            _decision(decision_id="d-after-store-error"),
+        )
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    records = await store.all()
+    assert [record.decision_id for record in records] == ["d-after-store-error"]
+    assert "fill evaluation failed in evaluator spool" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_survives_scoring_error_and_keeps_scoring(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = cast(EvalStore, InMemoryEvalStore())
+    spool = EvalSpool(store=store, scorer=Scorer())
+    await spool.start()
+    try:
+        caplog.set_level("ERROR", logger="pms.evaluation.spool")
+        spool.enqueue(
+            _fill(
+                decision_id="d-poison",
+                resolved_outcome=1.0,
+                strategy_id="alpha",
+                strategy_version_id="alpha-v1",
+            ),
+            _decision(
+                decision_id="d-poison",
+                strategy_id="beta",
+                strategy_version_id="beta-v1",
+            ),
+        )
+        spool.enqueue(
+            _fill(decision_id="d-after-poison", resolved_outcome=1.0),
+            _decision(decision_id="d-after-poison"),
+        )
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    records = await cast(InMemoryEvalStore, store).all()
+    assert [record.decision_id for record in records] == ["d-after-poison"]
+    assert "fill evaluation failed in evaluator spool" in caplog.text
 
 
 def test_metrics_snapshot_by_strategy_returns_only_present_keys() -> None:

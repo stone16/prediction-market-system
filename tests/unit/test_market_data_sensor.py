@@ -1126,6 +1126,60 @@ async def test_market_data_sensor_retries_after_websocket_handshake_error(
 
 
 @pytest.mark.asyncio
+async def test_market_data_sensor_reconnects_after_transient_storage_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import asyncpg
+
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    store_mock.write_book_snapshot_mock.side_effect = [
+        asyncpg.PostgresError("deadlock detected"),
+        1,
+    ]
+
+    def _book_message(book_hash: str) -> str:
+        return json.dumps(
+            {
+                "event_type": "book",
+                "market": "m-storage",
+                "asset_id": "asset-storage",
+                "timestamp": "1757908892351",
+                "hash": book_hash,
+                "bids": [{"price": "0.40", "size": "5"}],
+                "asks": [{"price": "0.60", "size": "5"}],
+                "last_trade_price": "0.50",
+            }
+        )
+
+    first_websocket = FakeWebSocket([_book_message("book-before-db-error")])
+    second_websocket = FakeWebSocket([_book_message("book-after-db-error")])
+    monkeypatch.setattr(
+        "pms.sensor.adapters.market_data.connect",
+        ConnectSequence([first_websocket, second_websocket]),
+    )
+    sensor = MarketDataSensor(
+        store=store,
+        ws_url="ws://market-data.example.test",
+        asset_ids=["asset-storage"],
+    )
+    sensor._INITIAL_BACKOFF_S = 0.0
+    iterator = cast(Any, sensor.__aiter__())
+
+    with caplog.at_level(logging.WARNING):
+        signal = await asyncio.wait_for(anext(iterator), timeout=2.0)
+
+    await iterator.aclose()
+    await sensor.aclose()
+
+    assert signal.market_id == "m-storage"
+    assert store_mock.write_book_snapshot_mock.await_count == 2
+    assert "market data sensor storage error; reconnecting" in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
 async def test_market_data_sensor_logs_expected_websocket_close_as_reconnect(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

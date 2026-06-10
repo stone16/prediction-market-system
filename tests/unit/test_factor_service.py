@@ -324,3 +324,45 @@ async def test_sensor_stream_closes_late_subscriptions_after_consumers_finish() 
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(anext(late_subscription), timeout=1.0)
     await asyncio.wait_for(stream.stop(), timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_compute_once_survives_transient_persist_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One transient Postgres error must not kill the factor task.
+
+    The dedupe key must not advance either, so the same row retries on
+    the next cadence instead of being silently lost.
+    """
+    import asyncpg
+
+    persisted: list[FactorValueRow] = []
+    calls = 0
+
+    async def flaky_persist(pool: Any, row: FactorValueRow) -> None:
+        nonlocal calls
+        del pool
+        calls += 1
+        if calls == 1:
+            raise asyncpg.PostgresError("transient db error")
+        persisted.append(row)
+
+    monkeypatch.setattr("pms.factors.service.persist_factor_value", flaky_persist)
+    service = FactorService(
+        pool=cast(Any, object()),
+        store=cast(Any, FakeStore()),
+        cadence_s=0.1,
+        factors=(PersistedFactor,),
+        signal_stream=SequenceSignalStream([]),
+    )
+    signal = _signal(market_id="persist-retry-market")
+
+    with caplog.at_level(logging.ERROR, logger="pms.factors.service"):
+        first = await service.compute_once([signal])
+    second = await service.compute_once([signal])
+
+    assert first == 0
+    assert second == 1
+    assert [row.market_id for row in persisted] == ["persist-retry-market"]

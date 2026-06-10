@@ -11,11 +11,24 @@ class InMemoryEvalStore:
     def __init__(self, records: list[EvalRecord] | None = None) -> None:
         self._records = list(records or [])
 
-    async def append(self, record: EvalRecord) -> None:
+    async def append(self, record: EvalRecord) -> bool:
         self._records.append(record)
+        return True
 
     async def all(self) -> list[EvalRecord]:
         return list(self._records)
+
+    async def all_for_strategy(
+        self,
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> list[EvalRecord]:
+        return [
+            record
+            for record in self._records
+            if record.strategy_id == strategy_id
+            and record.strategy_version_id == strategy_version_id
+        ]
 
 
 class InMemoryFeedbackStore:

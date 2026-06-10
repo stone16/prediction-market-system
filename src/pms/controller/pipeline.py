@@ -729,6 +729,16 @@ class ControllerPipeline:
                 emitted_count=0,
             )
             return None
+        # When decision_price is the executable best ask, decision_edge is
+        # already net of crossing the spread; charging spread_bps again would
+        # double-count it. The price-equality check (not metadata alone)
+        # covers the best_ask strategies whose pricing fell back to
+        # yes_price because no ask existed — there the spread is a real cost.
+        spread_already_in_price = (
+            _strategy_metadata(self.strategy).get("price_reference")
+            == "best_ask"
+            and decision_price == best_ask(execution_signal)
+        )
         decision_costs = _decision_cost_edges(
             decision_price=decision_price,
             spread_bps=decision_spread_bps,
@@ -737,6 +747,7 @@ class ControllerPipeline:
                 execution_signal.external_signal,
                 fallback_rate=self.settings.strategies.flb_fee_rate,
             ),
+            spread_already_in_price=spread_already_in_price,
         )
         net_edge_after_costs = decision_edge - decision_costs.total_edge
         if net_edge_after_costs <= 0.0:
@@ -751,6 +762,7 @@ class ControllerPipeline:
                     "gross_edge": decision_edge,
                     "spread_bps_at_decision": decision_spread_bps,
                     "spread_edge": decision_costs.spread_edge,
+                    "spread_already_in_price": spread_already_in_price,
                     "fee_rate": decision_costs.fee_rate,
                     "fee_edge": decision_costs.fee_edge,
                     "max_slippage_bps": self.settings.controller.max_slippage_bps,
@@ -981,6 +993,7 @@ class ControllerPipeline:
                 "gross_edge": decision_edge,
                 "spread_bps_at_decision": decision_spread_bps,
                 "spread_edge": decision_costs.spread_edge,
+                "spread_already_in_price": spread_already_in_price,
                 "fee_rate": decision_costs.fee_rate,
                 "fee_edge": decision_costs.fee_edge,
                 "max_slippage_bps": self.settings.controller.max_slippage_bps,
@@ -1203,7 +1216,10 @@ def _resolved_sample_count(calibrator: ICalibrator, model_ids: Sequence[str]) ->
     sample_count = getattr(calibrator, "sample_count", None)
     if not callable(sample_count) or not model_ids:
         return 0
-    return max(int(sample_count(model_id)) for model_id in model_ids)
+    # EvalRecords are keyed by the decision-level model id ("ensemble" for
+    # multi-forecaster strategies), so the unlock counter must read the same
+    # bucket — not the per-forecaster ids.
+    return int(sample_count(_decision_model_id(model_ids) or "unknown"))
 
 
 def _log_pipeline_funnel(
@@ -1247,6 +1263,7 @@ def _decision_cost_edges(
     spread_bps: int | None,
     settings: PMSSettings,
     fee_rate: float | None = None,
+    spread_already_in_price: bool = False,
 ) -> _DecisionCostEdges:
     price = Decimal(str(decision_price))
     effective_fee_rate = (
@@ -1259,7 +1276,7 @@ def _decision_cost_edges(
     ) * price
     spread_edge = (
         Decimal("0")
-        if spread_bps is None
+        if spread_bps is None or spread_already_in_price
         else (Decimal(spread_bps) / Decimal("10000")) * price
     )
     return _DecisionCostEdges(

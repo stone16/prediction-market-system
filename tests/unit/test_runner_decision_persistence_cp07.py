@@ -27,6 +27,14 @@ from pms.runner import (
     _decision_evidence_signal_for_decision,
     _decision_expires_at,
 )
+from pms.strategies.projections import (
+    ActiveStrategy,
+    EvalSpec,
+    ForecasterSpec,
+    MarketSelectionSpec,
+    RiskParams,
+    StrategyConfig,
+)
 
 
 FIXTURE_PATH = Path("tests/fixtures/polymarket_7day_synthetic.jsonl")
@@ -812,6 +820,78 @@ def test_decision_evidence_records_cost_basis_at_decision_time() -> None:
     assert evidence["net_edge_after_costs"] == pytest.approx(0.18697)
 
 
+def test_decision_evidence_excludes_spread_when_already_in_price() -> None:
+    """Ask-frame sibling of the cost-basis test: when the decision price is
+    the executable ask, the spread is already inside expected_edge and must
+    not be charged again — but the spread_edge_at_decision key stays present
+    (value 0.0) for the h1_flb smoke check."""
+    signal = replace(
+        _signal(),
+        external_signal={
+            "resolved_outcome": 1.0,
+            "book_age_ms": 75.0,
+            "fee_rate_bps": 300.0,
+        },
+    )
+    decision = replace(
+        _decision(),
+        expected_edge=0.21,
+        limit_price=0.41,
+        max_slippage_bps=50,
+        spread_bps_at_decision=80,
+    )
+
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at,
+        spread_already_in_price=True,
+    )
+
+    assert evidence["spread_edge_at_decision"] == 0.0
+    assert evidence["spread_already_in_price"] is True
+    assert evidence["fee_edge_at_decision"] == pytest.approx(0.0177)
+    assert evidence["slippage_edge_at_decision"] == pytest.approx(0.00205)
+    assert evidence["total_cost_edge_at_decision"] == pytest.approx(0.01975)
+    assert evidence["net_edge_after_costs"] == pytest.approx(0.19025)
+
+
+def test_decision_evidence_records_ask_frame_without_spread_bps() -> None:
+    signal = replace(
+        _signal(),
+        external_signal={
+            "resolved_outcome": 1.0,
+            "book_age_ms": 75.0,
+            "fee_rate_bps": 300.0,
+        },
+    )
+    decision = replace(
+        _decision(),
+        expected_edge=0.21,
+        limit_price=0.41,
+        max_slippage_bps=50,
+        spread_bps_at_decision=None,
+    )
+
+    evidence = _decision_evidence_from_signal(
+        signal,
+        decision=decision,
+        factor_snapshot_hash="snapshot-cp07",
+        quote_source="postgres_snapshot",
+        decision_created_at=signal.fetched_at,
+        spread_already_in_price=True,
+    )
+
+    assert evidence["spread_edge_at_decision"] == 0.0
+    assert evidence["spread_already_in_price"] is True
+    assert evidence["fee_edge_at_decision"] == pytest.approx(0.0177)
+    assert evidence["slippage_edge_at_decision"] == pytest.approx(0.00205)
+    assert evidence["total_cost_edge_at_decision"] == pytest.approx(0.01975)
+    assert evidence["net_edge_after_costs"] == pytest.approx(0.19025)
+
+
 def test_decision_evidence_projects_direct_no_book_baselines_to_yes_probability() -> None:
     signal = replace(
         _signal(),
@@ -853,3 +933,81 @@ def test_decision_evidence_projects_direct_no_book_baselines_to_yes_probability(
     )
     assert evidence["mid_quote_baseline_prob_estimate"] == pytest.approx(0.41)
     assert evidence["last_trade_baseline_prob_estimate"] == pytest.approx(0.43)
+
+
+def _active_strategy_with_metadata(
+    metadata: tuple[tuple[str, str], ...],
+) -> ActiveStrategy:
+    return ActiveStrategy(
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        config=StrategyConfig(
+            strategy_id="default",
+            factor_composition=(),
+            metadata=metadata,
+        ),
+        risk=RiskParams(
+            max_position_notional_usdc=500.0,
+            max_daily_drawdown_pct=2.5,
+            min_order_size_usdc=1.0,
+        ),
+        eval_spec=EvalSpec(metrics=("brier", "pnl")),
+        forecaster=ForecasterSpec(forecasters=(("rules", ()),)),
+        market_selection=MarketSelectionSpec(
+            venue="polymarket",
+            resolution_time_max_horizon_days=7,
+            volume_min_usdc=100.0,
+        ),
+    )
+
+
+class _ControllerWithStrategy:
+    def __init__(self, strategy: ActiveStrategy) -> None:
+        self.strategy = strategy
+
+    async def decide(
+        self,
+        signal: MarketSignal,
+        portfolio: Portfolio | None = None,
+    ) -> TradeDecision | None:
+        del signal, portfolio
+        return None
+
+
+def _runner_with_runtime_strategy(
+    metadata: tuple[tuple[str, str], ...],
+) -> Runner:
+    runner = _runner()
+    runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        controller=cast(Any, _ControllerWithStrategy(
+            _active_strategy_with_metadata(metadata)
+        )),
+        asset_ids=None,
+    )
+    return runner
+
+
+def test_decision_uses_ask_pricing_requires_ask_frame_and_matching_price() -> None:
+    runner = _runner_with_runtime_strategy((("price_reference", "best_ask"),))
+    signal = _signal()  # best executable ask = 0.42
+    ask_priced = replace(_decision(), limit_price=0.42)
+    mid_priced = replace(_decision(), limit_price=0.41)
+
+    assert runner._decision_uses_ask_pricing(ask_priced, signal) is True  # noqa: SLF001
+    assert runner._decision_uses_ask_pricing(mid_priced, signal) is False  # noqa: SLF001
+
+
+def test_decision_uses_ask_pricing_is_false_without_best_ask_metadata() -> None:
+    runner = _runner_with_runtime_strategy((("owner", "test"),))
+    ask_priced = replace(_decision(), limit_price=0.42)
+
+    assert runner._decision_uses_ask_pricing(ask_priced, _signal()) is False  # noqa: SLF001
+
+
+def test_decision_uses_ask_pricing_is_false_for_unknown_strategy() -> None:
+    runner = _runner()
+    ask_priced = replace(_decision(), limit_price=0.42)
+
+    assert runner._decision_uses_ask_pricing(ask_priced, _signal()) is False  # noqa: SLF001

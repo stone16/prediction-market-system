@@ -1459,6 +1459,123 @@ def test_report_net_edge_gate_excludes_position_exit_decisions() -> None:
     )
 
 
+def test_report_net_edge_gate_honors_spread_already_in_price_evidence() -> None:
+    """Ask-frame decisions persist spread_already_in_price=True because
+    expected_edge = p - ask already pays the spread; the go/no-go gate input
+    must not subtract a re-derived spread cost a second time."""
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 30),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-30T00:00:00+00:00",
+            "runtime_continuity": _runtime_continuity_status(),
+            "controller": {
+                "decisions_total": 1,
+                "diagnostics_total": 0,
+                "diagnostic_counts": {},
+            },
+            "actuator": {"fills_total": 1},
+            "evaluator": {},
+            "supervision": {"unresolved_feedback_total": 0},
+        },
+        metrics={
+            "slippage_bps": 0.0,
+            "pnl_series": _pnl_series(date(2026, 5, 30)),
+        },
+        decisions=[
+            {
+                "decision_id": "entry-ask-1",
+                "market_id": "m-1",
+                "prob_estimate": 0.55,
+                "limit_price": 0.50,
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "decision_evidence": {
+                    "spread_already_in_price": True,
+                    "spread_edge_at_decision": 0.0,
+                    "fee_edge_at_decision": 0.0035,
+                    "slippage_edge_at_decision": 0.0025,
+                    "net_edge_after_costs": 0.044,
+                },
+            },
+        ],
+        trades={
+            "trades": [
+                {
+                    "decision_id": "entry-ask-1",
+                    "fill_notional_usdc": 10.0,
+                    "fees": 0.10,
+                    "filled_at": "2026-05-30T00:00:00+00:00",
+                },
+            ],
+        },
+        positions={"positions": []},
+    )
+
+    gate = evaluate_paper_soak_gate(
+        metrics,
+        risk=RiskSettings(max_total_exposure=50.0),
+    )
+
+    # 500 bps gross - 0 spread (already inside the ask frame) - 0 slippage
+    # - 50 bps fee; the unfixed re-derivation charged 25 bps spread again.
+    assert metrics.average_edge_bps == pytest.approx(500.0)
+    assert metrics.average_net_edge_bps == pytest.approx(450.0)
+    assert (
+        gate.require_check("average_net_edge_bps").detail == "450.0000 > 0.0000"
+    )
+
+
+def test_trade_cost_breakdown_honors_spread_already_in_price_evidence() -> None:
+    """Breakdown rows for flagged decisions must stay internally consistent:
+    net_edge == gross_edge - spread_cost - fee_cost - slippage_cost."""
+    metrics = metrics_from_api_payloads(
+        report_date=date(2026, 5, 5),
+        status={
+            "mode": "paper",
+            "runner_started_at": "2026-05-03T00:00:00+00:00",
+            "sensors": [],
+            "controller": {"decisions_total": 1, "diagnostic_counts": {}},
+            "actuator": {"fills_total": 1},
+            "evaluator": {},
+            "quality": {},
+        },
+        decisions=[
+            {
+                "decision_id": "d-ask-frame",
+                "market_id": "m-ask-frame",
+                "prob_estimate": 0.55,
+                "limit_price": 0.50,
+                "expected_edge": 0.05,
+                "spread_bps_at_decision": 50,
+                "created_at": "2026-05-05T00:00:00+00:00",
+                "decision_evidence": {
+                    "spread_already_in_price": True,
+                    "spread_edge_at_decision": 0.0,
+                    "fee_edge_at_decision": 0.0035,
+                    "slippage_edge_at_decision": 0.0025,
+                    "net_edge_after_costs": 0.044,
+                },
+            }
+        ],
+        trades={"trades": []},
+        positions={"positions": []},
+    )
+
+    assert metrics.trade_costs == (
+        TradeCostBreakdown(
+            decision_id="d-ask-frame",
+            market_id="m-ask-frame",
+            gross_edge=0.05,
+            spread_cost=0.0,
+            fee_cost=0.0035,
+            slippage_cost=0.0025,
+            net_edge=0.044,
+        ),
+    )
+
+
 def test_metrics_from_api_payloads_flags_active_actuator_halt() -> None:
     metrics = metrics_from_api_payloads(
         report_date=date(2026, 5, 5),

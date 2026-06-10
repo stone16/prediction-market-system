@@ -8,7 +8,7 @@ from pms.config import RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
-from pms.controller.pipeline import ControllerPipeline
+from pms.controller.pipeline import ControllerPipeline, _resolved_sample_count
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import MarketStatus
 from pms.core.models import EvalRecord, MarketSignal, Portfolio
@@ -128,6 +128,68 @@ def test_netcal_calibrator_applies_isotonic_at_100_samples() -> None:
 
     assert calibrator.calibrate(0.8, model_id="model-a") == pytest.approx(1.0)
     assert calibrator.calibrate(0.2, model_id="model-a") == pytest.approx(0.0)
+
+
+def test_netcal_calibrator_dedups_samples_by_decision_id() -> None:
+    """Hydration from the eval store and the live push path can deliver the
+    same resolved record twice (e.g. a record persisted before a mid-session
+    pipeline swap is both hydrated and pushed). Double-counting would let a
+    single resolution unlock graduation thresholds early."""
+    calibrator = NetcalCalibrator()
+    records = _records(3)
+
+    calibrator.add_samples("model-a", records)
+    calibrator.add_samples("model-a", records)
+
+    assert calibrator.sample_count("model-a") == 3
+
+
+def test_netcal_calibrator_dedups_fresh_record_objects_by_decision_id() -> None:
+    """The production duplicate is a DB-rehydrated fresh EvalRecord object vs
+    an in-memory pushed object with an equal decision_id — never the same
+    object identity. An identity-keyed dedup regression would pass the
+    same-list test above but double-count here."""
+    calibrator = NetcalCalibrator()
+
+    calibrator.add_samples("model-a", _records(3))
+    calibrator.add_samples("model-a", _records(3))
+
+    assert calibrator.sample_count("model-a") == 3
+
+
+def test_netcal_calibrator_dedup_is_scoped_per_model_bucket() -> None:
+    calibrator = NetcalCalibrator()
+    records = _records(2)
+
+    calibrator.add_samples("model-a", records)
+    calibrator.add_samples("model-b", records)
+
+    assert calibrator.sample_count("model-a") == 2
+    assert calibrator.sample_count("model-b") == 2
+
+
+def test_resolved_sample_count_counts_decision_level_model_id_for_ensembles() -> None:
+    """EvalRecord.model_id is the decision-level id — "ensemble" for
+    multi-forecaster strategies (pipeline._decision_model_id). The clamp
+    unlock counter must read the same bucket the resolved records land in,
+    or graduation never happens for ensembles."""
+    calibrator = NetcalCalibrator()
+    calibrator.add_samples("ensemble", _records(20))
+
+    assert (
+        _resolved_sample_count(calibrator, ["RulesForecaster", "LLMForecaster"]) == 20
+    )
+
+
+def test_resolved_sample_count_keeps_single_forecaster_keying() -> None:
+    calibrator = NetcalCalibrator()
+    calibrator.add_samples("RulesForecaster", _records(5))
+
+    assert _resolved_sample_count(calibrator, ["RulesForecaster"]) == 5
+
+
+def test_resolved_sample_count_is_zero_without_model_ids() -> None:
+    assert _resolved_sample_count(NetcalCalibrator(), []) == 0
 
 
 def test_kelly_sizer_even_odds_fractional_bet() -> None:

@@ -279,19 +279,29 @@ class _CallLogEvalStore(InMemoryEvalStore):
         super().__init__()
         self._call_log = call_log
 
-    async def append(self, record: EvalRecord) -> None:
+    async def append(self, record: EvalRecord) -> bool:
         self._call_log.append(("append", record.decision_id))
-        await super().append(record)
+        return await super().append(record)
 
 
 class _FailingEvalStore:
     def __init__(self) -> None:
         self.attempts = 0
 
-    async def append(self, record: EvalRecord) -> None:
+    async def append(self, record: EvalRecord) -> bool:
         del record
         self.attempts += 1
         raise RuntimeError("transient eval store outage")
+
+
+class _DuplicateEvalStore:
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def append(self, record: EvalRecord) -> bool:
+        del record
+        self.attempts += 1
+        return False
 
 
 @pytest.mark.asyncio
@@ -360,6 +370,37 @@ async def test_failed_eval_append_leaves_fill_unresolved_for_retry() -> None:
     assert result.fills_resolved == 0
     assert result.eval_records_appended == 0
     assert result.fills_failed == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_eval_append_does_not_increment_appended_count() -> None:
+    """A retried sweep can hit the eval store's ON CONFLICT path. That is a
+    durable success, but not a newly appended row, so the sweep result must
+    not inflate eval_records_appended."""
+    fill_store = FakeResolutionFillStore([_fill()])
+    duplicate_store = _DuplicateEvalStore()
+    spool = EvalSpool(store=cast(EvalStore, duplicate_store), scorer=Scorer())
+    sweeper = _sweeper(
+        fill_store=fill_store,
+        eval_spool=spool,
+        source=FakeResolutionSource({"0xmarket-1": 1.0}),
+        decisions={
+            "d-res-1": _StoredDecision(
+                decision=_decision(),
+                decision_evidence={},
+            )
+        },
+    )
+
+    result = await sweeper.sweep_once()
+
+    assert duplicate_store.attempts == 1
+    assert result == ResolutionSweepResult(
+        unresolved_fills=1,
+        fills_resolved=1,
+        eval_records_appended=0,
+        fills_failed=0,
+    )
 
 
 @pytest.mark.asyncio
@@ -701,16 +742,17 @@ async def test_gamma_resolution_source_batches_condition_ids() -> None:
 
 
 class _RecordingConnection:
-    def __init__(self) -> None:
+    def __init__(self, *, execute_result: str = "INSERT 0 1") -> None:
         self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
         self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
         self.fetchrow_calls: list[tuple[str, tuple[object, ...]]] = []
         self.fetch_rows: list[object] = []
         self.fetchrow_result: object | None = None
+        self.execute_result = execute_result
 
     async def execute(self, query: str, *args: object) -> str:
         self.execute_calls.append((query, args))
-        return "OK"
+        return self.execute_result
 
     async def fetch(self, query: str, *args: object) -> list[object]:
         self.fetch_calls.append((query, args))
@@ -772,10 +814,10 @@ async def test_eval_store_append_is_idempotent_on_decision_id_conflict() -> None
     re-appends after a crash between append and resolve_fill) and keeps
     LIVE partial fills — multiple fills per decision — from raising
     UniqueViolation through the spool."""
-    connection = _RecordingConnection()
+    connection = _RecordingConnection(execute_result="INSERT 0 0")
     store = EvalStore(pool=cast(Any, _RecordingPool(connection)))
 
-    await store.append(
+    inserted = await store.append(
         EvalRecord(
             market_id="0xmarket-1",
             decision_id="d-res-1",
@@ -793,6 +835,7 @@ async def test_eval_store_append_is_idempotent_on_decision_id_conflict() -> None
     (query, args) = connection.execute_calls[0]
     assert "ON CONFLICT (decision_id) DO NOTHING" in query
     assert args[0] == "d-res-1"
+    assert inserted is False
 
 
 @pytest.mark.asyncio

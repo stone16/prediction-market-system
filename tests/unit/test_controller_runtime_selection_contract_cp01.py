@@ -213,7 +213,10 @@ async def test_controller_pipeline_uses_strategy_factor_composition_not_forecast
         "traded_edge": pytest.approx(0.32),
         "gross_edge": pytest.approx(0.32),
         "spread_bps_at_decision": 500,
+        # yes_price frame (no price_reference metadata): the executable ask is
+        # unknown, so the full spread stays a charged entry cost.
         "spread_edge": pytest.approx(0.02),
+        "spread_already_in_price": False,
         "fee_rate": pytest.approx(0.07),
         "fee_edge": pytest.approx(0.042),
         "max_slippage_bps": 50,

@@ -7,7 +7,7 @@ import logging
 from copy import deepcopy
 from math import isfinite
 from hashlib import sha256
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -32,7 +32,11 @@ from pms.actuator.adapters.polymarket import (
     PolymarketSubmissionUnknownError,
     PolymarketVenueAccountReconciler,
 )
-from pms.actuator.executor import ActuatorAdapter, ActuatorExecutor
+from pms.actuator.executor import (
+    ActuatorAdapter,
+    ActuatorExecutor,
+    is_terminal_partial_fill,
+)
 from pms.actuator.exit_monitor import (
     PositionExitMonitor,
     build_exit_decision,
@@ -42,6 +46,7 @@ from pms.actuator.exit_monitor import (
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import PMSSettings, validate_live_mode_ready
+from pms.controller._price_utils import best_ask
 from pms.controller.baselines import (
     CategoryPriorBaselineEstimator,
     enrich_signal_with_category_prior,
@@ -62,6 +67,7 @@ from pms.core.interfaces import (
     SubscriptionManagedSensor,
 )
 from pms.core.models import (
+    EvalRecord,
     FillRecord,
     LiveTradingDisabledError,
     MarketSignal,
@@ -118,7 +124,7 @@ from pms.sensor.adapters.direct_book import (
 from pms.sensor.adapters.historical import HistoricalSensor
 from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
-from pms.sensor.stream import SensorStream
+from pms.sensor.stream import SensorStream, SignalSubscription
 from pms.storage.dedup_store import InMemoryDedupStore, PgDedupStore
 from pms.storage.decision_store import DecisionStore
 from pms.storage.eval_store import EvalStore
@@ -186,6 +192,13 @@ from pms.strategies.ripple.source import (
 )
 from pms.strategies.runtime_bridge import StrategyRunResult
 from pms.strategies.versioning import compute_strategy_version_id
+from pms.supervision import (
+    ALIVE_WORKER_STATES,
+    WorkerFactory,
+    WorkerHealth,
+    WorkerSpec,
+    WorkerSupervisor,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -198,6 +211,39 @@ DECISION_PENDING_TTL = timedelta(minutes=15)
 DECISION_SWEEP_INTERVAL_S = 5.0
 RUNTIME_HEARTBEAT_INTERVAL_S = 60.0
 DEFAULT_OPERATIONAL_MARKET_SELECTION_HORIZON_DAYS = 90
+
+# --- Worker supervision (see pms.supervision) -------------------------------
+# Restart only on this transient set, within budget, with exponential
+# backoff. Inner per-cycle catches stay the first line of defence; the
+# supervisor is the last resort.
+WORKER_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+    asyncpg.PostgresError,
+    OSError,
+    TimeoutError,
+)
+WORKER_MAX_RESTARTS = 5
+WORKER_RESTART_WINDOW_S = 600.0
+WORKER_RESTART_BACKOFF_INITIAL_S = 1.0
+WORKER_RESTART_BACKOFF_MAX_S = 60.0
+WORKER_FACTOR_SERVICE = "factor_service"
+WORKER_CONTROLLER_DISPATCHER = "controller_dispatcher"
+WORKER_ACTUATOR = "actuator"
+WORKER_DECISION_EXPIRY = "decision_expiry"
+WORKER_RUNTIME_HEARTBEAT = "runtime_heartbeat"
+# Workers the trading path cannot live without: used to tighten the
+# heartbeat `running` flag. The factor service only counts when it was
+# actually spawned (PostgreSQL runtime).
+TRADING_REQUIRED_WORKERS: tuple[str, ...] = (
+    WORKER_CONTROLLER_DISPATCHER,
+    WORKER_ACTUATOR,
+    WORKER_FACTOR_SERVICE,
+)
+# Readiness additionally requires the heartbeat writer when it was spawned
+# (PAPER/LIVE with PostgreSQL).
+READINESS_REQUIRED_WORKERS: tuple[str, ...] = (
+    *TRADING_REQUIRED_WORKERS,
+    WORKER_RUNTIME_HEARTBEAT,
+)
 RAW_FACTOR_COMPOSITION_ROLES = frozenset(
     {
         "weighted",
@@ -255,6 +301,19 @@ class DetachedControllerRuntime:
     runtime: StrategyControllerRuntime | None
     queue: asyncio.Queue[MarketSignal] | None
     task: asyncio.Task[None] | None
+
+
+def _runtime_calibration_add_samples(
+    runtime: StrategyControllerRuntime,
+) -> Callable[[str, list[EvalRecord]], None] | None:
+    # Duck-typed like pipeline._resolved_sample_count: extending the
+    # ICalibrator Protocol would break test fakes that satisfy only
+    # `calibrate`/`sample_count`.
+    calibrator = getattr(runtime.controller, "calibrator", None)
+    add_samples = getattr(calibrator, "add_samples", None)
+    if not callable(add_samples):
+        return None
+    return cast(Callable[[str, list[EvalRecord]], None], add_samples)
 
 
 @dataclass(frozen=True)
@@ -325,7 +384,9 @@ class Runner:
     _controller_task: asyncio.Task[None] | None = field(init=False, default=None)
     _actuator_task: asyncio.Task[None] | None = field(init=False, default=None)
     _factor_service: FactorService | None = field(init=False, default=None)
+    _factor_service_fresh: bool = field(init=False, default=False)
     _factor_service_task: asyncio.Task[None] | None = field(init=False, default=None)
+    _supervisor: WorkerSupervisor = field(init=False)
     _task: asyncio.Task[None] | None = field(init=False, default=None)
     _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
     _owns_pg_pool: bool = field(init=False, default=False)
@@ -427,6 +488,7 @@ class Runner:
             feedback_generator=EvaluatorFeedback(self.feedback_store),
             metrics_provider=self._metrics_by_strategy,
             quote_store=self.quote_eval_store,
+            calibration_sink=self._on_eval_record_for_calibration,
         )
         self._decision_queue = asyncio.Queue()
         self._stop_event = asyncio.Event()
@@ -438,6 +500,9 @@ class Runner:
             self.config
         )
         self._flb_calibration_model = _flb_calibration_model_from_settings(self.config)
+        self._supervisor = WorkerSupervisor(
+            event_publisher=self._publish_worker_event,
+        )
         self.actuator_executor = self._build_executor(self.config.mode)
 
     @property
@@ -586,6 +651,11 @@ class Runner:
         self._resolution_sweeps_total = 0
         self._resolution_fills_resolved_total = 0
         self._resolution_sweep_failures_total = 0
+        # Fresh supervisor per run: stop() latches its no-respawn flag, so a
+        # restarted runner needs a new instance with clean health state.
+        self._supervisor = WorkerSupervisor(
+            event_publisher=self._publish_worker_event,
+        )
 
         try:
             self._assert_no_legacy_jsonl_paths()
@@ -611,15 +681,14 @@ class Runner:
                 if self._pg_pool is None:
                     msg = "Runner PostgreSQL pool is not initialized"
                     raise RuntimeError(msg)
-                factor_signal_stream = self.sensor_stream.subscribe()
-                self._factor_service = FactorService(
-                    pool=self._pg_pool,
-                    store=PostgresMarketDataStore(self._pg_pool),
-                    cadence_s=self.config.factor_cadence_s,
-                    factors=REGISTERED,
-                    signal_stream=factor_signal_stream,
+                self._factor_service = self._build_factor_service()
+                self._factor_service_fresh = True
+                self._factor_service_task = self._supervisor.spawn(
+                    self._worker_spec(
+                        WORKER_FACTOR_SERVICE,
+                        self._run_factor_service_worker,
+                    )
                 )
-                self._factor_service_task = asyncio.create_task(self._factor_service.run())
                 # Rebuild the portfolio from persisted fills BEFORE sensors
                 # start producing signals. Without this, a restart in LIVE
                 # mode would forget open Polymarket exposure: every new BUY
@@ -633,14 +702,39 @@ class Runner:
             self._wire_active_perception(self._active_sensors)
             await self._configure_controllers()
             await self.sensor_stream.start(self._active_sensors)
+            for index, (sensor, sensor_task) in enumerate(
+                zip(self._active_sensors, self.sensor_stream.tasks, strict=True)
+            ):
+                # Watch-only: sensor _consume tasks carry their own reconnect
+                # loops, and restarting them would fight SensorStream's
+                # _active_consumers bookkeeping.
+                self._supervisor.observe(
+                    sensor_task,
+                    name=f"sensor:{index}:{type(sensor).__name__}",
+                )
             await self._evaluator_spool.start()
-            self._controller_task = asyncio.create_task(self._controller_loop())
-            self._actuator_task = asyncio.create_task(self._actuator_loop())
+            self._controller_task = self._supervisor.spawn(
+                self._worker_spec(
+                    WORKER_CONTROLLER_DISPATCHER,
+                    self._controller_loop,
+                )
+            )
+            self._actuator_task = self._supervisor.spawn(
+                self._worker_spec(WORKER_ACTUATOR, self._actuator_loop)
+            )
             if self._pg_pool is not None:
-                self._decision_expiry_task = asyncio.create_task(self._decision_expiry_loop())
+                self._decision_expiry_task = self._supervisor.spawn(
+                    self._worker_spec(
+                        WORKER_DECISION_EXPIRY,
+                        self._decision_expiry_loop,
+                    )
+                )
             if self._pg_pool is not None and self.config.mode in {RunMode.PAPER, RunMode.LIVE}:
-                self._runtime_heartbeat_task = asyncio.create_task(
-                    self._runtime_heartbeat_loop()
+                self._runtime_heartbeat_task = self._supervisor.spawn(
+                    self._worker_spec(
+                        WORKER_RUNTIME_HEARTBEAT,
+                        self._runtime_heartbeat_loop,
+                    )
                 )
                 self._resolution_sweep_task = asyncio.create_task(
                     self._resolution_sweep_loop()
@@ -652,6 +746,9 @@ class Runner:
             raise
 
     async def stop(self, *, close_pool: bool = True) -> None:
+        # Block respawns before any cancellation so a supervised restart
+        # cannot race the teardown ordering below.
+        self._supervisor.stop()
         self._stop_event.set()
         error: BaseException | None = None
 
@@ -1126,6 +1223,70 @@ class Runner:
             return True
         return "database" in self.config.model_fields_set
 
+    def worker_health_snapshot(self) -> dict[str, WorkerHealth]:
+        return self._supervisor.snapshot()
+
+    def worker_component_payload(self) -> dict[str, object]:
+        return self._supervisor.component_payload()
+
+    def _worker_spec(self, name: str, factory: WorkerFactory) -> WorkerSpec:
+        return WorkerSpec(
+            name=name,
+            factory=factory,
+            transient=WORKER_TRANSIENT_ERRORS,
+            max_restarts=WORKER_MAX_RESTARTS,
+            restart_window_s=WORKER_RESTART_WINDOW_S,
+            backoff_initial_s=WORKER_RESTART_BACKOFF_INITIAL_S,
+            backoff_max_s=WORKER_RESTART_BACKOFF_MAX_S,
+        )
+
+    async def _publish_worker_event(self, event_type: str, summary: str) -> None:
+        await self.event_bus.publish(event_type, summary)
+
+    def _trading_workers_ok(self) -> bool:
+        snapshot = self._supervisor.snapshot()
+        return all(
+            health.state in ALIVE_WORKER_STATES
+            for name, health in snapshot.items()
+            if name in TRADING_REQUIRED_WORKERS
+        )
+
+    def _build_factor_service(self) -> FactorService:
+        pool = self._pg_pool
+        if pool is None:
+            msg = "Runner PostgreSQL pool is not initialized"
+            raise RuntimeError(msg)
+        return FactorService(
+            pool=pool,
+            store=PostgresMarketDataStore(pool),
+            cadence_s=self.config.factor_cadence_s,
+            factors=REGISTERED,
+            signal_stream=self.sensor_stream.subscribe(),
+        )
+
+    async def _run_factor_service_worker(self) -> None:
+        service = self._factor_service
+        if service is None or not self._factor_service_fresh:
+            # FactorService instances are single-use: _stream_exhausted
+            # latches once the subscription ends, so a supervised restart
+            # must rebuild the instance with a fresh subscription. Close the
+            # dead subscription so SensorStream stops buffering into it.
+            self._close_factor_signal_subscription(service)
+            service = self._build_factor_service()
+            self._factor_service = service
+        self._factor_service_fresh = False
+        await service.run()
+
+    def _close_factor_signal_subscription(
+        self,
+        service: FactorService | None,
+    ) -> None:
+        if service is None:
+            return
+        stream = service.signal_stream
+        if isinstance(stream, SignalSubscription):
+            stream.close()
+
     async def _ensure_default_v2_version(self) -> None:
         if not self.config.auto_migrate_default_v2:
             return
@@ -1398,7 +1559,22 @@ class Runner:
                     created_at=signal.fetched_at,
                     market_id=signal.market_id,
                 )
-                await self._emit_position_exit_decisions(signal)
+                try:
+                    await self._emit_position_exit_decisions(signal)
+                except (asyncpg.PostgresError, OSError, TimeoutError) as error:
+                    # A transient storage error must not kill the dispatcher:
+                    # every pipeline loop treats a finished dispatcher task as
+                    # clean shutdown and the whole trading path dismantles
+                    # silently. The exit key is only recorded after a
+                    # successful insert, so the exit retries on the next
+                    # signal for the same market.
+                    detail = _runtime_error_detail(error, self.config)
+                    await self.event_bus.publish(
+                        "error",
+                        f"position exit emission failed: {detail}",
+                        market_id=signal.market_id,
+                    )
+                    logger.warning("position exit emission failed: %s", detail)
                 for strategy_id, runtime in tuple(self._controller_runtimes.items()):
                     if not _matches_strategy_scope(runtime.asset_ids, signal):
                         continue
@@ -1408,6 +1584,34 @@ class Runner:
                     await queue.put(signal)
             finally:
                 self.sensor_stream.queue.task_done()
+
+    def _decision_uses_ask_pricing(
+        self,
+        decision: TradeDecision,
+        evidence_signal: MarketSignal,
+    ) -> bool:
+        """True when the decision's limit price is the executable best ask of
+        a price_reference=best_ask strategy — the frame where the spread is
+        already inside expected_edge and must not be charged again in the
+        persisted cost evidence (mirrors the pipeline's net-edge gate)."""
+        runtime = self._controller_runtimes.get(decision.strategy_id)
+        if runtime is None:
+            return False
+        strategy = getattr(runtime.controller, "strategy", None)
+        config = getattr(strategy, "config", None)
+        metadata = getattr(config, "metadata", None)
+        if metadata is None:
+            return False
+        try:
+            price_reference = dict(metadata).get("price_reference")
+        except (TypeError, ValueError):
+            return False
+        if price_reference != "best_ask":
+            return False
+        executable_ask = best_ask(evidence_signal)
+        return executable_ask is not None and (
+            decision.limit_price == executable_ask
+        )
 
     async def _controller_pipeline_loop(self, strategy_id: str) -> None:
         runtime = self._controller_runtimes[strategy_id]
@@ -1498,6 +1702,12 @@ class Runner:
                             factor_snapshot_hash=factor_snapshot_hash,
                             quote_source=self.config.controller.quote_source,
                             decision_created_at=created_at,
+                            spread_already_in_price=(
+                                self._decision_uses_ask_pricing(
+                                    decision,
+                                    decision_signal,
+                                )
+                            ),
                         )
                         await self.decision_store.insert(
                             decision,
@@ -1665,6 +1875,12 @@ class Runner:
                             factor_snapshot_hash=None,
                             quote_source=self.config.controller.quote_source,
                             decision_created_at=signal.fetched_at,
+                            spread_already_in_price=(
+                                self._decision_uses_ask_pricing(
+                                    decision,
+                                    evidence_signal,
+                                )
+                            ),
                         )
                     self._evaluator_spool.enqueue(
                         fill,
@@ -2331,11 +2547,16 @@ class Runner:
                 sensor_running
                 and len(self._controller_runtimes) > 0
                 and not self._stop_event.is_set()
+                # Dead trading workers (dispatcher/actuator/factor) must
+                # count as unhealthy heartbeat periods: this is the
+                # correction of the false-green the 2026-06-10 audit found.
+                and self._trading_workers_ok()
             ),
             "sensor_running": sensor_running,
             "sensor_tasks": running_tasks,
             "sensor_tasks_total": len(tasks),
             "sensor_task_failures": failed_tasks,
+            "workers": self._supervisor.component_payload(),
         }
 
     def _record_position_exit_reentry_quarantine(
@@ -2615,6 +2836,7 @@ class Runner:
         await self.close_pg_pool()
 
     async def _cleanup_after_start_failure(self) -> None:
+        self._supervisor.stop()
         stop_error: BaseException | None = None
         if self._factor_service_task is not None and not self._factor_service_task.done():
             self._factor_service_task.cancel()
@@ -2870,6 +3092,58 @@ class Runner:
         with suppress(asyncio.CancelledError):
             await task
 
+    def _on_eval_record_for_calibration(self, record: EvalRecord) -> None:
+        runtime = self._controller_runtimes.get(record.strategy_id)
+        if (
+            runtime is None
+            or runtime.strategy_version_id != record.strategy_version_id
+        ):
+            # Stale-version records must not feed a new version's calibrator:
+            # those outcomes never tested the new forecaster spec.
+            logger.debug(
+                "dropping eval record for calibration without a matching "
+                "runtime: (%s, %s)",
+                record.strategy_id,
+                record.strategy_version_id,
+            )
+            return
+        add_samples = _runtime_calibration_add_samples(runtime)
+        if add_samples is None:
+            return
+        add_samples(record.model_id or "unknown", [record])
+
+    async def _hydrate_runtime_calibration(
+        self,
+        runtime: StrategyControllerRuntime,
+    ) -> None:
+        add_samples = _runtime_calibration_add_samples(runtime)
+        if add_samples is None:
+            return
+        records = await self.eval_store.all_for_strategy(
+            runtime.strategy_id,
+            runtime.strategy_version_id,
+        )
+        grouped: dict[str, list[EvalRecord]] = {}
+        for record in records:
+            grouped.setdefault(record.model_id or "unknown", []).append(record)
+        for model_id, model_records in grouped.items():
+            add_samples(model_id, model_records)
+        logger.info(
+            "calibration hydration loaded %d resolved eval records for %s@%s",
+            len(records),
+            runtime.strategy_id,
+            runtime.strategy_version_id,
+            extra={
+                "event": "calibration_hydration",
+                "strategy_id": runtime.strategy_id,
+                "strategy_version_id": runtime.strategy_version_id,
+                "resolved_records_by_model": {
+                    model_id: len(model_records)
+                    for model_id, model_records in grouped.items()
+                },
+            },
+        )
+
     def _attach_controller_runtime(self, runtime: StrategyControllerRuntime) -> None:
         signal_queue: asyncio.Queue[MarketSignal] = asyncio.Queue()
         self._controller_runtimes[runtime.strategy_id] = runtime
@@ -2879,6 +3153,12 @@ class Runner:
             name=f"controller-pipeline:{runtime.strategy_id}",
         )
         task.add_done_callback(self._capture_controller_pipeline_exception)
+        # Watch-only: pipeline tasks already have capture/release/re-attach
+        # machinery; the supervisor only tracks their health.
+        self._supervisor.observe(
+            task,
+            name=f"controller-pipeline:{runtime.strategy_id}",
+        )
         self._controller_pipeline_tasks[runtime.strategy_id] = task
 
     def _capture_controller_pipeline_exception(
@@ -2918,10 +3198,24 @@ class Runner:
                     or current_runtime.asset_ids != desired_runtime.asset_ids
                 ):
                     await self._release_controller_runtime_locked(strategy_id)
+                    # Attach before the hydration DB await: a record pushed
+                    # by the calibration sink during that await would
+                    # otherwise be dropped (no runtime registered) AND can
+                    # miss the in-flight all_for_strategy query — a lost
+                    # sample. Duplicate delivery is safe: the calibrator
+                    # dedups per (model_id, decision_id). Attach-first also
+                    # keeps the strategy attached if hydration fails.
                     self._attach_controller_runtime(desired_runtime)
+                    await self._hydrate_runtime_calibration(desired_runtime)
 
             for strategy_id in sorted(desired_strategy_ids - current_strategy_ids):
-                self._attach_controller_runtime(desired_by_strategy[strategy_id])
+                desired_runtime = desired_by_strategy[strategy_id]
+                # Same attach-then-hydrate ordering as the replace branch:
+                # the sink drops records for unattached runtimes, so the
+                # push window exists here too (e.g. a sweep resolving fills
+                # of a re-added strategy).
+                self._attach_controller_runtime(desired_runtime)
+                await self._hydrate_runtime_calibration(desired_runtime)
 
             await self._refresh_subscription_assets_locked()
 
@@ -3057,6 +3351,7 @@ class Runner:
             raise RuntimeError(msg)
         runtimes = await self._build_controller_runtimes()
         for runtime in runtimes:
+            await self._hydrate_runtime_calibration(runtime)
             self._attach_controller_runtime(runtime)
 
     async def _build_controller_runtimes(self) -> list[StrategyControllerRuntime]:
@@ -3757,6 +4052,8 @@ def _decision_status_from_order(order_state: OrderState) -> str:
 def _is_open_order_state(order_state: OrderState) -> bool:
     if order_state.remaining_notional_usdc <= 1e-9:
         return False
+    if is_terminal_partial_fill(order_state):
+        return False
     normalized_status = order_state.status.lower()
     raw_status = order_state.raw_status.lower()
     return normalized_status in {
@@ -4030,6 +4327,7 @@ def _decision_evidence_from_signal(
     factor_snapshot_hash: str | None,
     quote_source: str,
     decision_created_at: datetime,
+    spread_already_in_price: bool = False,
 ) -> dict[str, object]:
     book_top_levels = _top_orderbook_levels(signal.orderbook)
     book_token_outcome = _book_token_outcome(signal, decision)
@@ -4091,7 +4389,11 @@ def _decision_evidence_from_signal(
         ),
         "factor_snapshot_hash": factor_snapshot_hash,
         "spread_bps_at_decision": decision.spread_bps_at_decision,
-        **_decision_cost_evidence(signal, decision),
+        **_decision_cost_evidence(
+            signal,
+            decision,
+            spread_already_in_price=spread_already_in_price,
+        ),
         "external_signal_keys": sorted(str(key) for key in signal.external_signal),
     }
 
@@ -4099,12 +4401,14 @@ def _decision_evidence_from_signal(
 def _decision_cost_evidence(
     signal: MarketSignal,
     decision: TradeDecision,
-) -> dict[str, float]:
+    *,
+    spread_already_in_price: bool = False,
+) -> dict[str, float | bool]:
     price = Decimal(str(decision.limit_price))
     if not price.is_finite() or price < 0:
         return {}
 
-    evidence: dict[str, float] = {}
+    evidence: dict[str, float | bool] = {}
     total_cost_edge = Decimal("0")
     has_cost_evidence = False
 
@@ -4119,7 +4423,16 @@ def _decision_cost_evidence(
         has_cost_evidence = True
 
     spread_bps = _optional_float(decision.spread_bps_at_decision)
-    if spread_bps is not None and spread_bps >= 0.0:
+    if spread_already_in_price:
+        # Ask-frame decisions already paid the spread inside expected_edge;
+        # keep the key present (the h1_flb smoke check requires it) but
+        # charge zero so net_edge_after_costs matches the gate arithmetic.
+        spread_edge = Decimal("0")
+        evidence["spread_edge_at_decision"] = float(spread_edge)
+        evidence["spread_already_in_price"] = True
+        total_cost_edge += spread_edge
+        has_cost_evidence = True
+    elif spread_bps is not None and spread_bps >= 0.0:
         spread_edge = (Decimal(str(spread_bps)) / Decimal("10000")) * price
         evidence["spread_edge_at_decision"] = float(spread_edge)
         total_cost_edge += spread_edge

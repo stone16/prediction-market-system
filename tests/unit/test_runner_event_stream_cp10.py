@@ -290,3 +290,42 @@ async def test_actuator_loop_handles_malformed_work_item_without_unbound_decisio
     assert replay[0].market_id is None
     assert replay[0].decision_id is None
     await runner.event_bus.unsubscribe(subscriber)
+
+
+@pytest.mark.asyncio
+async def test_controller_loop_survives_transient_position_exit_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One transient DB error in the position-exit path must not stop
+    signal routing: the dispatcher keeps running and later signals still
+    reach every strategy pipeline queue."""
+    import asyncpg
+
+    runner = _runner()
+    forwarded: asyncio.Queue[MarketSignal] = asyncio.Queue()
+    runner._controller_runtimes["default"] = StrategyControllerRuntime(  # noqa: SLF001
+        strategy_id="default",
+        strategy_version_id="default-v1",
+        controller=cast(Any, object()),
+        asset_ids=None,
+    )
+    runner._controller_signal_queues["default"] = forwarded  # noqa: SLF001
+
+    calls = 0
+
+    async def flaky_exit(signal: MarketSignal) -> None:
+        nonlocal calls
+        del signal
+        calls += 1
+        if calls == 1:
+            raise asyncpg.PostgresError("transient db error")
+
+    monkeypatch.setattr(runner, "_emit_position_exit_decisions", flaky_exit)
+    runner._stop_event.set()  # noqa: SLF001
+    await runner.sensor_stream.queue.put(_signal())
+    await runner.sensor_stream.queue.put(_signal())
+
+    await asyncio.wait_for(runner._controller_loop(), timeout=1.0)  # noqa: SLF001
+
+    assert calls == 2
+    assert forwarded.qsize() == 2
