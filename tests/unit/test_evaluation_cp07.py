@@ -405,6 +405,43 @@ def test_scorer_pnl_for_buy_no_uses_complementary_contract_outcome() -> None:
     assert record.pnl == pytest.approx(6.2)
 
 
+def test_scorer_realized_pnl_is_net_of_fill_fees_for_buy() -> None:
+    record = Scorer().score(
+        _fill(resolved_outcome=1.0, fill_price=0.42, fees=0.15),
+        _decision(prob=0.7, price=0.4),
+    )
+
+    # Realized PnL must be net of fees: (1.0 - 0.42) * 10 - 0.15, not 5.8.
+    assert record.pnl == pytest.approx(5.65)
+
+
+def test_scorer_realized_pnl_is_net_of_fill_fees_for_sell() -> None:
+    record = Scorer().score(
+        _fill(
+            resolved_outcome=0.0,
+            fill_price=0.42,
+            side=Side.SELL.value,
+            fees=0.12,
+        ),
+        _decision(prob=0.3, price=0.45, side=Side.SELL.value),
+    )
+
+    # Realized PnL must be net of fees: (0.42 - 0.0) * 10 - 0.12, not 4.2.
+    assert record.pnl == pytest.approx(4.08)
+
+
+def test_scorer_scores_fee_dominated_fill_as_loss() -> None:
+    record = Scorer().score(
+        _fill(resolved_outcome=1.0, fill_price=0.99, fees=0.25),
+        _decision(prob=0.995, price=0.99),
+    )
+
+    # Gross edge (0.10) is smaller than fees (0.25): the trade is a loss and
+    # must not count as a win in win_rate (metrics count record.pnl > 0.0).
+    assert record.pnl == pytest.approx(-0.15)
+    assert record.pnl < 0.0
+
+
 def test_scorer_brier_for_buy_no_uses_yes_probability_basis() -> None:
     scorer = Scorer()
     decision = TradeDecision(
