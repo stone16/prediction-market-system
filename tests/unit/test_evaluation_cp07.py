@@ -139,6 +139,18 @@ class _InMemoryQuoteEvalStore:
         self.records.append(record)
 
 
+class _TransientFailureEvalStore(InMemoryEvalStore):
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self._failures_remaining = failures
+
+    async def append(self, record: EvalRecord) -> None:
+        if self._failures_remaining > 0:
+            self._failures_remaining -= 1
+            raise RuntimeError("transient eval-store failure")
+        await super().append(record)
+
+
 class _StaticQuoteReader:
     def __init__(self, quote: BookSummary | None) -> None:
         self.quote = quote
@@ -782,6 +794,67 @@ async def test_eval_spool_logs_feedback_errors_and_keeps_scoring(
         "d-after-error",
     ]
     assert "feedback generation failed in evaluator spool" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_survives_transient_store_failure_and_keeps_scoring(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _TransientFailureEvalStore(failures=1)
+    spool = EvalSpool(store=cast(EvalStore, store), scorer=Scorer())
+    await spool.start()
+    try:
+        caplog.set_level("ERROR", logger="pms.evaluation.spool")
+        spool.enqueue(
+            _fill(decision_id="d-store-error", resolved_outcome=1.0),
+            _decision(decision_id="d-store-error"),
+        )
+        spool.enqueue(
+            _fill(decision_id="d-after-store-error", resolved_outcome=1.0),
+            _decision(decision_id="d-after-store-error"),
+        )
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    records = await store.all()
+    assert [record.decision_id for record in records] == ["d-after-store-error"]
+    assert "fill evaluation failed in evaluator spool" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_eval_spool_survives_scoring_error_and_keeps_scoring(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = cast(EvalStore, InMemoryEvalStore())
+    spool = EvalSpool(store=store, scorer=Scorer())
+    await spool.start()
+    try:
+        caplog.set_level("ERROR", logger="pms.evaluation.spool")
+        spool.enqueue(
+            _fill(
+                decision_id="d-poison",
+                resolved_outcome=1.0,
+                strategy_id="alpha",
+                strategy_version_id="alpha-v1",
+            ),
+            _decision(
+                decision_id="d-poison",
+                strategy_id="beta",
+                strategy_version_id="beta-v1",
+            ),
+        )
+        spool.enqueue(
+            _fill(decision_id="d-after-poison", resolved_outcome=1.0),
+            _decision(decision_id="d-after-poison"),
+        )
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    records = await cast(InMemoryEvalStore, store).all()
+    assert [record.decision_id for record in records] == ["d-after-poison"]
+    assert "fill evaluation failed in evaluator spool" in caplog.text
 
 
 def test_metrics_snapshot_by_strategy_returns_only_present_keys() -> None:

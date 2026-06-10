@@ -93,15 +93,22 @@ class EvalSpool:
                         decision_evidence,
                     )
                     continue
-                await self.store.append(
-                    self.scorer.score(
-                        fill,
-                        decision,
-                        baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
-                            decision_evidence,
-                        ),
+                try:
+                    await self.store.append(
+                        self.scorer.score(
+                            fill,
+                            decision,
+                            baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
+                                decision_evidence,
+                            ),
+                        )
                     )
-                )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "fill evaluation failed in evaluator spool: %s",
+                        fill.trade_id,
+                    )
+                    continue
                 try:
                     await self._generate_feedback()
                 except Exception:  # noqa: BLE001
