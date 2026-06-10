@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import asyncpg
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
@@ -181,6 +182,7 @@ class MarketDataSensor:
                     OSError,
                     TimeoutError,
                     InvalidHandshake,
+                    asyncpg.PostgresError,
                 ) as error:
                     _log_reconnectable_error(error)
                     await self._sleep(backoff)
@@ -615,6 +617,12 @@ def _log_reconnectable_error(error: BaseException) -> None:
     if isinstance(error, ConnectionClosed):
         logger.warning(
             "market data sensor websocket closed; reconnecting: %s",
+            error,
+        )
+        return
+    if isinstance(error, asyncpg.PostgresError):
+        logger.warning(
+            "market data sensor storage error; reconnecting: %s",
             error,
         )
         return

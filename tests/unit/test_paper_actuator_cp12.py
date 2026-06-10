@@ -284,8 +284,12 @@ def _decision_with_slippage(
 
 
 @pytest.mark.asyncio
-async def test_paper_buy_slippage_band_admits_ask_above_limit() -> None:
-    # limit=0.30 + 200bps = effective 0.306; best_ask 0.305 fits inside the band
+async def test_paper_buy_never_fills_above_limit_even_with_slippage_budget() -> None:
+    # Live parity: the Polymarket pre-submit guard rejects a BUY whenever the
+    # best executable price exceeds decision.limit_price, regardless of
+    # max_slippage_bps (polymarket.py _validate_pre_submit_quote). Paper must
+    # not book fills the live adapter would refuse — best_ask 0.305 > 0.30
+    # rejects even with a 200bps slippage budget.
     actuator = PaperActuator(
         orderbooks={
             "token-yes": {
@@ -295,28 +299,7 @@ async def test_paper_buy_slippage_band_admits_ask_above_limit() -> None:
         }
     )
 
-    state = await actuator.execute(
-        _decision_with_slippage(limit_price=0.30, max_slippage_bps=200),
-        _portfolio(),
-    )
-
-    assert state.fill_price == pytest.approx(0.305)
-    assert state.filled_notional_usdc == pytest.approx(100.0)
-
-
-@pytest.mark.asyncio
-async def test_paper_buy_slippage_band_still_rejects_beyond_band() -> None:
-    # limit=0.30 + 200bps = effective 0.306; best_ask 0.32 is outside band
-    actuator = PaperActuator(
-        orderbooks={
-            "token-yes": {
-                "bids": [{"price": 0.295, "size": 1_000.0}],
-                "asks": [{"price": 0.32, "size": 1_000.0}],
-            }
-        }
-    )
-
-    with pytest.raises(InsufficientLiquidityError, match="slippage=200bps"):
+    with pytest.raises(InsufficientLiquidityError, match="executable depth"):
         await actuator.execute(
             _decision_with_slippage(limit_price=0.30, max_slippage_bps=200),
             _portfolio(),
@@ -324,8 +307,32 @@ async def test_paper_buy_slippage_band_still_rejects_beyond_band() -> None:
 
 
 @pytest.mark.asyncio
+async def test_paper_buy_with_slippage_budget_fills_at_or_below_limit() -> None:
+    # The slippage budget never relaxes the limit: a book whose best ask sits
+    # exactly at the limit fills at the limit, never above it.
+    actuator = PaperActuator(
+        orderbooks={
+            "token-yes": {
+                "bids": [{"price": 0.295, "size": 1_000.0}],
+                "asks": [{"price": 0.30, "size": 1_000.0}],
+            }
+        }
+    )
+
+    state = await actuator.execute(
+        _decision_with_slippage(limit_price=0.30, max_slippage_bps=200),
+        _portfolio(),
+    )
+
+    assert state.fill_price is not None
+    assert state.fill_price == pytest.approx(0.30)
+    assert state.fill_price <= 0.30
+    assert state.filled_notional_usdc == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
 async def test_paper_zero_slippage_keeps_strict_limit() -> None:
-    # max_slippage_bps=0 → effective_limit == limit; ask above limit still rejects
+    # max_slippage_bps=0: ask above limit rejects (limit is always strict)
     actuator = PaperActuator(
         orderbooks={
             "token-yes": {
@@ -343,9 +350,10 @@ async def test_paper_zero_slippage_keeps_strict_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_paper_sell_slippage_band_admits_bid_below_limit() -> None:
-    # SELL side: effective_limit = 0.30 * (1 - 100/10000) = 0.297;
-    # best_bid 0.298 ≥ 0.297 → fills.
+async def test_paper_sell_never_fills_below_limit_even_with_slippage_budget() -> None:
+    # SELL mirror of the live guard: best executable below the limit rejects
+    # at submit regardless of max_slippage_bps — best_bid 0.298 < 0.30 rejects
+    # even with a 100bps slippage budget.
     actuator = PaperActuator(
         orderbooks={
             "token-yes": {
@@ -355,16 +363,15 @@ async def test_paper_sell_slippage_band_admits_bid_below_limit() -> None:
         }
     )
 
-    state = await actuator.execute(
-        _decision_with_slippage(
-            limit_price=0.30,
-            max_slippage_bps=100,
-            side="SELL",
-        ),
-        _portfolio(),
-    )
-
-    assert state.fill_price == pytest.approx(0.298)
+    with pytest.raises(InsufficientLiquidityError, match="executable depth"):
+        await actuator.execute(
+            _decision_with_slippage(
+                limit_price=0.30,
+                max_slippage_bps=100,
+                side="SELL",
+            ),
+            _portfolio(),
+        )
 
 
 @pytest.mark.asyncio

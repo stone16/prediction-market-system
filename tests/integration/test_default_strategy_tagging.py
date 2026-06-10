@@ -283,7 +283,7 @@ async def test_runner_tags_inner_ring_rows_with_default_strategy(
                         token_id="depth-token",
                         orderbook={
                             "bids": [{"price": 0.399, "size": 250.0}],
-                            "asks": [{"price": 0.401, "size": 250.0}],
+                            "asks": [{"price": 0.40, "size": 250.0}],
                         },
                         external_signal={"metaculus_prob": 0.9, "resolved_outcome": 0.0},
                     ),

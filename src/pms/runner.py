@@ -32,7 +32,11 @@ from pms.actuator.adapters.polymarket import (
     PolymarketSubmissionUnknownError,
     PolymarketVenueAccountReconciler,
 )
-from pms.actuator.executor import ActuatorAdapter, ActuatorExecutor
+from pms.actuator.executor import (
+    ActuatorAdapter,
+    ActuatorExecutor,
+    is_terminal_partial_fill,
+)
 from pms.actuator.exit_monitor import (
     PositionExitMonitor,
     build_exit_decision,
@@ -3669,6 +3673,8 @@ def _decision_status_from_order(order_state: OrderState) -> str:
 
 def _is_open_order_state(order_state: OrderState) -> bool:
     if order_state.remaining_notional_usdc <= 1e-9:
+        return False
+    if is_terminal_partial_fill(order_state):
         return False
     normalized_status = order_state.status.lower()
     raw_status = order_state.raw_status.lower()
