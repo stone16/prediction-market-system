@@ -46,6 +46,7 @@ from pms.actuator.exit_monitor import (
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import RiskManager
 from pms.config import PMSSettings, validate_live_mode_ready
+from pms.controller._price_utils import best_ask
 from pms.controller.baselines import (
     CategoryPriorBaselineEstimator,
     enrich_signal_with_category_prior,
@@ -1376,6 +1377,34 @@ class Runner:
             finally:
                 self.sensor_stream.queue.task_done()
 
+    def _decision_uses_ask_pricing(
+        self,
+        decision: TradeDecision,
+        evidence_signal: MarketSignal,
+    ) -> bool:
+        """True when the decision's limit price is the executable best ask of
+        a price_reference=best_ask strategy — the frame where the spread is
+        already inside expected_edge and must not be charged again in the
+        persisted cost evidence (mirrors the pipeline's net-edge gate)."""
+        runtime = self._controller_runtimes.get(decision.strategy_id)
+        if runtime is None:
+            return False
+        strategy = getattr(runtime.controller, "strategy", None)
+        config = getattr(strategy, "config", None)
+        metadata = getattr(config, "metadata", None)
+        if metadata is None:
+            return False
+        try:
+            price_reference = dict(metadata).get("price_reference")
+        except (TypeError, ValueError):
+            return False
+        if price_reference != "best_ask":
+            return False
+        executable_ask = best_ask(evidence_signal)
+        return executable_ask is not None and (
+            decision.limit_price == executable_ask
+        )
+
     async def _controller_pipeline_loop(self, strategy_id: str) -> None:
         runtime = self._controller_runtimes[strategy_id]
         queue = self._controller_signal_queues[strategy_id]
@@ -1465,6 +1494,12 @@ class Runner:
                             factor_snapshot_hash=factor_snapshot_hash,
                             quote_source=self.config.controller.quote_source,
                             decision_created_at=created_at,
+                            spread_already_in_price=(
+                                self._decision_uses_ask_pricing(
+                                    decision,
+                                    decision_signal,
+                                )
+                            ),
                         )
                         await self.decision_store.insert(
                             decision,
@@ -1632,6 +1667,12 @@ class Runner:
                             factor_snapshot_hash=None,
                             quote_source=self.config.controller.quote_source,
                             decision_created_at=signal.fetched_at,
+                            spread_already_in_price=(
+                                self._decision_uses_ask_pricing(
+                                    decision,
+                                    evidence_signal,
+                                )
+                            ),
                         )
                     self._evaluator_spool.enqueue(
                         fill,
@@ -3949,6 +3990,7 @@ def _decision_evidence_from_signal(
     factor_snapshot_hash: str | None,
     quote_source: str,
     decision_created_at: datetime,
+    spread_already_in_price: bool = False,
 ) -> dict[str, object]:
     book_top_levels = _top_orderbook_levels(signal.orderbook)
     book_token_outcome = _book_token_outcome(signal, decision)
@@ -4010,7 +4052,11 @@ def _decision_evidence_from_signal(
         ),
         "factor_snapshot_hash": factor_snapshot_hash,
         "spread_bps_at_decision": decision.spread_bps_at_decision,
-        **_decision_cost_evidence(signal, decision),
+        **_decision_cost_evidence(
+            signal,
+            decision,
+            spread_already_in_price=spread_already_in_price,
+        ),
         "external_signal_keys": sorted(str(key) for key in signal.external_signal),
     }
 
@@ -4018,12 +4064,14 @@ def _decision_evidence_from_signal(
 def _decision_cost_evidence(
     signal: MarketSignal,
     decision: TradeDecision,
-) -> dict[str, float]:
+    *,
+    spread_already_in_price: bool = False,
+) -> dict[str, float | bool]:
     price = Decimal(str(decision.limit_price))
     if not price.is_finite() or price < 0:
         return {}
 
-    evidence: dict[str, float] = {}
+    evidence: dict[str, float | bool] = {}
     total_cost_edge = Decimal("0")
     has_cost_evidence = False
 
@@ -4038,7 +4086,16 @@ def _decision_cost_evidence(
         has_cost_evidence = True
 
     spread_bps = _optional_float(decision.spread_bps_at_decision)
-    if spread_bps is not None and spread_bps >= 0.0:
+    if spread_already_in_price:
+        # Ask-frame decisions already paid the spread inside expected_edge;
+        # keep the key present (the h1_flb smoke check requires it) but
+        # charge zero so net_edge_after_costs matches the gate arithmetic.
+        spread_edge = Decimal("0")
+        evidence["spread_edge_at_decision"] = float(spread_edge)
+        evidence["spread_already_in_price"] = True
+        total_cost_edge += spread_edge
+        has_cost_evidence = True
+    elif spread_bps is not None and spread_bps >= 0.0:
         spread_edge = (Decimal(str(spread_bps)) / Decimal("10000")) * price
         evidence["spread_edge_at_decision"] = float(spread_edge)
         total_cost_edge += spread_edge
