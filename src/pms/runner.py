@@ -87,6 +87,11 @@ from pms.evaluation.metrics import (
     StrategyVersionKey,
 )
 from pms.evaluation.quote_reader import TokenBookQuoteReader
+from pms.evaluation.resolution import (
+    GammaResolutionSource,
+    ResolutionSweeper,
+    ResolutionSweepResult,
+)
 from pms.evaluation.spool import EvalSpool
 from pms.event_stream import RuntimeEventBus
 from pms.execution.fees import market_fee_rate_from_metadata
@@ -329,6 +334,12 @@ class Runner:
         init=False,
         default=None,
     )
+    _resolution_sweep_task: asyncio.Task[None] | None = field(
+        init=False,
+        default=None,
+    )
+    _resolution_sweeps_total: int = field(init=False, default=0)
+    _resolution_fills_resolved_total: int = field(init=False, default=0)
     _market_selector: MarketSelectorLike | None = field(init=False, default=None)
     _subscription_controller: SubscriptionControllerLike | None = field(
         init=False,
@@ -491,6 +502,14 @@ class Runner:
         return self._evaluator_spool._task
 
     @property
+    def resolution_sweeps_total(self) -> int:
+        return self._resolution_sweeps_total
+
+    @property
+    def resolution_fills_resolved_total(self) -> int:
+        return self._resolution_fills_resolved_total
+
+    @property
     def active_sensors(self) -> tuple[ISensor, ...]:
         return self._active_sensors
 
@@ -521,6 +540,8 @@ class Runner:
             tasks.append(self._decision_expiry_task)
         if self._runtime_heartbeat_task is not None:
             tasks.append(self._runtime_heartbeat_task)
+        if self._resolution_sweep_task is not None:
+            tasks.append(self._resolution_sweep_task)
         if self._reselection_task is not None:
             tasks.append(self._reselection_task)
         if self.evaluator_task is not None:
@@ -557,6 +578,8 @@ class Runner:
         )
         self._paper_orderbooks.clear()
         self._latest_signal_by_token.clear()
+        self._resolution_sweeps_total = 0
+        self._resolution_fills_resolved_total = 0
 
         try:
             self._assert_no_legacy_jsonl_paths()
@@ -613,6 +636,9 @@ class Runner:
                 self._runtime_heartbeat_task = asyncio.create_task(
                     self._runtime_heartbeat_loop()
                 )
+                self._resolution_sweep_task = asyncio.create_task(
+                    self._resolution_sweep_loop()
+                )
         except Exception:
             self._live_preflight_artifact_validated = False
             self._live_preflight_active_strategies_fingerprint = None
@@ -632,6 +658,9 @@ class Runner:
         runtime_heartbeat_task = self._runtime_heartbeat_task
         if runtime_heartbeat_task is not None and not runtime_heartbeat_task.done():
             runtime_heartbeat_task.cancel()
+        resolution_sweep_task = self._resolution_sweep_task
+        if resolution_sweep_task is not None and not resolution_sweep_task.done():
+            resolution_sweep_task.cancel()
         reselection_task = self._reselection_task
         self._reselection_requested.set()
         self._clear_discovery_poll_complete_hook()
@@ -659,6 +688,7 @@ class Runner:
                         self._actuator_task,
                         decision_expiry_task,
                         runtime_heartbeat_task,
+                        resolution_sweep_task,
                     )
                     if task
                 ),
@@ -692,6 +722,7 @@ class Runner:
         self._actuator_task = None
         self._decision_expiry_task = None
         self._runtime_heartbeat_task = None
+        self._resolution_sweep_task = None
         self._market_selector = None
         self._subscription_controller = None
         self._strategy_registry = None
@@ -1755,6 +1786,46 @@ class Runner:
             },
         )
 
+    async def _resolution_sweep_loop(self) -> None:
+        while True:
+            if self._stop_event.is_set():
+                return
+            try:
+                result = await self._resolution_sweep_once()
+                self._resolution_sweeps_total += 1
+                self._resolution_fills_resolved_total += result.fills_resolved
+                if result.fills_resolved > 0:
+                    logger.info(
+                        "resolution sweep resolved %d fill(s), appended %d "
+                        "eval record(s) (%d still unresolved)",
+                        result.fills_resolved,
+                        result.eval_records_appended,
+                        result.unresolved_fills - result.fills_resolved,
+                    )
+            except Exception as error:  # noqa: BLE001
+                logger.warning("resolution sweep failed: %s", error)
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=self.config.resolution_poll_interval_s,
+                )
+            except TimeoutError:
+                continue
+
+    async def _resolution_sweep_once(self) -> ResolutionSweepResult:
+        # The HTTP client is scoped to a single sweep so every exit path
+        # (success, transient failure, cancellation) releases it; at the
+        # default 300s cadence per-cycle construction is negligible, and no
+        # network request is made when there are no unresolved fills.
+        async with _build_discovery_http_client(self.config) as http_client:
+            sweeper = ResolutionSweeper(
+                fill_store=self.fill_store,
+                decision_reader=self.decision_store,
+                eval_store=self.eval_store,
+                resolution_source=GammaResolutionSource(http_client=http_client),
+            )
+            return await sweeper.sweep_once()
+
     async def _enqueue_decision(
         self,
         decision: TradeDecision,
@@ -2542,6 +2613,9 @@ class Runner:
         runtime_heartbeat_task = self._runtime_heartbeat_task
         if runtime_heartbeat_task is not None and not runtime_heartbeat_task.done():
             runtime_heartbeat_task.cancel()
+        resolution_sweep_task = self._resolution_sweep_task
+        if resolution_sweep_task is not None and not resolution_sweep_task.done():
+            resolution_sweep_task.cancel()
         for task in self._controller_pipeline_tasks.values():
             if not task.done():
                 task.cancel()
@@ -2560,6 +2634,7 @@ class Runner:
                         *self._controller_pipeline_tasks.values(),
                         decision_expiry_task,
                         runtime_heartbeat_task,
+                        resolution_sweep_task,
                     )
                     if task is not None
                 ),
@@ -2596,6 +2671,7 @@ class Runner:
         self._actuator_task = None
         self._decision_expiry_task = None
         self._runtime_heartbeat_task = None
+        self._resolution_sweep_task = None
         self._market_selector = None
         self._subscription_controller = None
         self._strategy_registry = None
