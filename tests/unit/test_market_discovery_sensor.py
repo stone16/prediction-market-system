@@ -1334,3 +1334,68 @@ async def test_market_discovery_sensor_transient_error_log_falls_back_when_str_e
         "fallback must replace empty str(error) — got: "
         f"{transient_records[0].getMessage()!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_market_discovery_sensor_recovers_from_malformed_payload_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed Gamma payload (valid JSON, wrong shape) must not kill
+    the discovery loop — discovery drives universe refresh and the
+    poll-complete hook that re-syncs controller runtimes for the soak."""
+    store = _store_mock()
+    store_mock = cast(StoreMock, store)
+    attempts = 0
+    sleeps: list[float] = []
+    wrote_market = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(200, json={"unexpected": "shape"})
+        return httpx.Response(
+            200,
+            json=[
+                _gamma_market(
+                    "pm-live-after-malformed",
+                    token_ids=["yes-token", "no-token"],
+                    outcomes=["Yes", "No"],
+                )
+            ],
+        )
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    async def tracked_write_market(*args: Any, **kwargs: Any) -> None:
+        wrote_market.set()
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    store_mock.write_market_mock.side_effect = tracked_write_market
+    sensor = MarketDiscoverySensor(
+        store=store,
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://gamma.example.test",
+        ),
+        poll_interval_s=60.0,
+    )
+
+    async def consume() -> None:
+        async for _ in cast(AsyncGenerator[object, None], sensor.__aiter__()):
+            pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(wrote_market.wait(), timeout=2.0)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        await sensor.aclose()
+
+    assert attempts >= 2

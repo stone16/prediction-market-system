@@ -94,7 +94,14 @@ class FactorService:
     async def compute_once(self, signals: list[MarketSignal]) -> int:
         persisted = 0
         for signal in signals:
-            await self._ensure_market_shell(signal)
+            try:
+                await self._ensure_market_shell(signal)
+            except asyncpg.PostgresError:
+                logger.exception(
+                    "market shell upsert failed market_id=%s; retrying next cadence",
+                    signal.market_id,
+                )
+                continue
             for factor_cls in self.factors:
                 if _requires_open_yes_price(factor_cls) and not _has_open_yes_price(
                     signal
@@ -115,7 +122,18 @@ class FactorService:
                 dedupe_key = (row.factor_id, row.market_id, row.param)
                 if self._last_persisted_ts.get(dedupe_key) == row.ts:
                     continue
-                await self._persist_factor_value(row, signal)
+                try:
+                    await self._persist_factor_value(row, signal)
+                except asyncpg.PostgresError:
+                    # Dedupe key intentionally not advanced: the same row
+                    # retries on the next cadence instead of being lost.
+                    logger.exception(
+                        "factor persist failed factor_id=%s market_id=%s ts=%s",
+                        row.factor_id,
+                        row.market_id,
+                        row.ts.isoformat(),
+                    )
+                    continue
                 self._last_persisted_ts[dedupe_key] = row.ts
                 persisted += 1
         return persisted
