@@ -223,7 +223,10 @@ async def test_markets_route_returns_price_fields(
     )
 
     async with _client(pg_pool, current_asset_ids=frozenset()) as client:
-        response = await client.get("/markets?limit=20&offset=0")
+        response = await client.get(
+            "/markets",
+            params={"limit": 20, "offset": 0, "q": "route expose prices"},
+        )
 
     assert response.status_code == 200
     row = response.json()["markets"][0]
@@ -264,7 +267,10 @@ async def test_markets_route_returns_subscription_source_user(
         )
 
     async with _client(pg_pool, current_asset_ids=frozenset()) as client:
-        response = await client.get("/markets?limit=20&offset=0")
+        response = await client.get(
+            "/markets",
+            params={"limit": 20, "offset": 0, "q": "user subscription source"},
+        )
 
     assert response.status_code == 200
     row = response.json()["markets"][0]
@@ -290,7 +296,10 @@ async def test_markets_route_subscription_source_null_when_idle(
     )
 
     async with _client(pg_pool, current_asset_ids=frozenset()) as client:
-        response = await client.get("/markets?limit=20&offset=0")
+        response = await client.get(
+            "/markets",
+            params={"limit": 20, "offset": 0, "q": "idle source"},
+        )
 
     assert response.status_code == 200
     row = response.json()["markets"][0]
@@ -346,10 +355,32 @@ async def test_subscribe_unsubscribe_roundtrip(
 
     async with _client(pg_pool, current_asset_ids=frozenset()) as client:
         subscribe = await client.post(f"/markets/{yes_token_id}/subscribe")
-        subscribed_markets = await client.get("/markets?limit=20&offset=0")
-        subscribed_filter = await client.get("/markets?limit=20&offset=0&subscribed=only")
+        subscribed_markets = await client.get(
+            "/markets",
+            params={
+                "limit": 20,
+                "offset": 0,
+                "q": "subscribe roundtrip",
+            },
+        )
+        subscribed_filter = await client.get(
+            "/markets",
+            params={
+                "limit": 20,
+                "offset": 0,
+                "subscribed": "only",
+                "q": "subscribe roundtrip",
+            },
+        )
         unsubscribe = await client.delete(f"/markets/{yes_token_id}/subscribe")
-        unsubscribed_markets = await client.get("/markets?limit=20&offset=0")
+        unsubscribed_markets = await client.get(
+            "/markets",
+            params={
+                "limit": 20,
+                "offset": 0,
+                "q": "subscribe roundtrip",
+            },
+        )
 
     assert subscribe.status_code == 200
     assert subscribe.json()["token_id"] == yes_token_id

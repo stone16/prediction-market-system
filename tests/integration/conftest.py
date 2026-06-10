@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from collections.abc import AsyncIterator
@@ -12,6 +13,8 @@ import pytest_asyncio
 
 SCHEMA_PATH = Path("schema.sql")
 PMS_TEST_DATABASE_URL = os.environ.get("PMS_TEST_DATABASE_URL")
+_TRUNCATE_MAX_ATTEMPTS = 4
+_TRUNCATE_RETRY_BASE_DELAY_S = 0.05
 
 
 def _run_psql(database_url: str, *args: str) -> None:
@@ -37,6 +40,21 @@ def _run_alembic(database_url: str, *args: str) -> subprocess.CompletedProcess[s
 
 
 async def _truncate_public_tables(pool: asyncpg.Pool) -> None:
+    for attempt in range(_TRUNCATE_MAX_ATTEMPTS):
+        try:
+            await _truncate_public_tables_once(pool)
+        except (
+            asyncpg.DeadlockDetectedError,
+            asyncpg.LockNotAvailableError,
+        ):
+            if attempt == _TRUNCATE_MAX_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(_TRUNCATE_RETRY_BASE_DELAY_S * (2**attempt))
+        else:
+            return
+
+
+async def _truncate_public_tables_once(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as connection:
         records = await connection.fetch(
             """
