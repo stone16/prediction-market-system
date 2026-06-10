@@ -415,6 +415,7 @@ class PMSSettings(BaseSettings):
     paper_soak_archive_default: bool = False
     enforce_schema_check: bool | None = None
     factor_cadence_s: float = 1.0
+    resolution_poll_interval_s: float = Field(default=300.0, gt=0.0)
     api_host: str = "127.0.0.1"
     api_token: str | None = None
     live_account_reconciliation_required: bool = True

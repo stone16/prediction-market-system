@@ -144,11 +144,11 @@ class _TransientFailureEvalStore(InMemoryEvalStore):
         super().__init__()
         self._failures_remaining = failures
 
-    async def append(self, record: EvalRecord) -> None:
+    async def append(self, record: EvalRecord) -> bool:
         if self._failures_remaining > 0:
             self._failures_remaining -= 1
             raise RuntimeError("transient eval-store failure")
-        await super().append(record)
+        return await super().append(record)
 
 
 class _StaticQuoteReader:

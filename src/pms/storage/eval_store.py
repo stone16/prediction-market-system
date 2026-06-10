@@ -17,9 +17,9 @@ class EvalStore:
     def bind_pool(self, pool: asyncpg.Pool) -> None:
         self.pool = pool
 
-    async def append(self, record: EvalRecord) -> None:
+    async def append(self, record: EvalRecord) -> bool:
         async with self._pool().acquire() as connection:
-            await insert_eval_record_row(connection, record)
+            return await insert_eval_record_row(connection, record)
 
     async def all(self) -> list[EvalRecord]:
         if self.pool is None:
@@ -55,8 +55,8 @@ class EvalStore:
 async def insert_eval_record_row(
     connection: asyncpg.Connection,
     record: EvalRecord,
-) -> None:
-    await connection.execute(
+) -> bool:
+    result = await connection.execute(
         """
         INSERT INTO eval_records (
             decision_id,
@@ -84,6 +84,7 @@ async def insert_eval_record_row(
             $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12::jsonb,
             $13, $14, $15, $16, $17, $18, $19, $20, $21
         )
+        ON CONFLICT (decision_id) DO NOTHING
         """,
         record.decision_id,
         record.market_id,
@@ -107,6 +108,7 @@ async def insert_eval_record_row(
         record.edge_at_decision,
         record.spread_bps_at_decision,
     )
+    return cast(str, result).rsplit(" ", maxsplit=1)[-1] == "1"
 
 
 _SELECT_ALL_QUERY = """

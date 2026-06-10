@@ -83,54 +83,72 @@ class EvalSpool:
             await self._task
         self._task = None
 
+    async def process(
+        self,
+        fill: FillRecord,
+        decision: TradeDecision,
+        *,
+        decision_evidence: Mapping[str, object] | None = None,
+    ) -> bool:
+        """Score one fill and commit its evaluation evidence synchronously.
+
+        Resolved fills are scored and committed to the eval store before
+        post-append hooks (calibration and feedback generation) fire
+        best-effort. Unresolved fills route to quote evaluation instead.
+        Returns ``True`` when a new eval record was inserted; duplicate
+        decision IDs can be accepted durably by the store without inserting
+        a second row. Scoring and append failures propagate to the caller:
+        the queue worker (``_run``) and the resolution sweeper each own
+        their failure policy.
+        """
+        if fill.resolved_outcome is None:
+            await self._record_quote_eval(
+                fill,
+                decision,
+                decision_evidence,
+            )
+            return False
+        scored_record = self.scorer.score(
+            fill,
+            decision,
+            baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
+                decision_evidence,
+            ),
+        )
+        # Persist before pushing: restart re-hydration reads the eval store,
+        # so a record must never feed a calibrator unless it is also durable.
+        #
+        # Duplicate delivery for one decision_id (sweep retry, or an
+        # ON CONFLICT-deduped store append) is safe: the sink's calibrator
+        # dedups per (model_id, decision_id).
+        inserted = await self.store.append(scored_record)
+        if self.calibration_sink is not None:
+            try:
+                self.calibration_sink(scored_record)
+            except Exception:  # noqa: BLE001
+                logger.exception("calibration sink failed in evaluator spool")
+        try:
+            await self._generate_feedback()
+        except Exception:  # noqa: BLE001
+            logger.exception("feedback generation failed in evaluator spool")
+        return inserted
+
     async def _run(self) -> None:
         while True:
             fill, decision, decision_evidence = await self._queue.get()
             try:
-                if fill.resolved_outcome is None:
-                    await self._record_quote_eval(
-                        fill,
-                        decision,
-                        decision_evidence,
-                    )
-                    continue
-                # Persist before pushing: restart re-hydration reads the eval
-                # store, so a record must never feed a calibrator unless it is
-                # also durable.
-                #
-                # Coordination contract (feat/resolution-ingestion): the
-                # resolution sweep re-enqueues late-resolved fills through
-                # this same queue, so ANY enqueue whose fill carries
-                # resolved_outcome reaches the sink — regardless of producer.
-                # Duplicate delivery for one decision_id (sweep retry, or
-                # ON CONFLICT-deduped store append) is safe: the sink's
-                # calibrator dedups per (model_id, decision_id).
                 try:
-                    scored_record = self.scorer.score(
+                    await self.process(
                         fill,
                         decision,
-                        baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
-                            decision_evidence,
-                        ),
+                        decision_evidence=decision_evidence,
                     )
-                    await self.store.append(scored_record)
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "fill evaluation failed in evaluator spool: %s",
                         fill.trade_id,
                     )
                     continue
-                if self.calibration_sink is not None:
-                    try:
-                        self.calibration_sink(scored_record)
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "calibration sink failed in evaluator spool"
-                        )
-                try:
-                    await self._generate_feedback()
-                except Exception:  # noqa: BLE001
-                    logger.exception("feedback generation failed in evaluator spool")
             finally:
                 self._queue.task_done()
 

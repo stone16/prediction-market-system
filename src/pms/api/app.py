@@ -261,6 +261,13 @@ def create_app(
                 "brier_14d": metrics_14d.brier_overall,
                 "baseline_brier_14d": metrics_14d.baseline_brier_overall,
                 "brier_improvement_14d": metrics_14d.brier_improvement_overall,
+                "resolution_sweeps_total": active_runner.resolution_sweeps_total,
+                "resolution_fills_resolved_total": (
+                    active_runner.resolution_fills_resolved_total
+                ),
+                "resolution_sweep_failures_total": (
+                    active_runner.resolution_sweep_failures_total
+                ),
             },
             "supervision": {
                 "unresolved_feedback_total": len(unresolved_feedback),
