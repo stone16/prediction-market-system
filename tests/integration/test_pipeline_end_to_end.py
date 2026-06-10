@@ -252,7 +252,7 @@ async def test_runner_start_resets_in_memory_session_state(
                     market_id="paper-state-reset",
                     orderbook={
                         "bids": [{"price": 0.399, "size": 250.0}],
-                        "asks": [{"price": 0.401, "size": 250.0}],
+                        "asks": [{"price": 0.40, "size": 250.0}],
                     },
                     external_signal={"metaculus_prob": 0.9, "resolved_outcome": 1.0},
                 )
