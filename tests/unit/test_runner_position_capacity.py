@@ -182,6 +182,29 @@ class _RecordingRisk:
         self.filled_order_ids.append(order_id)
 
 
+class _RecordingFillStore:
+    def __init__(self) -> None:
+        self.fills: list[Any] = []
+
+    async def insert(self, fill: Any) -> None:
+        self.fills.append(fill)
+
+
+class _EvalSpoolDouble:
+    def __init__(self) -> None:
+        self.enqueued: list[str] = []
+
+    def enqueue(
+        self,
+        fill: Any,
+        decision: TradeDecision,
+        *,
+        decision_evidence: dict[str, object] | None = None,
+    ) -> None:
+        del fill, decision_evidence
+        self.enqueued.append(decision.decision_id)
+
+
 class _StaticOpenOrderExecutor:
     def __init__(self, order_state: OrderState) -> None:
         self.order_state = order_state
@@ -466,6 +489,53 @@ class TestWouldExceedPositionCapacity:
         assert runner._would_exceed_position_capacity(second)  # noqa: SLF001
         assert executor.risk.open_orders == [order_state]
         assert executor.risk.filled_order_ids == []
+
+    @pytest.mark.asyncio
+    async def test_actuator_loop_releases_reservations_for_terminal_ioc_partial_fill(
+        self,
+    ) -> None:
+        """A PARTIAL fill on an IOC order is terminal — the venue cancelled
+        the unfilled remainder — so the runner must record the order as
+        filled (no permanent open-order risk reservation) and release the
+        pending position-capacity slot instead of leaking both forever."""
+        runner = _live_runner(max_open_positions=2)
+        runner.portfolio = replace(
+            runner.portfolio,
+            open_positions=[_position()],
+        )
+        first = _decision(market_id="market-b", token_id="token-b")
+        order_state = replace(
+            _open_order_state(first),
+            status=OrderStatus.PARTIAL.value,
+            raw_status="partial",
+            filled_notional_usdc=first.notional_usdc / 2,
+            remaining_notional_usdc=first.notional_usdc / 2,
+            fill_price=first.limit_price,
+            filled_quantity=(first.notional_usdc / 2) / first.limit_price,
+        )
+        assert order_state.time_in_force == TimeInForce.IOC.value
+        executor = _StaticOpenOrderExecutor(order_state)
+        runner.actuator_executor = cast(Any, executor)
+        runner.order_store = cast(Any, _RecordingOrderStore())
+        runner.decision_store = cast(Any, _RecordingDecisionStore())
+        runner.fill_store = cast(Any, _RecordingFillStore())
+        runner._evaluator_spool = cast(Any, _EvalSpoolDouble())  # noqa: SLF001
+        assert runner._reserve_position_capacity(first) is not None
+        await runner._decision_queue.put(  # noqa: SLF001
+            ActuatorWorkItem(decision=first, signal=None)
+        )
+
+        actuator_task = asyncio.create_task(runner._actuator_loop())  # noqa: SLF001
+        await asyncio.wait_for(runner._decision_queue.join(), timeout=1.0)  # noqa: SLF001
+        runner._stop_event.set()  # noqa: SLF001
+        await asyncio.wait_for(actuator_task, timeout=1.0)
+
+        assert executor.risk.open_orders == []
+        assert executor.risk.filled_order_ids == [order_state.order_id]
+        assert (
+            first.decision_id
+            not in runner._pending_open_position_keys_by_decision  # noqa: SLF001
+        )
 
     @pytest.mark.asyncio
     async def test_actuator_loop_keeps_live_open_exit_key_reserved(self) -> None:

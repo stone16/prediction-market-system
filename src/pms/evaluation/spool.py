@@ -94,13 +94,6 @@ class EvalSpool:
                         decision_evidence,
                     )
                     continue
-                scored_record = self.scorer.score(
-                    fill,
-                    decision,
-                    baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
-                        decision_evidence,
-                    ),
-                )
                 # Persist before pushing: restart re-hydration reads the eval
                 # store, so a record must never feed a calibrator unless it is
                 # also durable.
@@ -112,7 +105,21 @@ class EvalSpool:
                 # Duplicate delivery for one decision_id (sweep retry, or
                 # ON CONFLICT-deduped store append) is safe: the sink's
                 # calibrator dedups per (model_id, decision_id).
-                await self.store.append(scored_record)
+                try:
+                    scored_record = self.scorer.score(
+                        fill,
+                        decision,
+                        baseline_prob_estimates=_baseline_prob_estimates_from_evidence(
+                            decision_evidence,
+                        ),
+                    )
+                    await self.store.append(scored_record)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "fill evaluation failed in evaluator spool: %s",
+                        fill.trade_id,
+                    )
+                    continue
                 if self.calibration_sink is not None:
                     try:
                         self.calibration_sink(scored_record)

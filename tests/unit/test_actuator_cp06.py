@@ -3570,6 +3570,80 @@ async def test_executor_tracks_open_status_as_live_order_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_executor_ioc_partial_fill_does_not_arm_stale_order_halt() -> None:
+    """A PARTIAL fill on a non-GTC (IOC/FOK) order is terminal: the venue
+    cancels the unfilled remainder on arrival, so no further fill will ever
+    arrive for that order_id. Arming the 30-minute order-without-fill timer
+    for it guarantees a spurious permanent auto-halt 30 minutes after any
+    routine IOC partial fill."""
+    store = cast(FeedbackStore, InMemoryFeedbackStore())
+    decision = _decision(decision_id="d-ioc-partial")
+    assert decision.time_in_force == TimeInForce.IOC
+    returned_state = _order_state(
+        decision,
+        status=OrderStatus.PARTIAL.value,
+        raw_status="partial",
+        fill_price=decision.limit_price,
+        filled_notional_usdc=decision.notional_usdc / 2,
+    )
+    risk = RiskManager(
+        RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
+    )
+    actuator = executor.ActuatorExecutor(
+        adapter=StaticAdapter(returned_state),
+        risk=risk,
+        feedback=ActuatorFeedback(store),
+        dedup_store=RecordingDedupStore(),
+    )
+
+    await actuator.execute(decision, _portfolio())
+
+    halt_state = risk.check_auto_halt(
+        _portfolio(),
+        now=returned_state.submitted_at + timedelta(minutes=31),
+    )
+    assert halt_state.halted is False, (
+        "terminal IOC partial fill must not trigger order_without_fill auto-halt"
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_gtc_partial_fill_still_arms_stale_order_halt() -> None:
+    """A PARTIAL fill on a GTC order leaves the remainder resting at the
+    venue, so the order-without-fill stale timer must still arm."""
+    store = cast(FeedbackStore, InMemoryFeedbackStore())
+    decision = replace(
+        _decision(decision_id="d-gtc-partial"),
+        time_in_force=TimeInForce.GTC,
+    )
+    returned_state = _order_state(
+        decision,
+        status=OrderStatus.PARTIAL.value,
+        raw_status="partial",
+        fill_price=decision.limit_price,
+        filled_notional_usdc=decision.notional_usdc / 2,
+    )
+    risk = RiskManager(
+        RiskSettings(max_position_per_market=100.0, max_total_exposure=1000.0)
+    )
+    actuator = executor.ActuatorExecutor(
+        adapter=StaticAdapter(returned_state),
+        risk=risk,
+        feedback=ActuatorFeedback(store),
+        dedup_store=RecordingDedupStore(),
+    )
+
+    await actuator.execute(decision, _portfolio())
+
+    halt_state = risk.check_auto_halt(
+        _portfolio(),
+        now=returned_state.submitted_at + timedelta(minutes=31),
+    )
+    assert halt_state.halted is True
+    assert halt_state.trigger_kind == "order_without_fill"
+
+
+@pytest.mark.asyncio
 async def test_executor_releases_invalid_for_risk_rejection() -> None:
     store = cast(FeedbackStore, InMemoryFeedbackStore())
     dedup_store = RecordingDedupStore()

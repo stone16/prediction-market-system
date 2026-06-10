@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from math import isfinite
 from typing import cast
 
@@ -116,11 +117,18 @@ def _probability_or_none(value: object) -> float | None:
 def _pnl(fill: FillRecord, decision: TradeDecision) -> float:
     if fill.resolved_outcome is None:
         return 0.0
-    contract_outcome = _contract_outcome(fill.resolved_outcome, decision)
+    contract_outcome = Decimal(
+        str(_contract_outcome(fill.resolved_outcome, decision))
+    )
+    fill_price = Decimal(str(fill.fill_price))
+    fill_quantity = Decimal(str(fill.fill_quantity))
+    fees = Decimal("0") if fill.fees is None else Decimal(str(fill.fees))
     action = decision.action if decision.action is not None else decision.side
     if action == Side.SELL.value:
-        return (fill.fill_price - contract_outcome) * fill.fill_quantity
-    return (contract_outcome - fill.fill_price) * fill.fill_quantity
+        pnl = (fill_price - contract_outcome) * fill_quantity - fees
+    else:
+        pnl = (contract_outcome - fill_price) * fill_quantity - fees
+    return float(pnl)
 
 
 def _slippage_bps(fill: FillRecord, decision: TradeDecision) -> float:

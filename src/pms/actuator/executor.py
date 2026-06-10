@@ -10,7 +10,7 @@ from pms.actuator.adapters.polymarket import PolymarketSubmissionUnknownError
 from pms.actuator.feedback import ActuatorFeedback
 from pms.actuator.risk import InsufficientLiquidityError, RiskManager
 from pms.alerting.events import HaltEvent as AlertHaltEvent
-from pms.core.enums import OrderStatus, Venue
+from pms.core.enums import OrderStatus, TimeInForce, Venue
 from pms.core.exceptions import KalshiStubError
 from pms.core.interfaces import DedupStore
 from pms.core.models import OrderState, Portfolio, TradeDecision
@@ -255,8 +255,25 @@ def _record_order_lifecycle(risk: RiskManager, order_state: OrderState) -> None:
             OrderStatus.PARTIAL.value,
         }
         and order_state.remaining_notional_usdc > 1e-9
+        and not is_terminal_partial_fill(order_state)
     ):
         risk.record_order_placed(order_state.order_id, at=order_state.submitted_at)
         return
 
     risk.record_order_filled(order_state.order_id)
+
+
+def is_terminal_partial_fill(order_state: OrderState) -> bool:
+    """True when a PARTIAL order state is already terminal at the venue.
+
+    Non-GTC (IOC/FOK) orders never rest: the venue cancels the unfilled
+    remainder on arrival, so a PARTIAL response is the final state for that
+    order_id and no further fill will ever arrive. Treating it as an open
+    order would arm a stale-order timer and exposure reservation that
+    nothing can clear.
+    """
+    if _normalize_order_status(order_state.status) != OrderStatus.PARTIAL.value:
+        return False
+    if order_state.time_in_force is None:
+        return False
+    return order_state.time_in_force.strip().upper() != TimeInForce.GTC.value
