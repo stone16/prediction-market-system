@@ -589,7 +589,7 @@ calibrator participates).
 | Role | Kind | What it does |
 |---|---|---|
 | `weighted` | raw | Linear contribution to a weighted score |
-| `precedence_rank` | raw | Higher-weight steps preempt lower-weight ones if both fire |
+| `precedence_rank` | raw | Ordinal rank for `threshold_edge` evaluation: **lower** weight = **higher** priority. Steps are tried in ascending rank order and the first firing edge wins (reproduces legacy `RulesForecaster.predict` precedence) |
 | `threshold_edge` | raw | Fires when `value >= threshold` (or `<= -threshold` for sign-aware factors) |
 | `posterior_prior` | raw | Beta prior `α` contribution |
 | `posterior_success` | raw | Beta prior `β`-success contribution |
