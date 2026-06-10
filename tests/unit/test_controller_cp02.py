@@ -1581,6 +1581,19 @@ class _SmallGrossEdgeForecaster:
         return 0.43
 
 
+class _ModestEdgeForecaster:
+    """Against a 0.403 entry price the 0.047 gross edge clears fee+slippage
+    (0.043805) but not a second spread charge (+0.006045 at 150 bps)."""
+
+    def predict(self, signal: MarketSignal) -> tuple[float, float, str]:
+        del signal
+        return (0.45, 0.9, "modest edge")
+
+    async def forecast(self, signal: MarketSignal) -> float:
+        del signal
+        return 0.45
+
+
 @pytest.mark.asyncio
 async def test_on_signal_emits_diagnostic_when_decision_edge_not_positive() -> None:
     pipeline = ControllerPipeline(
@@ -1649,6 +1662,190 @@ def test_decision_cost_edges_convert_bps_to_price_space() -> None:
 
     assert costs.slippage_edge == pytest.approx(0.002)
     assert costs.spread_edge == pytest.approx(0.02)
+
+
+def test_decision_cost_edges_suppress_spread_when_already_in_price() -> None:
+    costs = _decision_cost_edges(
+        decision_price=0.40,
+        spread_bps=500,
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(max_slippage_bps=50),
+        ),
+        spread_already_in_price=True,
+    )
+
+    assert costs.spread_edge == 0.0
+    assert costs.slippage_edge == pytest.approx(0.002)
+    assert costs.total_edge == pytest.approx(costs.fee_edge + 0.002)
+
+
+@pytest.mark.asyncio
+async def test_best_ask_decision_does_not_double_charge_spread() -> None:
+    """best_ask frame: decision_price IS the executable ask, so the gross
+    edge p - ask is already net of crossing the spread. Charging spread_bps
+    again double-counts it and rejects a profitable decision."""
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[_ModestEdgeForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=1_000.0)),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                min_volume=100.0,
+                max_spread_bps=1_000.0,
+                max_slippage_bps=50,
+            ),
+        ),
+    )
+    signal = replace(
+        _signal(),
+        orderbook={
+            "bids": [{"price": "0.397", "size": "100"}],
+            "asks": [{"price": "0.403", "size": "100"}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is not None
+    opportunity, decision = emission
+    assert decision.limit_price == pytest.approx(0.403)
+    trace = opportunity.composition_trace
+    assert trace["spread_bps_at_decision"] == 150
+    assert trace["spread_edge"] == 0.0
+    assert trace["spread_already_in_price"] is True
+    # net edge = gross - fee - slippage only; the spread is inside the gross.
+    assert trace["net_edge_after_costs"] == pytest.approx(
+        (0.45 - 0.403) - 0.07 * (1.0 - 0.403) - 0.005 * 0.403
+    )
+
+
+@pytest.mark.asyncio
+async def test_yes_price_decision_still_charges_spread_on_identical_book() -> None:
+    """yes_price frame control: with no price_reference metadata the decision
+    price is the mid/last-trade reference, the executable ask is unknown, and
+    the full spread stays a real worst-case entry cost."""
+    pipeline = ControllerPipeline(
+        strategy_id="alpha",
+        strategy_version_id="alpha-v1",
+        forecasters=[_ModestEdgeForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=1_000.0)),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                min_volume=100.0,
+                max_spread_bps=1_000.0,
+                max_slippage_bps=50,
+            ),
+        ),
+    )
+    signal = replace(
+        _signal(),
+        yes_price=0.403,
+        orderbook={
+            "bids": [{"price": "0.397", "size": "100"}],
+            "asks": [{"price": "0.403", "size": "100"}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is None
+    diagnostic = pipeline.last_diagnostic
+    assert diagnostic is not None
+    assert diagnostic.code == "decision_net_edge_not_positive"
+    assert diagnostic.metadata["spread_edge"] == pytest.approx(0.015 * 0.403)
+    assert diagnostic.metadata["spread_already_in_price"] is False
+    assert diagnostic.metadata["net_edge_after_costs"] < 0.0
+
+
+@pytest.mark.asyncio
+async def test_no_side_direct_book_decision_does_not_charge_spread() -> None:
+    """NO-side best_ask frame: the direct outcome book provides the
+    executable NO ask, so the spread is already inside p_no - ask_no."""
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[BearishForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=1_000.0)),
+        outcome_token_resolver=StaticOutcomeTokenResolver(),
+        direct_book_reader=StaticDirectBookReader(
+            token_id="token-no",
+            bids=[(0.40, 1_000.0)],
+            asks=[(0.41, 1_000.0)],
+        ),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(max_spread_bps=1_000.0),
+        ),
+    )
+    signal = replace(
+        _signal(),
+        token_id="token-yes",
+        yes_price=0.585,
+        external_signal={
+            **_signal().external_signal,
+            "yes_token_id": "token-yes",
+            "no_token_id": "token-no",
+        },
+        orderbook={
+            "bids": [{"price": 0.58, "size": 1_000.0}],
+            "asks": [{"price": 0.59, "size": 1_000.0}],
+        },
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is not None
+    opportunity, decision = emission
+    assert decision.outcome == "NO"
+    assert decision.limit_price == pytest.approx(0.41)
+    trace = opportunity.composition_trace
+    assert trace["spread_bps_at_decision"] == 247
+    assert trace["spread_edge"] == 0.0
+    assert trace["spread_already_in_price"] is True
+
+
+@pytest.mark.asyncio
+async def test_best_ask_strategy_without_ask_still_charges_external_spread() -> None:
+    """Fallback hole: a best_ask strategy whose signal has no executable ask
+    anywhere falls back to yes_price pricing, so external spread_bps remains
+    a real entry cost (the price-equality half of the suppression condition)."""
+    pipeline = ControllerPipeline(
+        strategy=_best_ask_strategy(),
+        forecasters=[StaticForecaster()],
+        calibrator=NetcalCalibrator(),
+        sizer=KellySizer(risk=RiskSettings(max_position_per_market=500.0)),
+        router=Router(ControllerSettings(min_volume=100.0, max_spread_bps=1_000.0)),
+        settings=PMSSettings(
+            mode=RunMode.PAPER,
+            controller=ControllerSettings(
+                min_volume=100.0,
+                max_spread_bps=1_000.0,
+                max_slippage_bps=50,
+            ),
+        ),
+    )
+    signal = replace(
+        _signal(),
+        external_signal={**_signal().external_signal, "spread_bps": 50},
+    )
+
+    emission = await pipeline.on_signal(signal, portfolio=_portfolio())
+
+    assert emission is not None
+    opportunity, decision = emission
+    assert decision.limit_price == pytest.approx(0.4)
+    trace = opportunity.composition_trace
+    assert trace["spread_bps_at_decision"] == 50
+    assert trace["spread_edge"] == pytest.approx(0.005 * 0.4)
+    assert trace["spread_already_in_price"] is False
 
 
 @pytest.mark.asyncio
