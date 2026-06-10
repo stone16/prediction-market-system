@@ -261,8 +261,9 @@ class _AppendOnlyEvalStore:
     def __init__(self) -> None:
         self.appended: list[EvalRecord] = []
 
-    async def append(self, record: EvalRecord) -> None:
+    async def append(self, record: EvalRecord) -> bool:
         self.appended.append(record)
+        return True
 
 
 @pytest.mark.asyncio

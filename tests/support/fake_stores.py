@@ -11,8 +11,9 @@ class InMemoryEvalStore:
     def __init__(self, records: list[EvalRecord] | None = None) -> None:
         self._records = list(records or [])
 
-    async def append(self, record: EvalRecord) -> None:
+    async def append(self, record: EvalRecord) -> bool:
         self._records.append(record)
+        return True
 
     async def all(self) -> list[EvalRecord]:
         return list(self._records)

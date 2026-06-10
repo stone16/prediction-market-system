@@ -76,9 +76,10 @@ class _OrderRecordingEvalStore:
         self._events = events
         self.records: list[EvalRecord] = []
 
-    async def append(self, record: EvalRecord) -> None:
+    async def append(self, record: EvalRecord) -> bool:
         self._events.append(f"append:{record.decision_id}")
         self.records.append(record)
+        return True
 
 
 @pytest.mark.asyncio

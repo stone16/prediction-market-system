@@ -104,6 +104,59 @@ class FillStore:
             return None
         return _fill_from_row(row)
 
+    async def read_unresolved_fills(self) -> list[FillRecord]:
+        async with self._pool().acquire() as connection:
+            await _ensure_fill_payloads_table(connection)
+            rows = await connection.fetch(
+                """
+                SELECT
+                    fills.fill_id,
+                    fills.order_id,
+                    fills.market_id,
+                    fills.ts,
+                    fills.fill_notional_usdc,
+                    fills.fill_quantity,
+                    fills.strategy_id,
+                    fills.strategy_version_id,
+                    fill_payloads.payload
+                FROM fills
+                INNER JOIN fill_payloads
+                    ON fill_payloads.fill_id = fills.fill_id
+                WHERE fill_payloads.payload->>'resolved_outcome' IS NULL
+                ORDER BY fills.ts ASC, fills.fill_id ASC
+                """
+            )
+        return [_fill_from_row(row) for row in rows]
+
+    async def resolve_fill(
+        self,
+        fill_id: str,
+        *,
+        resolved_outcome: float,
+    ) -> bool:
+        async with self._pool().acquire() as connection:
+            await _ensure_fill_payloads_table(connection)
+            # The NULL guard makes the update idempotent: a second sweep (or
+            # a concurrent writer) observing the same resolution matches zero
+            # rows, so callers can gate eval-record appends on the returned
+            # flag without double-scoring.
+            row = await connection.fetchrow(
+                """
+                UPDATE fill_payloads
+                SET payload = jsonb_set(
+                    payload,
+                    '{resolved_outcome}',
+                    to_jsonb($2::double precision)
+                )
+                WHERE fill_id = $1
+                  AND payload->>'resolved_outcome' IS NULL
+                RETURNING fill_id
+                """,
+                fill_id,
+                resolved_outcome,
+            )
+        return row is not None
+
     async def read_positions(self) -> list[Position]:
         async with self._pool().acquire() as connection:
             await _ensure_fill_payloads_table(connection)
