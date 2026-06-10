@@ -144,6 +144,19 @@ def test_netcal_calibrator_dedups_samples_by_decision_id() -> None:
     assert calibrator.sample_count("model-a") == 3
 
 
+def test_netcal_calibrator_dedups_fresh_record_objects_by_decision_id() -> None:
+    """The production duplicate is a DB-rehydrated fresh EvalRecord object vs
+    an in-memory pushed object with an equal decision_id — never the same
+    object identity. An identity-keyed dedup regression would pass the
+    same-list test above but double-count here."""
+    calibrator = NetcalCalibrator()
+
+    calibrator.add_samples("model-a", _records(3))
+    calibrator.add_samples("model-a", _records(3))
+
+    assert calibrator.sample_count("model-a") == 3
+
+
 def test_netcal_calibrator_dedup_is_scoped_per_model_bucket() -> None:
     calibrator = NetcalCalibrator()
     records = _records(2)

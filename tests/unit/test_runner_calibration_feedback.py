@@ -723,15 +723,35 @@ async def test_calibration_graduation_unlocks_extreme_clamp_via_sink_path() -> N
     assert diagnostic is not None
     assert diagnostic.code == "calibration_clamp_rejected"
 
-    for index in range(2):
-        runner._on_eval_record_for_calibration(  # noqa: SLF001
-            _eval_record(
-                decision_id=f"d-resolved-{index}",
-                strategy_id="clamp-probe",
-                strategy_version_id="clamp-probe-v1",
-                model_id="ConstantForecaster",
-            )
+    runner._on_eval_record_for_calibration(  # noqa: SLF001
+        _eval_record(
+            decision_id="d-resolved-0",
+            strategy_id="clamp-probe",
+            strategy_version_id="clamp-probe-v1",
+            model_id="ConstantForecaster",
         )
+    )
+
+    # Pin the >= boundary: one resolved record is still below
+    # min_resolved_for_extreme=2, so the clamp must keep rejecting — an
+    # off-by-one unlock-early regression would emit here.
+    still_rejected = await pipeline.on_signal(_signal(), portfolio=_portfolio())
+    assert still_rejected is None, (
+        "a single resolved eval record (< min_resolved_for_extreme) must not "
+        "unlock the extreme-probability clamp"
+    )
+    boundary_diagnostic = pipeline.last_diagnostic
+    assert boundary_diagnostic is not None
+    assert boundary_diagnostic.code == "calibration_clamp_rejected"
+
+    runner._on_eval_record_for_calibration(  # noqa: SLF001
+        _eval_record(
+            decision_id="d-resolved-1",
+            strategy_id="clamp-probe",
+            strategy_version_id="clamp-probe-v1",
+            model_id="ConstantForecaster",
+        )
+    )
 
     emission = await pipeline.on_signal(_signal(), portfolio=_portfolio())
 
