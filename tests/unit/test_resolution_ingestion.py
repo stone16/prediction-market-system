@@ -887,6 +887,9 @@ async def test_resolution_sweep_loop_survives_transient_errors(
     assert calls >= 2
     assert runner.resolution_sweeps_total >= 1
     assert runner.resolution_fills_resolved_total >= 1
+    # Failed sweeps must increment a counter so /status can distinguish
+    # "Gamma down for a week" from healthy idle.
+    assert runner.resolution_sweep_failures_total == 1
 
 
 def test_resolution_poll_interval_defaults_to_five_minutes() -> None:

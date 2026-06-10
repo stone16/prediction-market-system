@@ -425,6 +425,7 @@ async def test_api_routes_expose_mock_runner_state() -> None:
         "brier_improvement_14d": None,
         "resolution_sweeps_total": 0,
         "resolution_fills_resolved_total": 0,
+        "resolution_sweep_failures_total": 0,
     }
     assert signals[0]["market_id"] == "api-market"
     assert decisions[0]["forecaster"] == "model-a"

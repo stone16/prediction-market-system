@@ -259,6 +259,9 @@ def create_app(
                 "resolution_fills_resolved_total": (
                     active_runner.resolution_fills_resolved_total
                 ),
+                "resolution_sweep_failures_total": (
+                    active_runner.resolution_sweep_failures_total
+                ),
             },
             "supervision": {
                 "unresolved_feedback_total": len(unresolved_feedback),

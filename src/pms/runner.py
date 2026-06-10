@@ -340,6 +340,7 @@ class Runner:
     )
     _resolution_sweeps_total: int = field(init=False, default=0)
     _resolution_fills_resolved_total: int = field(init=False, default=0)
+    _resolution_sweep_failures_total: int = field(init=False, default=0)
     _market_selector: MarketSelectorLike | None = field(init=False, default=None)
     _subscription_controller: SubscriptionControllerLike | None = field(
         init=False,
@@ -510,6 +511,10 @@ class Runner:
         return self._resolution_fills_resolved_total
 
     @property
+    def resolution_sweep_failures_total(self) -> int:
+        return self._resolution_sweep_failures_total
+
+    @property
     def active_sensors(self) -> tuple[ISensor, ...]:
         return self._active_sensors
 
@@ -580,6 +585,7 @@ class Runner:
         self._latest_signal_by_token.clear()
         self._resolution_sweeps_total = 0
         self._resolution_fills_resolved_total = 0
+        self._resolution_sweep_failures_total = 0
 
         try:
             self._assert_no_legacy_jsonl_paths()
@@ -1802,8 +1808,9 @@ class Runner:
                         result.eval_records_enqueued,
                         result.unresolved_fills - result.fills_resolved,
                     )
-            except Exception as error:  # noqa: BLE001
-                logger.warning("resolution sweep failed: %s", error)
+            except Exception:  # noqa: BLE001
+                self._resolution_sweep_failures_total += 1
+                logger.exception("resolution sweep failed")
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
