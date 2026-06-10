@@ -9,6 +9,7 @@ record must never reach a calibrator without also being on disk.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 
@@ -128,6 +129,46 @@ async def test_calibration_sink_not_called_for_unresolved_fill() -> None:
         await spool.stop()
 
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_calibration_sink_fires_for_sweep_style_late_resolved_reenqueue() -> None:
+    """Coordination contract with feat/resolution-ingestion: live PAPER/LIVE
+    fills are unresolved at enqueue time, and the resolution sweep later
+    re-enqueues ``replace(fill, resolved_outcome=...)`` through the same
+    ``EvalSpool.enqueue``. The sink must fire for any record passing ``_run``
+    with ``resolved_outcome`` set, regardless of which producer enqueued it."""
+    events: list[str] = []
+    store = _OrderRecordingEvalStore(events)
+    sunk: list[EvalRecord] = []
+
+    def sink(record: EvalRecord) -> None:
+        events.append(f"sink:{record.decision_id}")
+        sunk.append(record)
+
+    spool = EvalSpool(
+        store=cast(EvalStore, store),
+        scorer=Scorer(),
+        calibration_sink=sink,
+    )
+    unresolved_fill = _fill(decision_id="d-sweep", resolved_outcome=None)
+    decision = _decision(decision_id="d-sweep")
+    await spool.start()
+    try:
+        # Fill-time enqueue: market not yet resolved — no eval row, no sink.
+        spool.enqueue(unresolved_fill, decision)
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+        assert events == []
+
+        # Sweep-time re-enqueue: same fill, now carrying the resolution.
+        spool.enqueue(replace(unresolved_fill, resolved_outcome=1.0), decision)
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    assert events == ["append:d-sweep", "sink:d-sweep"]
+    assert [record.decision_id for record in sunk] == ["d-sweep"]
+    assert sunk[0].resolved_outcome == 1.0
 
 
 @pytest.mark.asyncio

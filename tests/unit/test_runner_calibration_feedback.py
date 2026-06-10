@@ -12,6 +12,7 @@ model those outcomes never tested.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,9 +23,18 @@ import pytest
 from pms.config import ControllerSettings, PMSSettings, RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.pipeline import ControllerPipeline
-from pms.core.enums import MarketStatus, RunMode
-from pms.core.models import EvalRecord, MarketSignal, Portfolio, TradeDecision
+from pms.core.enums import MarketStatus, OrderStatus, RunMode, Side, TimeInForce
+from pms.core.models import (
+    EvalRecord,
+    FillRecord,
+    MarketSignal,
+    Portfolio,
+    TradeDecision,
+)
+from pms.evaluation.adapters.scoring import Scorer
+from pms.evaluation.spool import EvalSpool
 from pms.runner import Runner, StrategyControllerRuntime
+from pms.storage.eval_store import EvalStore
 from pms.strategies.projections import (
     ActiveStrategy,
     CalibrationSpec,
@@ -197,6 +207,99 @@ def test_on_eval_record_ignores_controller_without_calibrator() -> None:
     runner._on_eval_record_for_calibration(  # noqa: SLF001
         _eval_record(decision_id="d-duck")
     )
+
+
+def _scored_decision(*, decision_id: str) -> TradeDecision:
+    return TradeDecision(
+        decision_id=decision_id,
+        market_id="m-cal",
+        token_id="t-yes",
+        venue="polymarket",
+        side=Side.BUY.value,
+        limit_price=0.4,
+        notional_usdc=4.0,
+        order_type="limit",
+        max_slippage_bps=100,
+        stop_conditions=["min_volume:100.00"],
+        prob_estimate=0.7,
+        expected_edge=0.3,
+        time_in_force=TimeInForce.GTC,
+        opportunity_id=f"op-{decision_id}",
+        strategy_id="s-cal",
+        strategy_version_id="s-cal-v1",
+        model_id="model-a",
+    )
+
+
+def _resolved_fill(*, decision_id: str) -> FillRecord:
+    now = datetime(2026, 6, 10, tzinfo=UTC)
+    return FillRecord(
+        trade_id=f"trade-{decision_id}",
+        order_id=f"order-{decision_id}",
+        decision_id=decision_id,
+        market_id="m-cal",
+        token_id="t-yes",
+        venue="polymarket",
+        side=Side.BUY.value,
+        fill_price=0.42,
+        fill_notional_usdc=4.2,
+        fill_quantity=10.0,
+        executed_at=now,
+        filled_at=now,
+        status=OrderStatus.MATCHED.value,
+        anomaly_flags=[],
+        strategy_id="s-cal",
+        strategy_version_id="s-cal-v1",
+        resolved_outcome=1.0,
+    )
+
+
+class _AppendOnlyEvalStore:
+    """Minimal eval-store fake; production dedups duplicate decision_ids with
+    ON CONFLICT at append, but the sink still fires once per enqueue."""
+
+    def __init__(self) -> None:
+        self.appended: list[EvalRecord] = []
+
+    async def append(self, record: EvalRecord) -> None:
+        self.appended.append(record)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_enqueue_same_decision_id_counts_one_calibration_sample(
+) -> None:
+    """Sweep re-enqueues (feat/resolution-ingestion) can deliver the same
+    decision_id twice — e.g. a fill resolved at enqueue time AND swept, or a
+    sweep retry. The store-level ON CONFLICT dedups the append, but the sink
+    fires per enqueue, so NetcalCalibrator's per-(model_id, decision_id) dedup
+    is what keeps a single resolution from counting twice toward clamp
+    graduation."""
+    runner = _runner()
+    controller = _CalibratedController()
+    runner._controller_runtimes["s-cal"] = _runtime(controller)  # noqa: SLF001
+    spool = EvalSpool(
+        store=cast(EvalStore, cast(object, _AppendOnlyEvalStore())),
+        scorer=Scorer(),
+        calibration_sink=runner._on_eval_record_for_calibration,  # noqa: SLF001
+    )
+    await spool.start()
+    try:
+        # Fresh, equal-by-value objects per enqueue: the production duplicate
+        # is a DB-rehydrated record vs an in-memory pushed one, never the
+        # same object identity.
+        spool.enqueue(
+            _resolved_fill(decision_id="d-dup"),
+            _scored_decision(decision_id="d-dup"),
+        )
+        spool.enqueue(
+            _resolved_fill(decision_id="d-dup"),
+            _scored_decision(decision_id="d-dup"),
+        )
+        await asyncio.wait_for(spool.join(), timeout=1.0)
+    finally:
+        await spool.stop()
+
+    assert controller.calibrator.sample_count("model-a") == 1
 
 
 @pytest.mark.asyncio

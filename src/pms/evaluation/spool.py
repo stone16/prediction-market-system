@@ -104,6 +104,14 @@ class EvalSpool:
                 # Persist before pushing: restart re-hydration reads the eval
                 # store, so a record must never feed a calibrator unless it is
                 # also durable.
+                #
+                # Coordination contract (feat/resolution-ingestion): the
+                # resolution sweep re-enqueues late-resolved fills through
+                # this same queue, so ANY enqueue whose fill carries
+                # resolved_outcome reaches the sink — regardless of producer.
+                # Duplicate delivery for one decision_id (sweep retry, or
+                # ON CONFLICT-deduped store append) is safe: the sink's
+                # calibrator dedups per (model_id, decision_id).
                 await self.store.append(scored_record)
                 if self.calibration_sink is not None:
                     try:
