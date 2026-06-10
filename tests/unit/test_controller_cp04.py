@@ -8,7 +8,7 @@ from pms.config import RiskSettings
 from pms.controller.calibrators.netcal import NetcalCalibrator
 from pms.controller.forecasters.rules import RulesForecaster
 from pms.controller.forecasters.statistical import StatisticalForecaster
-from pms.controller.pipeline import ControllerPipeline
+from pms.controller.pipeline import ControllerPipeline, _resolved_sample_count
 from pms.controller.sizers.kelly import KellySizer
 from pms.core.enums import MarketStatus
 from pms.core.models import EvalRecord, MarketSignal, Portfolio
@@ -153,6 +153,30 @@ def test_netcal_calibrator_dedup_is_scoped_per_model_bucket() -> None:
 
     assert calibrator.sample_count("model-a") == 2
     assert calibrator.sample_count("model-b") == 2
+
+
+def test_resolved_sample_count_counts_decision_level_model_id_for_ensembles() -> None:
+    """EvalRecord.model_id is the decision-level id — "ensemble" for
+    multi-forecaster strategies (pipeline._decision_model_id). The clamp
+    unlock counter must read the same bucket the resolved records land in,
+    or graduation never happens for ensembles."""
+    calibrator = NetcalCalibrator()
+    calibrator.add_samples("ensemble", _records(20))
+
+    assert (
+        _resolved_sample_count(calibrator, ["RulesForecaster", "LLMForecaster"]) == 20
+    )
+
+
+def test_resolved_sample_count_keeps_single_forecaster_keying() -> None:
+    calibrator = NetcalCalibrator()
+    calibrator.add_samples("RulesForecaster", _records(5))
+
+    assert _resolved_sample_count(calibrator, ["RulesForecaster"]) == 5
+
+
+def test_resolved_sample_count_is_zero_without_model_ids() -> None:
+    assert _resolved_sample_count(NetcalCalibrator(), []) == 0
 
 
 def test_kelly_sizer_even_odds_fractional_bet() -> None:

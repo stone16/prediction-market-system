@@ -1203,7 +1203,10 @@ def _resolved_sample_count(calibrator: ICalibrator, model_ids: Sequence[str]) ->
     sample_count = getattr(calibrator, "sample_count", None)
     if not callable(sample_count) or not model_ids:
         return 0
-    return max(int(sample_count(model_id)) for model_id in model_ids)
+    # EvalRecords are keyed by the decision-level model id ("ensemble" for
+    # multi-forecaster strategies), so the unlock counter must read the same
+    # bucket — not the per-forecaster ids.
+    return int(sample_count(_decision_model_id(model_ids) or "unknown"))
 
 
 def _log_pipeline_funnel(
