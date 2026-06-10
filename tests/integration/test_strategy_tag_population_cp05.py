@@ -157,7 +157,7 @@ def _signal() -> MarketSignal:
         resolves_at=datetime(2026, 4, 30, tzinfo=UTC),
         orderbook={
             "bids": [{"price": 0.399, "size": 1000.0}],
-            "asks": [{"price": 0.401, "size": 1000.0}],
+            "asks": [{"price": 0.40, "size": 1000.0}],
         },
         external_signal={"fair_value": 0.7, "resolved_outcome": 1.0},
         fetched_at=datetime(2026, 4, 19, tzinfo=UTC),
