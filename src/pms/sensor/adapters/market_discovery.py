@@ -87,6 +87,10 @@ class MarketDiscoverySensor:
                 asyncio.TimeoutError,
                 json.JSONDecodeError,
                 asyncpg.PostgresError,
+                # Page fetchers raise ValueError on unexpected Gamma payload
+                # shapes (valid JSON, wrong structure) — treat as transient
+                # like JSONDecodeError, not as a loop-fatal error.
+                ValueError,
             ) as error:
                 # Always include the exception type — many transient errors
                 # (httpx.ConnectError, asyncio.TimeoutError) have an empty
