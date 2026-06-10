@@ -113,7 +113,7 @@ from pms.sensor.adapters.direct_book import (
 from pms.sensor.adapters.historical import HistoricalSensor
 from pms.sensor.adapters.market_data import MarketDataSensor
 from pms.sensor.adapters.market_discovery import MarketDiscoverySensor
-from pms.sensor.stream import SensorStream
+from pms.sensor.stream import SensorStream, SignalSubscription
 from pms.storage.dedup_store import InMemoryDedupStore, PgDedupStore
 from pms.storage.decision_store import DecisionStore
 from pms.storage.eval_store import EvalStore
@@ -181,6 +181,13 @@ from pms.strategies.ripple.source import (
 )
 from pms.strategies.runtime_bridge import StrategyRunResult
 from pms.strategies.versioning import compute_strategy_version_id
+from pms.supervision import (
+    ALIVE_WORKER_STATES,
+    WorkerFactory,
+    WorkerHealth,
+    WorkerSpec,
+    WorkerSupervisor,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -193,6 +200,39 @@ DECISION_PENDING_TTL = timedelta(minutes=15)
 DECISION_SWEEP_INTERVAL_S = 5.0
 RUNTIME_HEARTBEAT_INTERVAL_S = 60.0
 DEFAULT_OPERATIONAL_MARKET_SELECTION_HORIZON_DAYS = 90
+
+# --- Worker supervision (see pms.supervision) -------------------------------
+# Restart only on this transient set, within budget, with exponential
+# backoff. Inner per-cycle catches stay the first line of defence; the
+# supervisor is the last resort.
+WORKER_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+    asyncpg.PostgresError,
+    OSError,
+    TimeoutError,
+)
+WORKER_MAX_RESTARTS = 5
+WORKER_RESTART_WINDOW_S = 600.0
+WORKER_RESTART_BACKOFF_INITIAL_S = 1.0
+WORKER_RESTART_BACKOFF_MAX_S = 60.0
+WORKER_FACTOR_SERVICE = "factor_service"
+WORKER_CONTROLLER_DISPATCHER = "controller_dispatcher"
+WORKER_ACTUATOR = "actuator"
+WORKER_DECISION_EXPIRY = "decision_expiry"
+WORKER_RUNTIME_HEARTBEAT = "runtime_heartbeat"
+# Workers the trading path cannot live without: used to tighten the
+# heartbeat `running` flag. The factor service only counts when it was
+# actually spawned (PostgreSQL runtime).
+TRADING_REQUIRED_WORKERS: tuple[str, ...] = (
+    WORKER_CONTROLLER_DISPATCHER,
+    WORKER_ACTUATOR,
+    WORKER_FACTOR_SERVICE,
+)
+# Readiness additionally requires the heartbeat writer when it was spawned
+# (PAPER/LIVE with PostgreSQL).
+READINESS_REQUIRED_WORKERS: tuple[str, ...] = (
+    *TRADING_REQUIRED_WORKERS,
+    WORKER_RUNTIME_HEARTBEAT,
+)
 RAW_FACTOR_COMPOSITION_ROLES = frozenset(
     {
         "weighted",
@@ -320,7 +360,9 @@ class Runner:
     _controller_task: asyncio.Task[None] | None = field(init=False, default=None)
     _actuator_task: asyncio.Task[None] | None = field(init=False, default=None)
     _factor_service: FactorService | None = field(init=False, default=None)
+    _factor_service_fresh: bool = field(init=False, default=False)
     _factor_service_task: asyncio.Task[None] | None = field(init=False, default=None)
+    _supervisor: WorkerSupervisor = field(init=False)
     _task: asyncio.Task[None] | None = field(init=False, default=None)
     _pg_pool: asyncpg.Pool | None = field(init=False, default=None)
     _owns_pg_pool: bool = field(init=False, default=False)
@@ -426,6 +468,9 @@ class Runner:
             self.config
         )
         self._flb_calibration_model = _flb_calibration_model_from_settings(self.config)
+        self._supervisor = WorkerSupervisor(
+            event_publisher=self._publish_worker_event,
+        )
         self.actuator_executor = self._build_executor(self.config.mode)
 
     @property
@@ -557,6 +602,11 @@ class Runner:
         )
         self._paper_orderbooks.clear()
         self._latest_signal_by_token.clear()
+        # Fresh supervisor per run: stop() latches its no-respawn flag, so a
+        # restarted runner needs a new instance with clean health state.
+        self._supervisor = WorkerSupervisor(
+            event_publisher=self._publish_worker_event,
+        )
 
         try:
             self._assert_no_legacy_jsonl_paths()
@@ -582,15 +632,14 @@ class Runner:
                 if self._pg_pool is None:
                     msg = "Runner PostgreSQL pool is not initialized"
                     raise RuntimeError(msg)
-                factor_signal_stream = self.sensor_stream.subscribe()
-                self._factor_service = FactorService(
-                    pool=self._pg_pool,
-                    store=PostgresMarketDataStore(self._pg_pool),
-                    cadence_s=self.config.factor_cadence_s,
-                    factors=REGISTERED,
-                    signal_stream=factor_signal_stream,
+                self._factor_service = self._build_factor_service()
+                self._factor_service_fresh = True
+                self._factor_service_task = self._supervisor.spawn(
+                    self._worker_spec(
+                        WORKER_FACTOR_SERVICE,
+                        self._run_factor_service_worker,
+                    )
                 )
-                self._factor_service_task = asyncio.create_task(self._factor_service.run())
                 # Rebuild the portfolio from persisted fills BEFORE sensors
                 # start producing signals. Without this, a restart in LIVE
                 # mode would forget open Polymarket exposure: every new BUY
@@ -604,14 +653,39 @@ class Runner:
             self._wire_active_perception(self._active_sensors)
             await self._configure_controllers()
             await self.sensor_stream.start(self._active_sensors)
+            for index, (sensor, sensor_task) in enumerate(
+                zip(self._active_sensors, self.sensor_stream.tasks, strict=True)
+            ):
+                # Watch-only: sensor _consume tasks carry their own reconnect
+                # loops, and restarting them would fight SensorStream's
+                # _active_consumers bookkeeping.
+                self._supervisor.observe(
+                    sensor_task,
+                    name=f"sensor:{index}:{type(sensor).__name__}",
+                )
             await self._evaluator_spool.start()
-            self._controller_task = asyncio.create_task(self._controller_loop())
-            self._actuator_task = asyncio.create_task(self._actuator_loop())
+            self._controller_task = self._supervisor.spawn(
+                self._worker_spec(
+                    WORKER_CONTROLLER_DISPATCHER,
+                    self._controller_loop,
+                )
+            )
+            self._actuator_task = self._supervisor.spawn(
+                self._worker_spec(WORKER_ACTUATOR, self._actuator_loop)
+            )
             if self._pg_pool is not None:
-                self._decision_expiry_task = asyncio.create_task(self._decision_expiry_loop())
+                self._decision_expiry_task = self._supervisor.spawn(
+                    self._worker_spec(
+                        WORKER_DECISION_EXPIRY,
+                        self._decision_expiry_loop,
+                    )
+                )
             if self._pg_pool is not None and self.config.mode in {RunMode.PAPER, RunMode.LIVE}:
-                self._runtime_heartbeat_task = asyncio.create_task(
-                    self._runtime_heartbeat_loop()
+                self._runtime_heartbeat_task = self._supervisor.spawn(
+                    self._worker_spec(
+                        WORKER_RUNTIME_HEARTBEAT,
+                        self._runtime_heartbeat_loop,
+                    )
                 )
         except Exception:
             self._live_preflight_artifact_validated = False
@@ -620,6 +694,9 @@ class Runner:
             raise
 
     async def stop(self, *, close_pool: bool = True) -> None:
+        # Block respawns before any cancellation so a supervised restart
+        # cannot race the teardown ordering below.
+        self._supervisor.stop()
         self._stop_event.set()
         error: BaseException | None = None
 
@@ -1088,6 +1165,70 @@ class Runner:
         if self.config.mode != RunMode.BACKTEST:
             return True
         return "database" in self.config.model_fields_set
+
+    def worker_health_snapshot(self) -> dict[str, WorkerHealth]:
+        return self._supervisor.snapshot()
+
+    def worker_component_payload(self) -> dict[str, object]:
+        return self._supervisor.component_payload()
+
+    def _worker_spec(self, name: str, factory: WorkerFactory) -> WorkerSpec:
+        return WorkerSpec(
+            name=name,
+            factory=factory,
+            transient=WORKER_TRANSIENT_ERRORS,
+            max_restarts=WORKER_MAX_RESTARTS,
+            restart_window_s=WORKER_RESTART_WINDOW_S,
+            backoff_initial_s=WORKER_RESTART_BACKOFF_INITIAL_S,
+            backoff_max_s=WORKER_RESTART_BACKOFF_MAX_S,
+        )
+
+    async def _publish_worker_event(self, event_type: str, summary: str) -> None:
+        await self.event_bus.publish(event_type, summary)
+
+    def _trading_workers_ok(self) -> bool:
+        snapshot = self._supervisor.snapshot()
+        return all(
+            health.state in ALIVE_WORKER_STATES
+            for name, health in snapshot.items()
+            if name in TRADING_REQUIRED_WORKERS
+        )
+
+    def _build_factor_service(self) -> FactorService:
+        pool = self._pg_pool
+        if pool is None:
+            msg = "Runner PostgreSQL pool is not initialized"
+            raise RuntimeError(msg)
+        return FactorService(
+            pool=pool,
+            store=PostgresMarketDataStore(pool),
+            cadence_s=self.config.factor_cadence_s,
+            factors=REGISTERED,
+            signal_stream=self.sensor_stream.subscribe(),
+        )
+
+    async def _run_factor_service_worker(self) -> None:
+        service = self._factor_service
+        if service is None or not self._factor_service_fresh:
+            # FactorService instances are single-use: _stream_exhausted
+            # latches once the subscription ends, so a supervised restart
+            # must rebuild the instance with a fresh subscription. Close the
+            # dead subscription so SensorStream stops buffering into it.
+            self._close_factor_signal_subscription(service)
+            service = self._build_factor_service()
+            self._factor_service = service
+        self._factor_service_fresh = False
+        await service.run()
+
+    def _close_factor_signal_subscription(
+        self,
+        service: FactorService | None,
+    ) -> None:
+        if service is None:
+            return
+        stream = service.signal_stream
+        if isinstance(stream, SignalSubscription):
+            stream.close()
 
     async def _ensure_default_v2_version(self) -> None:
         if not self.config.auto_migrate_default_v2:
@@ -2264,11 +2405,16 @@ class Runner:
                 sensor_running
                 and len(self._controller_runtimes) > 0
                 and not self._stop_event.is_set()
+                # Dead trading workers (dispatcher/actuator/factor) must
+                # count as unhealthy heartbeat periods: this is the
+                # correction of the false-green the 2026-06-10 audit found.
+                and self._trading_workers_ok()
             ),
             "sensor_running": sensor_running,
             "sensor_tasks": running_tasks,
             "sensor_tasks_total": len(tasks),
             "sensor_task_failures": failed_tasks,
+            "workers": self._supervisor.component_payload(),
         }
 
     def _record_position_exit_reentry_quarantine(
@@ -2548,6 +2694,7 @@ class Runner:
         await self.close_pg_pool()
 
     async def _cleanup_after_start_failure(self) -> None:
+        self._supervisor.stop()
         stop_error: BaseException | None = None
         if self._factor_service_task is not None and not self._factor_service_task.done():
             self._factor_service_task.cancel()
@@ -2807,6 +2954,12 @@ class Runner:
             name=f"controller-pipeline:{runtime.strategy_id}",
         )
         task.add_done_callback(self._capture_controller_pipeline_exception)
+        # Watch-only: pipeline tasks already have capture/release/re-attach
+        # machinery; the supervisor only tracks their health.
+        self._supervisor.observe(
+            task,
+            name=f"controller-pipeline:{runtime.strategy_id}",
+        )
         self._controller_pipeline_tasks[runtime.strategy_id] = task
 
     def _capture_controller_pipeline_exception(

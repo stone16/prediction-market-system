@@ -230,3 +230,84 @@ async def test_runtime_continuity_measures_healthy_days_to_report_clock(
     assert continuity.last_observed_at == last_observed_at
     assert continuity.healthy_days == 30
     assert continuity.max_gap_seconds == pytest.approx(2_592_000.0 - 60.0)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_runtime_continuity_counts_dead_worker_heartbeat_unhealthy(
+    pg_pool: asyncpg.Pool,
+) -> None:
+    """Round-trip the exact component_status shape the runner writes when a
+    required worker is dead: the tightened `running:false` must count as an
+    unhealthy heartbeat in the continuity gate, and the additive `workers`
+    payload must be invisible to the COALESCE-based SQL."""
+    run_id = "runtime-heartbeat-dead-worker"
+    started_at = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    observed_until = started_at + timedelta(minutes=2)
+    store = RuntimeHeartbeatStore(pg_pool)
+    async with pg_pool.acquire() as connection:
+        await connection.execute(
+            "DELETE FROM runtime_heartbeats WHERE run_id = $1",
+            run_id,
+        )
+
+    healthy_status: dict[str, object] = {
+        "running": True,
+        "sensor_running": True,
+        "sensor_tasks": 1,
+        "sensor_tasks_total": 1,
+        "sensor_task_failures": 0,
+        "controller_runtimes": 1,
+        "workers": {
+            "controller_dispatcher": {
+                "state": "running",
+                "restarts": 0,
+                "last_error_class": None,
+            },
+            "actuator": {
+                "state": "running",
+                "restarts": 0,
+                "last_error_class": None,
+            },
+        },
+    }
+    dead_worker_status: dict[str, object] = {
+        "running": False,
+        "sensor_running": True,
+        "sensor_tasks": 1,
+        "sensor_tasks_total": 1,
+        "sensor_task_failures": 0,
+        "controller_runtimes": 1,
+        "workers": {
+            "controller_dispatcher": {
+                "state": "failed",
+                "restarts": 0,
+                "last_error_class": "RuntimeError",
+            },
+            "actuator": {
+                "state": "running",
+                "restarts": 0,
+                "last_error_class": None,
+            },
+        },
+    }
+    for observed_at, component_status in (
+        (started_at, healthy_status),
+        (started_at + timedelta(minutes=1), dead_worker_status),
+    ):
+        await store.append(
+            run_id=run_id,
+            mode="paper",
+            started_at=started_at,
+            observed_at=observed_at,
+            strategy_fingerprint="strategy-fingerprint",
+            component_status=component_status,
+        )
+
+    continuity = await store.continuity(
+        run_id=run_id,
+        observed_until=observed_until,
+    )
+
+    assert continuity is not None
+    assert continuity.heartbeat_count == 2
+    assert continuity.unhealthy_heartbeat_count == 1

@@ -86,7 +86,8 @@ from pms.core.models import (
 from pms.evaluation.metrics import MetricsCollector, MetricsSnapshot
 from pms.evaluation.quote_metrics import QuoteMetricsCollector, QuoteMetricsSnapshot
 from pms.metrics import metrics_snapshot
-from pms.runner import Runner
+from pms.runner import READINESS_REQUIRED_WORKERS, Runner
+from pms.supervision import ALIVE_WORKER_STATES
 from pms.storage.schema_check import ensure_schema_current
 from pms.storage.decision_store import DecisionStore
 from pms.storage.market_data_store import PostgresMarketDataStore
@@ -231,7 +232,12 @@ def create_app(
         return {
             "mode": active_runner.state.mode.value,
             "runner_started_at": _jsonable(active_runner.state.runner_started_at),
+            # `running` keeps its historical any-task-alive semantics for
+            # smoke-script back-compat; `healthy`/`workers` are additive and
+            # carry per-worker supervision truth.
             "running": _is_runner_running(active_runner),
+            "healthy": _runner_workers_healthy(active_runner),
+            "workers": active_runner.worker_component_payload(),
             "autostart_attempted": getattr(
                 request.app.state, "autostart_attempted", False
             ),
@@ -1252,6 +1258,19 @@ def _should_use_durable_decisions(runner: Runner) -> bool:
 
 def _is_runner_running(runner: Runner) -> bool:
     return any(not task.done() for task in runner.tasks)
+
+
+def _runner_workers_healthy(runner: Runner) -> bool:
+    """True iff the runner is running and every spawned required worker is
+    alive. Stays additive: `/status.running` semantics are untouched."""
+    if not _is_runner_running(runner):
+        return False
+    snapshot = runner.worker_health_snapshot()
+    return all(
+        snapshot[name].state in ALIVE_WORKER_STATES
+        for name in READINESS_REQUIRED_WORKERS
+        if name in snapshot
+    )
 
 
 async def _ensure_runner_pool(runner: Runner) -> None:
