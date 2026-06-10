@@ -2898,13 +2898,24 @@ class Runner:
                     or current_runtime.asset_ids != desired_runtime.asset_ids
                 ):
                     await self._release_controller_runtime_locked(strategy_id)
-                    await self._hydrate_runtime_calibration(desired_runtime)
+                    # Attach before the hydration DB await: a record pushed
+                    # by the calibration sink during that await would
+                    # otherwise be dropped (no runtime registered) AND can
+                    # miss the in-flight all_for_strategy query — a lost
+                    # sample. Duplicate delivery is safe: the calibrator
+                    # dedups per (model_id, decision_id). Attach-first also
+                    # keeps the strategy attached if hydration fails.
                     self._attach_controller_runtime(desired_runtime)
+                    await self._hydrate_runtime_calibration(desired_runtime)
 
             for strategy_id in sorted(desired_strategy_ids - current_strategy_ids):
                 desired_runtime = desired_by_strategy[strategy_id]
-                await self._hydrate_runtime_calibration(desired_runtime)
+                # Same attach-then-hydrate ordering as the replace branch:
+                # the sink drops records for unattached runtimes, so the
+                # push window exists here too (e.g. a sweep resolving fills
+                # of a re-added strategy).
                 self._attach_controller_runtime(desired_runtime)
+                await self._hydrate_runtime_calibration(desired_runtime)
 
             await self._refresh_subscription_assets_locked()
 

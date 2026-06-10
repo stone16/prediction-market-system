@@ -495,6 +495,124 @@ async def test_sync_controller_runtimes_hydrates_only_attached_runtimes(
     assert unchanged_controller.calibrator.sample_count("model-a") == 0
 
 
+@pytest.mark.asyncio
+async def test_sync_replace_attaches_before_hydration_so_concurrent_push_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record pushed by the calibration sink while the replace-branch
+    hydration query is in flight must reach the new runtime's calibrator.
+    Hydrate-before-attach drops it (the old runtime is already released, the
+    new one not yet attached) and the in-flight all_for_strategy query can
+    also miss it — a lost sample until the next hydration event. Attach-first
+    is safe because NetcalCalibrator dedups per (model_id, decision_id)."""
+    runner = _runner()
+    runner._strategy_registry = cast(Any, object())  # noqa: SLF001
+
+    replaced_controller = _CalibratedController()
+    runner._controller_runtimes["s-replaced"] = _runtime(  # noqa: SLF001
+        _CalibratedController(),
+        strategy_id="s-replaced",
+        strategy_version_id="s-replaced-v1",
+    )
+    desired_replacement = _runtime(
+        replaced_controller,
+        strategy_id="s-replaced",
+        strategy_version_id="s-replaced-v2",
+    )
+
+    store = _StrategyScopedEvalStore()
+    original_all_for_strategy = store.all_for_strategy
+
+    async def pushing_all_for_strategy(
+        strategy_id: str,
+        strategy_version_id: str,
+    ) -> list[EvalRecord]:
+        # Simulate the evaluator spool pushing a freshly resolved record
+        # while the hydration DB read is awaited.
+        runner._on_eval_record_for_calibration(  # noqa: SLF001
+            _eval_record(
+                decision_id="d-concurrent",
+                strategy_id="s-replaced",
+                strategy_version_id="s-replaced-v2",
+            )
+        )
+        return await original_all_for_strategy(strategy_id, strategy_version_id)
+
+    monkeypatch.setattr(store, "all_for_strategy", pushing_all_for_strategy)
+    runner.eval_store = cast(Any, store)
+
+    async def fake_build() -> list[StrategyControllerRuntime]:
+        return [desired_replacement]
+
+    monkeypatch.setattr(runner, "_build_controller_runtimes", fake_build)
+    # Mirror only the sink-visible effect of attach (runtime registration);
+    # the real attach also spawns the pipeline task, whose teardown this
+    # unit test does not exercise.
+    monkeypatch.setattr(
+        runner,
+        "_attach_controller_runtime",
+        lambda runtime: runner._controller_runtimes.__setitem__(  # noqa: SLF001
+            runtime.strategy_id, runtime
+        ),
+    )
+
+    await runner._sync_controller_runtimes()  # noqa: SLF001
+
+    assert replaced_controller.calibrator.sample_count("model-a") == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_replace_keeps_runtime_attached_when_hydration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An eval-store failure mid-replace must not leave the strategy detached
+    until the next discovery sync: the runtime stays attached (fail-closed
+    calibrator under-count) and hydration still fails loudly."""
+    runner = _runner()
+    runner._strategy_registry = cast(Any, object())  # noqa: SLF001
+
+    desired_replacement = _runtime(
+        _CalibratedController(),
+        strategy_id="s-replaced",
+        strategy_version_id="s-replaced-v2",
+    )
+    runner._controller_runtimes["s-replaced"] = _runtime(  # noqa: SLF001
+        _CalibratedController(),
+        strategy_id="s-replaced",
+        strategy_version_id="s-replaced-v1",
+    )
+
+    class _FailingEvalStore:
+        async def all_for_strategy(
+            self,
+            strategy_id: str,
+            strategy_version_id: str,
+        ) -> list[EvalRecord]:
+            del strategy_id, strategy_version_id
+            msg = "eval store unavailable"
+            raise RuntimeError(msg)
+
+    runner.eval_store = cast(Any, _FailingEvalStore())
+
+    async def fake_build() -> list[StrategyControllerRuntime]:
+        return [desired_replacement]
+
+    monkeypatch.setattr(runner, "_build_controller_runtimes", fake_build)
+    monkeypatch.setattr(
+        runner,
+        "_attach_controller_runtime",
+        lambda runtime: runner._controller_runtimes.__setitem__(  # noqa: SLF001
+            runtime.strategy_id, runtime
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="eval store unavailable"):
+        await runner._sync_controller_runtimes()  # noqa: SLF001
+
+    attached = runner._controller_runtimes.get("s-replaced")  # noqa: SLF001
+    assert attached is desired_replacement
+
+
 # --- End-to-end graduation counter-trace -----------------------------------
 # Mirror of tests/unit/test_live_trading_blockers.py clamp-probe setup: an
 # extreme forecast (0.99) is rejected with zero resolved samples, then two
